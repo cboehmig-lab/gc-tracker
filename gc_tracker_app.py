@@ -361,25 +361,57 @@ def _parse_condition(raw: str) -> str:
 
 def _extract_conditions_from_listing(html: str) -> dict:
     """
-    Build a map of {url_fragment → condition} by scanning the listing page HTML.
-    GC renders each product card with visible text like:
-      Condition: Good
-    near the product link, so we extract all (url, condition) pairs in document order.
+    Build a map of {url → condition} by matching JSON-LD items to card conditions by position.
+
+    GC's page structure:
+    - JSON-LD block at top contains all product URLs/SKUs in order
+    - React-rendered cards below each have: store name, then "Condition: <!-- --> Good"
+    - The href links in cards are relative (/Used/...) not absolute
+    - So we match by order: 1st condition in HTML → 1st item in JSON-LD, etc.
     """
     _VALID = {"new", "like new", "excellent", "very good", "good", "fair", "poor",
               "blemished", "refurbished"}
-    result = {}
-    # Find every product link + the nearest "Condition: X" text within ~800 chars after it
-    for m in re.finditer(r'href="(https?://www\.guitarcenter\.com/Used/[^"]+\.gc[^"]*)"', html):
-        url = m.group(1).split("?")[0]  # strip query params
-        snippet = html[m.start():m.start() + 900]
-        cm = re.search(r'[Cc]ondition\s*[:\-–]\s*([A-Za-z][A-Za-z\s]{1,20}?)(?:\s*[<\n\r,]|$)',
-                       snippet)
-        if cm:
-            val = cm.group(1).strip().rstrip(".,;")
-            if val.lower() in _VALID:
-                result[url] = val.title()
-    return result
+
+    # 1. Extract ordered URLs from JSON-LD
+    urls = []
+    for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>',
+                             html, re.DOTALL):
+        try:
+            data = json.loads(block)
+            if data.get("@type") == "CollectionPage":
+                for entry in data.get("mainEntity", {}).get("itemListElement", []):
+                    url = entry.get("item", {}).get("url", "").split("?")[0]
+                    if url:
+                        urls.append(url)
+        except Exception:
+            pass
+        if urls:
+            break
+
+    if not urls:
+        return {}
+
+    # 2. Extract all conditions from the page in document order
+    # Handles "Condition: <!-- --> Good" (React comment node) and "Condition: Good"
+    cond_pattern = re.compile(
+        r'Condition:\s*(?:<!--.*?-->\s*)*([A-Za-z][A-Za-z\s]{1,20}?)(?:\s*[<\n\r])',
+        re.DOTALL
+    )
+    # Skip conditions that are in nav/filter links (e.g. href="...condition:Used...")
+    # by only searching the part of the HTML after the JSON-LD scripts
+    script_end = 0
+    for m in re.finditer(r'</script>', html):
+        script_end = m.end()
+
+    card_html = html[script_end:]
+    conditions = []
+    for m in cond_pattern.finditer(card_html):
+        val = m.group(1).strip().rstrip(".,;")
+        if val.lower() in _VALID:
+            conditions.append(val.title())
+
+    # 3. Zip by position
+    return {url: cond for url, cond in zip(urls, conditions)}
 
 
 def parse_products(html: str, store_name: str) -> list[dict]:
