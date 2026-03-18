@@ -1429,7 +1429,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .layout{display:flex;flex:1;overflow:hidden}
 
 /* ── Left panel ── */
-.left{width:300px;min-width:260px;background:#1a1a1a;border-right:1px solid #2e2e2e;display:flex;flex-direction:column;flex-shrink:0}
+.left{width:220px;min-width:200px;background:#1a1a1a;border-right:1px solid #2e2e2e;display:flex;flex-direction:column;flex-shrink:0}
 
 .mode-tabs{display:flex;border-bottom:1px solid #2e2e2e;flex-shrink:0}
 .mode-tab{flex:1;padding:10px 4px;text-align:center;font-size:.78rem;font-weight:600;color:#777;cursor:pointer;border:none;background:none;letter-spacing:.3px;text-transform:uppercase;border-bottom:2px solid transparent;margin-bottom:-1px}
@@ -1491,6 +1491,7 @@ th:hover{color:#ccc}
 th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
 th.sort-desc::after{content:" ▼";color:#c00;font-size:.6rem}
 td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;max-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+td:nth-child(1){width:52px;min-width:52px;max-width:52px}
 td:nth-child(2){max-width:260px;width:35%}
 tr:hover td{background:#161616}
 td a{color:#6ab0f5;text-decoration:none}
@@ -1961,17 +1962,17 @@ function onCatFilterChange() {
 
 // ── Table rendering & sorting ─────────────────────────────────────────────────
 // col indices: 0=status, 1=name, 2=condition, 3=category, 4=subcategory, 5=price, 6=date, 7=store
-const _SORT_COLS = [null, 'name', 'condition', 'category', 'subcategory', 'price', 'date', 'store'];
+const _SORT_COLS = [null, 'name', 'price', 'condition', 'category', 'subcategory', 'date', 'store'];
 
 function renderTable() {
   const data = window._tableData || [];
   let html = `<table id="res-table"><thead><tr>
     <th data-col="0"></th>
     <th data-col="1">Item</th>
-    <th data-col="2">Condition</th>
-    <th data-col="3">Category</th>
-    <th data-col="4">Subcategory</th>
-    <th data-col="5">Price</th>
+    <th data-col="2">Price</th>
+    <th data-col="3">Condition</th>
+    <th data-col="4">Category</th>
+    <th data-col="5">Subcategory</th>
     <th data-col="6">Date</th>
     <th data-col="7">Store</th>
   </tr></thead><tbody>`;
@@ -1984,11 +1985,11 @@ function renderTable() {
     html += `<tr data-name="${esc(item.name)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}">` +
       `<td>${item.isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
       `<td>${nameCell}</td>` +
+      `<td>${item.price||''}</td>` +
       `<td>${esc(item.condition)}</td>` +
       `<td>${esc(item.category)}</td>` +
       `<td>${esc(item.subcategory)}</td>` +
-      `<td>${item.price||''}</td>` +
-      `<td style="color:#888;font-size:.75rem">${esc(item.date||'')}</td>` +
+      `<td>${esc(item.date||'')}</td>` +
       `<td>${esc(item.store)}</td>` +
       `</tr>`;
   });
