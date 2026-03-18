@@ -362,14 +362,12 @@ def _parse_condition(raw: str) -> str:
 def _extract_conditions_from_listing(html: str) -> dict:
     """
     Build a map of {url → condition} from the GC 24-item listing page.
-    Uses positional matching: JSON-LD items and card Condition: labels
-    appear in the same order, so we zip them by index.
-    Searches only the HTML *after* the JSON-LD block to skip nav links.
+    Uses store-name-text spans as card anchors to avoid positional drift.
     """
     _VALID = {"new", "like new", "excellent", "very good", "good", "fair", "poor",
               "blemished", "refurbished"}
 
-    # 1. Extract ordered URLs from JSON-LD and note where the block ends
+    # 1. Extract ordered URLs from JSON-LD
     urls = []
     ld_end = 0
     for m in re.finditer(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>',
@@ -389,40 +387,63 @@ def _extract_conditions_from_listing(html: str) -> dict:
     if not urls or not ld_end:
         return {}
 
-    # 2. Search only the HTML after the JSON-LD block — this skips all nav/filter
-    #    links that contain "condition:Used" and any other pre-card content.
     card_html = html[ld_end:]
 
-    # Match "Condition: Good" or "Condition: <!-- --> Good" (React comment node)
     cond_re = re.compile(
         r'Condition:\s*(?:<!--[^>]*>\s*)*([A-Za-z][A-Za-z ]{1,20}?)(?:\s*[<\n\r])',
         re.DOTALL
     )
+
+    # Strategy A: use store-name-text as a per-card anchor
+    # Each card has exactly one store-name-text span, followed by Condition: within ~600 chars
+    store_anchors = [m.start() for m in re.finditer(r'store-name-text', card_html)]
     conditions = []
-    for m in cond_re.finditer(card_html):
-        val = m.group(1).strip().rstrip(".,;")
-        if val.lower() in _VALID:
-            conditions.append(val.title())
+
+    if len(store_anchors) >= len(urls):
+        for anchor_pos in store_anchors[:len(urls)]:
+            chunk = card_html[anchor_pos:anchor_pos + 600]
+            m = cond_re.search(chunk)
+            if m:
+                val = m.group(1).strip().rstrip(".,;")
+                conditions.append(val.title() if val.lower() in _VALID else "")
+            else:
+                conditions.append("")
+    else:
+        # Strategy B: plain positional scan
+        for m in cond_re.finditer(card_html):
+            val = m.group(1).strip().rstrip(".,;")
+            if val.lower() in _VALID:
+                conditions.append(val.title())
             if len(conditions) == len(urls):
                 break
 
-    # Save diagnostics for debugging
+    # Diagnostics
     try:
+        # Find first 5 condition hits with context
+        hits = []
+        for m in cond_re.finditer(card_html):
+            hits.append(card_html[m.start():m.start()+100].replace("\n", "\\n"))
+            if len(hits) >= 5:
+                break
+        # Show HTML around first store-name-text anchor
+        anchor_sample = ""
+        if store_anchors:
+            anchor_sample = card_html[store_anchors[0]:store_anchors[0]+400].replace("\n","\\n")
         diag = {
             "url_count": len(urls),
-            "conditions_found": len(conditions),
+            "store_anchor_count": len(store_anchors),
+            "conditions_found": sum(1 for c in conditions if c),
             "ld_end": ld_end,
-            "card_html_length": len(card_html),
             "sample_urls": urls[:3],
-            "sample_conditions": conditions[:3],
-            "card_html_sample": card_html[:600],
+            "sample_conditions": conditions[:5],
+            "first_5_condition_hits": hits,
+            "html_around_first_anchor": anchor_sample,
         }
         (DATA_DIR / "gc_condition_diag.json").write_text(json.dumps(diag, indent=2))
     except Exception:
         pass
 
-    # 3. Zip by position
-    return {url: cond for url, cond in zip(urls, conditions)}
+    return {url: cond for url, cond in zip(urls, conditions) if cond}
 
 
 def parse_products(html: str, store_name: str) -> list[dict]:
