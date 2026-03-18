@@ -397,13 +397,20 @@ def _extract_conditions_from_listing(html: str) -> dict:
         r'Condition:\s*(?:<!--.*?-->\s*)*([A-Za-z][A-Za-z\s]{1,20}?)(?:\s*[<\n\r])',
         re.DOTALL
     )
-    # Skip conditions that are in nav/filter links (e.g. href="...condition:Used...")
-    # by only searching the part of the HTML after the JSON-LD scripts
-    script_end = 0
-    for m in re.finditer(r'</script>', html):
-        script_end = m.end()
-
-    card_html = html[script_end:]
+    # Find the end of the JSON-LD CollectionPage script specifically
+    # (not the last script on page — there are many analytics scripts after cards)
+    ld_end = 0
+    for m in re.finditer(r'<script[^>]+type="application/ld\+json"[^>]*>.*?</script>',
+                         html, re.DOTALL):
+        try:
+            d = json.loads(m.group(0).split('>',1)[1].rsplit('<',1)[0])
+            if d.get("@type") == "CollectionPage":
+                ld_end = m.end()
+                break
+        except Exception:
+            pass
+    # Fall back to searching the whole page if we couldn't find the LD block end
+    card_html = html[ld_end:] if ld_end else html
     conditions = []
     for m in cond_pattern.finditer(card_html):
         val = m.group(1).strip().rstrip(".,;")
