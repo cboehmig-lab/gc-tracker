@@ -361,93 +361,68 @@ def _parse_condition(raw: str) -> str:
 
 def _extract_conditions_from_listing(html: str) -> dict:
     """
-    Build a map of {url → condition} from the GC listing page.
+    Build a map of {url → condition} from the GC 24-item listing page.
+    Uses positional matching: JSON-LD items and card Condition: labels
+    appear in the same order, so we zip them by index.
+    Searches only the HTML *after* the JSON-LD block to skip nav links.
     """
     _VALID = {"new", "like new", "excellent", "very good", "good", "fair", "poor",
               "blemished", "refurbished"}
 
-    # 1. Build slug → absolute URL map from JSON-LD
-    slug_to_url = {}
-    for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>',
-                             html, re.DOTALL):
+    # 1. Extract ordered URLs from JSON-LD and note where the block ends
+    urls = []
+    ld_end = 0
+    for m in re.finditer(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>',
+                         html, re.DOTALL):
         try:
-            data = json.loads(block)
+            data = json.loads(m.group(1))
             if data.get("@type") == "CollectionPage":
                 for entry in data.get("mainEntity", {}).get("itemListElement", []):
                     url = entry.get("item", {}).get("url", "").split("?")[0]
                     if url:
-                        slug = url.rstrip("/").split("/")[-1]
-                        slug_to_url[slug] = url
-        except Exception:
-            pass
-        if slug_to_url:
-            break
-
-    # Save diagnostics to a small log file for inspection
-    diag = {
-        "slug_count": len(slug_to_url),
-        "sample_slugs": list(slug_to_url.keys())[:3],
-    }
-
-    if not slug_to_url:
-        Path(DATA_DIR / "gc_condition_diag.json").write_text(json.dumps({"error": "no slugs found"}))
-        return {}
-
-    # 2. Find end of JSON-LD CollectionPage block
-    ld_end = 0
-    for m in re.finditer(r'<script[^>]+type="application/ld\+json"[^>]*>.*?</script>',
-                         html, re.DOTALL):
-        try:
-            d = json.loads(m.group(0).split('>',1)[1].rsplit('<',1)[0])
-            if d.get("@type") == "CollectionPage":
+                        urls.append(url)
                 ld_end = m.end()
                 break
         except Exception:
             pass
 
-    card_html = html[ld_end:] if ld_end else html
-    diag["ld_end"] = ld_end
-    diag["card_html_length"] = len(card_html)
+    if not urls or not ld_end:
+        return {}
 
-    # 3. Find relative href slugs in card HTML
-    rel_hrefs = re.findall(r'href="(/Used/[^"]+\.gc[^"]*)"', card_html)
-    diag["rel_href_count"] = len(rel_hrefs)
-    diag["sample_rel_hrefs"] = rel_hrefs[:3]
+    # 2. Search only the HTML after the JSON-LD block — this skips all nav/filter
+    #    links that contain "condition:Used" and any other pre-card content.
+    card_html = html[ld_end:]
 
-    # 4. For each relative href, find condition within next 1500 chars
+    # Match "Condition: Good" or "Condition: <!-- --> Good" (React comment node)
     cond_re = re.compile(
-        r'Condition:\s*(?:<!--.*?-->\s*)*([A-Za-z][A-Za-z ]{1,20}?)(?:\s*[<\n\r])',
+        r'Condition:\s*(?:<!--[^>]*>\s*)*([A-Za-z][A-Za-z ]{1,20}?)(?:\s*[<\n\r])',
         re.DOTALL
     )
-    result = {}
-    for m in re.finditer(r'href="(/Used/[^"]+\.gc[^"]*)"', card_html):
-        rel_url = m.group(1).split("?")[0]
-        slug    = rel_url.rstrip("/").split("/")[-1]
-        abs_url = slug_to_url.get(slug)
-        if not abs_url:
-            continue
-        snippet = card_html[m.start():m.start() + 1500]
-        cm = cond_re.search(snippet)
-        if cm:
-            val = cm.group(1).strip().rstrip(".,;")
-            if val.lower() in _VALID:
-                result[abs_url] = val.title()
+    conditions = []
+    for m in cond_re.finditer(card_html):
+        val = m.group(1).strip().rstrip(".,;")
+        if val.lower() in _VALID:
+            conditions.append(val.title())
+            if len(conditions) == len(urls):
+                break
 
-    diag["conditions_found"] = len(result)
-    diag["sample_conditions"] = dict(list(result.items())[:3])
-
-    # Also sample the raw card HTML around first href for inspection
-    if rel_hrefs:
-        idx = card_html.find(rel_hrefs[0])
-        if idx >= 0:
-            diag["html_around_first_href"] = card_html[idx:idx+800]
-
+    # Save diagnostics for debugging
     try:
+        diag = {
+            "url_count": len(urls),
+            "conditions_found": len(conditions),
+            "ld_end": ld_end,
+            "card_html_length": len(card_html),
+            "sample_urls": urls[:3],
+            "sample_conditions": conditions[:3],
+            "card_html_sample": card_html[:600],
+        }
         (DATA_DIR / "gc_condition_diag.json").write_text(json.dumps(diag, indent=2))
     except Exception:
         pass
 
-    return result
+    # 3. Zip by position
+    return {url: cond for url, cond in zip(urls, conditions)}
 
 
 def parse_products(html: str, store_name: str) -> list[dict]:
