@@ -227,29 +227,92 @@ def _fetch_state_stores(state: str) -> list[str]:
         return []
 
 
+def _extract_stores_from_used_page(html: str) -> list[str]:
+    """Extract all store names from GC's used inventory page filter facets.
+    The __NEXT_DATA__ blob or page HTML contains the complete list of valid store
+    names exactly as the filters=stores: parameter expects them."""
+    stores = []
+
+    # Strategy 1: __NEXT_DATA__ — find facet values for the 'stores' facet
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if m:
+        try:
+            nd = json.loads(m.group(1))
+            # Walk looking for arrays of facet values near a 'stores' key
+            def find_store_facets(obj, depth=0):
+                if depth > 12: return
+                if isinstance(obj, dict):
+                    # Look for facet arrays keyed by 'stores' or containing store-like values
+                    for k, v in obj.items():
+                        if k.lower() in ('stores', 'store') and isinstance(v, list):
+                            for item in v:
+                                if isinstance(item, dict):
+                                    val = item.get('displayValue') or item.get('value') or item.get('name') or ''
+                                elif isinstance(item, str):
+                                    val = item
+                                else:
+                                    continue
+                                if isinstance(val, str) and 2 < len(val) < 60:
+                                    stores.append(val)
+                        elif isinstance(v, (dict, list)):
+                            find_store_facets(v, depth + 1)
+                elif isinstance(obj, list):
+                    for item in obj:
+                        find_store_facets(item, depth + 1)
+            find_store_facets(nd)
+        except Exception:
+            pass
+
+    # Strategy 2: look for displayValue patterns near "stores" in the raw JSON
+    if len(stores) < 10:
+        # Find JSON arrays that look like store facets
+        for m2 in re.finditer(r'"(?:stores|store)"[^[]*(\[[^\]]{100,}\])', html, re.DOTALL):
+            try:
+                arr = json.loads(m2.group(1))
+                for item in arr:
+                    if isinstance(item, dict):
+                        val = item.get('displayValue') or item.get('value') or ''
+                        if isinstance(val, str) and 2 < len(val) < 60:
+                            stores.append(val)
+            except Exception:
+                pass
+
+    return stores
+
+
 def refresh_store_list(send_progress=None) -> list[str]:
-    """Fetch live store list from GC state-by-state and merge with fallback."""
+    """Fetch authoritative store list from GC's used inventory page filter facets,
+    then fall back to state-by-state scraping. Removes blocklisted stores."""
     live_names = []
 
-    # Strategy 1: scrape stores.guitarcenter.com state by state in parallel
+    # Strategy 1: fetch GC's used inventory page and extract store names from filter facets
+    # This is the gold standard — these are the exact names the filter system accepts
     try:
-        with ThreadPoolExecutor(max_workers=10) as pool:
-            futures = {pool.submit(_fetch_state_stores, st): st for st in _US_STATES}
-            for future in as_completed(futures):
-                try:
-                    live_names.extend(future.result())
-                except Exception:
-                    pass
+        r = _http.get("https://www.guitarcenter.com/Used/", timeout=20)
+        if r.status_code == 200:
+            live_names = _extract_stores_from_used_page(r.text)
     except Exception:
         pass
 
-    # Strategy 2: fall back to main stores page if state scrape yielded nothing useful
+    # Strategy 2: scrape stores.guitarcenter.com state by state in parallel
+    if len(live_names) < 50:
+        try:
+            with ThreadPoolExecutor(max_workers=10) as pool:
+                futures = {pool.submit(_fetch_state_stores, st): st for st in _US_STATES}
+                for future in as_completed(futures):
+                    try:
+                        live_names.extend(future.result())
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    # Strategy 3: main stores page URL pattern
     if len(live_names) < 20:
         try:
             r = _http.get("https://www.guitarcenter.com/Stores/", timeout=15)
             r.raise_for_status()
             html = r.text
-            # Only trust explicit store page URLs — same pattern as above
             for slug in re.findall(r'href="https?://stores\.guitarcenter\.com/([a-z]{2})/([a-z][a-z0-9\-]+)/(\d+)"', html):
                 _, city_slug, _ = slug
                 name = " ".join(w.capitalize() for w in city_slug.split("-"))
@@ -257,8 +320,7 @@ def refresh_store_list(send_progress=None) -> list[str]:
         except Exception:
             pass
 
-    # Always merge with fallback to guarantee known stores are never dropped
-    # Strip any non-city strings that could have slipped through scraping
+    # Strip nav garbage
     _NAV_GARBAGE = {
         "find your local guitar center store", "my account", "sign in", "track order",
         "returns", "faqs", "store locator", "guitar center lessons", "guitar center",
@@ -276,7 +338,10 @@ def refresh_store_list(send_progress=None) -> list[str]:
         and not any(bad in n.lower() for bad in ("guitar center", "my account", "sign in",
                                                    "track order", "©", "all rights"))
     ]
-    merged = sorted(set(live_names) | set(FALLBACK_STORES))
+
+    # Remove blocklisted invalid stores
+    blocklist = _get_blocklist()
+    merged = sorted((set(live_names) | set(FALLBACK_STORES)) - blocklist)
     STORES_CACHE.write_text(json.dumps({
         "stores":      merged,
         "live_count":  len(set(live_names)),
@@ -1065,14 +1130,25 @@ def api_reset():
     if data.get("password") != APP_PASSWORD and APP_PASSWORD:
         return jsonify({"error": "Incorrect password."}), 403
     deleted = []
-    for f in [STATE_FILE, CAT_CACHE_FILE, OUTPUT_FILE]:
+    for f in [STATE_FILE, CAT_CACHE_FILE, OUTPUT_FILE,
+              DATA_DIR / "gc_invalid_stores.json",
+              DATA_DIR / "gc_condition_diag.json",
+              DATA_DIR / "gc_debug_listing.html"]:
         if f.exists():
             f.unlink()
             deleted.append(f.name)
-    # Also clear in-memory cache
     global _cat_cache
     _cat_cache = {}
     return jsonify({"deleted": deleted, "status": "Reset complete. Ready for a fresh baseline."})
+
+@app.route("/api/clear-blocklist", methods=["POST"])
+@login_required
+def api_clear_blocklist():
+    """Remove the invalid stores blocklist so all stores are re-evaluated."""
+    f = DATA_DIR / "gc_invalid_stores.json"
+    if f.exists():
+        f.unlink()
+    return jsonify({"status": "Blocklist cleared. Run Validate Stores to re-check all stores."})
 
 @app.route("/")
 @login_required
@@ -1293,20 +1369,20 @@ def api_progress():
 
 
 def _validate_stores():
-    """Check every store in the list with a quick page-1 fetch. Remove 404s."""
+    """Check every store with a page-1 fetch, remove 404s, then rebuild from GC's live filter data."""
     def send(msg): _q.put(msg)
     try:
         stores = get_store_list()
         total  = len(stores)
         removed = []
-        send({"type": "progress", "msg": f"Validating {total} stores — checking page 1 of each…"})
-        send({"type": "progress", "msg": "This takes about 1-2 seconds per store. You can stop at any time."})
+        send({"type": "progress", "msg": f"Step 1: Validating {total} stores (checking for 404s)…"})
+        send({"type": "progress", "msg": "About 0.5s per store. You can stop at any time."})
 
         for i, store in enumerate(stores, 1):
             if _stop_event.is_set():
                 send({"type": "progress", "msg": "⏹ Stopped by user."})
                 break
-            if i % 20 == 1:
+            if i % 25 == 1:
                 send({"type": "progress", "msg": f"  [{i}/{total}] checking…"})
             try:
                 query = f"filters=stores:{store.replace(' ', '%20')}&Ns=cD"
@@ -1317,12 +1393,25 @@ def _validate_stores():
                     removed.append(store)
                     send({"type": "progress", "msg": f"  ✗ Removed: {store}"})
             except Exception:
-                pass  # network error — don't remove, just skip
+                pass
             time.sleep(0.5)
 
-        send({"type": "progress", "msg": f"\n✓ Done — {len(removed)} invalid store(s) removed."})
         if removed:
-            send({"type": "progress", "msg": "Removed: " + ", ".join(removed)})
+            send({"type": "progress", "msg": f"\n  Removed {len(removed)} invalid store(s): {', '.join(removed)}"})
+        else:
+            send({"type": "progress", "msg": "\n  All stores validated — none removed."})
+
+        # Step 2: rebuild from GC's live used inventory filter facets
+        if not _stop_event.is_set():
+            send({"type": "progress", "msg": "\nStep 2: Rebuilding store list from GC's live data…"})
+            try:
+                new_stores = refresh_store_list()
+                send({"type": "progress", "msg": f"  ✓ Store list rebuilt — {len(new_stores)} stores."})
+            except Exception as e:
+                send({"type": "progress", "msg": f"  Rebuild failed: {e} — keeping existing list."})
+
+        final_stores = get_store_list()
+        send({"type": "progress", "msg": f"\n✓ Done — {len(final_stores)} valid stores in list."})
         send({"type": "done", "baseline": False, "stopped": _stop_event.is_set(),
               "scanned": total, "new_count": 0, "new_items": [], "all_items": [],
               "gap_fill": True, "fixed": len(removed)})
@@ -2125,6 +2214,14 @@ function filterResults() {
 // ── Validate Stores ───────────────────────────────────────────────────────────
 async function validateStores() {
   if (running) { appendLog('Stop the current run before validating.', 'log-err'); return; }
+
+  // Offer to clear the blocklist first
+  const clearFirst = confirm('Clear the invalid-stores blocklist first?\n\nClick OK to start fresh (recommended if stores were wrongly removed).\nClick Cancel to skip and only check current list.');
+  if (clearFirst) {
+    await fetch('/api/clear-blocklist', {method: 'POST'});
+    appendLog('Blocklist cleared — all stores will be re-evaluated.', 'log-dim');
+  }
+
   const btn = document.getElementById('validate-stores-btn');
   const resp = await fetch('/api/validate-stores', {method: 'POST'});
   if (!resp.ok) {
@@ -2139,7 +2236,7 @@ async function validateStores() {
   document.getElementById('stop-btn').disabled = false;
   document.getElementById('stop-btn').textContent = '⏹ Stop';
   document.getElementById('log').innerHTML = '';
-  appendLog('✓ Checking all stores for 404s…');
+  appendLog('Checking all stores for 404s, then rebuilding from GC live data…');
 
   const es = new EventSource('/api/progress');
   es.onmessage = e => {
@@ -2152,7 +2249,6 @@ async function validateStores() {
       btn.textContent = '✓ Validate Stores';
       btn.disabled = false;
       updateCount();
-      // Reload store list to reflect removals
       loadData();
     }
   };
