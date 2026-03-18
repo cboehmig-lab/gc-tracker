@@ -649,7 +649,39 @@ def classify_by_name(name: str) -> tuple[str, str]:
     Returns (category, subcategory). Fast — no HTTP requests required."""
     n = name.lower()
 
-    # ── Bass (check before guitar so 'bass guitar' routes here) ──────────────
+    # ── Wireless Systems (before mic/recording so 'wireless' routes here) ────
+    if re.search(r'wireless system|wireless mic|wireless guitar|wireless transmitter'
+                 r'|in.ear wireless|iem wireless|\bqlxd\b|\bulgx\b|\bglxd\b|\bgldx\b'
+                 r'|\bslxd\b|\bpgxd\b|\bbgxd\b|\bew\d|\batwr\b', n):
+        return ("Microphones & Wireless", "Wireless Systems")
+
+    # ── Amplifiers & Cabinets — check BEFORE guitars ──────────────────────────
+    # "Guitar Combo Amp", "Guitar Cabinet", "Guitar Amp Head" all contain 'guitar'
+    # so we must catch amp-type gear first.
+    _amp_kw = re.search(
+        r'combo amp|amp combo|amp head|guitar amp|tube amp|solid.state amp|valve amp'
+        r'|practice amp|\bcabinet\b|\bcab\b|speaker cab|speaker cabinet'
+        r'|\d+\s*[wW]\s*(combo|head|amp)\b|(combo|head)\s*\d+\s*[wW]'
+        r'|\bx\d+\b.*amp|\bamp\b.*\bhead\b', n)
+    if _amp_kw:
+        if re.search(r'\bbass\b', n) and not re.search(r'drum|snare|cymbal', n):
+            return ("Amplifiers & Effects", "Bass Amplifiers")
+        if re.search(r'keyboard|piano', n):
+            return ("Amplifiers & Effects", "Keyboard Amplifiers")
+        if re.search(r'acoustic', n):
+            return ("Amplifiers & Effects", "Acoustic Amplifiers")
+        return ("Amplifiers & Effects", "Guitar Amplifiers")
+
+    # ── Powered Monitors / Studio Monitors / PA Speakers ─────────────────────
+    if re.search(r'powered monitor|studio monitor|reference monitor|nearfield|'
+                 r'pair.*monitor|monitor.*pair|powered speaker|pa speaker|'
+                 r'\blp-\d|kali audio|yamaha hs\d|adam a\d|krk\b|rokit\b|'
+                 r'genelec|focal alpha|jbl.*(lsr|305|306|308|310|series3)', n):
+        if re.search(r'studio|reference|nearfield|kali|krk|rokit|genelec|focal|adam\b', n):
+            return ("Recording", "Studio Monitors")
+        return ("Live Sound", "PA Speakers")
+
+    # ── Bass (before guitar) ──────────────────────────────────────────────────
     if re.search(r'\bbass\b', n) and not re.search(r'drum|cymbal|hi.hat|snare|bassoon', n):
         if re.search(r'acoustic|upright|stand.?up|arco|double bass', n):
             return ("Bass", "Acoustic Bass Guitars")
@@ -660,54 +692,62 @@ def classify_by_name(name: str) -> tuple[str, str]:
         return ("Bass", "Electric Bass Guitars")
 
     # ── Guitars ───────────────────────────────────────────────────────────────
-    guitar_kw = r'guitar|stratocaster|strat\b|telecaster|tele\b|les paul|sg\b|flying.?v|explorer\b|jazzmaster|jaguar\b|mustang\b|semi.hollow|hollow.body|archtop|resonator|dobro|banjo|mandolin|ukulele|squier|epiphone|prs\b|gretsch|rickenbacker|es.?[0-9]|lp\b'
+    guitar_kw = (r'guitar|stratocaster|strat\b|telecaster|tele\b|les paul|sg\b'
+                 r'|flying.?v|explorer\b|jazzmaster|jaguar\b|mustang\b'
+                 r'|semi.hollow|hollow.body|archtop|resonator|dobro'
+                 r'|banjo|mandolin|ukulele|squier|epiphone|prs\b|gretsch'
+                 r'|rickenbacker|es.?[0-9]')
     if re.search(guitar_kw, n):
-        if re.search(r'acoustic|classical|nylon|parlor|dreadnought|folk|fingerstyle|12.string', n):
-            return ("Guitars", "Acoustic Guitars")
-        if re.search(r'electric|solid.body|semi.hollow|hollow', n):
-            return ("Guitars", "Electric Guitars")
-        if re.search(r'classical|nylon|spanish', n):
-            return ("Guitars", "Classical & Nylon Guitars")
         if re.search(r'banjo', n):
             return ("Folk & Traditional Instruments", "Banjos")
         if re.search(r'mandolin', n):
             return ("Folk & Traditional Instruments", "Mandolins")
         if re.search(r'ukulele', n):
             return ("Folk & Traditional Instruments", "Ukuleles")
-        # Default guitar
+        if re.search(r'acoustic|classical|nylon|parlor|dreadnought|folk|fingerstyle|12.string', n):
+            return ("Guitars", "Acoustic Guitars")
+        if re.search(r'classical|nylon|spanish', n):
+            return ("Guitars", "Classical & Nylon Guitars")
         return ("Guitars", "Electric Guitars")
 
-    # ── Amplifiers ────────────────────────────────────────────────────────────
-    if re.search(r'\bamp\b|amplifier|amp combo|amp head|guitar amp|tube amp|solid.state amp|cabinet\b|\bcab\b|speaker cabinet|combo amp|practice amp|valve amp', n):
-        if re.search(r'keyboard|keys\b|piano', n):
-            return ("Amplifiers & Effects", "Keyboard Amplifiers")
-        if re.search(r'acoustic', n):
-            return ("Amplifiers & Effects", "Acoustic Amplifiers")
-        if re.search(r'pa\b|public address|monitor|powered speaker|subwoofer', n):
-            return ("Live Sound", "PA Speakers")
-        return ("Amplifiers & Effects", "Guitar Amplifiers")
-
     # ── Effects & Pedals ──────────────────────────────────────────────────────
-    if re.search(r'pedal|effect|reverb\b|delay\b|distortion|overdrive|fuzz\b|wah\b|chorus\b|flanger|phaser|compressor|tremolo|boost\b|looper|tuner\b|pedalboard|multi.effect|octave\b|harmonizer|pitch shift', n):
+    if re.search(r'pedal|effect\b|reverb\b|delay\b|distortion|overdrive|fuzz\b|wah\b'
+                 r'|chorus\b|flanger|phaser|compressor|tremolo|boost\b|looper|tuner\b'
+                 r'|pedalboard|multi.effect|octave\b|harmonizer|pitch shift', n):
         return ("Amplifiers & Effects", "Effects Pedals & Processors")
 
+    # ── Amplifiers (broader — standalone \bamp\b not caught above) ────────────
+    if re.search(r'\bamp\b|amplifier', n):
+        if re.search(r'\bbass\b', n):
+            return ("Amplifiers & Effects", "Bass Amplifiers")
+        if re.search(r'keyboard|piano', n):
+            return ("Amplifiers & Effects", "Keyboard Amplifiers")
+        return ("Amplifiers & Effects", "Guitar Amplifiers")
+
     # ── Drums & Percussion ────────────────────────────────────────────────────
-    if re.search(r'drum|snare|cymbal|hi.?hat|bass drum|\btom\b|drum kit|drum set|drum throne|djembe|cajon|bongo|conga|percussion|cowbell|tambourine|marimba|xylophone|vibraphone|timpani|electronic drum', n):
-        if re.search(r'electronic|digital|e.?drum', n):
+    if re.search(r'drum|snare|cymbal|hi.?hat|bass drum|\btom\b|drum kit|drum set'
+                 r'|drum throne|djembe|cajon|bongo|conga|percussion|cowbell'
+                 r'|tambourine|marimba|xylophone|vibraphone|timpani|electronic drum'
+                 r'|volca beats|volca drum|tr.?\d{2,3}|drum machine|beat.*machine', n):
+        if re.search(r'electronic|digital|e.?drum|drum machine|volca|tr.?\d', n):
             return ("Drums & Percussion", "Electronic Drums")
         if re.search(r'cymbal|hi.?hat', n):
             return ("Drums & Percussion", "Cymbals")
         if re.search(r'snare', n):
             return ("Drums & Percussion", "Snare Drums")
-        if re.search(r'djembe|bongo|conga|cajon|hand drum|world', n):
+        if re.search(r'djembe|bongo|conga|cajon|hand drum', n):
             return ("Drums & Percussion", "Hand Drums")
         return ("Drums & Percussion", "Drum Sets")
 
     # ── Keyboards & MIDI ──────────────────────────────────────────────────────
-    if re.search(r'keyboard|piano|organ\b|synth|synthesizer|workstation\b|midi controller|electric piano|stage piano|arranger|clav|wurlitzer|rhodes\b|nord\b|Roland\b|Korg\b|Yamaha\b.*key', n):
+    if re.search(r'keyboard|piano|organ\b|synth|synthesizer|workstation\b'
+                 r'|midi controller|electric piano|stage piano|arranger|clav'
+                 r'|wurlitzer|rhodes\b|nord\b|sound module|volca\b|groovebox'
+                 r'|roland\b.*\b(jd|juno|jupiter|fa|rd|fp|gaia)'
+                 r'|korg\b|yamaha\b.*\b(psr|cp|ck|np|p-\d|montage|motif)', n):
         if re.search(r'midi|controller\b', n):
             return ("Keyboards & MIDI", "MIDI Controllers")
-        if re.search(r'synth|synthesizer', n):
+        if re.search(r'synth|synthesizer|volca|groovebox|sound module', n):
             return ("Keyboards & MIDI", "Synthesizers & Sound Modules")
         if re.search(r'organ', n):
             return ("Keyboards & MIDI", "Organs")
@@ -722,21 +762,22 @@ def classify_by_name(name: str) -> tuple[str, str]:
         return ("Recording", "Microphones")
     if re.search(r'\bmic\b', n) and not re.search(r'microphone stand', n):
         return ("Recording", "Microphones")
-    if re.search(r'studio monitor|reference monitor|nearfield', n):
-        return ("Recording", "Studio Monitors")
-    if re.search(r'preamp|pre.?amplifier|channel strip|outboard|compressor.*rack|rack.*compressor', n):
+    if re.search(r'preamp|pre.?amplifier|channel strip|outboard', n):
         return ("Recording", "Preamps & Channel Strips")
     if re.search(r'mixer|mixing console|mixing board|analog mixer|digital mixer', n):
         return ("Recording", "Mixers")
     if re.search(r'headphone|headset|earphone|in.ear monitor|iem\b', n):
         return ("Recording", "Headphones & Monitoring")
+    if re.search(r'audio recorder|field recorder|multitrack|interface\b', n):
+        return ("Recording", "Audio Interfaces")
 
     # ── DJ Equipment ─────────────────────────────────────────────────────────
     if re.search(r'\bdj\b|turntable|cdj\b|serato|traktor|rekordbox|dj mixer|dj controller', n):
         return ("DJ Equipment & Lighting", "DJ Equipment")
 
     # ── Live Sound ────────────────────────────────────────────────────────────
-    if re.search(r'\bpa\b|powered speaker|live sound|subwoofer|stage monitor|line array|power amp.*pa|public address', n):
+    if re.search(r'\bpa\b|powered speaker|live sound|subwoofer|stage monitor'
+                 r'|line array|public address', n):
         return ("Live Sound", "PA Systems")
 
     # ── Accessories ───────────────────────────────────────────────────────────
@@ -1143,64 +1184,53 @@ def api_progress():
 
 
 def _fill_gaps(selected_stores: list[str]):
-    """Re-scrape listing pages for selected stores to fill missing condition/category data.
-    Same scrape as a normal run but never marks items as new — only updates the cache."""
+    """Fetch individual product pages for items missing category or condition data."""
     def send(msg): _q.put(msg)
     try:
         _load_cat_cache()
-        state      = load_state()
-        seen_ids   = set(state.get("seen_ids", []))
 
-        send({"type": "progress", "msg": f"Filling gaps for {len(selected_stores)} store(s)…"})
-        send({"type": "progress", "msg": "Re-scraping listing pages to capture Condition, Category, and Subcategory."})
+        # Find cache entries that need fixing — must have a URL to fetch
+        gaps = {
+            sku: data for sku, data in _cat_cache.items()
+            if data.get("url")
+            and (not data.get("category") or not data.get("condition_fetched"))
+        }
+
+        total = len(gaps)
+        if total == 0:
+            send({"type": "progress", "msg": "No gaps found — all items already have category and condition data."})
+            send({"type": "done", "baseline": False, "stopped": False,
+                  "scanned": 0, "new_count": 0, "new_items": [], "all_items": [],
+                  "gap_fill": True, "fixed": 0})
+            return
+
+        send({"type": "progress", "msg": f"Found {total} items with missing data. Fetching individual product pages…"})
+        send({"type": "progress", "msg": f"(This may take a few minutes. You can stop at any time.)"})
 
         fixed = 0
-        for i, store in enumerate(selected_stores, 1):
+        for i, (sku, data) in enumerate(gaps.items(), 1):
             if _stop_event.is_set():
                 send({"type": "progress", "msg": "⏹ Stopped by user."})
                 break
-            send({"type": "progress", "msg": f"\n[{i}/{len(selected_stores)}] {store}"})
-            page = 1
-            while page <= 50:
-                if _stop_event.is_set():
-                    break
-                send({"type": "progress", "msg": f"  [{store}] page {page}…"})
-                try:
-                    html = fetch_page(store, page)
-                except Exception as e:
-                    send({"type": "progress", "msg": f"  [{store}] error: {e}"})
-                    break
-                products = parse_products(html, store)
-                if not products:
-                    break
-                for p in products:
-                    sku = p["id"]
-                    cached = _cat_cache.get(sku, {})
-                    needs_fix = (not cached.get("condition") or not cached.get("category"))
-                    if needs_fix:
-                        cat, subcat = classify_by_name(p.get("name", ""))
-                        condition   = p.get("condition", "") or cached.get("condition", "")
-                        _cat_cache[sku] = {
-                            "category": cat or cached.get("category", ""),
-                            "subcategory": subcat or cached.get("subcategory", ""),
-                            "condition": condition,
-                            "condition_fetched": True,
-                            "name": p.get("name", ""),
-                            "url":  p.get("url", ""),
-                        }
-                        fixed += 1
-                    elif not cached.get("condition") and p.get("condition"):
-                        # Has category already, just missing condition
-                        _cat_cache[sku]["condition"] = p["condition"]
-                        _cat_cache[sku]["condition_fetched"] = True
-                        fixed += 1
-                if len(products) < PAGE_SIZE:
-                    break
-                page += 1
-                time.sleep(1.0)
+            if i % 10 == 1:
+                send({"type": "progress", "msg": f"  [{i}/{total}] fetching product pages…"})
+            url  = data.get("url", "")
+            name = data.get("name", "")
+            try:
+                cat, subcat, condition = fetch_page_data(url, name)
+            except Exception:
+                cat, subcat, condition = "", "", ""
+            _cat_cache[sku].update({
+                "category":          cat or data.get("category", ""),
+                "subcategory":       subcat or data.get("subcategory", ""),
+                "condition":         condition or data.get("condition", ""),
+                "condition_fetched": True,
+            })
+            fixed += 1
+            time.sleep(0.3)
 
         _save_cat_cache()
-        send({"type": "progress", "msg": f"\n✓ Done — {fixed} item(s) updated."})
+        send({"type": "progress", "msg": f"\n✓ Done — {fixed} item(s) updated. Re-run your stores to see the refreshed data."})
         send({"type": "done", "baseline": False, "stopped": _stop_event.is_set(),
               "scanned": fixed, "new_count": 0, "new_items": [], "all_items": [],
               "gap_fill": True, "fixed": fixed})
@@ -1208,6 +1238,7 @@ def _fill_gaps(selected_stores: list[str]):
         send({"type": "done", "error": str(e), "scanned": 0, "new_count": 0, "new_items": []})
     finally:
         _lock.release()
+
 
 
 def _run(selected_stores: list[str], baseline: bool):
@@ -1237,34 +1268,36 @@ def _run(selected_stores: list[str], baseline: bool):
                     all_products.append(p)
             ids_this_run |= ids
 
-        # ── Classify categories & fetch condition ─────────────────────────────
-        # New items in post-baseline runs: fetch from product page (accurate breadcrumb + condition).
-        # Baseline or existing items: keyword classifier (fast, no extra HTTP).
-        new_item_ids = {p["id"] for p in all_products if p["id"] not in seen_ids}
-        http_needed  = [p for p in all_products
-                        if p["id"] in new_item_ids and not baseline and p.get("url")
-                        and (not _cat_cache.get(p["id"], {}).get("category")
-                             or not _cat_cache.get(p["id"], {}).get("condition_fetched"))]
-        if http_needed:
-            send({"type":"progress","msg":f"\nFetching categories & conditions for {len(http_needed)} new item(s)…"})
+        # ── Classify categories & fetch condition from product pages ─────────
+        # Always fetch the individual product page for accurate breadcrumb category
+        # and condition. Skip only if already cached with both fields populated.
+        needs_fetch = [p for p in all_products
+                       if p.get("url") and not baseline
+                       and (not _cat_cache.get(p["id"], {}).get("category")
+                            or not _cat_cache.get(p["id"], {}).get("condition_fetched"))]
+        if needs_fetch:
+            send({"type":"progress","msg":f"\nFetching categories & conditions for {len(needs_fetch)} item(s)…"})
         for p in all_products:
             sku    = p["id"]
             cached = _cat_cache.get(sku, {})
             if cached.get("category") and cached.get("condition_fetched"):
-                cat, subcat  = cached["category"], cached.get("subcategory", "")
-                condition    = cached.get("condition", "")
-            elif sku in new_item_ids and not baseline and p.get("url"):
+                # Already have good data — use cache
+                cat, subcat = cached["category"], cached.get("subcategory", "")
+                condition   = cached.get("condition", "")
+            elif p.get("url") and not baseline:
+                # Fetch the product page for real breadcrumb + condition
                 cat, subcat, condition = fetch_page_data(p["url"], p.get("name", ""))
                 time.sleep(0.3)
             else:
+                # Baseline or no URL — keyword fallback only
                 cat, subcat = classify_by_name(p.get("name", ""))
-                condition   = cached.get("condition", p.get("condition", ""))
+                condition   = p.get("condition", "")
             _cat_cache[sku] = {"category": cat, "subcategory": subcat,
                                "condition": condition, "condition_fetched": True,
                                "name": p.get("name", ""), "url": p.get("url", "")}
-            p["category"]    = cat
+            p["category"]   = cat
             p["subcategory"] = subcat
-            p["condition"]   = condition
+            p["condition"]  = condition
         _save_cat_cache()
 
         # ── Record first-seen dates for new items ─────────────────────────────
