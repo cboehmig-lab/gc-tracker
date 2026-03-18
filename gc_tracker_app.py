@@ -989,48 +989,82 @@ def api_run():
 @app.route("/api/debug-condition")
 @login_required
 def api_debug_condition():
-    """Inspect the saved listing HTML to diagnose condition extraction."""
+    """Inspect the saved listing HTML to find exactly where condition data lives."""
     debug_file = DATA_DIR / "gc_debug_listing.html"
     if not debug_file.exists():
-        return jsonify({"error": "No debug file yet — run the tracker once first to save a listing page."})
+        return jsonify({"error": "No debug file yet — run the tracker once to save a listing page, then visit this URL."})
     html = debug_file.read_text(errors="replace")
 
-    import re as _re
+    report = {"html_size": len(html)}
 
-    # 1. Find all "Condition:" occurrences and show surrounding context
+    # 1. All "Condition" occurrences in raw HTML (catches server-rendered text)
     condition_hits = []
-    for m in _re.finditer(r'.{0,120}[Cc]ondition.{0,80}', html):
-        condition_hits.append(m.group(0).replace("<", "&lt;"))
-        if len(condition_hits) >= 10:
+    for m in re.finditer(r'.{0,60}[Cc]ondition.{0,60}', html):
+        txt = m.group(0).strip()
+        if txt not in condition_hits:
+            condition_hits.append(txt)
+        if len(condition_hits) >= 15:
             break
+    report["condition_in_raw_html"] = condition_hits
 
-    # 2. Find all product URLs in the HTML
-    product_urls = _re.findall(r'https?://www\.guitarcenter\.com/Used/[^\s"\'<>]+\.gc[^\s"\'<>]*', html)
-    product_urls = list(dict.fromkeys(product_urls))[:5]  # dedupe, first 5
+    # 2. Dig into __NEXT_DATA__ and find ALL keys that contain condition-like words
+    nd_condition_fields = {}
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if m:
+        try:
+            nd = json.loads(m.group(1))
+            report["has_next_data"] = True
+            report["next_data_size"] = len(m.group(1))
 
-    # 3. Show 400 chars of HTML after first product URL
-    snippet = ""
-    if product_urls:
-        idx = html.find(product_urls[0])
-        if idx >= 0:
-            snippet = html[max(0, idx-200):idx+600].replace("<", "&lt;")
+            # Walk every key/value pair and collect anything condition-related
+            def walk(obj, path=""):
+                if isinstance(obj, dict):
+                    for k, v in obj.items():
+                        full = f"{path}.{k}" if path else k
+                        if any(c in k.lower() for c in ("condition", "grade", "quality", "rating")):
+                            nd_condition_fields[full] = str(v)[:120]
+                        if isinstance(v, (dict, list)):
+                            walk(v, full)
+                elif isinstance(obj, list):
+                    for i, item in enumerate(obj[:5]):  # only first 5 items
+                        walk(item, f"{path}[{i}]")
+            walk(nd)
+        except Exception as e:
+            report["next_data_parse_error"] = str(e)
+    else:
+        report["has_next_data"] = False
 
-    # 4. Run current extractor and show result
-    cmap = _extract_conditions_from_listing(html)
+    report["next_data_condition_fields"] = nd_condition_fields
 
-    return jsonify({
-        "condition_hits_in_html": condition_hits,
-        "sample_product_urls": product_urls,
-        "html_around_first_url": snippet,
-        "extractor_result_count": len(cmap),
-        "extractor_sample": dict(list(cmap.items())[:3]),
-        "html_size": len(html),
-    })
+    # 3. All JSON-LD blocks — show the full offers object for first item
+    ld_offers = []
+    for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL):
+        try:
+            d = json.loads(block)
+            if d.get("@type") == "CollectionPage":
+                items = d.get("mainEntity", {}).get("itemListElement", [])
+                for entry in items[:3]:
+                    item = entry.get("item", {})
+                    ld_offers.append({
+                        "name": item.get("name", "")[:60],
+                        "offers": item.get("offers", {}),
+                    })
+        except Exception:
+            pass
+    report["jsonld_first_3_offers"] = ld_offers
+
+    # 4. Show raw HTML snippet around first .gc product URL
+    m2 = re.search(r'https?://www\.guitarcenter\.com/Used/[^"\'<>\s]+\.gc', html)
+    if m2:
+        start = max(0, m2.start() - 300)
+        end = min(len(html), m2.end() + 600)
+        report["html_around_first_product_url"] = html[start:end]
+
+    return jsonify(report)
 
 @app.route("/api/debug-condition/reset", methods=["POST"])
 @login_required
 def api_debug_condition_reset():
-    """Delete the debug listing file so a fresh one gets saved on next run."""
     debug_file = DATA_DIR / "gc_debug_listing.html"
     if debug_file.exists():
         debug_file.unlink()
