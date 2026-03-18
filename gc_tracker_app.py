@@ -1712,6 +1712,22 @@ td a:hover{text-decoration:underline}
 <body>
 
 <!-- Password modal -->
+<!-- Validate stores modal -->
+<div id="vs-modal" style="display:none;position:fixed;inset:0;z-index:100;align-items:center;justify-content:center">
+  <div style="position:absolute;inset:0;background:rgba(0,0,0,.7)" onclick="cancelValidate()"></div>
+  <div style="position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:30px 28px;width:360px;z-index:1">
+    <h2 style="color:#fff;font-size:1.05rem;margin-bottom:8px">✓ Validate Stores</h2>
+    <p style="color:#777;font-size:.82rem;margin-bottom:18px;line-height:1.6">Clear the invalid-stores blocklist before validating?<br><br>
+    <b style="color:#ccc">Yes (recommended)</b> — re-checks all stores including any previously removed ones.<br><br>
+    <b style="color:#ccc">No</b> — only checks stores currently in your list.</p>
+    <div style="display:flex;gap:8px">
+      <button onclick="cancelValidate()" style="flex:1;padding:9px;border-radius:5px;font-size:.88rem;font-weight:600;cursor:pointer;border:1px solid #3a3a3a;background:#2a2a2a;color:#aaa">Cancel</button>
+      <button onclick="startValidate(false)" style="flex:1;padding:9px;border-radius:5px;font-size:.88rem;font-weight:600;cursor:pointer;border:none;background:#444;color:#eee">No</button>
+      <button onclick="startValidate(true)" style="flex:1;padding:9px;border-radius:5px;font-size:.88rem;font-weight:600;cursor:pointer;border:none;background:#c00;color:#fff">Yes</button>
+    </div>
+  </div>
+</div>
+
 <div id="pw-modal">
   <div id="pw-overlay" onclick="cancelBaseline()"></div>
   <div id="pw-box">
@@ -2212,12 +2228,22 @@ function filterResults() {
 }
 
 // ── Validate Stores ───────────────────────────────────────────────────────────
-async function validateStores() {
+function validateStores() {
   if (running) { appendLog('Stop the current run before validating.', 'log-err'); return; }
+  document.getElementById('vs-modal').style.display = 'flex';
+}
 
-  // Clear blocklist first (always — safest default)
-  await fetch('/api/clear-blocklist', {method: 'POST'});
-  appendLog('Blocklist cleared — all stores will be re-evaluated.', 'log-dim');
+function cancelValidate() {
+  document.getElementById('vs-modal').style.display = 'none';
+}
+
+async function startValidate(clearBlocklist) {
+  document.getElementById('vs-modal').style.display = 'none';
+
+  if (clearBlocklist) {
+    await fetch('/api/clear-blocklist', {method: 'POST'});
+    appendLog('Blocklist cleared — all stores will be re-evaluated.', 'log-dim');
+  }
 
   const btn = document.getElementById('validate-stores-btn');
   const resp = await fetch('/api/validate-stores', {method: 'POST'});
