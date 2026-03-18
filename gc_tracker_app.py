@@ -424,18 +424,24 @@ def _extract_conditions_from_listing(html: str) -> dict:
             if len(hits) >= 5:
                 break
         anchor_sample = ""
+        lookback_sample = ""
         if avail_anchors:
             start = max(0, avail_anchors[0] - 200)
             anchor_sample = card_html[start:avail_anchors[0]+50].replace("\n", "\\n")
+            # Also show what the lookback chunk actually contains
+            lookback_chunk = card_html[start:avail_anchors[0]]
+            lookback_sample = repr(lookback_chunk[-200:])
         (DATA_DIR / "gc_condition_diag.json").write_text(json.dumps({
             "generated": datetime.now().isoformat(),
             "url_count": len(urls),
             "avail_anchor_count": len(avail_anchors),
             "conditions_found": sum(1 for c in conditions if c),
+            "ld_end": ld_end,
             "sample_urls": urls[:3],
             "sample_conditions": conditions[:5],
             "first_5_condition_hits": hits,
             "html_before_first_available_at": anchor_sample,
+            "lookback_chunk_repr": lookback_sample,
         }, indent=2))
     except Exception:
         pass
