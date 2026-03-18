@@ -7,6 +7,7 @@ Then open: http://localhost:5050
 """
 
 import json, os, re, sys, time, threading, queue, webbrowser
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -30,7 +31,6 @@ except ImportError:
     sys.exit("Missing openpyxl. Run:  pip3 install openpyxl")
 
 # ── Paths & config ────────────────────────────────────────────────────────────
-# On Railway, set DATA_DIR=/data (persistent volume). Locally defaults to script folder.
 SCRIPT_DIR     = Path(__file__).parent
 DATA_DIR       = Path(os.environ.get("DATA_DIR", SCRIPT_DIR))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -39,9 +39,10 @@ STATE_FILE     = DATA_DIR / "gc_state.json"
 OUTPUT_FILE    = DATA_DIR / "gc_new_inventory.xlsx"
 STORES_CACHE   = DATA_DIR / "gc_stores_cache.json"
 FAVORITES_FILE = DATA_DIR / "gc_favorites.json"
+CAT_CACHE_FILE = DATA_DIR / "gc_category_cache.json"
 
 PORT        = int(os.environ.get("PORT", 5050))
-APP_PASSWORD = os.environ.get("APP_PASSWORD", "")   # set this in Railway env vars
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 
 # ── HTTP session ──────────────────────────────────────────────────────────────
 _HEADERS = {
@@ -54,6 +55,23 @@ _HEADERS = {
 }
 _http = http.Session()
 _http.headers.update(_HEADERS)
+
+# ── Category cache ────────────────────────────────────────────────────────────
+_cat_cache: dict = {}
+
+def _load_cat_cache():
+    global _cat_cache
+    if CAT_CACHE_FILE.exists():
+        try:
+            _cat_cache = json.loads(CAT_CACHE_FILE.read_text())
+        except Exception:
+            _cat_cache = {}
+
+def _save_cat_cache():
+    try:
+        CAT_CACHE_FILE.write_text(json.dumps(_cat_cache))
+    except Exception:
+        pass
 
 # ── Store list ────────────────────────────────────────────────────────────────
 
@@ -84,7 +102,7 @@ FALLBACK_STORES = [
     "Pensacola","Pinecrest","Sarasota","St Petersburg","Tallahassee",
     "Tampa","West Palm Beach",
     # Georgia
-    "Atlanta","Columbus GA","Kennesaw","Macon","Savannah",
+    "Alpharetta","Atlanta","Columbus GA","Kennesaw","Macon","Marietta","Savannah",
     # Idaho
     "Boise",
     # Illinois
@@ -174,20 +192,47 @@ def get_store_list() -> list[str]:
 
 
 def refresh_store_list() -> list[str]:
+    """Fetch live store list from GC and merge with fallback so nothing is lost."""
+    live_names = []
     try:
         r = _http.get("https://www.guitarcenter.com/Stores/", timeout=15)
         r.raise_for_status()
-        names = re.findall(r'storeName["\s:]+["\'](.*?)["\']', r.text)
-        if not names:
-            names = re.findall(r'/store/[^"]+">([^<]+)</a>', r.text)
-        names = [n.strip() for n in names if len(n.strip()) > 2]
-        if len(names) < 20:
-            names = FALLBACK_STORES
+        html = r.text
+        # Try multiple extraction patterns
+        for pat in [
+            r'storeName["\s:]+["\'](.*?)["\']',
+            r'data-store-name=["\']([^"\']+)["\']',
+            r'/store/[^"]+">([^<]+)</a>',
+        ]:
+            found = [n.strip() for n in re.findall(pat, html) if len(n.strip()) > 2]
+            if len(found) > len(live_names):
+                live_names = found
     except Exception:
-        names = FALLBACK_STORES
-    stores = sorted(set(names))
-    STORES_CACHE.write_text(json.dumps({"stores": stores, "updated": datetime.now().isoformat()}))
-    return stores
+        pass
+
+    # Always merge with fallback to avoid losing known stores
+    merged = sorted(set(live_names) | set(FALLBACK_STORES))
+    STORES_CACHE.write_text(json.dumps({
+        "stores":      merged,
+        "live_count":  len(live_names),
+        "updated":     datetime.now().isoformat(),
+    }))
+    return merged
+
+
+def get_store_info() -> dict:
+    """Return metadata about the store list (count, last updated, live vs fallback)."""
+    if STORES_CACHE.exists():
+        try:
+            d = json.loads(STORES_CACHE.read_text())
+            return {
+                "count":      len(d.get("stores", [])),
+                "live_count": d.get("live_count", 0),
+                "updated":    d.get("updated", ""),
+            }
+        except Exception:
+            pass
+    return {"count": len(FALLBACK_STORES), "live_count": 0, "updated": ""}
 
 
 # ── Favorites ─────────────────────────────────────────────────────────────────
@@ -208,6 +253,14 @@ def save_favorites(favs: list[str]):
 # ── GC scraping ───────────────────────────────────────────────────────────────
 
 PAGE_SIZE = 24
+
+def _clean_name(name: str) -> str:
+    """Strip redundant 'Used ' prefix from item names."""
+    name = name.strip()
+    if name.lower().startswith("used "):
+        name = name[5:].strip()
+    return name
+
 
 def fetch_page(store_name: str, page: int) -> str:
     query = f"filters=stores:{store_name.replace(' ', '%20')}&Ns=cD"
@@ -231,7 +284,7 @@ def parse_products(html: str, store_name: str) -> list[dict]:
         products = []
         for entry in items:
             item = entry.get("item", {})
-            name = item.get("name", "").strip()
+            name = _clean_name(item.get("name", ""))
             sku  = item.get("sku",  "").strip()
             url  = item.get("url",  "").strip()
             raw  = item.get("offers", {}).get("price", "")
@@ -244,11 +297,49 @@ def parse_products(html: str, store_name: str) -> list[dict]:
     return []
 
 
-def scrape_store(store_name: str, seen_ids: set, send) -> tuple[list[dict], set]:
+def fetch_category(sku: str, url: str) -> tuple[str, str]:
+    """Fetch a product page and extract category/subcategory from BreadcrumbList JSON-LD.
+    Returns (category, subcategory). Results are stored in _cat_cache keyed by SKU."""
+    if sku in _cat_cache:
+        d = _cat_cache[sku]
+        return d.get("category", ""), d.get("subcategory", "")
+    if not url:
+        _cat_cache[sku] = {"category": "", "subcategory": ""}
+        return ("", "")
+    try:
+        r = _http.get(url, timeout=15)
+        r.raise_for_status()
+        skip = {"home", "used", "used gear", "guitar center"}
+        for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', r.text, re.DOTALL):
+            try:
+                data = json.loads(block)
+            except Exception:
+                continue
+            if data.get("@type") != "BreadcrumbList":
+                continue
+            names = [
+                it.get("name", "").strip()
+                for it in data.get("itemListElement", [])
+                if it.get("name", "").strip().lower() not in skip
+            ]
+            cat    = names[0] if len(names) > 0 else ""
+            subcat = names[1] if len(names) > 1 else ""
+            _cat_cache[sku] = {"category": cat, "subcategory": subcat}
+            return cat, subcat
+    except Exception:
+        pass
+    _cat_cache[sku] = {"category": "", "subcategory": ""}
+    return ("", "")
+
+
+def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Event) -> tuple[list[dict], set]:
     """Returns (all_products_found, ids_seen_this_store)."""
     all_products, ids_seen = [], set()
     page = 1
     while page <= 50:
+        if stop_event.is_set():
+            send({"type": "progress", "msg": f"  [{store_name}] stopped."})
+            break
         send({"type": "progress", "msg": f"  [{store_name}] page {page}…"})
         try:
             html = fetch_page(store_name, page)
@@ -288,8 +379,8 @@ def save_state(seen_ids: list, run_time: str):
 
 # ── Excel ─────────────────────────────────────────────────────────────────────
 
-_COLS    = ["Status", "Date Found", "Item Name", "Price", "Store", "Link"]
-_WIDTHS  = [8, 18, 58, 12, 16, 70]
+_COLS    = ["Status", "Date Found", "Item Name", "Category", "Subcategory", "Price", "Store", "Link"]
+_WIDTHS  = [8, 18, 58, 22, 22, 12, 16, 70]
 _HDR_FILL = PatternFill("solid", start_color="1F3864", end_color="1F3864")
 _HDR_FONT = Font(name="Arial", bold=True, color="FFFFFF", size=11)
 _ROW_FONT = Font(name="Arial", size=10)
@@ -306,6 +397,17 @@ def _fmt_row(ws, r):
 def write_excel(new_items: list[dict]):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     n  = len(new_items)
+
+    # If existing file has old column count, back it up and start fresh
+    if OUTPUT_FILE.exists():
+        try:
+            wb_check = load_workbook(OUTPUT_FILE)
+            if wb_check.active.max_column != len(_COLS):
+                backup = OUTPUT_FILE.with_name(OUTPUT_FILE.stem + "_backup" + OUTPUT_FILE.suffix)
+                OUTPUT_FILE.rename(backup)
+        except Exception:
+            pass
+
     if OUTPUT_FILE.exists():
         wb = load_workbook(OUTPUT_FILE)
         ws = wb.active
@@ -313,9 +415,10 @@ def write_excel(new_items: list[dict]):
         for i, item in enumerate(new_items):
             r = 2 + i
             ws.cell(r, 1, "New"); ws.cell(r, 2, ts); ws.cell(r, 3, item["name"])
-            pc = ws.cell(r, 4, item["price"]); pc.number_format = '$#,##0.00'
-            ws.cell(r, 5, item["store"])
-            lc = ws.cell(r, 6, item["url"] or "")
+            ws.cell(r, 4, item.get("category", "")); ws.cell(r, 5, item.get("subcategory", ""))
+            pc = ws.cell(r, 6, item["price"]); pc.number_format = '$#,##0.00'
+            ws.cell(r, 7, item["store"])
+            lc = ws.cell(r, 8, item["url"] or "")
             if item["url"]: lc.hyperlink = item["url"]; lc.style = "Hyperlink"
             _fmt_row(ws, r); ws.cell(r, 1).font = _NEW_FONT
         for r in range(2 + n, ws.max_row + 1):
@@ -333,9 +436,10 @@ def write_excel(new_items: list[dict]):
         for i, item in enumerate(new_items):
             r = 2 + i
             ws.cell(r, 1, "New"); ws.cell(r, 2, ts); ws.cell(r, 3, item["name"])
-            pc = ws.cell(r, 4, item["price"]); pc.number_format = '$#,##0.00'
-            ws.cell(r, 5, item["store"])
-            lc = ws.cell(r, 6, item["url"] or "")
+            ws.cell(r, 4, item.get("category", "")); ws.cell(r, 5, item.get("subcategory", ""))
+            pc = ws.cell(r, 6, item["price"]); pc.number_format = '$#,##0.00'
+            ws.cell(r, 7, item["store"])
+            lc = ws.cell(r, 8, item["url"] or "")
             if item["url"]: lc.hyperlink = item["url"]; lc.style = "Hyperlink"
             _fmt_row(ws, r); ws.cell(r, 1).font = _NEW_FONT
     wb.save(OUTPUT_FILE)
@@ -347,6 +451,7 @@ app             = Flask(__name__)
 app.secret_key  = os.environ.get("SECRET_KEY", os.urandom(24))
 _q              = queue.Queue()
 _lock           = threading.Lock()
+_stop_event     = threading.Event()
 
 
 def login_required(f):
@@ -414,13 +519,19 @@ def download_excel():
 @app.route("/api/stores")
 @login_required
 def api_stores():
-    return jsonify({"stores": get_store_list(), "favorites": load_favorites()})
+    return jsonify({
+        "stores":    get_store_list(),
+        "favorites": load_favorites(),
+        "info":      get_store_info(),
+    })
 
 @app.route("/api/stores/refresh", methods=["POST"])
 @login_required
 def api_stores_refresh():
     stores = refresh_store_list()
-    return jsonify({"stores": stores, "favorites": load_favorites(), "count": len(stores)})
+    info   = get_store_info()
+    return jsonify({"stores": stores, "favorites": load_favorites(),
+                    "count": len(stores), "info": info})
 
 @app.route("/api/favorites", methods=["POST"])
 @login_required
@@ -451,9 +562,10 @@ def api_state():
 def api_run():
     if not _lock.acquire(blocking=False):
         return jsonify({"error": "A run is already in progress."}), 409
+    _stop_event.clear()
     data     = request.json
     selected = data.get("stores", [])
-    baseline = data.get("baseline", False)   # True = full nationwide baseline scan
+    baseline = data.get("baseline", False)
     if not selected and not baseline:
         _lock.release()
         return jsonify({"error": "No stores selected."}), 400
@@ -463,6 +575,12 @@ def api_run():
     t = threading.Thread(target=_run, args=(selected, baseline), daemon=True)
     t.start()
     return jsonify({"status": "started"})
+
+@app.route("/api/stop", methods=["POST"])
+@login_required
+def api_stop():
+    _stop_event.set()
+    return jsonify({"status": "stopping"})
 
 @app.route("/api/progress")
 @login_required
@@ -494,12 +612,47 @@ def _run(selected_stores: list[str], baseline: bool):
 
         all_products, ids_this_run = [], set()
         for i, store in enumerate(stores_to_scan, 1):
+            if _stop_event.is_set():
+                send({"type":"progress","msg":"⏹ Stopped by user."})
+                break
             send({"type":"progress","msg":f"\n[{i}/{len(stores_to_scan)}] {store}"})
-            products, ids = scrape_store(store, seen_ids, send)
+            products, ids = scrape_store(store, seen_ids, send, _stop_event)
             for p in products:
                 if p["id"] not in ids_this_run:
                     all_products.append(p)
             ids_this_run |= ids
+
+        # Fetch categories in parallel for items not already cached
+        items_needing_cats = [p for p in all_products if p["id"] not in _cat_cache]
+        if items_needing_cats and not _stop_event.is_set():
+            send({"type":"progress","msg":f"\nFetching categories for {len(items_needing_cats)} items…"})
+            done_count = 0
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                future_map = {
+                    pool.submit(fetch_category, p["id"], p.get("url", "")): p
+                    for p in items_needing_cats
+                }
+                for future in as_completed(future_map):
+                    if _stop_event.is_set():
+                        break
+                    p = future_map[future]
+                    try:
+                        cat, subcat = future.result()
+                    except Exception:
+                        cat, subcat = "", ""
+                    p["category"]    = cat
+                    p["subcategory"] = subcat
+                    done_count += 1
+                    if done_count % 20 == 0 or done_count == len(items_needing_cats):
+                        send({"type":"progress","msg":f"  Categories: {done_count}/{len(items_needing_cats)}…"})
+            _save_cat_cache()
+
+        # Fill in categories from cache for items that were already cached
+        for p in all_products:
+            if "category" not in p:
+                d = _cat_cache.get(p["id"], {})
+                p["category"]    = d.get("category", "")
+                p["subcategory"] = d.get("subcategory", "")
 
         new_items = [p for p in all_products if p["id"] not in seen_ids]
         save_state(list(seen_ids | ids_this_run), run_time)
@@ -507,17 +660,23 @@ def _run(selected_stores: list[str], baseline: bool):
             write_excel(new_items)
 
         def fmt(p):
-            return {"name":p["name"], "price":f"${p['price']:,.2f}" if p["price"] else "",
-                    "store":p["store"], "url":p["url"]}
+            return {
+                "name":       p["name"],
+                "price":      f"${p['price']:,.2f}" if p["price"] else "",
+                "store":      p["store"],
+                "url":        p["url"],
+                "category":   p.get("category", ""),
+                "subcategory":p.get("subcategory", ""),
+            }
 
         new_ids = {p["id"] for p in new_items}
         send({
             "type":       "done",
             "baseline":   baseline,
+            "stopped":    _stop_event.is_set(),
             "scanned":    len(all_products),
             "new_count":  len(new_items),
             "new_items":  [fmt(p) for p in new_items],
-            # all items found this run (new first, then existing) — omit on baseline
             "all_items":  [] if baseline else
                           [fmt(p) for p in all_products if p["id"] not in new_ids],
         })
@@ -539,8 +698,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#111;color:#eee;height:100vh;display:flex;flex-direction:column}
 
-header{background:#c00;padding:14px 24px;display:flex;align-items:center;gap:16px;flex-shrink:0}
-header h1{font-size:1.25rem;font-weight:700;color:#fff}
+header{background:#c00;padding:12px 24px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+header h1{font-size:1.2rem;font-weight:700;color:#fff}
+#stop-btn{display:none;padding:7px 14px;background:#fff;color:#c00;border:none;border-radius:5px;font-size:.82rem;font-weight:700;cursor:pointer;white-space:nowrap}
+#stop-btn:hover{background:#ffe0e0}
+#stop-btn:disabled{opacity:.6;cursor:not-allowed}
 #hdr-status{font-size:.8rem;color:#ffbbbb;margin-left:auto}
 
 .layout{display:flex;flex:1;overflow:hidden}
@@ -585,7 +747,7 @@ header h1{font-size:1.25rem;font-weight:700;color:#fff}
 /* ── Right panel ── */
 .right{flex:1;display:flex;flex-direction:column;overflow:hidden}
 
-.status-bar{padding:8px 20px;background:#161616;border-bottom:1px solid #2e2e2e;font-size:.78rem;color:#666;display:flex;gap:20px;flex-shrink:0}
+.status-bar{padding:8px 20px;background:#161616;border-bottom:1px solid #2e2e2e;font-size:.78rem;color:#666;display:flex;gap:20px;flex-wrap:wrap;flex-shrink:0}
 .status-bar b{color:#bbb}
 
 #log{height:52px;overflow-y:auto;padding:6px 20px;font-family:monospace;font-size:.78rem;color:#6dba8d;line-height:1.75;flex-shrink:0;border-bottom:1px solid #2e2e2e}
@@ -593,34 +755,71 @@ header h1{font-size:1.25rem;font-weight:700;color:#fff}
 .log-err{color:#f88}
 
 .results{flex:1;overflow-y:auto}
-.results-hdr{padding:8px 20px;font-size:.88rem;font-weight:600;color:#ccc;background:#111;position:sticky;top:0;z-index:1;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.results-hdr{padding:8px 16px;font-size:.88rem;font-weight:600;color:#ccc;background:#111;position:sticky;top:0;z-index:1;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .badge{background:#c00;color:#fff;font-size:.7rem;font-weight:700;padding:2px 7px;border-radius:10px}
+.cat-sel{padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer}
+.cat-sel:focus{border-color:#c00}
 #res-search-wrap{margin-left:auto;display:flex;align-items:center;gap:6px}
-#res-search{padding:5px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.8rem;width:200px;outline:none}
+#res-search{padding:5px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.8rem;width:180px;outline:none}
 #res-search:focus{border-color:#c00}
 #res-search-count{font-size:.75rem;color:#555;white-space:nowrap}
 
 table{width:100%;border-collapse:collapse;font-size:.83rem}
-th{background:#161616;color:#666;font-weight:600;text-align:left;padding:7px 16px;font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:40px}
-td{padding:8px 16px;border-bottom:1px solid #1c1c1c;color:#ddd}
+th{background:#161616;color:#666;font-weight:600;text-align:left;padding:7px 14px;font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:40px;cursor:pointer;user-select:none;white-space:nowrap}
+th:hover{color:#ccc}
+th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
+th.sort-desc::after{content:" ▼";color:#c00;font-size:.6rem}
+td{padding:7px 14px;border-bottom:1px solid #1c1c1c;color:#ddd}
 tr:hover td{background:#161616}
 td a{color:#6ab0f5;text-decoration:none}
 td a:hover{text-decoration:underline}
 .tag{background:#c00;color:#fff;font-size:.65rem;font-weight:700;padding:1px 5px;border-radius:3px}
 .no-res{padding:24px 20px;color:#555;font-size:.85rem}
+
+/* ── Password modal ── */
+#pw-modal{display:none;position:fixed;inset:0;z-index:100;align-items:center;justify-content:center}
+#pw-overlay{position:absolute;inset:0;background:rgba(0,0,0,.7)}
+#pw-box{position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:30px 28px;width:340px;z-index:1}
+#pw-box h2{color:#fff;font-size:1.05rem;margin-bottom:6px}
+#pw-box p{color:#777;font-size:.82rem;margin-bottom:18px;line-height:1.5}
+#pw-input{width:100%;padding:9px 12px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#eee;font-size:.95rem;outline:none;margin-bottom:10px}
+#pw-input:focus{border-color:#c00}
+#pw-err{color:#f88;font-size:.8rem;margin-bottom:10px;display:none}
+.pw-btns{display:flex;gap:8px}
+.pw-btns button{flex:1;padding:9px;border-radius:5px;font-size:.88rem;font-weight:600;cursor:pointer;border:none}
+#pw-cancel{background:#2a2a2a;color:#aaa;border:1px solid #3a3a3a!important}
+#pw-cancel:hover{color:#fff}
+#pw-confirm{background:#c00;color:#fff}
+#pw-confirm:hover{background:#e00}
 </style>
 </head>
 <body>
 
+<!-- Password modal -->
+<div id="pw-modal">
+  <div id="pw-overlay" onclick="cancelBaseline()"></div>
+  <div id="pw-box">
+    <h2>🌐 Build Nationwide Baseline</h2>
+    <p>This scan covers ~300 stores and takes 30–60 minutes. Enter the password to continue.</p>
+    <input type="password" id="pw-input" placeholder="Password"
+           onkeydown="if(event.key==='Enter')confirmBaseline()">
+    <div id="pw-err">Incorrect password.</div>
+    <div class="pw-btns">
+      <button id="pw-cancel" onclick="cancelBaseline()">Cancel</button>
+      <button id="pw-confirm" onclick="confirmBaseline()">Continue →</button>
+    </div>
+  </div>
+</div>
+
 <header>
   <h1>🎸 GC Used Inventory Tracker</h1>
+  <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
 
 <div class="layout">
 
   <div class="left">
-    <!-- Mode tabs -->
     <div class="mode-tabs">
       <button class="mode-tab active" id="tab-find" onclick="setMode('find')">Select Stores</button>
       <button class="mode-tab"        id="tab-favs" onclick="setMode('favs')">★ Favorites</button>
@@ -640,7 +839,7 @@ td a:hover{text-decoration:underline}
       <div id="sel-count">0 stores selected</div>
       <div class="btn-row">
         <button id="run-btn"      onclick="runTracker()" disabled>Run</button>
-        <button id="baseline-btn" onclick="runBaseline()" title="Scan every GC store nationwide to build a complete baseline">🌐 Build Baseline</button>
+        <button id="baseline-btn" onclick="runBaseline()" title="Scan every GC store nationwide">🌐 Build Baseline</button>
       </div>
     </div>
   </div>
@@ -649,6 +848,7 @@ td a:hover{text-decoration:underline}
     <div class="status-bar">
       <span>Last run: <b id="s-last">—</b></span>
       <span>Known items: <b id="s-known">—</b></span>
+      <span>Stores: <b id="s-stores">—</b></span>
       <span id="s-excel" style="display:none"><a style="color:#6ab0f5" href="/download/excel">Download Excel ↗</a></span>
     </div>
     <div id="log"><span class="log-dim">Ready — select stores and click Run, or build a full baseline.</span></div>
@@ -656,6 +856,12 @@ td a:hover{text-decoration:underline}
       <div class="results-hdr">
         <span id="res-title">New Items</span>
         <span class="badge" id="res-badge"></span>
+        <select id="cat-filter" class="cat-sel" style="display:none" onchange="onCatFilterChange()">
+          <option value="">All Categories</option>
+        </select>
+        <select id="subcat-filter" class="cat-sel" style="display:none" onchange="filterResults()">
+          <option value="">All Subcategories</option>
+        </select>
         <div id="res-search-wrap">
           <input id="res-search" type="text" placeholder="Filter results…" oninput="filterResults()" autocomplete="off">
           <span id="res-search-count"></span>
@@ -669,6 +875,7 @@ td a:hover{text-decoration:underline}
 
 <script>
 let allStores = [], favorites = [], mode = 'find', running = false;
+const BASELINE_PW = 'Beatle909!';
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
@@ -682,7 +889,11 @@ async function loadData() {
   const d = await r.json();
   allStores = d.stores; favorites = d.favorites;
   renderList();
-  document.getElementById('hdr-status').textContent = allStores.length + ' stores available';
+  const info = d.info || {};
+  const storeLabel = info.count ? info.count + ' stores' : allStores.length + ' stores';
+  document.getElementById('hdr-status').textContent = storeLabel + ' available';
+  document.getElementById('s-stores').textContent = storeLabel +
+    (info.updated ? ' · checked ' + info.updated.slice(0,10) : ' (fallback list)');
 }
 
 async function loadState() {
@@ -720,36 +931,29 @@ function clearAll() {
 function renderList() {
   const el    = document.getElementById('store-list');
   const q     = document.getElementById('search').value.toLowerCase();
-  let stores;
-  if (mode === 'favs') {
-    stores = favorites.length ? favorites : null;
-  } else {
-    stores = allStores;
-  }
+  let stores  = mode === 'favs' ? (favorites.length ? favorites : null) : allStores;
 
   if (!stores) {
     el.innerHTML = '<div class="empty-msg">No favorites yet.<br>Click ★ next to any store to add it.</div>';
     updateCount(); return;
   }
 
-  const filtered = mode === 'find' && q ? stores.filter(s => s.toLowerCase().includes(q)) : stores;
-
+  const filtered = (mode === 'find' && q) ? stores.filter(s => s.toLowerCase().includes(q)) : stores;
   el.innerHTML = '';
   filtered.forEach(name => {
     const isFav = favorites.includes(name);
     const div   = document.createElement('div');
     div.className = 'store-row';
     div.dataset.name = name;
-    const id = 'cb_' + name.replace(/\W/g,'_');
+    const id = 'cb_' + name.replace(/\\W/g,'_');
     div.innerHTML =
       `<input type="checkbox" id="${id}" value="${name}">` +
       `<label for="${id}">${name}</label>` +
-      `<button class="fav-btn ${isFav?'active':''}" title="${isFav?'Remove from':'Add to'} favorites" onclick="toggleFav(event,'${name.replace(/'/g,"\\'")}',this)">★</button>`;
+      `<button class="fav-btn ${isFav?'active':''}" title="${isFav?'Remove from':'Add to'} favorites"
+        onclick="toggleFav(event,'${name.replace(/'/g,"\\\\'")}',this)">★</button>`;
     div.querySelector('input').addEventListener('change', updateCount);
     el.appendChild(div);
   });
-
-  // In "all" mode check all by default if list was just rendered
   updateCount();
 }
 
@@ -758,7 +962,7 @@ function filterList() { if (mode==='find') renderList(); }
 // ── Favorites ─────────────────────────────────────────────────────────────────
 async function toggleFav(e, name, btn) {
   e.stopPropagation();
-  const adding  = !favorites.includes(name);
+  const adding = !favorites.includes(name);
   const r = await fetch('/api/favorites', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({store: name, action: adding ? 'add' : 'remove'})
@@ -783,6 +987,29 @@ function getSelected() {
   return [...document.querySelectorAll('.store-row input:checked')].map(c => c.value);
 }
 
+// ── Baseline password modal ───────────────────────────────────────────────────
+function runBaseline() {
+  document.getElementById('pw-modal').style.display = 'flex';
+  document.getElementById('pw-input').value = '';
+  document.getElementById('pw-err').style.display = 'none';
+  setTimeout(() => document.getElementById('pw-input').focus(), 50);
+}
+
+function cancelBaseline() {
+  document.getElementById('pw-modal').style.display = 'none';
+}
+
+function confirmBaseline() {
+  const pw = document.getElementById('pw-input').value;
+  if (pw !== BASELINE_PW) {
+    document.getElementById('pw-err').style.display = 'block';
+    document.getElementById('pw-input').select();
+    return;
+  }
+  document.getElementById('pw-modal').style.display = 'none';
+  startRun({stores:[], baseline:true}, true);
+}
+
 // ── Run ───────────────────────────────────────────────────────────────────────
 async function runTracker() {
   const stores = getSelected();
@@ -790,13 +1017,20 @@ async function runTracker() {
   await startRun({stores}, false);
 }
 
-async function runBaseline() {
-  if (!confirm('This will scan every Guitar Center store nationwide (~300 stores) to build a complete inventory baseline.\\n\\nIt will take 30–60 minutes. Continue?')) return;
-  await startRun({stores:[], baseline:true}, true);
+async function stopRun() {
+  const btn = document.getElementById('stop-btn');
+  btn.textContent = '⏹ Stopping…';
+  btn.disabled = true;
+  await fetch('/api/stop', {method:'POST'});
 }
 
 async function startRun(payload, isBaseline) {
   running = true; updateCount();
+  const stopBtn = document.getElementById('stop-btn');
+  stopBtn.style.display = 'inline-block';
+  stopBtn.disabled = false;
+  stopBtn.textContent = '⏹ Stop Running';
+
   document.getElementById('res-panel').style.display = 'none';
   document.getElementById('log').innerHTML = '';
 
@@ -807,7 +1041,7 @@ async function startRun(payload, isBaseline) {
   if (!resp.ok) {
     const e = await resp.json();
     appendLog(e.error, 'log-err');
-    running = false; updateCount(); return;
+    running = false; stopBtn.style.display = 'none'; updateCount(); return;
   }
 
   const es = new EventSource('/api/progress');
@@ -816,7 +1050,9 @@ async function startRun(payload, isBaseline) {
     if (msg.type === 'ping') return;
     if (msg.type === 'progress') { appendLog(msg.msg); return; }
     if (msg.type === 'done') {
-      es.close(); running = false; updateCount(); loadState(); showResults(msg, isBaseline);
+      es.close(); running = false;
+      stopBtn.style.display = 'none';
+      updateCount(); loadState(); showResults(msg, isBaseline);
     }
   };
 }
@@ -834,13 +1070,15 @@ function showResults(msg, isBaseline) {
   }
 
   const n = msg.new_count;
-  appendLog(`\\n✓ Done — ${msg.scanned.toLocaleString()} items scanned, ${n} new.`, 'log-dim');
+  const stoppedNote = msg.stopped ? ' (stopped early)' : '';
+  appendLog(`\\n✓ Done${stoppedNote} — ${msg.scanned.toLocaleString()} items scanned, ${n} new.`, 'log-dim');
 
   if (isBaseline && n === 0) {
     document.getElementById('res-title').textContent = 'Baseline Complete';
     document.getElementById('res-badge').textContent = '';
     document.getElementById('res-body').innerHTML =
-      `<div class="no-res">Full inventory baseline saved (${msg.scanned.toLocaleString()} items). Run again any time to see what's new!</div>`;
+      `<div class="no-res">Full inventory baseline saved (${msg.scanned.toLocaleString()} items)${stoppedNote}. Run again any time to see what's new!</div>`;
+    ['cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
     return;
   }
 
@@ -853,33 +1091,128 @@ function showResults(msg, isBaseline) {
 
   if (total === 0) {
     document.getElementById('res-body').innerHTML = '<div class="no-res">Nothing found for selected stores.</div>';
+    ['cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
     return;
   }
 
-  let html = `<table><thead><tr><th></th><th>Item</th><th>Price</th><th>Store</th><th>Link</th></tr></thead><tbody>`;
-  (msg.new_items || []).forEach(item => {
-    html += `<tr><td><span class="tag">NEW</span></td><td>${item.name}</td><td>${item.price}</td><td>${item.store}</td><td><a href="${item.url}" target="_blank">View ↗</a></td></tr>`;
-  });
-  (msg.all_items || []).forEach(item => {
-    html += `<tr><td></td><td>${item.name}</td><td>${item.price}</td><td>${item.store}</td><td><a href="${item.url}" target="_blank">View ↗</a></td></tr>`;
+  window._tableData = [];
+  (msg.new_items || []).forEach(item => window._tableData.push({isNew:true,  ...item}));
+  (msg.all_items  || []).forEach(item => window._tableData.push({isNew:false, ...item}));
+  window._sortCol = null; window._sortDir = 1;
+
+  populateCategoryFilter();
+  renderTable();
+}
+
+// ── Category filters ──────────────────────────────────────────────────────────
+function populateCategoryFilter() {
+  const data = window._tableData || [];
+  const cats = [...new Set(data.map(i => i.category).filter(Boolean))].sort();
+  const catEl = document.getElementById('cat-filter');
+  catEl.innerHTML = '<option value="">All Categories</option>';
+  cats.forEach(c => { const o = document.createElement('option'); o.value=o.textContent=c; catEl.appendChild(o); });
+  catEl.style.display = cats.length ? '' : 'none';
+  catEl.value = '';
+  document.getElementById('subcat-filter').style.display = 'none';
+}
+
+function onCatFilterChange() {
+  const cat   = document.getElementById('cat-filter').value;
+  const data  = window._tableData || [];
+  const subcats = [...new Set(
+    data.filter(i => !cat || i.category === cat).map(i => i.subcategory).filter(Boolean)
+  )].sort();
+  const subEl = document.getElementById('subcat-filter');
+  if (subcats.length && cat) {
+    subEl.innerHTML = '<option value="">All Subcategories</option>';
+    subcats.forEach(s => { const o = document.createElement('option'); o.value=o.textContent=s; subEl.appendChild(o); });
+    subEl.style.display = '';
+  } else {
+    subEl.style.display = 'none';
+  }
+  subEl.value = '';
+  filterResults();
+}
+
+// ── Table rendering & sorting ─────────────────────────────────────────────────
+// col indices: 0=status, 1=name, 2=category, 3=subcategory, 4=price, 5=store, 6=link
+const _SORT_COLS = [null, 'name', 'category', 'subcategory', 'price', 'store', null];
+
+function renderTable() {
+  const data = window._tableData || [];
+  let html = `<table id="res-table"><thead><tr>
+    <th data-col="0"></th>
+    <th data-col="1">Item</th>
+    <th data-col="2">Category</th>
+    <th data-col="3">Subcategory</th>
+    <th data-col="4">Price</th>
+    <th data-col="5">Store</th>
+    <th data-col="6">Link</th>
+  </tr></thead><tbody>`;
+  data.forEach(item => {
+    const priceNum = parseFloat((item.price||'').replace(/[^0-9.]/g,'')) || 0;
+    const esc = s => (s||'').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+    html += `<tr data-name="${esc(item.name)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}">` +
+      `<td>${item.isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
+      `<td>${esc(item.name)}</td>` +
+      `<td>${esc(item.category)}</td>` +
+      `<td>${esc(item.subcategory)}</td>` +
+      `<td>${item.price||''}</td>` +
+      `<td>${esc(item.store)}</td>` +
+      `<td>${item.url ? `<a href="${item.url}" target="_blank">View ↗</a>` : ''}</td>` +
+      `</tr>`;
   });
   html += '</tbody></table>';
   document.getElementById('res-body').innerHTML = html;
+
+  if (window._sortCol !== null) {
+    const th = document.querySelector(`#res-table th[data-col="${window._sortCol}"]`);
+    if (th) th.classList.add(window._sortDir === 1 ? 'sort-asc' : 'sort-desc');
+  }
+
+  document.querySelectorAll('#res-table thead th[data-col]').forEach(th => {
+    const colIdx = parseInt(th.dataset.col);
+    if (!_SORT_COLS[colIdx]) return;
+    th.addEventListener('click', () => sortTable(colIdx));
+  });
+
+  filterResults();
+}
+
+function sortTable(colIdx) {
+  const field = _SORT_COLS[colIdx];
+  if (!field) return;
+  window._sortDir = (window._sortCol === colIdx) ? window._sortDir * -1 : 1;
+  window._sortCol = colIdx;
+  const dir = window._sortDir;
+  window._tableData.sort((a, b) => {
+    let av = a[field] || '', bv = b[field] || '';
+    if (field === 'price') {
+      av = parseFloat((av+'').replace(/[^0-9.]/g,'')) || 0;
+      bv = parseFloat((bv+'').replace(/[^0-9.]/g,'')) || 0;
+      return (av - bv) * dir;
+    }
+    return av.toString().localeCompare(bv.toString()) * dir;
+  });
+  renderTable();
 }
 
 // ── Results filter ────────────────────────────────────────────────────────────
 function filterResults() {
-  const q     = document.getElementById('res-search').value.toLowerCase().trim();
-  const rows  = document.querySelectorAll('#res-body tbody tr');
-  let visible = 0;
+  const q      = document.getElementById('res-search').value.toLowerCase().trim();
+  const cat    = document.getElementById('cat-filter').value;
+  const subcat = document.getElementById('subcat-filter').value;
+  const rows   = document.querySelectorAll('#res-body tbody tr');
+  let visible  = 0;
   rows.forEach(row => {
-    const text  = row.textContent.toLowerCase();
-    const show  = !q || text.includes(q);
+    const show = (!q      || row.textContent.toLowerCase().includes(q)) &&
+                 (!cat    || (row.dataset.category    || '') === cat) &&
+                 (!subcat || (row.dataset.subcategory || '') === subcat);
     row.style.display = show ? '' : 'none';
     if (show) visible++;
   });
   const countEl = document.getElementById('res-search-count');
-  countEl.textContent = q ? `${visible} of ${rows.length}` : '';
+  countEl.textContent = (q || cat || subcat) ? `${visible} of ${rows.length}` : '';
 }
 
 // ── Log helper ────────────────────────────────────────────────────────────────
@@ -898,6 +1231,7 @@ function appendLog(text, cls) {
 
 # ── Launch ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    _load_cat_cache()
     if not STORES_CACHE.exists():
         print("Building store list…")
         refresh_store_list()
