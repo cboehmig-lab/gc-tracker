@@ -190,8 +190,9 @@ def get_store_list() -> list[str]:
             cached = json.loads(STORES_CACHE.read_text()).get("stores", [])
         except Exception:
             pass
-    # Always merge with fallback so newly added stores are never missing
-    return sorted(set(cached) | set(FALLBACK_STORES))
+    blocklist = _get_blocklist()
+    # Merge with fallback, then remove any confirmed-invalid stores
+    return sorted((set(cached) | set(FALLBACK_STORES)) - blocklist)
 
 
 _US_STATES = [
@@ -853,7 +854,12 @@ def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Eve
         try:
             html = fetch_page(store_name, page)
         except Exception as e:
-            send({"type": "progress", "msg": f"  [{store_name}] error: {e}"})
+            # 404 = store doesn't exist — remove it from cache silently
+            if "404" in str(e):
+                send({"type": "progress", "msg": f"  [{store_name}] not found — removing from store list."})
+                _remove_invalid_store(store_name)
+            else:
+                send({"type": "progress", "msg": f"  [{store_name}] error: {e}"})
             break
         products = parse_products(html, store_name)
         if not products:
@@ -869,6 +875,42 @@ def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Eve
         page += 1
         time.sleep(1.5)
     return all_products, ids_seen
+
+
+def _remove_invalid_store(store_name: str):
+    """Remove a store that returned 404 from the stores cache.
+    Also saves to a blocklist so it stays removed after refreshes."""
+    # Remove from cache
+    if STORES_CACHE.exists():
+        try:
+            d = json.loads(STORES_CACHE.read_text())
+            stores = d.get("stores", [])
+            if store_name in stores:
+                stores.remove(store_name)
+                d["stores"] = stores
+                STORES_CACHE.write_text(json.dumps(d))
+        except Exception:
+            pass
+    # Add to persistent blocklist
+    blocklist_file = DATA_DIR / "gc_invalid_stores.json"
+    try:
+        blocklist = json.loads(blocklist_file.read_text()) if blocklist_file.exists() else []
+        if store_name not in blocklist:
+            blocklist.append(store_name)
+            blocklist_file.write_text(json.dumps(sorted(blocklist)))
+    except Exception:
+        pass
+
+
+def _get_blocklist() -> set:
+    """Return the set of stores confirmed invalid (404'd)."""
+    blocklist_file = DATA_DIR / "gc_invalid_stores.json"
+    try:
+        if blocklist_file.exists():
+            return set(json.loads(blocklist_file.read_text()))
+    except Exception:
+        pass
+    return set()
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -1204,7 +1246,19 @@ def api_stop():
     _stop_event.set()
     return jsonify({"status": "stopping"})
 
-@app.route("/api/fill-gaps", methods=["POST"])
+@app.route("/api/validate-stores", methods=["POST"])
+@login_required
+def api_validate_stores():
+    if not _lock.acquire(blocking=False):
+        return jsonify({"error": "A run is already in progress."}), 409
+    _stop_event.clear()
+    while not _q.empty():
+        try: _q.get_nowait()
+        except queue.Empty: break
+    t = threading.Thread(target=_validate_stores, daemon=True)
+    t.start()
+    return jsonify({"status": "started"})
+
 @login_required
 def api_fill_gaps():
     """Re-scrape listing pages for selected stores to fill missing condition/category data."""
@@ -1236,6 +1290,46 @@ def api_progress():
                 yield f"data: {json.dumps({'type':'ping'})}\n\n"
     return Response(stream_with_context(generate()), mimetype="text/event-stream",
                     headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+
+
+def _validate_stores():
+    """Check every store in the list with a quick page-1 fetch. Remove 404s."""
+    def send(msg): _q.put(msg)
+    try:
+        stores = get_store_list()
+        total  = len(stores)
+        removed = []
+        send({"type": "progress", "msg": f"Validating {total} stores — checking page 1 of each…"})
+        send({"type": "progress", "msg": "This takes about 1-2 seconds per store. You can stop at any time."})
+
+        for i, store in enumerate(stores, 1):
+            if _stop_event.is_set():
+                send({"type": "progress", "msg": "⏹ Stopped by user."})
+                break
+            if i % 20 == 1:
+                send({"type": "progress", "msg": f"  [{i}/{total}] checking…"})
+            try:
+                query = f"filters=stores:{store.replace(' ', '%20')}&Ns=cD"
+                url   = f"https://www.guitarcenter.com/Used/?{query}&page=1"
+                r = _http.get(url, timeout=10)
+                if r.status_code == 404:
+                    _remove_invalid_store(store)
+                    removed.append(store)
+                    send({"type": "progress", "msg": f"  ✗ Removed: {store}"})
+            except Exception:
+                pass  # network error — don't remove, just skip
+            time.sleep(0.5)
+
+        send({"type": "progress", "msg": f"\n✓ Done — {len(removed)} invalid store(s) removed."})
+        if removed:
+            send({"type": "progress", "msg": "Removed: " + ", ".join(removed)})
+        send({"type": "done", "baseline": False, "stopped": _stop_event.is_set(),
+              "scanned": total, "new_count": 0, "new_items": [], "all_items": [],
+              "gap_fill": True, "fixed": len(removed)})
+    except Exception as e:
+        send({"type": "done", "error": str(e), "scanned": 0, "new_count": 0, "new_items": []})
+    finally:
+        _lock.release()
 
 
 def _fill_gaps(selected_stores: list[str]):
@@ -1575,15 +1669,10 @@ td a:hover{text-decoration:underline}
         <button id="run-btn"      onclick="runTracker()" disabled>Run</button>
         <button id="baseline-btn" onclick="runBaseline()" title="Scan every GC store nationwide">🌐 Build Baseline</button>
       </div>
-      <button id="refresh-stores-btn" onclick="refreshStores()"
+      <button id="validate-stores-btn" onclick="validateStores()"
         style="margin-top:8px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:5px;color:#777;font-size:.75rem;cursor:pointer"
-        title="Re-fetch the full store list from Guitar Center's website">
-        🔄 Refresh Store List
-      </button>
-      <button id="fill-gaps-btn" onclick="fillGaps()"
-        style="margin-top:6px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:5px;color:#777;font-size:.75rem;cursor:pointer"
-        title="Re-scrape selected stores to fill in missing Condition and Category data">
-        🔍 Fill Data Gaps
+        title="Check all stores and remove any that no longer exist">
+        ✓ Validate Stores
       </button>
       <button id="reset-btn" onclick="resetData()"
         style="margin-top:6px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #5a2a2a;border-radius:5px;color:#a05050;font-size:.75rem;cursor:pointer"
@@ -1664,25 +1753,6 @@ async function loadState() {
 }
 
 // ── Refresh store list ────────────────────────────────────────────────────────
-async function refreshStores() {
-  const btn = document.getElementById('refresh-stores-btn');
-  btn.textContent = '🔄 Fetching all stores…';
-  btn.disabled = true;
-  try {
-    const r = await fetch('/api/stores/refresh', {method:'POST'});
-    const d = await r.json();
-    allStores = d.stores; favorites = d.favorites;
-    renderList();
-    const info = d.info || {};
-    const label = d.count + ' stores';
-    document.getElementById('hdr-status').textContent = label + ' available';
-    document.getElementById('s-stores').textContent = label + ' · refreshed just now';
-    btn.textContent = `✓ ${d.count} stores loaded`;
-  } catch(e) {
-    btn.textContent = '🔄 Refresh Store List';
-  }
-  btn.disabled = false;
-}
 
 // ── Mode switching ────────────────────────────────────────────────────────────
 function setMode(m) {
@@ -1805,51 +1875,6 @@ async function stopRun() {
   btn.textContent = '⏹ Stopping…';
   btn.disabled = true;
   await fetch('/api/stop', {method:'POST'});
-}
-
-async function fillGaps() {
-  if (running) return;
-  const stores = getSelected();
-  if (!stores.length) {
-    appendLog('Select at least one store before filling gaps.', 'log-err');
-    return;
-  }
-  const btn = document.getElementById('fill-gaps-btn');
-  const resp = await fetch('/api/fill-gaps', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({stores})
-  });
-  if (!resp.ok) {
-    const e = await resp.json();
-    appendLog('Fill gaps error: ' + e.error, 'log-err');
-    return;
-  }
-  running = true; updateCount();
-  btn.textContent = '⏳ Filling gaps…';
-  btn.disabled = true;
-  document.getElementById('stop-btn').style.display = 'inline-block';
-  document.getElementById('stop-btn').disabled = false;
-  document.getElementById('stop-btn').textContent = '⏹ Stop Running';
-  document.getElementById('log').innerHTML = '';
-  appendLog(`🔍 Re-scanning ${stores.length} store(s) to fill missing Condition & Category data…`);
-
-  const es = new EventSource('/api/progress');
-  es.onmessage = e => {
-    const msg = JSON.parse(e.data);
-    if (msg.type === 'ping') return;
-    if (msg.type === 'progress') { appendLog(msg.msg); return; }
-    if (msg.type === 'done') {
-      es.close(); running = false;
-      document.getElementById('stop-btn').style.display = 'none';
-      btn.textContent = '🔍 Fill Data Gaps';
-      btn.disabled = false;
-      updateCount();
-      if (msg.gap_fill) {
-        appendLog(`✓ Gap fill complete — ${msg.fixed || 0} items updated. Re-run to see refreshed data.`, 'log-dim');
-      }
-    }
-  };
 }
 
 async function startRun(payload, isBaseline) {
@@ -2095,6 +2120,42 @@ function filterResults() {
   countEl.textContent = (q || cond || cat || subcat) ? `${visible} of ${rows.length}` : '';
   const clearBtn = document.getElementById('clear-filters-btn');
   if (clearBtn) clearBtn.style.display = (cond || cat || subcat) ? '' : 'none';
+}
+
+// ── Validate Stores ───────────────────────────────────────────────────────────
+async function validateStores() {
+  if (running) { appendLog('Stop the current run before validating.', 'log-err'); return; }
+  const btn = document.getElementById('validate-stores-btn');
+  const resp = await fetch('/api/validate-stores', {method: 'POST'});
+  if (!resp.ok) {
+    const e = await resp.json();
+    appendLog('Validate error: ' + e.error, 'log-err');
+    return;
+  }
+  running = true; updateCount();
+  btn.textContent = '⏳ Validating…';
+  btn.disabled = true;
+  document.getElementById('stop-btn').style.display = 'inline-block';
+  document.getElementById('stop-btn').disabled = false;
+  document.getElementById('stop-btn').textContent = '⏹ Stop';
+  document.getElementById('log').innerHTML = '';
+  appendLog('✓ Checking all stores for 404s…');
+
+  const es = new EventSource('/api/progress');
+  es.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'ping') return;
+    if (msg.type === 'progress') { appendLog(msg.msg); return; }
+    if (msg.type === 'done') {
+      es.close(); running = false;
+      document.getElementById('stop-btn').style.display = 'none';
+      btn.textContent = '✓ Validate Stores';
+      btn.disabled = false;
+      updateCount();
+      // Reload store list to reflect removals
+      loadData();
+    }
+  };
 }
 
 // ── Reset ─────────────────────────────────────────────────────────────────────
