@@ -1221,30 +1221,39 @@ def _fill_gaps(selected_stores: list[str]):
                   "gap_fill": True, "fixed": 0})
             return
 
-        send({"type": "progress", "msg": f"Found {total} items with missing data. Fetching individual product pages…"})
-        send({"type": "progress", "msg": f"(This may take a few minutes. You can stop at any time.)"})
+        send({"type": "progress", "msg": f"Found {total} items with missing data. Fetching product pages in parallel…"})
+        send({"type": "progress", "msg": f"(You can stop at any time.)"})
 
         fixed = 0
-        for i, (sku, data) in enumerate(gaps.items(), 1):
-            if _stop_event.is_set():
-                send({"type": "progress", "msg": "⏹ Stopped by user."})
-                break
-            if i % 10 == 1:
-                send({"type": "progress", "msg": f"  [{i}/{total}] fetching product pages…"})
+        gap_list = list(gaps.items())
+
+        def _fetch_gap(item):
+            sku, data = item
             url  = data.get("url", "")
             name = data.get("name", "")
             try:
                 cat, subcat, condition = fetch_page_data(url, name)
+                return sku, cat, subcat, condition
             except Exception:
-                cat, subcat, condition = "", "", ""
-            _cat_cache[sku].update({
-                "category":          cat or data.get("category", ""),
-                "subcategory":       subcat or data.get("subcategory", ""),
-                "condition":         condition or data.get("condition", ""),
-                "condition_fetched": True,
-            })
-            fixed += 1
-            time.sleep(0.3)
+                return sku, "", "", ""
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {pool.submit(_fetch_gap, item): item for item in gap_list}
+            for future in as_completed(futures):
+                if _stop_event.is_set():
+                    send({"type": "progress", "msg": "⏹ Stopped by user."})
+                    break
+                sku, cat, subcat, condition = future.result()
+                data = gaps[sku]
+                _cat_cache[sku].update({
+                    "category":          cat or data.get("category", ""),
+                    "subcategory":       subcat or data.get("subcategory", ""),
+                    "condition":         condition or data.get("condition", ""),
+                    "condition_fetched": True,
+                })
+                fixed += 1
+                if fixed % 10 == 0:
+                    send({"type": "progress", "msg": f"  …{fixed}/{total} items updated"})
 
         _save_cat_cache()
         send({"type": "progress", "msg": f"\n✓ Done — {fixed} item(s) updated. Re-run your stores to see the refreshed data."})
@@ -1285,36 +1294,50 @@ def _run(selected_stores: list[str], baseline: bool):
                     all_products.append(p)
             ids_this_run |= ids
 
-        # ── Classify categories & fetch condition from product pages ─────────
-        # Always fetch the individual product page for accurate breadcrumb category
-        # and condition. Skip only if already cached with both fields populated.
-        needs_fetch = [p for p in all_products
-                       if p.get("url") and not baseline
-                       and (not _cat_cache.get(p["id"], {}).get("category")
-                            or not _cat_cache.get(p["id"], {}).get("condition_fetched"))]
-        if needs_fetch:
-            send({"type":"progress","msg":f"\nFetching categories & conditions for {len(needs_fetch)} item(s)…"})
+        # ── Classify categories (parallel) & use listing-page condition ─────────
+        # Condition is already parsed from the listing page in parse_products — use it.
+        # Category requires the individual product page (breadcrumb) — fetch in parallel.
+        needs_cat = [p for p in all_products
+                     if not baseline and p.get("url")
+                     and not _cat_cache.get(p["id"], {}).get("category")]
+
+        if needs_cat:
+            send({"type": "progress", "msg": f"\nFetching categories for {len(needs_cat)} item(s) (parallel)…"})
+
+            def _fetch_cat(p):
+                try:
+                    cat, subcat, _ = fetch_page_data(p["url"], p.get("name", ""))
+                    return p["id"], cat, subcat
+                except Exception:
+                    return p["id"], "", ""
+
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                futures = {pool.submit(_fetch_cat, p): p for p in needs_cat}
+                done_count = 0
+                for future in as_completed(futures):
+                    if _stop_event.is_set():
+                        break
+                    sku, cat, subcat = future.result()
+                    _cat_cache.setdefault(sku, {}).update({"category": cat, "subcategory": subcat})
+                    done_count += 1
+                    if done_count % 10 == 0:
+                        send({"type": "progress", "msg": f"  …{done_count}/{len(needs_cat)} categories fetched"})
+
+        # Apply all data to products
         for p in all_products:
             sku    = p["id"]
             cached = _cat_cache.get(sku, {})
-            if cached.get("category") and cached.get("condition_fetched"):
-                # Already have good data — use cache
-                cat, subcat = cached["category"], cached.get("subcategory", "")
-                condition   = cached.get("condition", "")
-            elif p.get("url") and not baseline:
-                # Fetch the product page for real breadcrumb + condition
-                cat, subcat, condition = fetch_page_data(p["url"], p.get("name", ""))
-                time.sleep(0.3)
-            else:
-                # Baseline or no URL — keyword fallback only
-                cat, subcat = classify_by_name(p.get("name", ""))
-                condition   = p.get("condition", "")
+            # Category: from cache (just fetched) or keyword fallback
+            cat    = cached.get("category") or classify_by_name(p.get("name", ""))[0]
+            subcat = cached.get("subcategory") or classify_by_name(p.get("name", ""))[1]
+            # Condition: from the listing page (parse_products already got it) — never blank it out
+            condition = p.get("condition") or cached.get("condition", "")
             _cat_cache[sku] = {"category": cat, "subcategory": subcat,
                                "condition": condition, "condition_fetched": True,
                                "name": p.get("name", ""), "url": p.get("url", "")}
-            p["category"]   = cat
+            p["category"]    = cat
             p["subcategory"] = subcat
-            p["condition"]  = condition
+            p["condition"]   = condition
         _save_cat_cache()
 
         # ── Record first-seen dates for new items ─────────────────────────────
