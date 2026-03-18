@@ -1567,10 +1567,6 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 /* ── Left panel ── */
 .left{width:220px;min-width:200px;background:#1a1a1a;border-right:1px solid #2e2e2e;display:flex;flex-direction:column;flex-shrink:0}
 
-.mode-tabs{display:flex;border-bottom:1px solid #2e2e2e;flex-shrink:0}
-.mode-tab{flex:1;padding:10px 4px;text-align:center;font-size:.78rem;font-weight:600;color:#777;cursor:pointer;border:none;background:none;letter-spacing:.3px;text-transform:uppercase;border-bottom:2px solid transparent;margin-bottom:-1px}
-.mode-tab:hover{color:#ccc}
-.mode-tab.active{color:#fff;border-bottom-color:#c00}
 .sel-btns{display:flex;gap:6px;margin-top:8px}
 .sel-btn{flex:1;padding:5px;background:#252525;border:1px solid #3a3a3a;border-radius:4px;color:#aaa;font-size:.75rem;cursor:pointer}
 .sel-btn:hover{border-color:#c00;color:#fff}
@@ -1701,15 +1697,10 @@ td a:hover{text-decoration:underline}
 <div class="layout">
 
   <div class="left">
-    <div class="mode-tabs">
-      <button class="mode-tab active" id="tab-find" onclick="setMode('find')">Select Stores</button>
-      <button class="mode-tab"        id="tab-favs" onclick="setMode('favs')">★ Favorites</button>
-    </div>
-
     <div class="search-wrap" id="search-wrap">
       <input id="search" type="text" placeholder="Search stores…" autocomplete="off">
       <div class="sel-btns">
-        <button class="sel-btn" onclick="selectFavorites()">★ Favorites</button>
+        <button class="sel-btn" id="favs-btn" onclick="toggleFavsFilter()">★ Favorites</button>
         <button class="sel-btn" onclick="selectAll()">Select All</button>
         <button class="sel-btn" onclick="clearAll()">Clear All</button>
       </div>
@@ -1773,7 +1764,7 @@ td a:hover{text-decoration:underline}
 </div>
 
 <script>
-let allStores = [], favorites = [], mode = 'find', running = false;
+let allStores = [], favorites = [], running = false;
 const BASELINE_PW = 'Beatle909!';
 
 // ── Init ─────────────────────────────────────────────────────────────────────
@@ -1824,12 +1815,12 @@ async function loadState() {
 // ── Refresh store list ────────────────────────────────────────────────────────
 
 // ── Mode switching ────────────────────────────────────────────────────────────
-function setMode(m) {
-  mode = m;
-  ['find','favs'].forEach(t => {
-    document.getElementById('tab-'+t).classList.toggle('active', t===m);
-  });
-  document.getElementById('search-wrap').style.display = m === 'find' ? '' : 'none';
+let favsOnly = false;
+
+function toggleFavsFilter() {
+  favsOnly = !favsOnly;
+  const btn = document.getElementById('favs-btn');
+  btn.classList.toggle('active', favsOnly);
   document.getElementById('search').value = '';
   renderList();
 }
@@ -1842,44 +1833,38 @@ function clearAll() {
   document.querySelectorAll('.store-row input[type=checkbox]').forEach(cb => cb.checked = false);
   updateCount();
 }
-function selectFavorites() {
-  document.querySelectorAll('.store-row input[type=checkbox]').forEach(cb => {
-    cb.checked = favorites.includes(cb.value);
-  });
-  updateCount();
-}
 
 // ── Render store list ─────────────────────────────────────────────────────────
 function renderList() {
-  const el    = document.getElementById('store-list');
-  const q     = document.getElementById('search').value.toLowerCase();
-  let stores  = mode === 'favs' ? (favorites.length ? favorites : null) : allStores;
+  const el = document.getElementById('store-list');
+  const q  = document.getElementById('search').value.toLowerCase();
+  let stores = favsOnly ? favorites : allStores;
 
-  if (!stores) {
+  if (favsOnly && !stores.length) {
     el.innerHTML = '<div class="empty-msg">No favorites yet.<br>Click ★ next to any store to add it.</div>';
     updateCount(); return;
   }
 
-  const filtered = (mode === 'find' && q) ? stores.filter(s => s.toLowerCase().includes(q)) : stores;
+  const filtered = q ? stores.filter(s => s.toLowerCase().includes(q)) : stores;
   el.innerHTML = '';
   filtered.forEach(name => {
     const isFav = favorites.includes(name);
     const div   = document.createElement('div');
     div.className = 'store-row';
     div.dataset.name = name;
-    const id = 'cb_' + name.replace(/\\W/g,'_');
+    const id = 'cb_' + name.replace(/[^a-zA-Z0-9]/g,'_');
     div.innerHTML =
       `<input type="checkbox" id="${id}" value="${name}">` +
       `<label for="${id}">${name}</label>` +
       `<button class="fav-btn ${isFav?'active':''}" title="${isFav?'Remove from':'Add to'} favorites"
-        onclick="toggleFav(event,'${name.replace(/'/g,"\\\\'")}',this)">★</button>`;
+        onclick="toggleFav(event,'${name.replace(/'/g,"\\'")}',this)">★</button>`;
     div.querySelector('input').addEventListener('change', updateCount);
     el.appendChild(div);
   });
   updateCount();
 }
 
-function filterList() { if (mode==='find') renderList(); }
+function filterList() { renderList(); }
 
 // ── Favorites ─────────────────────────────────────────────────────────────────
 async function toggleFav(e, name, btn) {
@@ -1893,7 +1878,7 @@ async function toggleFav(e, name, btn) {
   favorites = d.favorites;
   btn.classList.toggle('active', adding);
   btn.title = (adding ? 'Remove from' : 'Add to') + ' favorites';
-  if (mode === 'favs') renderList();
+  if (favsOnly) renderList();
 }
 
 // ── Selection ─────────────────────────────────────────────────────────────────
