@@ -403,14 +403,88 @@ def _find_breadcrumbs_in_json(data, depth: int = 0):
     return None
 
 
-def fetch_category_from_page(url: str, name: str) -> tuple[str, str]:
-    """Fetch (category, subcategory) from a GC product page URL.
+def _extract_condition_from_html(html: str) -> str:
+    """Try multiple strategies to pull the condition label from a GC product page."""
+    # Strategy A: JSON-LD Product/Offer itemCondition
+    for block in re.findall(
+        r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL
+    ):
+        try:
+            d = json.loads(block)
+            # Handle both single Product and ItemList
+            offers = None
+            if d.get("@type") == "Product":
+                offers = d.get("offers", {})
+            elif d.get("@type") == "CollectionPage":
+                items = d.get("mainEntity", {}).get("itemListElement", [])
+                if items:
+                    offers = items[0].get("item", {}).get("offers", {})
+            if offers:
+                raw = offers.get("itemCondition", "")
+                if raw:
+                    return _parse_condition(raw)
+        except Exception:
+            pass
+
+    # Strategy B: __NEXT_DATA__ — look for condition/itemCondition keys anywhere
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if m:
+        try:
+            nd = json.loads(m.group(1))
+            cond = _find_key_in_json(nd, ("itemCondition", "condition", "conditionDisplayName",
+                                          "usedCondition", "productCondition"))
+            if cond:
+                return _parse_condition(str(cond))
+        except Exception:
+            pass
+
+    # Strategy C: meta tag or data attribute
+    for pat in [
+        r'data-condition="([^"]+)"',
+        r'"condition"\s*:\s*"([^"]+)"',
+        r'condition["\s:]+([A-Z][a-z]+(?: [A-Z][a-z]+)?)',
+        r'<span[^>]*class="[^"]*condition[^"]*"[^>]*>([^<]+)<',
+    ]:
+        m2 = re.search(pat, html)
+        if m2:
+            val = m2.group(1).strip()
+            if len(val) < 30:
+                return _parse_condition(val)
+
+    return ""
+
+
+def _find_key_in_json(data, keys: tuple, depth: int = 0):
+    """Recursively search a JSON structure for any of the given keys."""
+    if depth > 10:
+        return None
+    if isinstance(data, dict):
+        for k in keys:
+            if k in data and isinstance(data[k], str) and data[k]:
+                return data[k]
+        for v in data.values():
+            result = _find_key_in_json(v, keys, depth + 1)
+            if result:
+                return result
+    elif isinstance(data, list):
+        for item in data:
+            result = _find_key_in_json(item, keys, depth + 1)
+            if result:
+                return result
+    return None
+
+
+def fetch_page_data(url: str, name: str) -> tuple[str, str, str]:
+    """Fetch (category, subcategory, condition) from a GC product page URL.
     Tries JSON-LD BreadcrumbList first, then __NEXT_DATA__, then keyword fallback."""
     try:
         r = _http.get(url, timeout=15)
         if r.status_code != 200:
-            return classify_by_name(name)
+            cat, subcat = classify_by_name(name)
+            return cat, subcat, ""
         html = r.text
+
+        condition = _extract_condition_from_html(html)
 
         # Strategy 1: JSON-LD BreadcrumbList
         for block in re.findall(
@@ -430,7 +504,7 @@ def fetch_category_from_page(url: str, name: str) -> tuple[str, str]:
                     if names:
                         cat    = names[0]
                         subcat = names[2] if len(names) >= 3 else (names[1] if len(names) >= 2 else "")
-                        return cat, subcat
+                        return cat, subcat, condition
             except Exception:
                 pass
 
@@ -450,15 +524,25 @@ def fetch_category_from_page(url: str, name: str) -> tuple[str, str]:
                     if names:
                         cat    = names[0]
                         subcat = names[2] if len(names) >= 3 else (names[1] if len(names) >= 2 else "")
-                        return cat, subcat
+                        return cat, subcat, condition
             except Exception:
                 pass
+
+        cat, subcat = classify_by_name(name)
+        return cat, subcat, condition
 
     except Exception:
         pass
 
     # Final fallback: keyword classification
-    return classify_by_name(name)
+    cat, subcat = classify_by_name(name)
+    return cat, subcat, ""
+
+
+# Keep old name as alias for any callers
+def fetch_category_from_page(url: str, name: str) -> tuple[str, str]:
+    cat, subcat, _ = fetch_page_data(url, name)
+    return cat, subcat
 
 
 def classify_by_name(name: str) -> tuple[str, str]:
@@ -841,6 +925,20 @@ def api_stop():
     _stop_event.set()
     return jsonify({"status": "stopping"})
 
+@app.route("/api/fill-gaps", methods=["POST"])
+@login_required
+def api_fill_gaps():
+    """Re-fetch product pages for items missing category or condition data."""
+    if not _lock.acquire(blocking=False):
+        return jsonify({"error": "A run is already in progress."}), 409
+    _stop_event.clear()
+    while not _q.empty():
+        try: _q.get_nowait()
+        except queue.Empty: break
+    t = threading.Thread(target=_fill_gaps, daemon=True)
+    t.start()
+    return jsonify({"status": "started"})
+
 @app.route("/api/progress")
 @login_required
 def api_progress():
@@ -854,6 +952,73 @@ def api_progress():
                 yield f"data: {json.dumps({'type':'ping'})}\n\n"
     return Response(stream_with_context(generate()), mimetype="text/event-stream",
                     headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+
+
+def _fill_gaps():
+    """Worker: find items in the category cache missing condition or category, re-fetch their pages."""
+    def send(msg): _q.put(msg)
+    try:
+        _load_cat_cache()
+        # Find SKUs that are missing condition (condition_fetched not set) or missing category
+        gaps = {
+            sku: data for sku, data in _cat_cache.items()
+            if not data.get("condition_fetched") or not data.get("category")
+        }
+        # Also pull URLs from state so we can fetch pages — but we need URLs.
+        # URLs are stored in the Excel file; read them from there.
+        url_map: dict[str, tuple[str, str]] = {}  # sku → (name, url)  — can't recover SKU from Excel easily
+        # Actually we stored URLs keyed by GC listing URL slug which includes SKU-like numbers.
+        # Better: re-read the Excel to get name+url for items that need gaps filled.
+        # The Excel SKU isn't stored directly, so we'll match by URL pattern.
+        # Instead, we track which cache entries have a stored url.
+        url_gaps = {sku: data for sku, data in gaps.items() if data.get("url")}
+        no_url_gaps = {sku: data for sku, data in gaps.items() if not data.get("url")}
+
+        total = len(gaps)
+        send({"type": "progress", "msg": f"Found {total} items with gaps ({len(url_gaps)} have URLs to fetch, {len(no_url_gaps)} will use keyword classifier)."})
+
+        # For items without URLs, just re-run keyword classifier on cached name
+        fixed_kw = 0
+        for sku, data in no_url_gaps.items():
+            if _stop_event.is_set():
+                break
+            name = data.get("name", "")
+            if not data.get("category") and name:
+                cat, subcat = classify_by_name(name)
+                _cat_cache[sku].update({"category": cat, "subcategory": subcat})
+                fixed_kw += 1
+            _cat_cache[sku]["condition_fetched"] = True  # mark so we don't retry endlessly
+
+        if fixed_kw:
+            send({"type": "progress", "msg": f"  Classified {fixed_kw} items via keyword matcher."})
+
+        # For items with URLs, fetch each page
+        fixed_http = 0
+        for i, (sku, data) in enumerate(url_gaps.items(), 1):
+            if _stop_event.is_set():
+                send({"type": "progress", "msg": "⏹ Stopped by user."})
+                break
+            url  = data.get("url", "")
+            name = data.get("name", "")
+            if (i - 1) % 10 == 0:
+                send({"type": "progress", "msg": f"  Fetching page data… ({i}/{len(url_gaps)})"})
+            cat, subcat, condition = fetch_page_data(url, name)
+            _cat_cache[sku].update({
+                "category": cat, "subcategory": subcat,
+                "condition": condition, "condition_fetched": True,
+            })
+            fixed_http += 1
+            time.sleep(0.4)
+
+        _save_cat_cache()
+        send({"type": "progress", "msg": f"\n✓ Gap fill complete — {fixed_kw + fixed_http} items updated."})
+        send({"type": "done", "baseline": False, "stopped": _stop_event.is_set(),
+              "scanned": total, "new_count": 0, "new_items": [], "all_items": [],
+              "gap_fill": True, "fixed": fixed_kw + fixed_http})
+    except Exception as e:
+        send({"type": "done", "error": str(e), "scanned": 0, "new_count": 0, "new_items": []})
+    finally:
+        _lock.release()
 
 
 def _run(selected_stores: list[str], baseline: bool):
@@ -883,28 +1048,34 @@ def _run(selected_stores: list[str], baseline: bool):
                     all_products.append(p)
             ids_this_run |= ids
 
-        # ── Classify categories ───────────────────────────────────────────────
-        # New items in post-baseline runs: fetch from product page (accurate breadcrumb).
+        # ── Classify categories & fetch condition ─────────────────────────────
+        # New items in post-baseline runs: fetch from product page (accurate breadcrumb + condition).
         # Baseline or existing items: keyword classifier (fast, no extra HTTP).
         new_item_ids = {p["id"] for p in all_products if p["id"] not in seen_ids}
         http_needed  = [p for p in all_products
                         if p["id"] in new_item_ids and not baseline and p.get("url")
-                        and not _cat_cache.get(p["id"], {}).get("category")]
+                        and (not _cat_cache.get(p["id"], {}).get("category")
+                             or not _cat_cache.get(p["id"], {}).get("condition_fetched"))]
         if http_needed:
-            send({"type":"progress","msg":f"\nFetching categories for {len(http_needed)} new item(s)…"})
+            send({"type":"progress","msg":f"\nFetching categories & conditions for {len(http_needed)} new item(s)…"})
         for p in all_products:
             sku    = p["id"]
             cached = _cat_cache.get(sku, {})
-            if cached.get("category"):
-                cat, subcat = cached["category"], cached.get("subcategory", "")
+            if cached.get("category") and cached.get("condition_fetched"):
+                cat, subcat  = cached["category"], cached.get("subcategory", "")
+                condition    = cached.get("condition", "")
             elif sku in new_item_ids and not baseline and p.get("url"):
-                cat, subcat = fetch_category_from_page(p["url"], p.get("name", ""))
+                cat, subcat, condition = fetch_page_data(p["url"], p.get("name", ""))
                 time.sleep(0.3)
             else:
                 cat, subcat = classify_by_name(p.get("name", ""))
-            _cat_cache[sku] = {"category": cat, "subcategory": subcat}
+                condition   = cached.get("condition", p.get("condition", ""))
+            _cat_cache[sku] = {"category": cat, "subcategory": subcat,
+                               "condition": condition, "condition_fetched": True,
+                               "name": p.get("name", ""), "url": p.get("url", "")}
             p["category"]    = cat
             p["subcategory"] = subcat
+            p["condition"]   = condition
         _save_cat_cache()
 
         # ── Record first-seen dates for new items ─────────────────────────────
@@ -1027,7 +1198,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 table{width:auto;min-width:100%;border-collapse:collapse;font-size:.83rem;table-layout:fixed}
 th{background:#161616;color:#666;font-weight:600;text-align:left;padding:7px 10px;font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:40px;cursor:pointer;user-select:none;white-space:nowrap;overflow:hidden}
 th:nth-child(1){width:46px}
-th:nth-child(2){width:200px}
+th:nth-child(2){} /* Item width set dynamically */
 th:nth-child(3){width:110px}
 th:nth-child(4){width:110px}
 th:nth-child(5){width:110px}
@@ -1114,6 +1285,11 @@ td a:hover{text-decoration:underline}
         style="margin-top:8px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:5px;color:#777;font-size:.75rem;cursor:pointer"
         title="Re-fetch the full store list from Guitar Center's website">
         🔄 Refresh Store List
+      </button>
+      <button id="fill-gaps-btn" onclick="fillGaps()"
+        style="margin-top:6px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:5px;color:#777;font-size:.75rem;cursor:pointer"
+        title="Re-fetch product pages to fill in missing Category, Subcategory, and Condition data">
+        🔍 Fill Data Gaps
       </button>
     </div>
   </div>
@@ -1329,6 +1505,42 @@ async function stopRun() {
   await fetch('/api/stop', {method:'POST'});
 }
 
+async function fillGaps() {
+  if (running) return;
+  const btn = document.getElementById('fill-gaps-btn');
+  const resp = await fetch('/api/fill-gaps', {method:'POST'});
+  if (!resp.ok) {
+    const e = await resp.json();
+    appendLog('Fill gaps error: ' + e.error, 'log-err');
+    return;
+  }
+  running = true; updateCount();
+  btn.textContent = '⏳ Filling gaps…';
+  btn.disabled = true;
+  document.getElementById('stop-btn').style.display = 'inline-block';
+  document.getElementById('stop-btn').disabled = false;
+  document.getElementById('stop-btn').textContent = '⏹ Stop Running';
+  document.getElementById('log').innerHTML = '';
+  appendLog('🔍 Scanning for missing Category, Subcategory, and Condition data…');
+
+  const es = new EventSource('/api/progress');
+  es.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'ping') return;
+    if (msg.type === 'progress') { appendLog(msg.msg); return; }
+    if (msg.type === 'done') {
+      es.close(); running = false;
+      document.getElementById('stop-btn').style.display = 'none';
+      btn.textContent = '🔍 Fill Data Gaps';
+      btn.disabled = false;
+      updateCount();
+      if (msg.gap_fill) {
+        appendLog(`✓ Gap fill complete — ${msg.fixed || 0} items updated. Re-run your stores to see refreshed data.`, 'log-dim');
+      }
+    }
+  };
+}
+
 async function startRun(payload, isBaseline) {
   running = true; updateCount();
   const stopBtn = document.getElementById('stop-btn');
@@ -1487,9 +1699,31 @@ function renderTable() {
   });
 
   filterResults();
+  autoSizeItemColumn();
 }
 
-function sortTable(colIdx) {
+function autoSizeItemColumn() {
+  // Measure the longest visible item name using a hidden canvas for accuracy
+  const data = window._tableData || [];
+  if (!data.length) return;
+  const canvas = autoSizeItemColumn._canvas || (autoSizeItemColumn._canvas = document.createElement('canvas'));
+  const ctx = canvas.getContext('2d');
+  ctx.font = '13.3px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'; // matches td font ~.83rem
+  let maxW = 80;
+  data.forEach(item => {
+    const w = ctx.measureText(item.name || '').width;
+    if (w > maxW) maxW = w;
+  });
+  // Add padding (link underline cursor area + 24px right padding)
+  const colW = Math.min(Math.ceil(maxW) + 32, 520); // cap at 520px
+  const th = document.querySelector('#res-table th[data-col="1"]');
+  if (th) th.style.width = colW + 'px';
+  // Also set td widths via col group or direct style on first td of each row
+  document.querySelectorAll('#res-table tbody tr td:nth-child(2)').forEach(td => {
+    td.style.maxWidth = colW + 'px';
+  });
+}
+
   const field = _SORT_COLS[colIdx];
   if (!field) return;
   window._sortDir = (window._sortCol === colIdx) ? window._sortDir * -1 : 1;
