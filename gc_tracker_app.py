@@ -364,9 +364,8 @@ def _parse_condition(raw: str) -> str:
 def _extract_conditions_from_listing(html: str) -> dict:
     """
     Build a map of {url → condition} from the GC 24-item listing page.
-    GC's five condition grades are: Excellent, Great, Good, Fair, Poor.
-    No whitelist — accept whatever label GC uses after 'Condition:'.
-    Uses store-name-text spans as per-card anchors to avoid positional drift.
+    Each card has the structure: ... Condition: Great ... Available at: City, ST ...
+    We find each 'Available at:' anchor and look BACKWARDS for the condition.
     """
     # 1. Extract ordered URLs from JSON-LD
     urls = []
@@ -390,22 +389,26 @@ def _extract_conditions_from_listing(html: str) -> dict:
 
     card_html = html[ld_end:]
 
-    # Match "Condition: Great" or "Condition: <!-- --> Good" etc.
-    # No whitelist — accept any 2-20 char word GC puts here
+    # Match "Condition: Great" or "Condition: <!-- --> Good"
     cond_re = re.compile(
         r'Condition:\s*(?:<!--[^>]*>\s*)*([A-Z][A-Za-z ]{1,19}?)(?:\s*[<\n\r])',
         re.DOTALL
     )
 
-    # Use store-name-text as per-card anchor (one per card, right before condition)
-    store_anchors = [m.start() for m in re.finditer(r'store-name-text', card_html)]
-    conditions = []
+    # Find all "Available at:" positions — one per card, always after Condition:
+    avail_anchors = [m.start() for m in re.finditer(r'Available\s+at:', card_html)]
 
-    if len(store_anchors) >= len(urls):
-        for anchor_pos in store_anchors[:len(urls)]:
-            chunk = card_html[anchor_pos:anchor_pos + 600]
-            m = cond_re.search(chunk)
-            conditions.append(m.group(1).strip() if m else "")
+    conditions = []
+    if len(avail_anchors) >= len(urls):
+        for anchor_pos in avail_anchors[:len(urls)]:
+            # Look backwards up to 800 chars before "Available at:" for the condition
+            start = max(0, anchor_pos - 800)
+            chunk = card_html[start:anchor_pos]
+            # Find the LAST condition match in this chunk (closest to "Available at:")
+            last_match = None
+            for m in cond_re.finditer(chunk):
+                last_match = m
+            conditions.append(last_match.group(1).strip() if last_match else "")
     else:
         # Fallback: positional scan
         for m in cond_re.finditer(card_html):
@@ -421,16 +424,17 @@ def _extract_conditions_from_listing(html: str) -> dict:
             if len(hits) >= 5:
                 break
         anchor_sample = ""
-        if store_anchors:
-            anchor_sample = card_html[store_anchors[0]:store_anchors[0]+300].replace("\n", "\\n")
+        if avail_anchors:
+            start = max(0, avail_anchors[0] - 400)
+            anchor_sample = card_html[start:avail_anchors[0]+100].replace("\n", "\\n")
         (DATA_DIR / "gc_condition_diag.json").write_text(json.dumps({
             "url_count": len(urls),
-            "store_anchor_count": len(store_anchors),
+            "avail_anchor_count": len(avail_anchors),
             "conditions_found": sum(1 for c in conditions if c),
             "sample_urls": urls[:3],
             "sample_conditions": conditions[:5],
             "first_5_condition_hits": hits,
-            "html_around_first_anchor": anchor_sample,
+            "html_before_first_available_at": anchor_sample,
         }, indent=2))
     except Exception:
         pass
