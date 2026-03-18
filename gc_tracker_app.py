@@ -342,12 +342,14 @@ _CONDITION_MAP = {
     "new":          "New",
     "likenew":      "Like New",
     "excellent":    "Excellent",
+    "great":        "Great",
     "verygood":     "Very Good",
     "good":         "Good",
     "fair":         "Fair",
     "poor":         "Poor",
     "usedcondition":"Used",
     "refurbished":  "Refurbished",
+    "blemished":    "Blemished",
 }
 
 def _parse_condition(raw: str) -> str:
@@ -362,11 +364,10 @@ def _parse_condition(raw: str) -> str:
 def _extract_conditions_from_listing(html: str) -> dict:
     """
     Build a map of {url → condition} from the GC 24-item listing page.
-    Uses store-name-text spans as card anchors to avoid positional drift.
+    GC's five condition grades are: Excellent, Great, Good, Fair, Poor.
+    No whitelist — accept whatever label GC uses after 'Condition:'.
+    Uses store-name-text spans as per-card anchors to avoid positional drift.
     """
-    _VALID = {"new", "like new", "excellent", "very good", "good", "fair", "poor",
-              "blemished", "refurbished"}
-
     # 1. Extract ordered URLs from JSON-LD
     urls = []
     ld_end = 0
@@ -389,13 +390,14 @@ def _extract_conditions_from_listing(html: str) -> dict:
 
     card_html = html[ld_end:]
 
+    # Match "Condition: Great" or "Condition: <!-- --> Good" etc.
+    # No whitelist — accept any 2-20 char word GC puts here
     cond_re = re.compile(
-        r'Condition:\s*(?:<!--[^>]*>\s*)*([A-Za-z][A-Za-z ]{1,20}?)(?:\s*[<\n\r])',
+        r'Condition:\s*(?:<!--[^>]*>\s*)*([A-Z][A-Za-z ]{1,19}?)(?:\s*[<\n\r])',
         re.DOTALL
     )
 
-    # Strategy A: use store-name-text as a per-card anchor
-    # Each card has exactly one store-name-text span, followed by Condition: within ~600 chars
+    # Use store-name-text as per-card anchor (one per card, right before condition)
     store_anchors = [m.start() for m in re.finditer(r'store-name-text', card_html)]
     conditions = []
 
@@ -403,43 +405,33 @@ def _extract_conditions_from_listing(html: str) -> dict:
         for anchor_pos in store_anchors[:len(urls)]:
             chunk = card_html[anchor_pos:anchor_pos + 600]
             m = cond_re.search(chunk)
-            if m:
-                val = m.group(1).strip().rstrip(".,;")
-                conditions.append(val.title() if val.lower() in _VALID else "")
-            else:
-                conditions.append("")
+            conditions.append(m.group(1).strip() if m else "")
     else:
-        # Strategy B: plain positional scan
+        # Fallback: positional scan
         for m in cond_re.finditer(card_html):
-            val = m.group(1).strip().rstrip(".,;")
-            if val.lower() in _VALID:
-                conditions.append(val.title())
+            conditions.append(m.group(1).strip())
             if len(conditions) == len(urls):
                 break
 
     # Diagnostics
     try:
-        # Find first 5 condition hits with context
         hits = []
         for m in cond_re.finditer(card_html):
-            hits.append(card_html[m.start():m.start()+100].replace("\n", "\\n"))
+            hits.append(card_html[m.start():m.start()+80].replace("\n", "\\n"))
             if len(hits) >= 5:
                 break
-        # Show HTML around first store-name-text anchor
         anchor_sample = ""
         if store_anchors:
-            anchor_sample = card_html[store_anchors[0]:store_anchors[0]+400].replace("\n","\\n")
-        diag = {
+            anchor_sample = card_html[store_anchors[0]:store_anchors[0]+300].replace("\n", "\\n")
+        (DATA_DIR / "gc_condition_diag.json").write_text(json.dumps({
             "url_count": len(urls),
             "store_anchor_count": len(store_anchors),
             "conditions_found": sum(1 for c in conditions if c),
-            "ld_end": ld_end,
             "sample_urls": urls[:3],
             "sample_conditions": conditions[:5],
             "first_5_condition_hits": hits,
             "html_around_first_anchor": anchor_sample,
-        }
-        (DATA_DIR / "gc_condition_diag.json").write_text(json.dumps(diag, indent=2))
+        }, indent=2))
     except Exception:
         pass
 
@@ -525,7 +517,7 @@ def _extract_condition_from_html(html: str) -> str:
     """Extract condition label from a GC page (listing or product page).
     Prioritises the visible 'Condition: X' text that appears on both page types."""
 
-    _VALID = {"new", "like new", "excellent", "very good", "good", "fair", "poor",
+    _VALID = {"new", "like new", "excellent", "great", "very good", "good", "fair", "poor",
               "blemished", "refurbished", "used"}
 
     # Strategy A: plain visible text — "Condition: Good" / "Condition: Very Good"
