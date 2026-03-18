@@ -318,6 +318,16 @@ def save_favorites(favs: list[str]):
 
 PAGE_SIZE = 24
 
+def _fmt_date(d: str) -> str:
+    """Convert YYYY-MM-DD to M/D/YY."""
+    try:
+        from datetime import date
+        dt = date.fromisoformat(d[:10])
+        return f"{dt.month}/{dt.day}/{str(dt.year)[2:]}"
+    except Exception:
+        return d
+
+
 def _clean_name(name: str) -> str:
     """Strip redundant 'Used ' prefix from item names."""
     name = name.strip()
@@ -1387,7 +1397,7 @@ def _run(selected_stores: list[str], baseline: bool):
                 "category":   p.get("category", ""),
                 "subcategory":p.get("subcategory", ""),
                 "condition":  p.get("condition", ""),
-                "date":       item_dates.get(p["id"], ""),
+                "date":       _fmt_date(item_dates.get(p["id"], "")),
             }
 
         new_ids = {p["id"] for p in new_items}
@@ -1491,7 +1501,7 @@ th:hover{color:#ccc}
 th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
 th.sort-desc::after{content:" ▼";color:#c00;font-size:.6rem}
 td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;max-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-td:nth-child(1){width:52px;min-width:52px;max-width:52px}
+td:nth-child(1){width:62px;min-width:62px;max-width:62px}
 td:nth-child(2){max-width:260px;width:35%}
 tr:hover td{background:#161616}
 td a{color:#6ab0f5;text-decoration:none}
