@@ -1765,6 +1765,28 @@ function renderTable() {
   autoSizeItemColumn();
 }
 
+function sortTable(colIdx) {
+  const field = _SORT_COLS[colIdx];
+  if (!field) return;
+  window._sortDir = (window._sortCol === colIdx) ? window._sortDir * -1 : 1;
+  window._sortCol = colIdx;
+  const dir = window._sortDir;
+  window._tableData.sort((a, b) => {
+    let av = a[field] || '', bv = b[field] || '';
+    if (field === 'price') {
+      av = parseFloat((av+'').replace(/[^0-9.]/g,'')) || 0;
+      bv = parseFloat((bv+'').replace(/[^0-9.]/g,'')) || 0;
+      return (av - bv) * dir;
+    }
+    if (field === 'date') {
+      // Sort dates descending by default (newest first), ascending on toggle
+      return av.toString().localeCompare(bv.toString()) * dir;
+    }
+    return av.toString().localeCompare(bv.toString()) * dir;
+  });
+  renderTable();
+}
+
 function autoSizeItemColumn() {
   // Measure the longest visible item name using a hidden canvas for accuracy
   const data = window._tableData || [];
@@ -1785,27 +1807,6 @@ function autoSizeItemColumn() {
   document.querySelectorAll('#res-table tbody tr td:nth-child(2)').forEach(td => {
     td.style.maxWidth = colW + 'px';
   });
-}
-
-  const field = _SORT_COLS[colIdx];
-  if (!field) return;
-  window._sortDir = (window._sortCol === colIdx) ? window._sortDir * -1 : 1;
-  window._sortCol = colIdx;
-  const dir = window._sortDir;
-  window._tableData.sort((a, b) => {
-    let av = a[field] || '', bv = b[field] || '';
-    if (field === 'price') {
-      av = parseFloat((av+'').replace(/[^0-9.]/g,'')) || 0;
-      bv = parseFloat((bv+'').replace(/[^0-9.]/g,'')) || 0;
-      return (av - bv) * dir;
-    }
-    if (field === 'date') {
-      // Sort dates descending by default (newest first), ascending on toggle
-      return av.toString().localeCompare(bv.toString()) * dir;
-    }
-    return av.toString().localeCompare(bv.toString()) * dir;
-  });
-  renderTable();
 }
 
 // ── Results filter ────────────────────────────────────────────────────────────
