@@ -1485,20 +1485,13 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #res-search:focus{border-color:#c00}
 #res-search-count{font-size:.75rem;color:#555;white-space:nowrap}
 
-table{width:auto;min-width:100%;border-collapse:collapse;font-size:.83rem;table-layout:fixed}
-th{background:#161616;color:#666;font-weight:600;text-align:left;padding:7px 10px;font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:40px;cursor:pointer;user-select:none;white-space:nowrap;overflow:hidden}
-th:nth-child(1){width:46px}
-th:nth-child(2){} /* Item width set dynamically */
-th:nth-child(3){width:110px}
-th:nth-child(4){width:110px}
-th:nth-child(5){width:110px}
-th:nth-child(6){width:72px}
-th:nth-child(7){width:88px}
-th:nth-child(8){width:128px}
+table{width:100%;border-collapse:collapse;font-size:.83rem;table-layout:auto}
+th{background:#161616;color:#666;font-weight:600;text-align:left;padding:7px 10px;font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:40px;cursor:pointer;user-select:none;white-space:nowrap}
 th:hover{color:#ccc}
 th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
 th.sort-desc::after{content:" ▼";color:#c00;font-size:.6rem}
-td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;max-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+td:nth-child(2){max-width:260px;width:35%}
 tr:hover td{background:#161616}
 td a{color:#6ab0f5;text-decoration:none}
 td a:hover{text-decoration:underline}
@@ -1601,6 +1594,9 @@ td a:hover{text-decoration:underline}
       <div class="results-hdr">
         <span id="res-title">New Items</span>
         <span class="badge" id="res-badge"></span>
+        <select id="cond-filter" class="cat-sel" style="display:none" onchange="filterResults()">
+          <option value="">All Conditions</option>
+        </select>
         <select id="cat-filter" class="cat-sel" style="display:none" onchange="onCatFilterChange()">
           <option value="">All Categories</option>
         </select>
@@ -1899,7 +1895,7 @@ function showResults(msg, isBaseline) {
     document.getElementById('res-badge').textContent = '';
     document.getElementById('res-body').innerHTML =
       `<div class="no-res">Full inventory baseline saved (${msg.scanned.toLocaleString()} items)${stoppedNote}. Run again any time to see what's new!</div>`;
-    ['cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+    ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
     return;
   }
 
@@ -1912,7 +1908,7 @@ function showResults(msg, isBaseline) {
 
   if (total === 0) {
     document.getElementById('res-body').innerHTML = '<div class="no-res">Nothing found for selected stores.</div>';
-    ['cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+    ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
     return;
   }
 
@@ -1928,6 +1924,14 @@ function showResults(msg, isBaseline) {
 // ── Category filters ──────────────────────────────────────────────────────────
 function populateCategoryFilter() {
   const data = window._tableData || [];
+  // Condition filter
+  const conds = [...new Set(data.map(i => i.condition).filter(Boolean))].sort();
+  const condEl = document.getElementById('cond-filter');
+  condEl.innerHTML = '<option value="">All Conditions</option>';
+  conds.forEach(c => { const o = document.createElement('option'); o.value=o.textContent=c; condEl.appendChild(o); });
+  condEl.style.display = conds.length ? '' : 'none';
+  condEl.value = '';
+  // Category filter
   const cats = [...new Set(data.map(i => i.category).filter(Boolean))].sort();
   const catEl = document.getElementById('cat-filter');
   catEl.innerHTML = '<option value="">All Categories</option>';
@@ -1977,7 +1981,7 @@ function renderTable() {
     const nameCell = item.url
       ? `<a href="${item.url}" target="_blank">${esc(item.name)}</a>`
       : esc(item.name);
-    html += `<tr data-name="${esc(item.name)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}">` +
+    html += `<tr data-name="${esc(item.name)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}">` +
       `<td>${item.isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
       `<td>${nameCell}</td>` +
       `<td>${esc(item.condition)}</td>` +
@@ -2052,6 +2056,7 @@ function autoSizeItemColumn() {
 
 // ── Results filter ────────────────────────────────────────────────────────────
 function clearFilters() {
+  document.getElementById('cond-filter').value = '';
   document.getElementById('cat-filter').value = '';
   const subEl = document.getElementById('subcat-filter');
   subEl.value = '';
@@ -2062,22 +2067,23 @@ function clearFilters() {
 
 function filterResults() {
   const q      = document.getElementById('res-search').value.toLowerCase().trim();
+  const cond   = document.getElementById('cond-filter').value;
   const cat    = document.getElementById('cat-filter').value;
   const subcat = document.getElementById('subcat-filter').value;
   const rows   = document.querySelectorAll('#res-body tbody tr');
   let visible  = 0;
   rows.forEach(row => {
     const show = (!q      || row.textContent.toLowerCase().includes(q)) &&
+                 (!cond   || (row.dataset.condition   || '') === cond) &&
                  (!cat    || (row.dataset.category    || '') === cat) &&
                  (!subcat || (row.dataset.subcategory || '') === subcat);
     row.style.display = show ? '' : 'none';
     if (show) visible++;
   });
   const countEl = document.getElementById('res-search-count');
-  countEl.textContent = (q || cat || subcat) ? `${visible} of ${rows.length}` : '';
-  // Show/hide Clear Filters button based on whether any filter is active
+  countEl.textContent = (q || cond || cat || subcat) ? `${visible} of ${rows.length}` : '';
   const clearBtn = document.getElementById('clear-filters-btn');
-  if (clearBtn) clearBtn.style.display = (cat || subcat) ? '' : 'none';
+  if (clearBtn) clearBtn.style.display = (cond || cat || subcat) ? '' : 'none';
 }
 
 // ── Reset ─────────────────────────────────────────────────────────────────────
