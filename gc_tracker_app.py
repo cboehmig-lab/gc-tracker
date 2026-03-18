@@ -986,6 +986,23 @@ def logout():
     session.clear()
     return redirect("/login")
 
+@app.route("/api/reset", methods=["POST"])
+@login_required
+def api_reset():
+    """Delete state, category cache, and Excel file to start fresh."""
+    data = request.json or {}
+    if data.get("password") != APP_PASSWORD and APP_PASSWORD:
+        return jsonify({"error": "Incorrect password."}), 403
+    deleted = []
+    for f in [STATE_FILE, CAT_CACHE_FILE, OUTPUT_FILE]:
+        if f.exists():
+            f.unlink()
+            deleted.append(f.name)
+    # Also clear in-memory cache
+    global _cat_cache
+    _cat_cache = {}
+    return jsonify({"deleted": deleted, "status": "Reset complete. Ready for a fresh baseline."})
+
 @app.route("/")
 @login_required
 def index():
@@ -1513,6 +1530,11 @@ td a:hover{text-decoration:underline}
         title="Re-scrape selected stores to fill in missing Condition and Category data">
         🔍 Fill Data Gaps
       </button>
+      <button id="reset-btn" onclick="resetData()"
+        style="margin-top:6px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #5a2a2a;border-radius:5px;color:#a05050;font-size:.75rem;cursor:pointer"
+        title="Delete all cached data and start fresh">
+        🗑 Reset All Data
+      </button>
     </div>
   </div>
 
@@ -2005,6 +2027,28 @@ function filterResults() {
   // Show/hide Clear Filters button based on whether any filter is active
   const clearBtn = document.getElementById('clear-filters-btn');
   if (clearBtn) clearBtn.style.display = (cat || subcat) ? '' : 'none';
+}
+
+// ── Reset ─────────────────────────────────────────────────────────────────────
+async function resetData() {
+  if (running) { appendLog('Stop the current run before resetting.', 'log-err'); return; }
+  const pw = prompt('Enter your app password to reset all data (state, cache, Excel):');
+  if (pw === null) return;
+  if (!confirm('This will delete gc_state.json, gc_category_cache.json, and gc_new_inventory.xlsx. Are you sure?')) return;
+  const r = await fetch('/api/reset', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({password: pw})
+  });
+  const d = await r.json();
+  if (!r.ok) {
+    appendLog('Reset failed: ' + (d.error || 'unknown error'), 'log-err');
+    return;
+  }
+  appendLog('✓ ' + d.status + (d.deleted.length ? ' Deleted: ' + d.deleted.join(', ') : ''), 'log-dim');
+  document.getElementById('s-last').textContent  = 'Never';
+  document.getElementById('s-known').textContent = '0';
+  document.getElementById('s-excel').style.display = 'none';
 }
 
 // ── Log helper ────────────────────────────────────────────────────────────────
