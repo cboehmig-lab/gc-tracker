@@ -83,13 +83,14 @@ FALLBACK_STORES = [
     # Arkansas
     "Little Rock",
     # California
-    "Anaheim","Bakersfield","Burbank","Canoga Park","Chico","Clovis",
-    "Concord","El Cajon","Escondido","Fresno","Hollywood","Long Beach",
-    "Modesto","Moreno Valley","Northridge","Oakland","Ontario CA",
-    "Orange","Oxnard","Pasadena","Rancho Cucamonga","Redding","Riverside",
+    "Anaheim","Bakersfield","Brea","Burbank","Canoga Park","Cerritos",
+    "Chico","Chula Vista","Clovis","Concord","El Cajon","Escondido",
+    "Fresno","Hollywood","Lancaster","Long Beach","Modesto","Moreno Valley",
+    "Murrieta","Northridge","Oakland","Ontario CA","Orange","Oxnard",
+    "Pasadena","Rancho Cucamonga","Redding","Riverside","Roseville",
     "Sacramento","San Bernardino","San Diego","San Francisco","San Jose",
     "San Marcos","Santa Ana","Santa Barbara","Santa Rosa","Stockton",
-    "Torrance","Ventura","Victorville","Visalia","West Los Angeles",
+    "Temecula","Torrance","Ventura","Victorville","Visalia","West Los Angeles",
     # Colorado
     "Aurora","Colorado Springs","Denver","Lakewood","Thornton",
     # Connecticut
@@ -342,6 +343,98 @@ def parse_products(html: str, store_name: str) -> list[dict]:
     return []
 
 
+def _clean_gc_cat(s: str) -> str:
+    """Strip 'Used ' prefix from GC category breadcrumb names."""
+    s = s.strip()
+    if s.lower().startswith("used "):
+        s = s[5:].strip()
+    return s
+
+
+def _find_breadcrumbs_in_json(data, depth: int = 0):
+    """Recursively search for a breadcrumb array inside __NEXT_DATA__ JSON."""
+    if depth > 8:
+        return None
+    if isinstance(data, dict):
+        for key in ("breadcrumbs", "breadcrumb", "breadCrumbs", "Breadcrumbs",
+                    "crumbs", "navCrumbs", "categoryPath", "categories"):
+            val = data.get(key)
+            if isinstance(val, list) and len(val) >= 2:
+                name_keys = ("name", "displayName", "label", "text", "title")
+                if all(isinstance(v, dict) and any(k in v for k in name_keys) for v in val):
+                    return val
+        for v in data.values():
+            if isinstance(v, (dict, list)):
+                result = _find_breadcrumbs_in_json(v, depth + 1)
+                if result:
+                    return result
+    elif isinstance(data, list):
+        for item in data:
+            if isinstance(item, (dict, list)):
+                result = _find_breadcrumbs_in_json(item, depth + 1)
+                if result:
+                    return result
+    return None
+
+
+def fetch_category_from_page(url: str, name: str) -> tuple[str, str]:
+    """Fetch (category, subcategory) from a GC product page URL.
+    Tries JSON-LD BreadcrumbList first, then __NEXT_DATA__, then keyword fallback."""
+    try:
+        r = _http.get(url, timeout=15)
+        if r.status_code != 200:
+            return classify_by_name(name)
+        html = r.text
+
+        # Strategy 1: JSON-LD BreadcrumbList
+        for block in re.findall(
+            r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>',
+            html, re.DOTALL
+        ):
+            try:
+                d = json.loads(block)
+                if d.get("@type") == "BreadcrumbList":
+                    els = sorted(d.get("itemListElement", []),
+                                 key=lambda x: x.get("position", 0))
+                    names = []
+                    for el in els:
+                        n = ((el.get("item") or {}).get("name") or el.get("name") or "").strip()
+                        if n and n.lower() not in ("home", "used & vintage", "used"):
+                            names.append(_clean_gc_cat(n))
+                    if names:
+                        cat    = names[0]
+                        subcat = names[2] if len(names) >= 3 else (names[1] if len(names) >= 2 else "")
+                        return cat, subcat
+            except Exception:
+                pass
+
+        # Strategy 2: __NEXT_DATA__ JSON blob (Next.js server-side props)
+        m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+        if m:
+            try:
+                nd = json.loads(m.group(1))
+                crumbs = _find_breadcrumbs_in_json(nd)
+                if crumbs:
+                    names = []
+                    for c in crumbs:
+                        n = (c.get("displayName") or c.get("name") or
+                             c.get("label") or c.get("text") or "").strip()
+                        if n and n.lower() not in ("home", "used & vintage", "used"):
+                            names.append(_clean_gc_cat(n))
+                    if names:
+                        cat    = names[0]
+                        subcat = names[2] if len(names) >= 3 else (names[1] if len(names) >= 2 else "")
+                        return cat, subcat
+            except Exception:
+                pass
+
+    except Exception:
+        pass
+
+    # Final fallback: keyword classification
+    return classify_by_name(name)
+
+
 def classify_by_name(name: str) -> tuple[str, str]:
     """Infer category and subcategory from product name using keyword matching.
     Returns (category, subcategory). Fast — no HTTP requests required."""
@@ -504,11 +597,15 @@ def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Eve
 def load_state() -> dict:
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text())
-    return {"last_run": None, "seen_ids": []}
+    return {"last_run": None, "seen_ids": [], "item_dates": {}}
 
 
-def save_state(seen_ids: list, run_time: str):
-    STATE_FILE.write_text(json.dumps({"last_run": run_time, "seen_ids": seen_ids}, indent=2))
+def save_state(seen_ids: list, run_time: str, item_dates: dict = None):
+    STATE_FILE.write_text(json.dumps({
+        "last_run":   run_time,
+        "seen_ids":   seen_ids,
+        "item_dates": item_dates or {},
+    }, indent=2))
 
 
 # ── Excel ─────────────────────────────────────────────────────────────────────
@@ -734,9 +831,11 @@ def api_progress():
 def _run(selected_stores: list[str], baseline: bool):
     def send(msg): _q.put(msg)
     try:
-        state    = load_state()
-        seen_ids = set(state["seen_ids"])
-        run_time = datetime.now().isoformat()
+        state      = load_state()
+        seen_ids   = set(state["seen_ids"])
+        item_dates = dict(state.get("item_dates", {}))
+        run_time   = datetime.now().isoformat()
+        ts         = datetime.now().strftime("%Y-%m-%d")
 
         stores_to_scan = get_store_list() if baseline else selected_stores
         label = "baseline scan" if baseline else f"{len(stores_to_scan)} store(s)"
@@ -756,15 +855,37 @@ def _run(selected_stores: list[str], baseline: bool):
                     all_products.append(p)
             ids_this_run |= ids
 
-        # Classify categories for all products (instant — keyword-based, no HTTP)
+        # ── Classify categories ───────────────────────────────────────────────
+        # New items in post-baseline runs: fetch from product page (accurate breadcrumb).
+        # Baseline or existing items: keyword classifier (fast, no extra HTTP).
+        new_item_ids = {p["id"] for p in all_products if p["id"] not in seen_ids}
+        http_needed  = [p for p in all_products
+                        if p["id"] in new_item_ids and not baseline and p.get("url")
+                        and not _cat_cache.get(p["id"], {}).get("category")]
+        if http_needed:
+            send({"type":"progress","msg":f"\nFetching categories for {len(http_needed)} new item(s)…"})
         for p in all_products:
-            cat, subcat = fetch_category(p["id"], p.get("name", ""), p.get("url", ""))
+            sku    = p["id"]
+            cached = _cat_cache.get(sku, {})
+            if cached.get("category"):
+                cat, subcat = cached["category"], cached.get("subcategory", "")
+            elif sku in new_item_ids and not baseline and p.get("url"):
+                cat, subcat = fetch_category_from_page(p["url"], p.get("name", ""))
+                time.sleep(0.3)
+            else:
+                cat, subcat = classify_by_name(p.get("name", ""))
+            _cat_cache[sku] = {"category": cat, "subcategory": subcat}
             p["category"]    = cat
             p["subcategory"] = subcat
         _save_cat_cache()
 
+        # ── Record first-seen dates for new items ─────────────────────────────
+        for p in all_products:
+            if p["id"] not in seen_ids and p["id"] not in item_dates:
+                item_dates[p["id"]] = ts
+
         new_items = [p for p in all_products if p["id"] not in seen_ids]
-        save_state(list(seen_ids | ids_this_run), run_time)
+        save_state(list(seen_ids | ids_this_run), run_time, item_dates)
         if new_items:
             write_excel(new_items)
 
@@ -776,6 +897,7 @@ def _run(selected_stores: list[str], baseline: bool):
                 "url":        p["url"],
                 "category":   p.get("category", ""),
                 "subcategory":p.get("subcategory", ""),
+                "date":       item_dates.get(p["id"], ""),
             }
 
         new_ids = {p["id"] for p in new_items}
@@ -873,12 +995,19 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #res-search:focus{border-color:#c00}
 #res-search-count{font-size:.75rem;color:#555;white-space:nowrap}
 
-table{width:100%;border-collapse:collapse;font-size:.83rem}
-th{background:#161616;color:#666;font-weight:600;text-align:left;padding:7px 14px;font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:40px;cursor:pointer;user-select:none;white-space:nowrap}
+table{width:auto;min-width:100%;border-collapse:collapse;font-size:.83rem;table-layout:fixed}
+th{background:#161616;color:#666;font-weight:600;text-align:left;padding:7px 10px;font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:40px;cursor:pointer;user-select:none;white-space:nowrap;overflow:hidden}
+th:nth-child(1){width:46px}
+th:nth-child(2){width:300px}
+th:nth-child(3){width:148px}
+th:nth-child(4){width:92px}
+th:nth-child(5){width:148px}
+th:nth-child(6){width:72px}
+th:nth-child(7){width:128px}
 th:hover{color:#ccc}
 th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
 th.sort-desc::after{content:" ▼";color:#c00;font-size:.6rem}
-td{padding:7px 14px;border-bottom:1px solid #1c1c1c;color:#ddd}
+td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 tr:hover td{background:#161616}
 td a{color:#6ab0f5;text-decoration:none}
 td a:hover{text-decoration:underline}
@@ -1281,8 +1410,8 @@ function onCatFilterChange() {
 }
 
 // ── Table rendering & sorting ─────────────────────────────────────────────────
-// col indices: 0=status, 1=name, 2=category, 3=subcategory, 4=price, 5=store
-const _SORT_COLS = [null, 'name', 'category', 'subcategory', 'price', 'store'];
+// col indices: 0=status, 1=name, 2=category, 3=date, 4=subcategory, 5=price, 6=store
+const _SORT_COLS = [null, 'name', 'category', 'date', 'subcategory', 'price', 'store'];
 
 function renderTable() {
   const data = window._tableData || [];
@@ -1290,9 +1419,10 @@ function renderTable() {
     <th data-col="0"></th>
     <th data-col="1">Item</th>
     <th data-col="2">Category</th>
-    <th data-col="3">Subcategory</th>
-    <th data-col="4">Price</th>
-    <th data-col="5">Store</th>
+    <th data-col="3">Date</th>
+    <th data-col="4">Subcategory</th>
+    <th data-col="5">Price</th>
+    <th data-col="6">Store</th>
   </tr></thead><tbody>`;
   data.forEach(item => {
     const priceNum = parseFloat((item.price||'').replace(/[^0-9.]/g,'')) || 0;
@@ -1304,6 +1434,7 @@ function renderTable() {
       `<td>${item.isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
       `<td>${nameCell}</td>` +
       `<td>${esc(item.category)}</td>` +
+      `<td style="color:#888;font-size:.75rem">${esc(item.date||'')}</td>` +
       `<td>${esc(item.subcategory)}</td>` +
       `<td>${item.price||''}</td>` +
       `<td>${esc(item.store)}</td>` +
@@ -1338,6 +1469,10 @@ function sortTable(colIdx) {
       av = parseFloat((av+'').replace(/[^0-9.]/g,'')) || 0;
       bv = parseFloat((bv+'').replace(/[^0-9.]/g,'')) || 0;
       return (av - bv) * dir;
+    }
+    if (field === 'date') {
+      // Sort dates descending by default (newest first), ascending on toggle
+      return av.toString().localeCompare(bv.toString()) * dir;
     }
     return av.toString().localeCompare(bv.toString()) * dir;
   });
