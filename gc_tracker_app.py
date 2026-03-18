@@ -1,4 +1,23 @@
-#!/usr/bin/env python3
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>gc_tracker_app.py</title>
+<style>
+body { margin: 0; background: #1e1e1e; color: #d4d4d4; font-family: 'Consolas', 'Monaco', monospace; font-size: 13px; }
+.toolbar { background: #252526; padding: 10px 16px; border-bottom: 1px solid #3c3c3c; display: flex; align-items: center; gap: 12px; position: sticky; top: 0; z-index: 10; }
+.toolbar span { color: #ccc; font-size: 13px; }
+button { padding: 6px 14px; background: #0e639c; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+button:hover { background: #1177bb; }
+pre { margin: 0; padding: 16px; white-space: pre; overflow-x: auto; line-height: 1.6; }
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <span>gc_tracker_app.py</span>
+  <button onclick="copyAll()">Copy All</button>
+</div>
+<pre id="code">#!/usr/bin/env python3
 """
 Guitar Center Used Inventory Tracker — Web App
 ------------------------------------------------
@@ -30,7 +49,7 @@ try:
 except ImportError:
     sys.exit("Missing openpyxl. Run:  pip3 install openpyxl")
 
-# ── Paths & config ────────────────────────────────────────────────────────────
+# ── Paths &amp; config ────────────────────────────────────────────────────────────
 SCRIPT_DIR     = Path(__file__).parent
 DATA_DIR       = Path(os.environ.get("DATA_DIR", SCRIPT_DIR))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -182,7 +201,7 @@ FALLBACK_STORES = [
 ]
 
 
-def get_store_list() -> list[str]:
+def get_store_list() -&gt; list[str]:
     cached = []
     if STORES_CACHE.exists():
         try:
@@ -193,36 +212,79 @@ def get_store_list() -> list[str]:
     return sorted(set(cached) | set(FALLBACK_STORES))
 
 
-def refresh_store_list() -> list[str]:
-    """Fetch live store list from GC and merge with fallback so nothing is lost."""
-    live_names = []
+_US_STATES = [
+    "al","ak","az","ar","ca","co","ct","de","fl","ga","hi","id","il","in",
+    "ia","ks","ky","la","me","md","ma","mi","mn","ms","mo","mt","ne","nv",
+    "nh","nj","nm","ny","nc","nd","oh","ok","or","pa","ri","sc","sd","tn",
+    "tx","ut","vt","va","wa","wv","wi","wy","dc",
+]
+
+def _fetch_state_stores(state: str) -&gt; list[str]:
+    """Fetch store names for a single state from stores.guitarcenter.com."""
     try:
-        r = _http.get("https://www.guitarcenter.com/Stores/", timeout=15)
-        r.raise_for_status()
+        r = _http.get(f"https://stores.guitarcenter.com/{state}/", timeout=10)
+        if r.status_code != 200:
+            return []
         html = r.text
-        # Try multiple extraction patterns
+        # Extract store display names from city listing links and headings
+        names = []
         for pat in [
-            r'storeName["\s:]+["\'](.*?)["\']',
-            r'data-store-name=["\']([^"\']+)["\']',
-            r'/store/[^"]+">([^<]+)</a>',
+            r'&lt;h\d[^&gt;]*&gt;([A-Z][A-Za-z\s\-\.]+)&lt;/h\d&gt;',
+            r'class="[^"]*location[^"]*title[^"]*"[^&gt;]*&gt;([^&lt;]+)&lt;',
+            r'&lt;a[^&gt;]+href="/[a-z]{2}/[^/]+/\d+/?[^"]*"[^&gt;]*&gt;\s*([^&lt;]{3,40})\s*&lt;/a&gt;',
         ]:
-            found = [n.strip() for n in re.findall(pat, html) if len(n.strip()) > 2]
-            if len(found) > len(live_names):
-                live_names = found
+            found = [n.strip() for n in re.findall(pat, html)
+                     if 3 &lt; len(n.strip()) &lt; 50
+                     and not n.strip().lower().startswith(("guitar center", "gc ", "home", "store"))]
+            names.extend(found)
+        return list(set(names))
+    except Exception:
+        return []
+
+
+def refresh_store_list(send_progress=None) -&gt; list[str]:
+    """Fetch live store list from GC state-by-state and merge with fallback."""
+    live_names = []
+
+    # Strategy 1: scrape stores.guitarcenter.com state by state in parallel
+    try:
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = {pool.submit(_fetch_state_stores, st): st for st in _US_STATES}
+            for future in as_completed(futures):
+                try:
+                    live_names.extend(future.result())
+                except Exception:
+                    pass
     except Exception:
         pass
 
-    # Always merge with fallback to avoid losing known stores
+    # Strategy 2: fall back to main stores page if state scrape yielded nothing useful
+    if len(live_names) &lt; 20:
+        try:
+            r = _http.get("https://www.guitarcenter.com/Stores/", timeout=15)
+            r.raise_for_status()
+            html = r.text
+            for pat in [
+                r'storeName["\s:]+["\'](.*?)["\']',
+                r'data-store-name=["\']([^"\']+)["\']',
+                r'/store/[^"]+"&gt;([^&lt;]+)&lt;/a&gt;',
+            ]:
+                found = [n.strip() for n in re.findall(pat, html) if len(n.strip()) &gt; 2]
+                live_names.extend(found)
+        except Exception:
+            pass
+
+    # Always merge with fallback to guarantee known stores are never dropped
     merged = sorted(set(live_names) | set(FALLBACK_STORES))
     STORES_CACHE.write_text(json.dumps({
         "stores":      merged,
-        "live_count":  len(live_names),
+        "live_count":  len(set(live_names)),
         "updated":     datetime.now().isoformat(),
     }))
     return merged
 
 
-def get_store_info() -> dict:
+def get_store_info() -&gt; dict:
     """Return metadata about the store list (count, last updated, live vs fallback)."""
     if STORES_CACHE.exists():
         try:
@@ -239,7 +301,7 @@ def get_store_info() -> dict:
 
 # ── Favorites ─────────────────────────────────────────────────────────────────
 
-def load_favorites() -> list[str]:
+def load_favorites() -&gt; list[str]:
     if FAVORITES_FILE.exists():
         try:
             return json.loads(FAVORITES_FILE.read_text())
@@ -256,7 +318,7 @@ def save_favorites(favs: list[str]):
 
 PAGE_SIZE = 24
 
-def _clean_name(name: str) -> str:
+def _clean_name(name: str) -&gt; str:
     """Strip redundant 'Used ' prefix from item names."""
     name = name.strip()
     if name.lower().startswith("used "):
@@ -264,16 +326,16 @@ def _clean_name(name: str) -> str:
     return name
 
 
-def fetch_page(store_name: str, page: int) -> str:
-    query = f"filters=stores:{store_name.replace(' ', '%20')}&Ns=cD"
-    url   = f"https://www.guitarcenter.com/Used/?{query}&page={page}"
+def fetch_page(store_name: str, page: int) -&gt; str:
+    query = f"filters=stores:{store_name.replace(' ', '%20')}&amp;Ns=cD"
+    url   = f"https://www.guitarcenter.com/Used/?{query}&amp;page={page}"
     r = _http.get(url, timeout=20)
     r.raise_for_status()
     return r.text
 
 
-def parse_products(html: str, store_name: str) -> list[dict]:
-    for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL):
+def parse_products(html: str, store_name: str) -&gt; list[dict]:
+    for block in re.findall(r'&lt;script[^&gt;]+type="application/ld\+json"[^&gt;]*&gt;(.*?)&lt;/script&gt;', html, re.DOTALL):
         try:
             data = json.loads(block)
         except Exception:
@@ -299,82 +361,138 @@ def parse_products(html: str, store_name: str) -> list[dict]:
     return []
 
 
-def fetch_category(sku: str, url: str) -> tuple[str, str]:
-    """Fetch a product page and extract category/subcategory.
-    Tries three strategies: BreadcrumbList JSON-LD, __NEXT_DATA__, HTML breadcrumbs.
-    Returns (category, subcategory). Results are stored in _cat_cache keyed by SKU."""
-    if sku in _cat_cache:
-        d = _cat_cache[sku]
-        return d.get("category", ""), d.get("subcategory", "")
-    if not url:
-        _cat_cache[sku] = {"category": "", "subcategory": ""}
-        return ("", "")
-    try:
-        clean_url = url.split('?')[0]
-        r = _http.get(clean_url, timeout=15)
-        r.raise_for_status()
-        html = r.text
-        skip = {"home", "used", "used gear", "guitar center", ""}
+def classify_by_name(name: str) -&gt; tuple[str, str]:
+    """Infer category and subcategory from product name using keyword matching.
+    Returns (category, subcategory). Fast — no HTTP requests required."""
+    n = name.lower()
 
-        def _store(cat, subcat):
-            _cat_cache[sku] = {"category": cat, "subcategory": subcat}
-            return cat, subcat
+    # ── Bass (check before guitar so 'bass guitar' routes here) ──────────────
+    if re.search(r'\bbass\b', n) and not re.search(r'drum|cymbal|hi.hat|snare|bassoon', n):
+        if re.search(r'acoustic|upright|stand.?up|arco|double bass', n):
+            return ("Bass", "Acoustic Bass Guitars")
+        if re.search(r'amp|amplifier|cabinet|combo|head\b|cab\b', n):
+            return ("Amplifiers &amp; Effects", "Bass Amplifiers")
+        if re.search(r'pedal|effect|pre.?amp|di\b|direct box', n):
+            return ("Amplifiers &amp; Effects", "Bass Effects")
+        return ("Bass", "Electric Bass Guitars")
 
-        # Strategy 1: BreadcrumbList JSON-LD
-        for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script', html, re.DOTALL):
-            try:
-                data = json.loads(block)
-            except Exception:
-                continue
-            if data.get("@type") != "BreadcrumbList":
-                continue
-            names = [it.get("name","").strip() for it in data.get("itemListElement",[])
-                     if it.get("name","").strip().lower() not in skip]
-            if names:
-                return _store(names[0], names[1] if len(names) > 1 else "")
+    # ── Guitars ───────────────────────────────────────────────────────────────
+    guitar_kw = r'guitar|stratocaster|strat\b|telecaster|tele\b|les paul|sg\b|flying.?v|explorer\b|jazzmaster|jaguar\b|mustang\b|semi.hollow|hollow.body|archtop|resonator|dobro|banjo|mandolin|ukulele|squier|epiphone|prs\b|gretsch|rickenbacker|es.?[0-9]|lp\b'
+    if re.search(guitar_kw, n):
+        if re.search(r'acoustic|classical|nylon|parlor|dreadnought|folk|fingerstyle|12.string', n):
+            return ("Guitars", "Acoustic Guitars")
+        if re.search(r'electric|solid.body|semi.hollow|hollow', n):
+            return ("Guitars", "Electric Guitars")
+        if re.search(r'classical|nylon|spanish', n):
+            return ("Guitars", "Classical &amp; Nylon Guitars")
+        if re.search(r'banjo', n):
+            return ("Folk &amp; Traditional Instruments", "Banjos")
+        if re.search(r'mandolin', n):
+            return ("Folk &amp; Traditional Instruments", "Mandolins")
+        if re.search(r'ukulele', n):
+            return ("Folk &amp; Traditional Instruments", "Ukuleles")
+        # Default guitar
+        return ("Guitars", "Electric Guitars")
 
-        # Strategy 2: __NEXT_DATA__ (Next.js server-rendered JSON)
-        nd = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
-        if nd:
-            try:
-                ndata = json.loads(nd.group(1))
-                pp = ndata.get("props", {}).get("pageProps", {})
-                for bc in [
-                    pp.get("breadcrumbs"),
-                    pp.get("product", {}).get("breadcrumbs"),
-                    pp.get("initialData", {}).get("breadcrumbs"),
-                    pp.get("initialData", {}).get("product", {}).get("breadcrumbs"),
-                ]:
-                    if bc and isinstance(bc, list):
-                        names = [(b.get("name") or b.get("label") or "").strip()
-                                 for b in bc
-                                 if (b.get("name") or b.get("label") or "").strip().lower() not in skip]
-                        if names:
-                            return _store(names[0], names[1] if len(names) > 1 else "")
-            except Exception:
-                pass
+    # ── Amplifiers ────────────────────────────────────────────────────────────
+    if re.search(r'\bamp\b|amplifier|amp combo|amp head|guitar amp|tube amp|solid.state amp|cabinet\b|\bcab\b|speaker cabinet|combo amp|practice amp|valve amp', n):
+        if re.search(r'keyboard|keys\b|piano', n):
+            return ("Amplifiers &amp; Effects", "Keyboard Amplifiers")
+        if re.search(r'acoustic', n):
+            return ("Amplifiers &amp; Effects", "Acoustic Amplifiers")
+        if re.search(r'pa\b|public address|monitor|powered speaker|subwoofer', n):
+            return ("Live Sound", "PA Speakers")
+        return ("Amplifiers &amp; Effects", "Guitar Amplifiers")
 
-        # Strategy 3: HTML breadcrumb nav elements
-        # GC often renders: <li class="...breadcrumb..."><a href="...">Guitars</a></li>
-        bc_names = re.findall(
-            r'<(?:li|span|a)[^>]*(?:breadcrumb|Breadcrumb)[^>]*>\s*(?:<[^>]+>)*\s*([A-Za-z][^<]{2,40}?)\s*(?:</[^>]+>)*\s*</(?:li|span|a)>',
-            html
-        )
-        bc_names = [n.strip() for n in bc_names if n.strip().lower() not in skip]
-        if bc_names:
-            return _store(bc_names[0], bc_names[1] if len(bc_names) > 1 else "")
+    # ── Effects &amp; Pedals ──────────────────────────────────────────────────────
+    if re.search(r'pedal|effect|reverb\b|delay\b|distortion|overdrive|fuzz\b|wah\b|chorus\b|flanger|phaser|compressor|tremolo|boost\b|looper|tuner\b|pedalboard|multi.effect|octave\b|harmonizer|pitch shift', n):
+        return ("Amplifiers &amp; Effects", "Effects Pedals &amp; Processors")
 
-    except Exception:
-        pass
-    _cat_cache[sku] = {"category": "", "subcategory": ""}
+    # ── Drums &amp; Percussion ────────────────────────────────────────────────────
+    if re.search(r'drum|snare|cymbal|hi.?hat|bass drum|\btom\b|drum kit|drum set|drum throne|djembe|cajon|bongo|conga|percussion|cowbell|tambourine|marimba|xylophone|vibraphone|timpani|electronic drum', n):
+        if re.search(r'electronic|digital|e.?drum', n):
+            return ("Drums &amp; Percussion", "Electronic Drums")
+        if re.search(r'cymbal|hi.?hat', n):
+            return ("Drums &amp; Percussion", "Cymbals")
+        if re.search(r'snare', n):
+            return ("Drums &amp; Percussion", "Snare Drums")
+        if re.search(r'djembe|bongo|conga|cajon|hand drum|world', n):
+            return ("Drums &amp; Percussion", "Hand Drums")
+        return ("Drums &amp; Percussion", "Drum Sets")
+
+    # ── Keyboards &amp; MIDI ──────────────────────────────────────────────────────
+    if re.search(r'keyboard|piano|organ\b|synth|synthesizer|workstation\b|midi controller|electric piano|stage piano|arranger|clav|wurlitzer|rhodes\b|nord\b|Roland\b|Korg\b|Yamaha\b.*key', n):
+        if re.search(r'midi|controller\b', n):
+            return ("Keyboards &amp; MIDI", "MIDI Controllers")
+        if re.search(r'synth|synthesizer', n):
+            return ("Keyboards &amp; MIDI", "Synthesizers &amp; Sound Modules")
+        if re.search(r'organ', n):
+            return ("Keyboards &amp; MIDI", "Organs")
+        if re.search(r'digital piano|stage piano|acoustic piano', n):
+            return ("Keyboards &amp; MIDI", "Digital Pianos")
+        return ("Keyboards &amp; MIDI", "Keyboards")
+
+    # ── Recording &amp; Studio ────────────────────────────────────────────────────
+    if re.search(r'audio interface|recording interface|usb interface|thunderbolt interface', n):
+        return ("Recording", "Audio Interfaces")
+    if re.search(r'microphone|condenser mic|dynamic mic|ribbon mic|vocal mic\b', n):
+        return ("Recording", "Microphones")
+    if re.search(r'\bmic\b', n) and not re.search(r'microphone stand', n):
+        return ("Recording", "Microphones")
+    if re.search(r'studio monitor|reference monitor|nearfield', n):
+        return ("Recording", "Studio Monitors")
+    if re.search(r'preamp|pre.?amplifier|channel strip|outboard|compressor.*rack|rack.*compressor', n):
+        return ("Recording", "Preamps &amp; Channel Strips")
+    if re.search(r'mixer|mixing console|mixing board|analog mixer|digital mixer', n):
+        return ("Recording", "Mixers")
+    if re.search(r'headphone|headset|earphone|in.ear monitor|iem\b', n):
+        return ("Recording", "Headphones &amp; Monitoring")
+
+    # ── DJ Equipment ─────────────────────────────────────────────────────────
+    if re.search(r'\bdj\b|turntable|cdj\b|serato|traktor|rekordbox|dj mixer|dj controller', n):
+        return ("DJ Equipment &amp; Lighting", "DJ Equipment")
+
+    # ── Live Sound ────────────────────────────────────────────────────────────
+    if re.search(r'\bpa\b|powered speaker|live sound|subwoofer|stage monitor|line array|power amp.*pa|public address', n):
+        return ("Live Sound", "PA Systems")
+
+    # ── Accessories ───────────────────────────────────────────────────────────
+    if re.search(r'\bstrap\b|guitar strap|instrument strap', n):
+        return ("Accessories", "Straps")
+    if re.search(r'\bstring\b|guitar string|bass string', n):
+        return ("Accessories", "Strings")
+    if re.search(r'\bcase\b|gig bag|hardshell|soft case', n):
+        return ("Accessories", "Cases &amp; Bags")
+    if re.search(r'\bstand\b|guitar stand|amp stand|keyboard stand', n):
+        return ("Accessories", "Stands &amp; Racks")
+    if re.search(r'\bcable\b|instrument cable|patch cable|speaker cable', n):
+        return ("Accessories", "Cables")
+    if re.search(r'\bpick\b|plectrum', n):
+        return ("Accessories", "Picks")
+
     return ("", "")
 
 
-def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Event) -> tuple[list[dict], set]:
+def fetch_category(sku: str, name: str, url: str) -&gt; tuple[str, str]:
+    """Return (category, subcategory) for a product.
+    Uses keyword classification from the product name (fast, no HTTP).
+    Falls back to cached value if already known."""
+    if sku in _cat_cache:
+        d = _cat_cache[sku]
+        # Re-classify if cache has empty values and we have a name
+        if d.get("category") or not name:
+            return d.get("category", ""), d.get("subcategory", "")
+
+    cat, subcat = classify_by_name(name)
+    _cat_cache[sku] = {"category": cat, "subcategory": subcat}
+    return cat, subcat
+
+
+def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Event) -&gt; tuple[list[dict], set]:
     """Returns (all_products_found, ids_seen_this_store)."""
     all_products, ids_seen = [], set()
     page = 1
-    while page <= 50:
+    while page &lt;= 50:
         if stop_event.is_set():
             send({"type": "progress", "msg": f"  [{store_name}] stopped."})
             break
@@ -393,7 +511,7 @@ def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Eve
             if p["id"] not in ids_seen:
                 all_products.append(p)
                 ids_seen.add(p["id"])
-        if len(products) < PAGE_SIZE:
+        if len(products) &lt; PAGE_SIZE:
             break
         page += 1
         time.sleep(1.5)
@@ -402,7 +520,7 @@ def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Eve
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
-def load_state() -> dict:
+def load_state() -&gt; dict:
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text())
     return {"last_run": None, "seen_ids": []}
@@ -498,9 +616,9 @@ def login_required(f):
     return decorated
 
 
-LOGIN_PAGE = """<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>GC Tracker — Login</title>
-<style>
+LOGIN_PAGE = """&lt;!DOCTYPE html&gt;
+&lt;html&gt;&lt;head&gt;&lt;meta charset="UTF-8"&gt;&lt;title&gt;GC Tracker — Login&lt;/title&gt;
+&lt;style&gt;
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#111;display:flex;align-items:center;justify-content:center;height:100vh;font-family:-apple-system,sans-serif}
 .box{background:#1a1a1a;border:1px solid #2e2e2e;border-radius:10px;padding:40px;width:320px}
@@ -511,16 +629,16 @@ input:focus{border-color:#c00}
 button{width:100%;padding:11px;background:#c00;color:#fff;border:none;border-radius:5px;font-size:1rem;font-weight:700;cursor:pointer}
 button:hover{background:#e00}
 .err{color:#f88;font-size:.82rem;margin-bottom:12px}
-</style></head>
-<body><div class="box">
-  <h1>🎸 GC Tracker</h1>
-  <p>Enter your password to continue.</p>
-  {% if error %}<div class="err">Incorrect password.</div>{% endif %}
-  <form method="POST">
-    <input type="password" name="password" placeholder="Password" autofocus>
-    <button type="submit">Sign In</button>
-  </form>
-</div></body></html>"""
+&lt;/style&gt;&lt;/head&gt;
+&lt;body&gt;&lt;div class="box"&gt;
+  &lt;h1&gt;🎸 GC Tracker&lt;/h1&gt;
+  &lt;p&gt;Enter your password to continue.&lt;/p&gt;
+  {% if error %}&lt;div class="err"&gt;Incorrect password.&lt;/div&gt;{% endif %}
+  &lt;form method="POST"&gt;
+    &lt;input type="password" name="password" placeholder="Password" autofocus&gt;
+    &lt;button type="submit"&gt;Sign In&lt;/button&gt;
+  &lt;/form&gt;
+&lt;/div&gt;&lt;/body&gt;&lt;/html&gt;"""
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -657,37 +775,12 @@ def _run(selected_stores: list[str], baseline: bool):
                     all_products.append(p)
             ids_this_run |= ids
 
-        # Fetch categories in parallel for items not already cached
-        items_needing_cats = [p for p in all_products if p["id"] not in _cat_cache]
-        if items_needing_cats and not _stop_event.is_set():
-            send({"type":"progress","msg":f"\nFetching categories for {len(items_needing_cats)} items…"})
-            done_count = 0
-            with ThreadPoolExecutor(max_workers=6) as pool:
-                future_map = {
-                    pool.submit(fetch_category, p["id"], p.get("url", "")): p
-                    for p in items_needing_cats
-                }
-                for future in as_completed(future_map):
-                    if _stop_event.is_set():
-                        break
-                    p = future_map[future]
-                    try:
-                        cat, subcat = future.result()
-                    except Exception:
-                        cat, subcat = "", ""
-                    p["category"]    = cat
-                    p["subcategory"] = subcat
-                    done_count += 1
-                    if done_count % 20 == 0 or done_count == len(items_needing_cats):
-                        send({"type":"progress","msg":f"  Categories: {done_count}/{len(items_needing_cats)}…"})
-            _save_cat_cache()
-
-        # Fill in categories from cache for items that were already cached
+        # Classify categories for all products (instant — keyword-based, no HTTP)
         for p in all_products:
-            if "category" not in p:
-                d = _cat_cache.get(p["id"], {})
-                p["category"]    = d.get("category", "")
-                p["subcategory"] = d.get("subcategory", "")
+            cat, subcat = fetch_category(p["id"], p.get("name", ""), p.get("url", ""))
+            p["category"]    = cat
+            p["subcategory"] = subcat
+        _save_cat_cache()
 
         new_items = [p for p in all_products if p["id"] not in seen_ids]
         save_state(list(seen_ids | ids_this_run), run_time)
@@ -723,13 +816,13 @@ def _run(selected_stores: list[str], baseline: bool):
 
 # ── HTML ──────────────────────────────────────────────────────────────────────
 
-HTML_TEMPLATE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GC Used Tracker</title>
-<style>
+HTML_TEMPLATE = """&lt;!DOCTYPE html&gt;
+&lt;html lang="en"&gt;
+&lt;head&gt;
+&lt;meta charset="UTF-8"&gt;
+&lt;meta name="viewport" content="width=device-width,initial-scale=1"&gt;
+&lt;title&gt;GC Used Tracker&lt;/title&gt;
+&lt;style&gt;
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#111;color:#eee;height:100vh;display:flex;flex-direction:column}
 
@@ -826,94 +919,104 @@ td a:hover{text-decoration:underline}
 #pw-cancel:hover{color:#fff}
 #pw-confirm{background:#c00;color:#fff}
 #pw-confirm:hover{background:#e00}
-</style>
-</head>
-<body>
+&lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
 
-<!-- Password modal -->
-<div id="pw-modal">
-  <div id="pw-overlay" onclick="cancelBaseline()"></div>
-  <div id="pw-box">
-    <h2>🌐 Build Nationwide Baseline</h2>
-    <p>This scan covers ~300 stores and takes 30–60 minutes. Enter the password to continue.</p>
-    <input type="password" id="pw-input" placeholder="Password"
-           onkeydown="if(event.key==='Enter')confirmBaseline()">
-    <div id="pw-err">Incorrect password.</div>
-    <div class="pw-btns">
-      <button id="pw-cancel" onclick="cancelBaseline()">Cancel</button>
-      <button id="pw-confirm" onclick="confirmBaseline()">Continue →</button>
-    </div>
-  </div>
-</div>
+&lt;!-- Password modal --&gt;
+&lt;div id="pw-modal"&gt;
+  &lt;div id="pw-overlay" onclick="cancelBaseline()"&gt;&lt;/div&gt;
+  &lt;div id="pw-box"&gt;
+    &lt;h2&gt;🌐 Build Nationwide Baseline&lt;/h2&gt;
+    &lt;p&gt;This scan covers ~300 stores and takes 30–60 minutes. Enter the password to continue.&lt;/p&gt;
+    &lt;input type="password" id="pw-input" placeholder="Password"
+           onkeydown="if(event.key==='Enter')confirmBaseline()"&gt;
+    &lt;div id="pw-err"&gt;Incorrect password.&lt;/div&gt;
+    &lt;div class="pw-btns"&gt;
+      &lt;button id="pw-cancel" onclick="cancelBaseline()"&gt;Cancel&lt;/button&gt;
+      &lt;button id="pw-confirm" onclick="confirmBaseline()"&gt;Continue →&lt;/button&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/div&gt;
 
-<header>
-  <h1>🎸 GC Used Inventory Tracker</h1>
-  <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
-  <span id="hdr-status">Loading…</span>
-</header>
+&lt;header&gt;
+  &lt;h1&gt;🎸 GC Used Inventory Tracker&lt;/h1&gt;
+  &lt;button id="stop-btn" onclick="stopRun()"&gt;⏹ Stop Running&lt;/button&gt;
+  &lt;span id="hdr-status"&gt;Loading…&lt;/span&gt;
+&lt;/header&gt;
 
-<div class="layout">
+&lt;div class="layout"&gt;
 
-  <div class="left">
-    <div class="mode-tabs">
-      <button class="mode-tab active" id="tab-find" onclick="setMode('find')">Select Stores</button>
-      <button class="mode-tab"        id="tab-favs" onclick="setMode('favs')">★ Favorites</button>
-    </div>
+  &lt;div class="left"&gt;
+    &lt;div class="mode-tabs"&gt;
+      &lt;button class="mode-tab active" id="tab-find" onclick="setMode('find')"&gt;Select Stores&lt;/button&gt;
+      &lt;button class="mode-tab"        id="tab-favs" onclick="setMode('favs')"&gt;★ Favorites&lt;/button&gt;
+    &lt;/div&gt;
 
-    <div class="search-wrap" id="search-wrap">
-      <input id="search" type="text" placeholder="Search stores…" autocomplete="off">
-      <div class="sel-btns">
-        <button class="sel-btn" onclick="selectAll()">Select All</button>
-        <button class="sel-btn" onclick="clearAll()">Clear All</button>
-      </div>
-    </div>
+    &lt;div class="search-wrap" id="search-wrap"&gt;
+      &lt;input id="search" type="text" placeholder="Search stores…" autocomplete="off"&gt;
+      &lt;div class="sel-btns"&gt;
+        &lt;button class="sel-btn" onclick="selectFavorites()"&gt;★ Favorites&lt;/button&gt;
+        &lt;button class="sel-btn" onclick="selectAll()"&gt;Select All&lt;/button&gt;
+        &lt;button class="sel-btn" onclick="clearAll()"&gt;Clear All&lt;/button&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
 
-    <div id="store-list"></div>
+    &lt;div id="store-list"&gt;&lt;/div&gt;
 
-    <div class="left-footer">
-      <div id="sel-count">0 stores selected</div>
-      <div class="btn-row">
-        <button id="run-btn"      onclick="runTracker()" disabled>Run</button>
-        <button id="baseline-btn" onclick="runBaseline()" title="Scan every GC store nationwide">🌐 Build Baseline</button>
-      </div>
-    </div>
-  </div>
+    &lt;div class="left-footer"&gt;
+      &lt;div id="sel-count"&gt;0 stores selected&lt;/div&gt;
+      &lt;div class="btn-row"&gt;
+        &lt;button id="run-btn"      onclick="runTracker()" disabled&gt;Run&lt;/button&gt;
+        &lt;button id="baseline-btn" onclick="runBaseline()" title="Scan every GC store nationwide"&gt;🌐 Build Baseline&lt;/button&gt;
+      &lt;/div&gt;
+      &lt;button id="refresh-stores-btn" onclick="refreshStores()"
+        style="margin-top:8px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:5px;color:#777;font-size:.75rem;cursor:pointer"
+        title="Re-fetch the full store list from Guitar Center's website"&gt;
+        🔄 Refresh Store List
+      &lt;/button&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
 
-  <div class="right">
-    <div class="status-bar">
-      <span>Last run: <b id="s-last">—</b></span>
-      <span>Known items: <b id="s-known">—</b></span>
-      <span>Stores: <b id="s-stores">—</b></span>
-      <span id="s-excel" style="display:none"><a style="color:#6ab0f5" href="/download/excel">Download Excel ↗</a></span>
-    </div>
-    <div id="log"><span class="log-dim">Ready — select stores and click Run, or build a full baseline.</span></div>
-    <div class="results" id="res-panel" style="display:none">
-      <div class="results-hdr">
-        <span id="res-title">New Items</span>
-        <span class="badge" id="res-badge"></span>
-        <select id="cat-filter" class="cat-sel" style="display:none" onchange="onCatFilterChange()">
-          <option value="">All Categories</option>
-        </select>
-        <select id="subcat-filter" class="cat-sel" style="display:none" onchange="filterResults()">
-          <option value="">All Subcategories</option>
-        </select>
-        <div id="res-search-wrap">
-          <input id="res-search" type="text" placeholder="Filter results…" oninput="filterResults()" autocomplete="off">
-          <span id="res-search-count"></span>
-        </div>
-      </div>
-      <div id="res-body"></div>
-    </div>
-  </div>
+  &lt;div class="right"&gt;
+    &lt;div class="status-bar"&gt;
+      &lt;span&gt;Last run: &lt;b id="s-last"&gt;—&lt;/b&gt;&lt;/span&gt;
+      &lt;span&gt;Known items: &lt;b id="s-known"&gt;—&lt;/b&gt;&lt;/span&gt;
+      &lt;span&gt;Stores: &lt;b id="s-stores"&gt;—&lt;/b&gt;&lt;/span&gt;
+      &lt;span id="s-excel" style="display:none"&gt;&lt;a style="color:#6ab0f5" href="/download/excel"&gt;Download Excel ↗&lt;/a&gt;&lt;/span&gt;
+    &lt;/div&gt;
+    &lt;div id="log"&gt;&lt;span class="log-dim"&gt;Ready — select stores and click Run, or build a full baseline.&lt;/span&gt;&lt;/div&gt;
+    &lt;div class="results" id="res-panel" style="display:none"&gt;
+      &lt;div class="results-hdr"&gt;
+        &lt;span id="res-title"&gt;New Items&lt;/span&gt;
+        &lt;span class="badge" id="res-badge"&gt;&lt;/span&gt;
+        &lt;select id="cat-filter" class="cat-sel" style="display:none" onchange="onCatFilterChange()"&gt;
+          &lt;option value=""&gt;All Categories&lt;/option&gt;
+        &lt;/select&gt;
+        &lt;select id="subcat-filter" class="cat-sel" style="display:none" onchange="filterResults()"&gt;
+          &lt;option value=""&gt;All Subcategories&lt;/option&gt;
+        &lt;/select&gt;
+        &lt;button id="clear-filters-btn" onclick="clearFilters()"
+          style="display:none;padding:5px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #c00;color:#f88;font-size:.78rem;cursor:pointer;white-space:nowrap"&gt;
+          ✕ Clear Filters
+        &lt;/button&gt;
+        &lt;div id="res-search-wrap"&gt;
+          &lt;input id="res-search" type="text" placeholder="Filter results…" oninput="filterResults()" autocomplete="off"&gt;
+          &lt;span id="res-search-count"&gt;&lt;/span&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div id="res-body"&gt;&lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
 
-</div>
+&lt;/div&gt;
 
-<script>
+&lt;script&gt;
 let allStores = [], favorites = [], mode = 'find', running = false;
 const BASELINE_PW = 'Beatle909!';
 
 // ── Init ─────────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', async () => {
+document.addEventListener('DOMContentLoaded', async () =&gt; {
   document.getElementById('search').addEventListener('input', filterList);
   await loadData();
   await loadState();
@@ -942,10 +1045,31 @@ async function loadState() {
   }
 }
 
+// ── Refresh store list ────────────────────────────────────────────────────────
+async function refreshStores() {
+  const btn = document.getElementById('refresh-stores-btn');
+  btn.textContent = '🔄 Fetching all stores…';
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/stores/refresh', {method:'POST'});
+    const d = await r.json();
+    allStores = d.stores; favorites = d.favorites;
+    renderList();
+    const info = d.info || {};
+    const label = d.count + ' stores';
+    document.getElementById('hdr-status').textContent = label + ' available';
+    document.getElementById('s-stores').textContent = label + ' · refreshed just now';
+    btn.textContent = `✓ ${d.count} stores loaded`;
+  } catch(e) {
+    btn.textContent = '🔄 Refresh Store List';
+  }
+  btn.disabled = false;
+}
+
 // ── Mode switching ────────────────────────────────────────────────────────────
 function setMode(m) {
   mode = m;
-  ['find','favs'].forEach(t => {
+  ['find','favs'].forEach(t =&gt; {
     document.getElementById('tab-'+t).classList.toggle('active', t===m);
   });
   document.getElementById('search-wrap').style.display = m === 'find' ? '' : 'none';
@@ -954,11 +1078,17 @@ function setMode(m) {
 }
 
 function selectAll() {
-  document.querySelectorAll('.store-row:not(.hidden) input[type=checkbox]').forEach(cb => cb.checked = true);
+  document.querySelectorAll('.store-row:not(.hidden) input[type=checkbox]').forEach(cb =&gt; cb.checked = true);
   updateCount();
 }
 function clearAll() {
-  document.querySelectorAll('.store-row input[type=checkbox]').forEach(cb => cb.checked = false);
+  document.querySelectorAll('.store-row input[type=checkbox]').forEach(cb =&gt; cb.checked = false);
+  updateCount();
+}
+function selectFavorites() {
+  document.querySelectorAll('.store-row input[type=checkbox]').forEach(cb =&gt; {
+    cb.checked = favorites.includes(cb.value);
+  });
   updateCount();
 }
 
@@ -969,23 +1099,23 @@ function renderList() {
   let stores  = mode === 'favs' ? (favorites.length ? favorites : null) : allStores;
 
   if (!stores) {
-    el.innerHTML = '<div class="empty-msg">No favorites yet.<br>Click ★ next to any store to add it.</div>';
+    el.innerHTML = '&lt;div class="empty-msg"&gt;No favorites yet.&lt;br&gt;Click ★ next to any store to add it.&lt;/div&gt;';
     updateCount(); return;
   }
 
-  const filtered = (mode === 'find' && q) ? stores.filter(s => s.toLowerCase().includes(q)) : stores;
+  const filtered = (mode === 'find' &amp;&amp; q) ? stores.filter(s =&gt; s.toLowerCase().includes(q)) : stores;
   el.innerHTML = '';
-  filtered.forEach(name => {
+  filtered.forEach(name =&gt; {
     const isFav = favorites.includes(name);
     const div   = document.createElement('div');
     div.className = 'store-row';
     div.dataset.name = name;
     const id = 'cb_' + name.replace(/\\W/g,'_');
     div.innerHTML =
-      `<input type="checkbox" id="${id}" value="${name}">` +
-      `<label for="${id}">${name}</label>` +
-      `<button class="fav-btn ${isFav?'active':''}" title="${isFav?'Remove from':'Add to'} favorites"
-        onclick="toggleFav(event,'${name.replace(/'/g,"\\\\'")}',this)">★</button>`;
+      `&lt;input type="checkbox" id="${id}" value="${name}"&gt;` +
+      `&lt;label for="${id}"&gt;${name}&lt;/label&gt;` +
+      `&lt;button class="fav-btn ${isFav?'active':''}" title="${isFav?'Remove from':'Add to'} favorites"
+        onclick="toggleFav(event,'${name.replace(/'/g,"\\\\'")}',this)"&gt;★&lt;/button&gt;`;
     div.querySelector('input').addEventListener('change', updateCount);
     el.appendChild(div);
   });
@@ -1019,7 +1149,7 @@ function updateCount() {
 }
 
 function getSelected() {
-  return [...document.querySelectorAll('.store-row input:checked')].map(c => c.value);
+  return [...document.querySelectorAll('.store-row input:checked')].map(c =&gt; c.value);
 }
 
 // ── Baseline password modal ───────────────────────────────────────────────────
@@ -1027,7 +1157,7 @@ function runBaseline() {
   document.getElementById('pw-modal').style.display = 'flex';
   document.getElementById('pw-input').value = '';
   document.getElementById('pw-err').style.display = 'none';
-  setTimeout(() => document.getElementById('pw-input').focus(), 50);
+  setTimeout(() =&gt; document.getElementById('pw-input').focus(), 50);
 }
 
 function cancelBaseline() {
@@ -1080,7 +1210,7 @@ async function startRun(payload, isBaseline) {
   }
 
   const es = new EventSource('/api/progress');
-  es.onmessage = e => {
+  es.onmessage = e =&gt; {
     const msg = JSON.parse(e.data);
     if (msg.type === 'ping') return;
     if (msg.type === 'progress') { appendLog(msg.msg); return; }
@@ -1100,7 +1230,7 @@ function showResults(msg, isBaseline) {
   if (msg.error) {
     document.getElementById('res-title').textContent = 'Error';
     document.getElementById('res-badge').textContent = '';
-    document.getElementById('res-body').innerHTML = `<div class="no-res" style="color:#f88">${msg.error}</div>`;
+    document.getElementById('res-body').innerHTML = `&lt;div class="no-res" style="color:#f88"&gt;${msg.error}&lt;/div&gt;`;
     return;
   }
 
@@ -1108,31 +1238,31 @@ function showResults(msg, isBaseline) {
   const stoppedNote = msg.stopped ? ' (stopped early)' : '';
   appendLog(`\\n✓ Done${stoppedNote} — ${msg.scanned.toLocaleString()} items scanned, ${n} new.`, 'log-dim');
 
-  if (isBaseline && n === 0) {
+  if (isBaseline &amp;&amp; n === 0) {
     document.getElementById('res-title').textContent = 'Baseline Complete';
     document.getElementById('res-badge').textContent = '';
     document.getElementById('res-body').innerHTML =
-      `<div class="no-res">Full inventory baseline saved (${msg.scanned.toLocaleString()} items)${stoppedNote}. Run again any time to see what's new!</div>`;
-    ['cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+      `&lt;div class="no-res"&gt;Full inventory baseline saved (${msg.scanned.toLocaleString()} items)${stoppedNote}. Run again any time to see what's new!&lt;/div&gt;`;
+    ['cat-filter','subcat-filter'].forEach(id =&gt; document.getElementById(id).style.display = 'none');
     return;
   }
 
   document.getElementById('res-search').value = '';
   document.getElementById('res-search-count').textContent = '';
   const total = n + (msg.all_items ? msg.all_items.length : 0);
-  document.getElementById('res-title').textContent = n > 0 ? `${n} New · ${total} Total` : `${total} Items (nothing new)`;
-  document.getElementById('res-badge').textContent  = n > 0 ? n + ' NEW' : '';
-  if (n > 0) document.getElementById('s-excel').style.display = 'inline';
+  document.getElementById('res-title').textContent = n &gt; 0 ? `${n} New · ${total} Total` : `${total} Items (nothing new)`;
+  document.getElementById('res-badge').textContent  = n &gt; 0 ? n + ' NEW' : '';
+  if (n &gt; 0) document.getElementById('s-excel').style.display = 'inline';
 
   if (total === 0) {
-    document.getElementById('res-body').innerHTML = '<div class="no-res">Nothing found for selected stores.</div>';
-    ['cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+    document.getElementById('res-body').innerHTML = '&lt;div class="no-res"&gt;Nothing found for selected stores.&lt;/div&gt;';
+    ['cat-filter','subcat-filter'].forEach(id =&gt; document.getElementById(id).style.display = 'none');
     return;
   }
 
   window._tableData = [];
-  (msg.new_items || []).forEach(item => window._tableData.push({isNew:true,  ...item}));
-  (msg.all_items  || []).forEach(item => window._tableData.push({isNew:false, ...item}));
+  (msg.new_items || []).forEach(item =&gt; window._tableData.push({isNew:true,  ...item}));
+  (msg.all_items  || []).forEach(item =&gt; window._tableData.push({isNew:false, ...item}));
   window._sortCol = null; window._sortDir = 1;
 
   populateCategoryFilter();
@@ -1142,10 +1272,10 @@ function showResults(msg, isBaseline) {
 // ── Category filters ──────────────────────────────────────────────────────────
 function populateCategoryFilter() {
   const data = window._tableData || [];
-  const cats = [...new Set(data.map(i => i.category).filter(Boolean))].sort();
+  const cats = [...new Set(data.map(i =&gt; i.category).filter(Boolean))].sort();
   const catEl = document.getElementById('cat-filter');
-  catEl.innerHTML = '<option value="">All Categories</option>';
-  cats.forEach(c => { const o = document.createElement('option'); o.value=o.textContent=c; catEl.appendChild(o); });
+  catEl.innerHTML = '&lt;option value=""&gt;All Categories&lt;/option&gt;';
+  cats.forEach(c =&gt; { const o = document.createElement('option'); o.value=o.textContent=c; catEl.appendChild(o); });
   catEl.style.display = cats.length ? '' : 'none';
   catEl.value = '';
   document.getElementById('subcat-filter').style.display = 'none';
@@ -1155,12 +1285,12 @@ function onCatFilterChange() {
   const cat   = document.getElementById('cat-filter').value;
   const data  = window._tableData || [];
   const subcats = [...new Set(
-    data.filter(i => !cat || i.category === cat).map(i => i.subcategory).filter(Boolean)
+    data.filter(i =&gt; !cat || i.category === cat).map(i =&gt; i.subcategory).filter(Boolean)
   )].sort();
   const subEl = document.getElementById('subcat-filter');
-  if (subcats.length && cat) {
-    subEl.innerHTML = '<option value="">All Subcategories</option>';
-    subcats.forEach(s => { const o = document.createElement('option'); o.value=o.textContent=s; subEl.appendChild(o); });
+  if (subcats.length &amp;&amp; cat) {
+    subEl.innerHTML = '&lt;option value=""&gt;All Subcategories&lt;/option&gt;';
+    subcats.forEach(s =&gt; { const o = document.createElement('option'); o.value=o.textContent=s; subEl.appendChild(o); });
     subEl.style.display = '';
   } else {
     subEl.style.display = 'none';
@@ -1169,36 +1299,36 @@ function onCatFilterChange() {
   filterResults();
 }
 
-// ── Table rendering & sorting ─────────────────────────────────────────────────
+// ── Table rendering &amp; sorting ─────────────────────────────────────────────────
 // col indices: 0=status, 1=name, 2=category, 3=subcategory, 4=price, 5=store
 const _SORT_COLS = [null, 'name', 'category', 'subcategory', 'price', 'store'];
 
 function renderTable() {
   const data = window._tableData || [];
-  let html = `<table id="res-table"><thead><tr>
-    <th data-col="0"></th>
-    <th data-col="1">Item</th>
-    <th data-col="2">Category</th>
-    <th data-col="3">Subcategory</th>
-    <th data-col="4">Price</th>
-    <th data-col="5">Store</th>
-  </tr></thead><tbody>`;
-  data.forEach(item => {
+  let html = `&lt;table id="res-table"&gt;&lt;thead&gt;&lt;tr&gt;
+    &lt;th data-col="0"&gt;&lt;/th&gt;
+    &lt;th data-col="1"&gt;Item&lt;/th&gt;
+    &lt;th data-col="2"&gt;Category&lt;/th&gt;
+    &lt;th data-col="3"&gt;Subcategory&lt;/th&gt;
+    &lt;th data-col="4"&gt;Price&lt;/th&gt;
+    &lt;th data-col="5"&gt;Store&lt;/th&gt;
+  &lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;`;
+  data.forEach(item =&gt; {
     const priceNum = parseFloat((item.price||'').replace(/[^0-9.]/g,'')) || 0;
-    const esc = s => (s||'').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+    const esc = s =&gt; (s||'').replace(/"/g,'&amp;quot;').replace(/&lt;/g,'&amp;lt;');
     const nameCell = item.url
-      ? `<a href="${item.url}" target="_blank">${esc(item.name)}</a>`
+      ? `&lt;a href="${item.url}" target="_blank"&gt;${esc(item.name)}&lt;/a&gt;`
       : esc(item.name);
-    html += `<tr data-name="${esc(item.name)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}">` +
-      `<td>${item.isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
-      `<td>${nameCell}</td>` +
-      `<td>${esc(item.category)}</td>` +
-      `<td>${esc(item.subcategory)}</td>` +
-      `<td>${item.price||''}</td>` +
-      `<td>${esc(item.store)}</td>` +
-      `</tr>`;
+    html += `&lt;tr data-name="${esc(item.name)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}"&gt;` +
+      `&lt;td&gt;${item.isNew ? '&lt;span class="tag"&gt;NEW&lt;/span&gt;' : ''}&lt;/td&gt;` +
+      `&lt;td&gt;${nameCell}&lt;/td&gt;` +
+      `&lt;td&gt;${esc(item.category)}&lt;/td&gt;` +
+      `&lt;td&gt;${esc(item.subcategory)}&lt;/td&gt;` +
+      `&lt;td&gt;${item.price||''}&lt;/td&gt;` +
+      `&lt;td&gt;${esc(item.store)}&lt;/td&gt;` +
+      `&lt;/tr&gt;`;
   });
-  html += '</tbody></table>';
+  html += '&lt;/tbody&gt;&lt;/table&gt;';
   document.getElementById('res-body').innerHTML = html;
 
   if (window._sortCol !== null) {
@@ -1206,10 +1336,10 @@ function renderTable() {
     if (th) th.classList.add(window._sortDir === 1 ? 'sort-asc' : 'sort-desc');
   }
 
-  document.querySelectorAll('#res-table thead th[data-col]').forEach(th => {
+  document.querySelectorAll('#res-table thead th[data-col]').forEach(th =&gt; {
     const colIdx = parseInt(th.dataset.col);
     if (!_SORT_COLS[colIdx]) return;
-    th.addEventListener('click', () => sortTable(colIdx));
+    th.addEventListener('click', () =&gt; sortTable(colIdx));
   });
 
   filterResults();
@@ -1221,7 +1351,7 @@ function sortTable(colIdx) {
   window._sortDir = (window._sortCol === colIdx) ? window._sortDir * -1 : 1;
   window._sortCol = colIdx;
   const dir = window._sortDir;
-  window._tableData.sort((a, b) => {
+  window._tableData.sort((a, b) =&gt; {
     let av = a[field] || '', bv = b[field] || '';
     if (field === 'price') {
       av = parseFloat((av+'').replace(/[^0-9.]/g,'')) || 0;
@@ -1234,21 +1364,33 @@ function sortTable(colIdx) {
 }
 
 // ── Results filter ────────────────────────────────────────────────────────────
+function clearFilters() {
+  document.getElementById('cat-filter').value = '';
+  const subEl = document.getElementById('subcat-filter');
+  subEl.value = '';
+  subEl.style.display = 'none';
+  document.getElementById('clear-filters-btn').style.display = 'none';
+  filterResults();
+}
+
 function filterResults() {
   const q      = document.getElementById('res-search').value.toLowerCase().trim();
   const cat    = document.getElementById('cat-filter').value;
   const subcat = document.getElementById('subcat-filter').value;
   const rows   = document.querySelectorAll('#res-body tbody tr');
   let visible  = 0;
-  rows.forEach(row => {
-    const show = (!q      || row.textContent.toLowerCase().includes(q)) &&
-                 (!cat    || (row.dataset.category    || '') === cat) &&
+  rows.forEach(row =&gt; {
+    const show = (!q      || row.textContent.toLowerCase().includes(q)) &amp;&amp;
+                 (!cat    || (row.dataset.category    || '') === cat) &amp;&amp;
                  (!subcat || (row.dataset.subcategory || '') === subcat);
     row.style.display = show ? '' : 'none';
     if (show) visible++;
   });
   const countEl = document.getElementById('res-search-count');
   countEl.textContent = (q || cat || subcat) ? `${visible} of ${rows.length}` : '';
+  // Show/hide Clear Filters button based on whether any filter is active
+  const clearBtn = document.getElementById('clear-filters-btn');
+  if (clearBtn) clearBtn.style.display = (cat || subcat) ? '' : 'none';
 }
 
 // ── Log helper ────────────────────────────────────────────────────────────────
@@ -1260,9 +1402,9 @@ function appendLog(text, cls) {
   log.appendChild(line);
   log.scrollTop = log.scrollHeight;
 }
-</script>
-</body>
-</html>"""
+&lt;/script&gt;
+&lt;/body&gt;
+&lt;/html&gt;"""
 
 
 # ── Launch ────────────────────────────────────────────────────────────────────
@@ -1277,3 +1419,16 @@ if __name__ == "__main__":
     print(f"  Press Ctrl+C to stop.\n")
     threading.Timer(1.2, lambda: webbrowser.open(url)).start()
     app.run(host="0.0.0.0", port=PORT, threaded=True, debug=False)
+</pre>
+<script>
+function copyAll() {
+  const text = document.getElementById('code').textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.querySelector('button');
+    btn.textContent = '✓ Copied!';
+    setTimeout(() => btn.textContent = 'Copy All', 2000);
+  });
+}
+</script>
+</body>
+</html>
