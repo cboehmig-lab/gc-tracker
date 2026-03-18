@@ -183,12 +183,14 @@ FALLBACK_STORES = [
 
 
 def get_store_list() -> list[str]:
+    cached = []
     if STORES_CACHE.exists():
         try:
-            return sorted(json.loads(STORES_CACHE.read_text()).get("stores", []))
+            cached = json.loads(STORES_CACHE.read_text()).get("stores", [])
         except Exception:
             pass
-    return sorted(set(FALLBACK_STORES))
+    # Always merge with fallback so newly added stores are never missing
+    return sorted(set(cached) | set(FALLBACK_STORES))
 
 
 def refresh_store_list() -> list[str]:
@@ -298,7 +300,8 @@ def parse_products(html: str, store_name: str) -> list[dict]:
 
 
 def fetch_category(sku: str, url: str) -> tuple[str, str]:
-    """Fetch a product page and extract category/subcategory from BreadcrumbList JSON-LD.
+    """Fetch a product page and extract category/subcategory.
+    Tries three strategies: BreadcrumbList JSON-LD, __NEXT_DATA__, HTML breadcrumbs.
     Returns (category, subcategory). Results are stored in _cat_cache keyed by SKU."""
     if sku in _cat_cache:
         d = _cat_cache[sku]
@@ -307,25 +310,60 @@ def fetch_category(sku: str, url: str) -> tuple[str, str]:
         _cat_cache[sku] = {"category": "", "subcategory": ""}
         return ("", "")
     try:
-        r = _http.get(url, timeout=15)
+        clean_url = url.split('?')[0]
+        r = _http.get(clean_url, timeout=15)
         r.raise_for_status()
-        skip = {"home", "used", "used gear", "guitar center"}
-        for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', r.text, re.DOTALL):
+        html = r.text
+        skip = {"home", "used", "used gear", "guitar center", ""}
+
+        def _store(cat, subcat):
+            _cat_cache[sku] = {"category": cat, "subcategory": subcat}
+            return cat, subcat
+
+        # Strategy 1: BreadcrumbList JSON-LD
+        for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script', html, re.DOTALL):
             try:
                 data = json.loads(block)
             except Exception:
                 continue
             if data.get("@type") != "BreadcrumbList":
                 continue
-            names = [
-                it.get("name", "").strip()
-                for it in data.get("itemListElement", [])
-                if it.get("name", "").strip().lower() not in skip
-            ]
-            cat    = names[0] if len(names) > 0 else ""
-            subcat = names[1] if len(names) > 1 else ""
-            _cat_cache[sku] = {"category": cat, "subcategory": subcat}
-            return cat, subcat
+            names = [it.get("name","").strip() for it in data.get("itemListElement",[])
+                     if it.get("name","").strip().lower() not in skip]
+            if names:
+                return _store(names[0], names[1] if len(names) > 1 else "")
+
+        # Strategy 2: __NEXT_DATA__ (Next.js server-rendered JSON)
+        nd = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+        if nd:
+            try:
+                ndata = json.loads(nd.group(1))
+                pp = ndata.get("props", {}).get("pageProps", {})
+                for bc in [
+                    pp.get("breadcrumbs"),
+                    pp.get("product", {}).get("breadcrumbs"),
+                    pp.get("initialData", {}).get("breadcrumbs"),
+                    pp.get("initialData", {}).get("product", {}).get("breadcrumbs"),
+                ]:
+                    if bc and isinstance(bc, list):
+                        names = [(b.get("name") or b.get("label") or "").strip()
+                                 for b in bc
+                                 if (b.get("name") or b.get("label") or "").strip().lower() not in skip]
+                        if names:
+                            return _store(names[0], names[1] if len(names) > 1 else "")
+            except Exception:
+                pass
+
+        # Strategy 3: HTML breadcrumb nav elements
+        # GC often renders: <li class="...breadcrumb..."><a href="...">Guitars</a></li>
+        bc_names = re.findall(
+            r'<(?:li|span|a)[^>]*(?:breadcrumb|Breadcrumb)[^>]*>\s*(?:<[^>]+>)*\s*([A-Za-z][^<]{2,40}?)\s*(?:</[^>]+>)*\s*</(?:li|span|a)>',
+            html
+        )
+        bc_names = [n.strip() for n in bc_names if n.strip().lower() not in skip]
+        if bc_names:
+            return _store(bc_names[0], bc_names[1] if len(bc_names) > 1 else "")
+
     except Exception:
         pass
     _cat_cache[sku] = {"category": "", "subcategory": ""}
@@ -355,9 +393,6 @@ def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Eve
             if p["id"] not in ids_seen:
                 all_products.append(p)
                 ids_seen.add(p["id"])
-        if seen_ids and all(p["id"] in seen_ids for p in products):
-            send({"type": "progress", "msg": f"  [{store_name}] up to date ✓"})
-            break
         if len(products) < PAGE_SIZE:
             break
         page += 1
@@ -1135,8 +1170,8 @@ function onCatFilterChange() {
 }
 
 // ── Table rendering & sorting ─────────────────────────────────────────────────
-// col indices: 0=status, 1=name, 2=category, 3=subcategory, 4=price, 5=store, 6=link
-const _SORT_COLS = [null, 'name', 'category', 'subcategory', 'price', 'store', null];
+// col indices: 0=status, 1=name, 2=category, 3=subcategory, 4=price, 5=store
+const _SORT_COLS = [null, 'name', 'category', 'subcategory', 'price', 'store'];
 
 function renderTable() {
   const data = window._tableData || [];
@@ -1147,19 +1182,20 @@ function renderTable() {
     <th data-col="3">Subcategory</th>
     <th data-col="4">Price</th>
     <th data-col="5">Store</th>
-    <th data-col="6">Link</th>
   </tr></thead><tbody>`;
   data.forEach(item => {
     const priceNum = parseFloat((item.price||'').replace(/[^0-9.]/g,'')) || 0;
     const esc = s => (s||'').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+    const nameCell = item.url
+      ? `<a href="${item.url}" target="_blank">${esc(item.name)}</a>`
+      : esc(item.name);
     html += `<tr data-name="${esc(item.name)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}">` +
       `<td>${item.isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
-      `<td>${esc(item.name)}</td>` +
+      `<td>${nameCell}</td>` +
       `<td>${esc(item.category)}</td>` +
       `<td>${esc(item.subcategory)}</td>` +
       `<td>${item.price||''}</td>` +
       `<td>${esc(item.store)}</td>` +
-      `<td>${item.url ? `<a href="${item.url}" target="_blank">View ↗</a>` : ''}</td>` +
       `</tr>`;
   });
   html += '</tbody></table>';
