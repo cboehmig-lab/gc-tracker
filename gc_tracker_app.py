@@ -364,8 +364,10 @@ def _parse_condition(raw: str) -> str:
 def _extract_conditions_from_listing(html: str) -> dict:
     """
     Build a map of {url → condition} from the GC 24-item listing page.
-    Card structure: ... Condition: Great ... Available at: City, ST ...
-    We look just 200 chars before each 'Available at:' to find its condition.
+    Card structure (from screenshot):
+      Available at: City, ST
+      Condition: Good
+    Condition comes AFTER 'Available at:' — look forward within 200 chars.
     """
     # 1. Extract ordered URLs from JSON-LD
     urls = []
@@ -389,28 +391,23 @@ def _extract_conditions_from_listing(html: str) -> dict:
 
     card_html = html[ld_end:]
 
-    # Match "Condition: Great" or "Condition: <!-- --> Good"
     cond_re = re.compile(
         r'Condition:\s*(?:<!--[^>]*>\s*)*([A-Z][A-Za-z ]{1,19}?)(?:\s*[<\n\r])',
         re.DOTALL
     )
 
-    # Find all "Available at:" positions — one per card
-    avail_anchors = [m.start() for m in re.finditer(r'Available\s+at:', card_html)]
+    # Find all "Available at:" — one per card, condition follows within ~200 chars
+    avail_anchors = [m.start() for m in re.finditer(r'Available\s*at:', card_html)]
 
     conditions = []
     if len(avail_anchors) >= len(urls):
         for anchor_pos in avail_anchors[:len(urls)]:
-            # Look only 200 chars back — the condition label is right before "Available at:"
-            start = max(0, anchor_pos - 200)
-            chunk = card_html[start:anchor_pos]
-            # Find the LAST condition match in this small window
-            last_match = None
-            for m in cond_re.finditer(chunk):
-                last_match = m
-            conditions.append(last_match.group(1).strip() if last_match else "")
+            # Look FORWARD up to 200 chars after "Available at:" for the condition
+            chunk = card_html[anchor_pos:anchor_pos + 200]
+            m = cond_re.search(chunk)
+            conditions.append(m.group(1).strip() if m else "")
     else:
-        # Fallback: positional scan
+        # Fallback: positional scan after ld_end
         for m in cond_re.finditer(card_html):
             conditions.append(m.group(1).strip())
             if len(conditions) == len(urls):
@@ -418,30 +415,17 @@ def _extract_conditions_from_listing(html: str) -> dict:
 
     # Diagnostics
     try:
-        hits = []
-        for m in cond_re.finditer(card_html):
-            hits.append(card_html[m.start():m.start()+80].replace("\n", "\\n"))
-            if len(hits) >= 5:
-                break
-        anchor_sample = ""
-        lookback_sample = ""
+        # Show what's after the first Available at:
+        after_sample = ""
         if avail_anchors:
-            start = max(0, avail_anchors[0] - 200)
-            anchor_sample = card_html[start:avail_anchors[0]+50].replace("\n", "\\n")
-            # Also show what the lookback chunk actually contains
-            lookback_chunk = card_html[start:avail_anchors[0]]
-            lookback_sample = repr(lookback_chunk[-200:])
+            after_sample = card_html[avail_anchors[0]:avail_anchors[0]+200].replace("\n", "\\n")
         (DATA_DIR / "gc_condition_diag.json").write_text(json.dumps({
             "generated": datetime.now().isoformat(),
             "url_count": len(urls),
             "avail_anchor_count": len(avail_anchors),
             "conditions_found": sum(1 for c in conditions if c),
-            "ld_end": ld_end,
-            "sample_urls": urls[:3],
             "sample_conditions": conditions[:5],
-            "first_5_condition_hits": hits,
-            "html_before_first_available_at": anchor_sample,
-            "lookback_chunk_repr": lookback_sample,
+            "html_after_first_available_at": after_sample,
         }, indent=2))
     except Exception:
         pass
