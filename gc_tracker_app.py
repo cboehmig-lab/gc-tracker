@@ -364,8 +364,8 @@ def _parse_condition(raw: str) -> str:
 def _extract_conditions_from_listing(html: str) -> dict:
     """
     Build a map of {url → condition} from the GC 24-item listing page.
-    Each card has the structure: ... Condition: Great ... Available at: City, ST ...
-    We find each 'Available at:' anchor and look BACKWARDS for the condition.
+    Card structure: ... Condition: Great ... Available at: City, ST ...
+    We look just 200 chars before each 'Available at:' to find its condition.
     """
     # 1. Extract ordered URLs from JSON-LD
     urls = []
@@ -395,16 +395,16 @@ def _extract_conditions_from_listing(html: str) -> dict:
         re.DOTALL
     )
 
-    # Find all "Available at:" positions — one per card, always after Condition:
+    # Find all "Available at:" positions — one per card
     avail_anchors = [m.start() for m in re.finditer(r'Available\s+at:', card_html)]
 
     conditions = []
     if len(avail_anchors) >= len(urls):
         for anchor_pos in avail_anchors[:len(urls)]:
-            # Look backwards up to 800 chars before "Available at:" for the condition
-            start = max(0, anchor_pos - 800)
+            # Look only 200 chars back — the condition label is right before "Available at:"
+            start = max(0, anchor_pos - 200)
             chunk = card_html[start:anchor_pos]
-            # Find the LAST condition match in this chunk (closest to "Available at:")
+            # Find the LAST condition match in this small window
             last_match = None
             for m in cond_re.finditer(chunk):
                 last_match = m
@@ -425,9 +425,10 @@ def _extract_conditions_from_listing(html: str) -> dict:
                 break
         anchor_sample = ""
         if avail_anchors:
-            start = max(0, avail_anchors[0] - 400)
-            anchor_sample = card_html[start:avail_anchors[0]+100].replace("\n", "\\n")
+            start = max(0, avail_anchors[0] - 200)
+            anchor_sample = card_html[start:avail_anchors[0]+50].replace("\n", "\\n")
         (DATA_DIR / "gc_condition_diag.json").write_text(json.dumps({
+            "generated": datetime.now().isoformat(),
             "url_count": len(urls),
             "avail_anchor_count": len(avail_anchors),
             "conditions_found": sum(1 for c in conditions if c),
@@ -1180,7 +1181,7 @@ def api_debug_condition():
 
     return jsonify(report)
 
-@app.route("/api/debug-condition/reset", methods=["POST"])
+@app.route("/api/debug-condition/reset", methods=["GET", "POST"])
 @login_required
 def api_debug_condition_reset():
     debug_file = DATA_DIR / "gc_debug_listing.html"
