@@ -316,6 +316,27 @@ def fetch_page(store_name: str, page: int) -> str:
     return r.text
 
 
+_CONDITION_MAP = {
+    "new":          "New",
+    "likenew":      "Like New",
+    "excellent":    "Excellent",
+    "verygood":     "Very Good",
+    "good":         "Good",
+    "fair":         "Fair",
+    "poor":         "Poor",
+    "usedcondition":"Used",
+    "refurbished":  "Refurbished",
+}
+
+def _parse_condition(raw: str) -> str:
+    """Normalise a schema.org itemCondition URL or plain text to a readable label."""
+    if not raw:
+        return ""
+    # Strip schema.org URL prefix, e.g. "https://schema.org/GoodCondition" → "GoodCondition"
+    key = raw.split("/")[-1].lower().replace("condition", "").replace(" ", "").replace("-", "")
+    return _CONDITION_MAP.get(key, raw.split("/")[-1])  # fall back to raw tail if unknown
+
+
 def parse_products(html: str, store_name: str) -> list[dict]:
     for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL):
         try:
@@ -333,12 +354,17 @@ def parse_products(html: str, store_name: str) -> list[dict]:
             name = _clean_name(item.get("name", ""))
             sku  = item.get("sku",  "").strip()
             url  = item.get("url",  "").strip()
-            raw  = item.get("offers", {}).get("price", "")
+            offers = item.get("offers", {})
+            raw  = offers.get("price", "")
             try:    price = float(raw) if raw else None
             except: price = None
+            # Extract condition from itemCondition (e.g. "https://schema.org/UsedCondition" or plain text)
+            raw_cond = offers.get("itemCondition", "")
+            condition = _parse_condition(raw_cond)
             if name and sku:
                 products.append({"id": sku, "name": name, "price": price,
-                                  "store": store_name, "url": url})
+                                  "store": store_name, "url": url,
+                                  "condition": condition})
         return products
     return []
 
@@ -610,8 +636,8 @@ def save_state(seen_ids: list, run_time: str, item_dates: dict = None):
 
 # ── Excel ─────────────────────────────────────────────────────────────────────
 
-_COLS    = ["Status", "Date Found", "Item Name", "Category", "Subcategory", "Price", "Store", "Link"]
-_WIDTHS  = [8, 18, 58, 22, 22, 12, 16, 70]
+_COLS    = ["Status", "Date Found", "Item Name", "Condition", "Category", "Subcategory", "Price", "Store", "Link"]
+_WIDTHS  = [8, 18, 58, 14, 22, 22, 12, 16, 70]
 _HDR_FILL = PatternFill("solid", start_color="1F3864", end_color="1F3864")
 _HDR_FONT = Font(name="Arial", bold=True, color="FFFFFF", size=11)
 _ROW_FONT = Font(name="Arial", size=10)
@@ -646,10 +672,11 @@ def write_excel(new_items: list[dict]):
         for i, item in enumerate(new_items):
             r = 2 + i
             ws.cell(r, 1, "New"); ws.cell(r, 2, ts); ws.cell(r, 3, item["name"])
-            ws.cell(r, 4, item.get("category", "")); ws.cell(r, 5, item.get("subcategory", ""))
-            pc = ws.cell(r, 6, item["price"]); pc.number_format = '$#,##0.00'
-            ws.cell(r, 7, item["store"])
-            lc = ws.cell(r, 8, item["url"] or "")
+            ws.cell(r, 4, item.get("condition", ""))
+            ws.cell(r, 5, item.get("category", "")); ws.cell(r, 6, item.get("subcategory", ""))
+            pc = ws.cell(r, 7, item["price"]); pc.number_format = '$#,##0.00'
+            ws.cell(r, 8, item["store"])
+            lc = ws.cell(r, 9, item["url"] or "")
             if item["url"]: lc.hyperlink = item["url"]; lc.style = "Hyperlink"
             _fmt_row(ws, r); ws.cell(r, 1).font = _NEW_FONT
         for r in range(2 + n, ws.max_row + 1):
@@ -667,10 +694,11 @@ def write_excel(new_items: list[dict]):
         for i, item in enumerate(new_items):
             r = 2 + i
             ws.cell(r, 1, "New"); ws.cell(r, 2, ts); ws.cell(r, 3, item["name"])
-            ws.cell(r, 4, item.get("category", "")); ws.cell(r, 5, item.get("subcategory", ""))
-            pc = ws.cell(r, 6, item["price"]); pc.number_format = '$#,##0.00'
-            ws.cell(r, 7, item["store"])
-            lc = ws.cell(r, 8, item["url"] or "")
+            ws.cell(r, 4, item.get("condition", ""))
+            ws.cell(r, 5, item.get("category", "")); ws.cell(r, 6, item.get("subcategory", ""))
+            pc = ws.cell(r, 7, item["price"]); pc.number_format = '$#,##0.00'
+            ws.cell(r, 8, item["store"])
+            lc = ws.cell(r, 9, item["url"] or "")
             if item["url"]: lc.hyperlink = item["url"]; lc.style = "Hyperlink"
             _fmt_row(ws, r); ws.cell(r, 1).font = _NEW_FONT
     wb.save(OUTPUT_FILE)
@@ -897,6 +925,7 @@ def _run(selected_stores: list[str], baseline: bool):
                 "url":        p["url"],
                 "category":   p.get("category", ""),
                 "subcategory":p.get("subcategory", ""),
+                "condition":  p.get("condition", ""),
                 "date":       item_dates.get(p["id"], ""),
             }
 
@@ -998,12 +1027,13 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 table{width:auto;min-width:100%;border-collapse:collapse;font-size:.83rem;table-layout:fixed}
 th{background:#161616;color:#666;font-weight:600;text-align:left;padding:7px 10px;font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:40px;cursor:pointer;user-select:none;white-space:nowrap;overflow:hidden}
 th:nth-child(1){width:46px}
-th:nth-child(2){width:300px}
-th:nth-child(3){width:148px}
-th:nth-child(4){width:92px}
-th:nth-child(5){width:148px}
+th:nth-child(2){width:200px}
+th:nth-child(3){width:110px}
+th:nth-child(4){width:110px}
+th:nth-child(5){width:110px}
 th:nth-child(6){width:72px}
-th:nth-child(7){width:128px}
+th:nth-child(7){width:88px}
+th:nth-child(8){width:128px}
 th:hover{color:#ccc}
 th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
 th.sort-desc::after{content:" ▼";color:#c00;font-size:.6rem}
@@ -1410,19 +1440,20 @@ function onCatFilterChange() {
 }
 
 // ── Table rendering & sorting ─────────────────────────────────────────────────
-// col indices: 0=status, 1=name, 2=category, 3=date, 4=subcategory, 5=price, 6=store
-const _SORT_COLS = [null, 'name', 'category', 'date', 'subcategory', 'price', 'store'];
+// col indices: 0=status, 1=name, 2=condition, 3=category, 4=subcategory, 5=price, 6=date, 7=store
+const _SORT_COLS = [null, 'name', 'condition', 'category', 'subcategory', 'price', 'date', 'store'];
 
 function renderTable() {
   const data = window._tableData || [];
   let html = `<table id="res-table"><thead><tr>
     <th data-col="0"></th>
     <th data-col="1">Item</th>
-    <th data-col="2">Category</th>
-    <th data-col="3">Date</th>
+    <th data-col="2">Condition</th>
+    <th data-col="3">Category</th>
     <th data-col="4">Subcategory</th>
     <th data-col="5">Price</th>
-    <th data-col="6">Store</th>
+    <th data-col="6">Date</th>
+    <th data-col="7">Store</th>
   </tr></thead><tbody>`;
   data.forEach(item => {
     const priceNum = parseFloat((item.price||'').replace(/[^0-9.]/g,'')) || 0;
@@ -1433,10 +1464,11 @@ function renderTable() {
     html += `<tr data-name="${esc(item.name)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}">` +
       `<td>${item.isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
       `<td>${nameCell}</td>` +
+      `<td>${esc(item.condition)}</td>` +
       `<td>${esc(item.category)}</td>` +
-      `<td style="color:#888;font-size:.75rem">${esc(item.date||'')}</td>` +
       `<td>${esc(item.subcategory)}</td>` +
       `<td>${item.price||''}</td>` +
+      `<td style="color:#888;font-size:.75rem">${esc(item.date||'')}</td>` +
       `<td>${esc(item.store)}</td>` +
       `</tr>`;
   });
