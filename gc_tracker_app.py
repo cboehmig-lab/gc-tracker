@@ -92,7 +92,7 @@ FALLBACK_STORES = [
     "San Marcos","Santa Ana","Santa Barbara","Santa Rosa","Stockton",
     "Temecula","Torrance","Ventura","Victorville","Visalia","West Los Angeles",
     # Colorado
-    "Aurora","Colorado Springs","Denver","Lakewood","Thornton",
+    "Arvada","Colorado Springs","Denver","Englewood","Fort Collins",
     # Connecticut
     "Fairfield","Manchester CT","North Haven",
     # Florida
@@ -202,24 +202,26 @@ _US_STATES = [
 ]
 
 def _fetch_state_stores(state: str) -> list[str]:
-    """Fetch store names for a single state from stores.guitarcenter.com."""
+    """Fetch store city names for a single state from stores.guitarcenter.com.
+    Only extracts names from confirmed store-page URLs matching /{state}/{city}/{id},
+    which is the only reliable signal — headings and link text pick up nav garbage."""
     try:
         r = _http.get(f"https://stores.guitarcenter.com/{state}/", timeout=10)
         if r.status_code != 200:
             return []
         html = r.text
-        # Extract store display names from city listing links and headings
-        names = []
-        for pat in [
-            r'<h\d[^>]*>([A-Z][A-Za-z\s\-\.]+)</h\d>',
-            r'class="[^"]*location[^"]*title[^"]*"[^>]*>([^<]+)<',
-            r'<a[^>]+href="/[a-z]{2}/[^/]+/\d+/?[^"]*"[^>]*>\s*([^<]{3,40})\s*</a>',
-        ]:
-            found = [n.strip() for n in re.findall(pat, html)
-                     if 3 < len(n.strip()) < 50
-                     and not n.strip().lower().startswith(("guitar center", "gc ", "home", "store"))]
-            names.extend(found)
-        return list(set(names))
+        # Only trust URLs in the form /state/city-slug/numeric-id
+        # These uniquely identify actual store pages; nav links never match this pattern.
+        slug_to_name = {}
+        for slug in re.findall(
+            rf'href="/{re.escape(state)}/([a-z][a-z0-9\-]+)/(\d+)(?:/[^"]*)?"',
+            html
+        ):
+            city_slug, store_id = slug
+            # Convert slug to display name: "south-austin" → "South Austin"
+            name = " ".join(w.capitalize() for w in city_slug.split("-"))
+            slug_to_name[city_slug] = name
+        return list(slug_to_name.values())
     except Exception:
         return []
 
@@ -246,17 +248,33 @@ def refresh_store_list(send_progress=None) -> list[str]:
             r = _http.get("https://www.guitarcenter.com/Stores/", timeout=15)
             r.raise_for_status()
             html = r.text
-            for pat in [
-                r'storeName["\s:]+["\'](.*?)["\']',
-                r'data-store-name=["\']([^"\']+)["\']',
-                r'/store/[^"]+">([^<]+)</a>',
-            ]:
-                found = [n.strip() for n in re.findall(pat, html) if len(n.strip()) > 2]
-                live_names.extend(found)
+            # Only trust explicit store page URLs — same pattern as above
+            for slug in re.findall(r'href="https?://stores\.guitarcenter\.com/([a-z]{2})/([a-z][a-z0-9\-]+)/(\d+)"', html):
+                _, city_slug, _ = slug
+                name = " ".join(w.capitalize() for w in city_slug.split("-"))
+                live_names.append(name)
         except Exception:
             pass
 
     # Always merge with fallback to guarantee known stores are never dropped
+    # Strip any non-city strings that could have slipped through scraping
+    _NAV_GARBAGE = {
+        "find your local guitar center store", "my account", "sign in", "track order",
+        "returns", "faqs", "store locator", "guitar center lessons", "guitar center",
+        "home", "shop all", "new arrivals", "top sellers", "on sale", "price drop",
+        "used", "vintage", "sell your gear", "financing", "outlet", "deals",
+        "daily pick", "gc pro", "lessons", "repairs", "rentals", "riffs blog",
+        "accessibility statement", "privacy policy", "terms of use", "site map",
+        "careers", "about", "contact us", "press room", "service", "support",
+        "all rights reserved", "california transparency", "do not sell",
+    }
+    live_names = [
+        n for n in live_names
+        if n.strip().lower() not in _NAV_GARBAGE
+        and len(n.strip()) >= 3
+        and not any(bad in n.lower() for bad in ("guitar center", "my account", "sign in",
+                                                   "track order", "©", "all rights"))
+    ]
     merged = sorted(set(live_names) | set(FALLBACK_STORES))
     STORES_CACHE.write_text(json.dumps({
         "stores":      merged,
@@ -337,7 +355,33 @@ def _parse_condition(raw: str) -> str:
     return _CONDITION_MAP.get(key, raw.split("/")[-1])  # fall back to raw tail if unknown
 
 
+def _extract_conditions_from_listing(html: str) -> dict:
+    """
+    Build a map of {url_fragment → condition} by scanning the listing page HTML.
+    GC renders each product card with visible text like:
+      Condition: Good
+    near the product link, so we extract all (url, condition) pairs in document order.
+    """
+    _VALID = {"new", "like new", "excellent", "very good", "good", "fair", "poor",
+              "blemished", "refurbished"}
+    result = {}
+    # Find every product link + the nearest "Condition: X" text within ~800 chars after it
+    for m in re.finditer(r'href="(https?://www\.guitarcenter\.com/Used/[^"]+\.gc[^"]*)"', html):
+        url = m.group(1).split("?")[0]  # strip query params
+        snippet = html[m.start():m.start() + 900]
+        cm = re.search(r'[Cc]ondition\s*[:\-–]\s*([A-Za-z][A-Za-z\s]{1,20}?)(?:\s*[<\n\r,]|$)',
+                       snippet)
+        if cm:
+            val = cm.group(1).strip().rstrip(".,;")
+            if val.lower() in _VALID:
+                result[url] = val.title()
+    return result
+
+
 def parse_products(html: str, store_name: str) -> list[dict]:
+    # Pre-scan the listing HTML for per-item conditions (visible text on product cards)
+    condition_map = _extract_conditions_from_listing(html)
+
     for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL):
         try:
             data = json.loads(block)
@@ -358,15 +402,21 @@ def parse_products(html: str, store_name: str) -> list[dict]:
             raw  = offers.get("price", "")
             try:    price = float(raw) if raw else None
             except: price = None
-            # Extract condition from itemCondition (e.g. "https://schema.org/UsedCondition" or plain text)
-            raw_cond = offers.get("itemCondition", "")
-            condition = _parse_condition(raw_cond)
+            # Prefer condition from the visible card HTML; fall back to JSON-LD itemCondition
+            url_key = url.split("?")[0]
+            condition = condition_map.get(url_key, "")
+            if not condition:
+                raw_cond = offers.get("itemCondition", "")
+                parsed = _parse_condition(raw_cond)
+                # Don't use the generic "Used" fallback — it's meaningless
+                condition = parsed if parsed.lower() not in ("used", "") else ""
             if name and sku:
                 products.append({"id": sku, "name": name, "price": price,
                                   "store": store_name, "url": url,
                                   "condition": condition})
         return products
     return []
+
 
 
 def _clean_gc_cat(s: str) -> str:
@@ -404,14 +454,26 @@ def _find_breadcrumbs_in_json(data, depth: int = 0):
 
 
 def _extract_condition_from_html(html: str) -> str:
-    """Try multiple strategies to pull the condition label from a GC product page."""
-    # Strategy A: JSON-LD Product/Offer itemCondition
+    """Extract condition label from a GC page (listing or product page).
+    Prioritises the visible 'Condition: X' text that appears on both page types."""
+
+    _VALID = {"new", "like new", "excellent", "very good", "good", "fair", "poor",
+              "blemished", "refurbished", "used"}
+
+    # Strategy A: plain visible text — "Condition: Good" / "Condition: Very Good"
+    # This is the most reliable; it's what the shopper sees on the page.
+    m = re.search(r'[Cc]ondition\s*[:\-–]\s*([A-Za-z][A-Za-z\s]{1,20}?)(?:\s*[<\n\r,]|$)', html)
+    if m:
+        val = m.group(1).strip().rstrip(".,;")
+        if val.lower() in _VALID:
+            return val.title()
+
+    # Strategy B: JSON-LD itemCondition on a Product page
     for block in re.findall(
         r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL
     ):
         try:
             d = json.loads(block)
-            # Handle both single Product and ItemList
             offers = None
             if d.get("@type") == "Product":
                 offers = d.get("offers", {})
@@ -422,34 +484,35 @@ def _extract_condition_from_html(html: str) -> str:
             if offers:
                 raw = offers.get("itemCondition", "")
                 if raw:
-                    return _parse_condition(raw)
+                    parsed = _parse_condition(raw)
+                    if parsed.lower() not in ("used", "usedcondition") and parsed:
+                        return parsed
         except Exception:
             pass
 
-    # Strategy B: __NEXT_DATA__ — look for condition/itemCondition keys anywhere
-    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
-    if m:
+    # Strategy C: __NEXT_DATA__ JSON — look for condition keys
+    m2 = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if m2:
         try:
-            nd = json.loads(m.group(1))
-            cond = _find_key_in_json(nd, ("itemCondition", "condition", "conditionDisplayName",
-                                          "usedCondition", "productCondition"))
-            if cond:
-                return _parse_condition(str(cond))
+            nd = json.loads(m2.group(1))
+            cond = _find_key_in_json(nd, ("conditionDisplayName", "usedCondition",
+                                          "productCondition", "itemCondition", "condition"))
+            if cond and str(cond).lower() in _VALID:
+                return str(cond).strip().title()
         except Exception:
             pass
 
-    # Strategy C: meta tag or data attribute
+    # Strategy D: data attributes / inline JSON strings
     for pat in [
         r'data-condition="([^"]+)"',
-        r'"condition"\s*:\s*"([^"]+)"',
-        r'condition["\s:]+([A-Z][a-z]+(?: [A-Z][a-z]+)?)',
-        r'<span[^>]*class="[^"]*condition[^"]*"[^>]*>([^<]+)<',
+        r'"conditionDisplayName"\s*:\s*"([^"]+)"',
+        r'"usedCondition"\s*:\s*"([^"]+)"',
     ]:
-        m2 = re.search(pat, html)
-        if m2:
-            val = m2.group(1).strip()
-            if len(val) < 30:
-                return _parse_condition(val)
+        m3 = re.search(pat, html)
+        if m3:
+            val = m3.group(1).strip()
+            if val.lower() in _VALID:
+                return val.title()
 
     return ""
 
