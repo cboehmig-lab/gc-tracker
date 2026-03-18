@@ -361,19 +361,19 @@ def _parse_condition(raw: str) -> str:
 
 def _extract_conditions_from_listing(html: str) -> dict:
     """
-    Build a map of {url → condition} by matching JSON-LD items to card conditions by position.
+    Build a map of {url → condition} from the GC listing page.
 
-    GC's page structure:
-    - JSON-LD block at top contains all product URLs/SKUs in order
-    - React-rendered cards below each have: store name, then "Condition: <!-- --> Good"
-    - The href links in cards are relative (/Used/...) not absolute
-    - So we match by order: 1st condition in HTML → 1st item in JSON-LD, etc.
+    Each product card contains a relative href like /Used/Brand/Model.gc
+    followed by store name and then "Condition: <!-- --> Good".
+    We find card boundaries using the store-name-text span, extract the
+    relative URL and condition from each card, then match to the absolute
+    URLs in the JSON-LD block by slug.
     """
     _VALID = {"new", "like new", "excellent", "very good", "good", "fair", "poor",
               "blemished", "refurbished"}
 
-    # 1. Extract ordered URLs from JSON-LD
-    urls = []
+    # 1. Build slug → absolute URL map from JSON-LD
+    slug_to_url = {}
     for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>',
                              html, re.DOTALL):
         try:
@@ -382,23 +382,18 @@ def _extract_conditions_from_listing(html: str) -> dict:
                 for entry in data.get("mainEntity", {}).get("itemListElement", []):
                     url = entry.get("item", {}).get("url", "").split("?")[0]
                     if url:
-                        urls.append(url)
+                        # key by the last path segment (slug) e.g. "Used-Fender-Strat-123.gc"
+                        slug = url.rstrip("/").split("/")[-1]
+                        slug_to_url[slug] = url
         except Exception:
             pass
-        if urls:
+        if slug_to_url:
             break
 
-    if not urls:
+    if not slug_to_url:
         return {}
 
-    # 2. Extract all conditions from the page in document order
-    # Handles "Condition: <!-- --> Good" (React comment node) and "Condition: Good"
-    cond_pattern = re.compile(
-        r'Condition:\s*(?:<!--.*?-->\s*)*([A-Za-z][A-Za-z\s]{1,20}?)(?:\s*[<\n\r])',
-        re.DOTALL
-    )
-    # Find the end of the JSON-LD CollectionPage script specifically
-    # (not the last script on page — there are many analytics scripts after cards)
+    # 2. Find the end of the JSON-LD block — cards come after
     ld_end = 0
     for m in re.finditer(r'<script[^>]+type="application/ld\+json"[^>]*>.*?</script>',
                          html, re.DOTALL):
@@ -409,16 +404,30 @@ def _extract_conditions_from_listing(html: str) -> dict:
                 break
         except Exception:
             pass
-    # Fall back to searching the whole page if we couldn't find the LD block end
-    card_html = html[ld_end:] if ld_end else html
-    conditions = []
-    for m in cond_pattern.finditer(card_html):
-        val = m.group(1).strip().rstrip(".,;")
-        if val.lower() in _VALID:
-            conditions.append(val.title())
 
-    # 3. Zip by position
-    return {url: cond for url, cond in zip(urls, conditions)}
+    card_html = html[ld_end:] if ld_end else html
+
+    # 3. For each relative product URL in card_html, grab the condition
+    #    that follows within the next 1500 chars (same card)
+    result = {}
+    cond_re = re.compile(
+        r'Condition:\s*(?:<!--.*?-->\s*)*([A-Za-z][A-Za-z ]{1,20}?)(?:\s*[<\n\r])',
+        re.DOTALL
+    )
+    for m in re.finditer(r'href="(/Used/[^"]+\.gc[^"]*)"', card_html):
+        rel_url  = m.group(1).split("?")[0]
+        slug     = rel_url.rstrip("/").split("/")[-1]
+        abs_url  = slug_to_url.get(slug)
+        if not abs_url:
+            continue
+        snippet = card_html[m.start():m.start() + 1500]
+        cm = cond_re.search(snippet)
+        if cm:
+            val = cm.group(1).strip().rstrip(".,;")
+            if val.lower() in _VALID:
+                result[abs_url] = val.title()
+
+    return result
 
 
 def parse_products(html: str, store_name: str) -> list[dict]:
@@ -1213,11 +1222,11 @@ def _fill_gaps(selected_stores: list[str]):
     try:
         _load_cat_cache()
 
-        # Find cache entries that need fixing — must have a URL to fetch
+        # Find cache entries that need fixing — missing category OR empty condition
         gaps = {
             sku: data for sku, data in _cat_cache.items()
             if data.get("url")
-            and (not data.get("category") or not data.get("condition_fetched"))
+            and (not data.get("category") or not data.get("condition"))
         }
 
         total = len(gaps)
