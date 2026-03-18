@@ -362,12 +362,6 @@ def _parse_condition(raw: str) -> str:
 def _extract_conditions_from_listing(html: str) -> dict:
     """
     Build a map of {url → condition} from the GC listing page.
-
-    Each product card contains a relative href like /Used/Brand/Model.gc
-    followed by store name and then "Condition: <!-- --> Good".
-    We find card boundaries using the store-name-text span, extract the
-    relative URL and condition from each card, then match to the absolute
-    URLs in the JSON-LD block by slug.
     """
     _VALID = {"new", "like new", "excellent", "very good", "good", "fair", "poor",
               "blemished", "refurbished"}
@@ -382,7 +376,6 @@ def _extract_conditions_from_listing(html: str) -> dict:
                 for entry in data.get("mainEntity", {}).get("itemListElement", []):
                     url = entry.get("item", {}).get("url", "").split("?")[0]
                     if url:
-                        # key by the last path segment (slug) e.g. "Used-Fender-Strat-123.gc"
                         slug = url.rstrip("/").split("/")[-1]
                         slug_to_url[slug] = url
         except Exception:
@@ -390,10 +383,17 @@ def _extract_conditions_from_listing(html: str) -> dict:
         if slug_to_url:
             break
 
+    # Save diagnostics to a small log file for inspection
+    diag = {
+        "slug_count": len(slug_to_url),
+        "sample_slugs": list(slug_to_url.keys())[:3],
+    }
+
     if not slug_to_url:
+        Path(DATA_DIR / "gc_condition_diag.json").write_text(json.dumps({"error": "no slugs found"}))
         return {}
 
-    # 2. Find the end of the JSON-LD block — cards come after
+    # 2. Find end of JSON-LD CollectionPage block
     ld_end = 0
     for m in re.finditer(r'<script[^>]+type="application/ld\+json"[^>]*>.*?</script>',
                          html, re.DOTALL):
@@ -406,18 +406,24 @@ def _extract_conditions_from_listing(html: str) -> dict:
             pass
 
     card_html = html[ld_end:] if ld_end else html
+    diag["ld_end"] = ld_end
+    diag["card_html_length"] = len(card_html)
 
-    # 3. For each relative product URL in card_html, grab the condition
-    #    that follows within the next 1500 chars (same card)
-    result = {}
+    # 3. Find relative href slugs in card HTML
+    rel_hrefs = re.findall(r'href="(/Used/[^"]+\.gc[^"]*)"', card_html)
+    diag["rel_href_count"] = len(rel_hrefs)
+    diag["sample_rel_hrefs"] = rel_hrefs[:3]
+
+    # 4. For each relative href, find condition within next 1500 chars
     cond_re = re.compile(
         r'Condition:\s*(?:<!--.*?-->\s*)*([A-Za-z][A-Za-z ]{1,20}?)(?:\s*[<\n\r])',
         re.DOTALL
     )
+    result = {}
     for m in re.finditer(r'href="(/Used/[^"]+\.gc[^"]*)"', card_html):
-        rel_url  = m.group(1).split("?")[0]
-        slug     = rel_url.rstrip("/").split("/")[-1]
-        abs_url  = slug_to_url.get(slug)
+        rel_url = m.group(1).split("?")[0]
+        slug    = rel_url.rstrip("/").split("/")[-1]
+        abs_url = slug_to_url.get(slug)
         if not abs_url:
             continue
         snippet = card_html[m.start():m.start() + 1500]
@@ -426,6 +432,20 @@ def _extract_conditions_from_listing(html: str) -> dict:
             val = cm.group(1).strip().rstrip(".,;")
             if val.lower() in _VALID:
                 result[abs_url] = val.title()
+
+    diag["conditions_found"] = len(result)
+    diag["sample_conditions"] = dict(list(result.items())[:3])
+
+    # Also sample the raw card HTML around first href for inspection
+    if rel_hrefs:
+        idx = card_html.find(rel_hrefs[0])
+        if idx >= 0:
+            diag["html_around_first_href"] = card_html[idx:idx+800]
+
+    try:
+        (DATA_DIR / "gc_condition_diag.json").write_text(json.dumps(diag, indent=2))
+    except Exception:
+        pass
 
     return result
 
@@ -1175,6 +1195,15 @@ def api_debug_condition_reset():
     if debug_file.exists():
         debug_file.unlink()
     return jsonify({"status": "cleared"})
+
+@app.route("/api/debug-condition/diag")
+@login_required
+def api_debug_condition_diag():
+    """Read the condition extraction diagnostic log."""
+    diag_file = DATA_DIR / "gc_condition_diag.json"
+    if not diag_file.exists():
+        return jsonify({"error": "No diagnostic file yet — run the tracker first."})
+    return diag_file.read_text()
 
 @app.route("/api/stop", methods=["POST"])
 @login_required
