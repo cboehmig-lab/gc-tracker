@@ -2215,12 +2215,9 @@ function filterResults() {
 async function validateStores() {
   if (running) { appendLog('Stop the current run before validating.', 'log-err'); return; }
 
-  // Offer to clear the blocklist first
-  const clearFirst = confirm('Clear the invalid-stores blocklist first?\n\nClick OK to start fresh (recommended if stores were wrongly removed).\nClick Cancel to skip and only check current list.');
-  if (clearFirst) {
-    await fetch('/api/clear-blocklist', {method: 'POST'});
-    appendLog('Blocklist cleared — all stores will be re-evaluated.', 'log-dim');
-  }
+  // Clear blocklist first (always — safest default)
+  await fetch('/api/clear-blocklist', {method: 'POST'});
+  appendLog('Blocklist cleared — all stores will be re-evaluated.', 'log-dim');
 
   const btn = document.getElementById('validate-stores-btn');
   const resp = await fetch('/api/validate-stores', {method: 'POST'});
@@ -2259,7 +2256,7 @@ async function resetData() {
   if (running) { appendLog('Stop the current run before resetting.', 'log-err'); return; }
   const pw = prompt('Enter your app password to reset all data (state, cache, Excel):');
   if (pw === null) return;
-  if (!confirm('This will delete gc_state.json, gc_category_cache.json, and gc_new_inventory.xlsx. Are you sure?')) return;
+  if (!pw) return;
   const r = await fetch('/api/reset', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
