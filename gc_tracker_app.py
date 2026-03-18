@@ -75,112 +75,7 @@ def _save_cat_cache():
 
 # ── Store list ────────────────────────────────────────────────────────────────
 
-FALLBACK_STORES = [
-    # Alabama
-    "Birmingham","Huntsville","Mobile",
-    # Arizona
-    "Phoenix","Scottsdale","Tempe","Tucson","Mesa","Chandler","Peoria AZ",
-    # Arkansas
-    "Little Rock",
-    # California
-    "Anaheim","Bakersfield","Brea","Burbank","Canoga Park","Cerritos",
-    "Chico","Chula Vista","Clovis","Concord","El Cajon","Escondido",
-    "Fresno","Hollywood","Lancaster","Long Beach","Modesto","Moreno Valley",
-    "Murrieta","Northridge","Oakland","Ontario CA","Orange","Oxnard",
-    "Pasadena","Rancho Cucamonga","Redding","Riverside","Roseville",
-    "Sacramento","San Bernardino","San Diego","San Francisco","San Jose",
-    "San Marcos","Santa Ana","Santa Barbara","Santa Rosa","Stockton",
-    "Temecula","Torrance","Ventura","Victorville","Visalia","West Los Angeles",
-    # Colorado
-    "Arvada","Colorado Springs","Denver","Englewood","Fort Collins",
-    # Connecticut
-    "Fairfield","Manchester CT","North Haven",
-    # Florida
-    "Altamonte Springs","Boca Raton","Brandon","Clearwater","Davie",
-    "Doral","Fort Lauderdale","Fort Myers","Gainesville","Hialeah",
-    "Jacksonville","Jupiter","Kendale Lakes","Kissimmee","Melbourne FL",
-    "Miami","Naples FL","North Miami","Orlando","Palm Beach Gardens",
-    "Pensacola","Pinecrest","Sarasota","St Petersburg","Tallahassee",
-    "Tampa","West Palm Beach",
-    # Georgia
-    "Alpharetta","Atlanta","Columbus GA","Kennesaw","Macon","Marietta","Savannah",
-    # Idaho
-    "Boise",
-    # Illinois
-    "Bloomington IL","Chicago","Downers Grove","Elgin","Orland Park",
-    "Rockford","Schaumburg","Springfield IL",
-    # Indiana
-    "Evansville","Fort Wayne","Indianapolis","Merrillville",
-    # Iowa
-    "Cedar Rapids","Des Moines",
-    # Kansas
-    "Wichita",
-    # Kentucky
-    "Lexington","Louisville",
-    # Louisiana
-    "Baton Rouge","Metairie","New Orleans","Shreveport",
-    # Maryland
-    "Baltimore","Beltsville","Rockville","Towson",
-    # Massachusetts
-    "Boston","Braintree","Burlington MA","Cambridge","Springfield MA","Worcester",
-    # Michigan
-    "Ann Arbor","Detroit","Flint","Grand Rapids","Kalamazoo","Lansing",
-    "Sterling Heights","Troy MI",
-    # Minnesota
-    "Bloomington MN","Duluth","Minneapolis","St Paul",
-    # Mississippi
-    "Jackson MS",
-    # Missouri
-    "Kansas City","Springfield MO","St Louis",
-    # Nebraska
-    "Omaha",
-    # Nevada
-    "Henderson","Las Vegas","North Las Vegas","Reno",
-    # New Hampshire
-    "Manchester NH","Nashua",
-    # New Jersey
-    "Eatontown","Edison","Linden","Paramus","Princeton",
-    # New Mexico
-    "Albuquerque",
-    # New York
-    "Albany NY","Brooklyn","Buffalo","Long Island","Manhattan",
-    "Queens","Rochester NY","Staten Island","Syracuse","Yonkers",
-    # North Carolina
-    "Asheville","Charlotte","Durham","Fayetteville","Greensboro",
-    "Raleigh","Wilmington NC","Winston-Salem",
-    # Ohio
-    "Akron","Canton OH","Cincinnati","Cleveland","Columbus OH",
-    "Dayton","Toledo","Youngstown",
-    # Oklahoma
-    "Oklahoma City","Tulsa",
-    # Oregon
-    "Beaverton","Eugene","Portland OR","Salem OR",
-    # Pennsylvania
-    "Allentown","Erie PA","Philadelphia","Pittsburgh","Reading PA","Scranton",
-    # Rhode Island
-    "Providence",
-    # South Carolina
-    "Charleston SC","Columbia SC","Greenville SC",
-    # Tennessee
-    "Chattanooga","Knoxville","Memphis","Nashville",
-    # Texas
-    "Amarillo","Arlington TX","Austin","Cedar Park","Corpus Christi",
-    "Dallas","El Paso","Fort Worth","Frisco","Garland","Houston",
-    "Houston Willowbrook","Humble","Lubbock","McAllen","Mesquite",
-    "North Austin","Plano","Round Rock","San Antonio","South Austin",
-    "Sugar Land","Tyler TX","Waco",
-    # Utah
-    "Murray UT","Orem","Salt Lake City",
-    # Virginia
-    "Chesapeake","Hampton VA","Lynchburg","Newport News","Norfolk",
-    "Richmond VA","Roanoke","Virginia Beach",
-    # Washington
-    "Bellevue WA","Lynnwood","Seattle","Spokane","Tacoma",
-    # Washington DC
-    "Washington DC",
-    # Wisconsin
-    "Green Bay","Madison WI","Milwaukee",
-]
+FALLBACK_STORES: list[str] = []  # Populated from GC live data via Validate Stores
 
 
 def get_store_list() -> list[str]:
@@ -191,8 +86,7 @@ def get_store_list() -> list[str]:
         except Exception:
             pass
     blocklist = _get_blocklist()
-    # Merge with fallback, then remove any confirmed-invalid stores
-    return sorted((set(cached) | set(FALLBACK_STORES)) - blocklist)
+    return sorted(set(cached) - blocklist)
 
 
 _US_STATES = [
@@ -339,9 +233,8 @@ def refresh_store_list(send_progress=None) -> list[str]:
                                                    "track order", "©", "all rights"))
     ]
 
-    # Remove blocklisted invalid stores
     blocklist = _get_blocklist()
-    merged = sorted((set(live_names) | set(FALLBACK_STORES)) - blocklist)
+    merged = sorted(set(live_names) - blocklist)
     STORES_CACHE.write_text(json.dumps({
         "stores":      merged,
         "live_count":  len(set(live_names)),
@@ -1368,47 +1261,87 @@ def api_progress():
                     headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
 
+def _check_store_url(store_name: str) -> tuple[bool, str]:
+    """Check if a store name works in the GC filter URL.
+    Returns (is_valid, working_name). Tries variations if the original fails."""
+    def _try(name: str) -> bool:
+        try:
+            query = f"filters=stores:{name.replace(' ', '%20')}&Ns=cD"
+            url   = f"https://www.guitarcenter.com/Used/?{query}&page=1"
+            r = _http.get(url, timeout=10, allow_redirects=True)
+            return r.status_code != 404
+        except Exception:
+            return True  # network error — assume valid
+
+    if _try(store_name):
+        return True, store_name
+
+    # Try stripping state suffix (e.g. "Albany NY" → "Albany")
+    parts = store_name.rsplit(' ', 1)
+    if len(parts) == 2 and len(parts[1]) == 2 and parts[1].isupper():
+        bare = parts[0]
+        if _try(bare):
+            return True, bare
+
+    return False, store_name
+
+
 def _validate_stores():
-    """Check every store with a page-1 fetch, remove 404s, then rebuild from GC's live filter data."""
+    """Check every store with a page-1 fetch, auto-fix names, remove 404s, then rebuild."""
     def send(msg): _q.put(msg)
     try:
         stores = get_store_list()
         total  = len(stores)
         removed = []
-        send({"type": "progress", "msg": f"Step 1: Validating {total} stores (checking for 404s)…"})
+        renamed = []
+        send({"type": "progress", "msg": f"Step 1: Validating {total} stores…"})
         send({"type": "progress", "msg": "About 0.5s per store. You can stop at any time."})
 
+        updated_stores = list(stores)
         for i, store in enumerate(stores, 1):
             if _stop_event.is_set():
                 send({"type": "progress", "msg": "⏹ Stopped by user."})
                 break
             if i % 25 == 1:
                 send({"type": "progress", "msg": f"  [{i}/{total}] checking…"})
-            try:
-                query = f"filters=stores:{store.replace(' ', '%20')}&Ns=cD"
-                url   = f"https://www.guitarcenter.com/Used/?{query}&page=1"
-                r = _http.get(url, timeout=10)
-                if r.status_code == 404:
-                    _remove_invalid_store(store)
-                    removed.append(store)
-                    send({"type": "progress", "msg": f"  ✗ Removed: {store}"})
-            except Exception:
-                pass
+            is_valid, working_name = _check_store_url(store)
+            if not is_valid:
+                _remove_invalid_store(store)
+                removed.append(store)
+                if store in updated_stores:
+                    updated_stores.remove(store)
+                send({"type": "progress", "msg": f"  ✗ Removed: {store}"})
+            elif working_name != store:
+                idx = updated_stores.index(store) if store in updated_stores else -1
+                if idx >= 0:
+                    updated_stores[idx] = working_name
+                renamed.append(f"{store} → {working_name}")
+                send({"type": "progress", "msg": f"  ✎ Renamed: {store} → {working_name}"})
             time.sleep(0.5)
 
-        if removed:
-            send({"type": "progress", "msg": f"\n  Removed {len(removed)} invalid store(s): {', '.join(removed)}"})
-        else:
-            send({"type": "progress", "msg": "\n  All stores validated — none removed."})
+        # Save corrected names back to cache
+        if renamed:
+            try:
+                d = json.loads(STORES_CACHE.read_text()) if STORES_CACHE.exists() else {}
+                d["stores"] = sorted(set(updated_stores))
+                STORES_CACHE.write_text(json.dumps(d))
+            except Exception:
+                pass
 
-        # Step 2: rebuild from GC's live used inventory filter facets
+        if removed:
+            send({"type": "progress", "msg": f"\n  Removed {len(removed)}: {', '.join(removed)}"})
+        if renamed:
+            send({"type": "progress", "msg": f"  Renamed {len(renamed)}: {', '.join(renamed)}"})
+        if not removed and not renamed:
+            send({"type": "progress", "msg": "\n  All stores validated — none removed or renamed."})
+
         if not _stop_event.is_set():
             send({"type": "progress", "msg": "\nStep 2: Rebuilding store list from GC's live data…"})
             try:
                 new_stores = refresh_store_list()
                 send({"type": "progress", "msg": f"  ✓ Store list rebuilt — {len(new_stores)} stores."})
             except Exception as e:
-                send({"type": "progress", "msg": f"  Rebuild failed: {e} — keeping existing list."})
+                send({"type": "progress", "msg": f"  Rebuild failed: {e}"})
 
         final_stores = get_store_list()
         send({"type": "progress", "msg": f"\n✓ Done — {len(final_stores)} valid stores in list."})
@@ -1844,6 +1777,9 @@ async function loadData() {
   document.getElementById('hdr-status').textContent = storeLabel + ' available';
   document.getElementById('s-stores').textContent = storeLabel +
     (info.updated ? ' · checked ' + info.updated.slice(0,10) : ' (fallback list)');
+  if (allStores.length === 0) {
+    appendLog('💡 No stores loaded — click "✓ Validate Stores" to build the store list from GC live data.', 'log-dim');
+  }
 }
 
 async function loadState() {
