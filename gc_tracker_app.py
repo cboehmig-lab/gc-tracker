@@ -6,11 +6,16 @@ Run with:  python3 gc_tracker_app.py
 Then open: http://localhost:5050
 """
 
-import json, os, re, sys, time, threading, queue, webbrowser
+import json, os, re, sys, time, threading, queue, webbrowser, random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
+
+
+def _sleep(base: float, jitter: float = 0.5):
+    """Sleep for base ± jitter seconds to avoid looking like a bot."""
+    time.sleep(max(0.1, base + random.uniform(-jitter, jitter)))
 
 try:
     from flask import (Flask, request, jsonify, Response, stream_with_context,
@@ -831,7 +836,7 @@ def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Eve
         if len(products) < PAGE_SIZE:
             break
         page += 1
-        time.sleep(1.5)
+        _sleep(1.5, 0.8)  # 0.7–2.3s between pages
     return all_products, ids_seen
 
 
@@ -1317,7 +1322,7 @@ def _validate_stores():
                     updated_stores[idx] = working_name
                 renamed.append(f"{store} → {working_name}")
                 send({"type": "progress", "msg": f"  ✎ Renamed: {store} → {working_name}"})
-            time.sleep(0.5)
+            _sleep(0.5, 0.3)  # 0.2–0.8s between store checks
 
         # Save corrected names back to cache
         if renamed:
@@ -1386,6 +1391,7 @@ def _fill_gaps(selected_stores: list[str]):
             url  = data.get("url", "")
             name = data.get("name", "")
             try:
+                _sleep(0.3, 0.2)  # 0.1–0.5s jitter
                 cat, subcat, condition = fetch_page_data(url, name)
                 return sku, cat, subcat, condition
             except Exception:
@@ -1449,10 +1455,13 @@ def _run(selected_stores: list[str], baseline: bool):
             ids_this_run |= ids
 
         # ── Classify categories (parallel) & use listing-page condition ─────────
-        # Condition is already parsed from the listing page in parse_products — use it.
-        # Category requires the individual product page (breadcrumb) — fetch in parallel.
+        # Condition is already parsed from the listing page in parse_products — free, no HTTP.
+        # Category requires the individual product page — only fetch for NEW items not in seen_ids,
+        # and only if not already cached. Existing items keep their cached category.
+        new_item_ids = {p["id"] for p in all_products if p["id"] not in seen_ids}
         needs_cat = [p for p in all_products
-                     if not baseline and p.get("url")
+                     if p["id"] in new_item_ids
+                     and not baseline and p.get("url")
                      and not _cat_cache.get(p["id"], {}).get("category")]
 
         if needs_cat:
@@ -1460,6 +1469,7 @@ def _run(selected_stores: list[str], baseline: bool):
 
             def _fetch_cat(p):
                 try:
+                    _sleep(0.2, 0.2)  # 0–0.4s jitter so parallel requests stagger
                     cat, subcat, _ = fetch_page_data(p["url"], p.get("name", ""))
                     return p["id"], cat, subcat
                 except Exception:
