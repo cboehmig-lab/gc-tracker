@@ -1,98 +1,108 @@
-# Guitar Center Used Inventory Tracker
+# 🎸 GC Used Inventory Tracker
 
-Automatically checks the Guitar Center used inventory for **Austin** and **South Austin** stores and logs new items to an Excel file.
-
----
-
-## Quick Start
-
-### 1. Install dependencies (one time)
-
-```bash
-pip install requests beautifulsoup4 openpyxl
-```
-
-### 2. Run the tracker
-
-```bash
-python gc_inventory_tracker.py
-```
-
-- **First run**: logs all current inventory as your baseline (nothing goes into the Excel file yet — this just sets the starting point).
-- **Every run after that**: only items that are new since the last run get added to `gc_new_inventory.xlsx`.
+Track new used gear listings at Guitar Center stores — see what's just arrived before anyone else.
 
 ---
 
-## What you get
+## What it does
 
-| File | Purpose |
-|------|---------|
-| `gc_new_inventory.xlsx` | Opens in Excel. New rows are added each run. |
-| `gc_state.json` | Tracks which items you've seen. Don't delete this. |
+- Monitors any Guitar Center store's used inventory
+- Shows you new listings since your last check
+- Filters by condition (Excellent, Great, Good, Fair, Poor), category, and price
+- Downloads results to Excel
+- Remembers your favorite stores
 
-### Excel columns
+---
 
-| Column | Description |
-|--------|-------------|
-| Date Found | Timestamp of the run that spotted this item |
-| Item Name | Product description |
-| Price | Listed price |
-| Store | Austin or South Austin |
-| Link | Clickable URL to the GC listing |
+## Setup (one time only)
+
+### Step 1 — Install Python
+
+**Mac:** Python is usually already installed. To check, open Terminal and type `python3 --version`. If you see a version number, skip to Step 2. Otherwise download it from [python.org/downloads](https://www.python.org/downloads/).
+
+**Windows:** Download Python from [python.org/downloads](https://www.python.org/downloads/). **Important:** During installation, check the box that says "Add Python to PATH."
+
+---
+
+### Step 2 — Download the tracker
+
+1. Go to [github.com/cboehmig-lab/gc-tracker](https://github.com/cboehmig-lab/gc-tracker)
+2. Click the green **Code** button → **Download ZIP**
+3. Unzip the downloaded file somewhere easy to find (like your Desktop or Documents)
+
+---
+
+### Step 3 — Run it
+
+**Mac:**
+1. Open the unzipped folder
+2. Right-click `install_mac.command` → **Open**
+3. If you see a security warning, click **Open** again
+4. Your browser will open automatically with the tracker
+
+**Windows:**
+1. Open the unzipped folder
+2. Double-click `install_windows.bat`
+3. If Windows shows a "Windows protected your PC" warning, click **More info** → **Run anyway**
+4. Your browser will open automatically with the tracker
+
+> The first time you run it, it installs the required Python packages (takes about 30 seconds). After that it starts instantly.
+
+---
+
+## Using the tracker
+
+**First run — Build your baseline**
+
+Before you can track new items, you need to tell the tracker what already exists. Click **🌐 Build Baseline** — this scans all Guitar Center stores and saves the current inventory as your starting point. It takes 30–60 minutes but you only do it once.
+
+**After that — Check for new items**
+
+1. Select one or more stores from the left panel (click ★ to save favorites)
+2. Click **Run**
+3. New items appear highlighted with a **NEW** badge
+
+**Validate your store list**
+
+Click **✓ Validate Stores** occasionally to remove any stores that have closed and discover any new ones that have opened.
+
+---
+
+## Your data
+
+All your data is saved in:
+- **Mac:** `~/Documents/GCTracker/`
+- **Windows:** `Documents\GCTracker\`
+
+This includes your state, favorites, and Excel exports. It's never deleted when you update the app.
+
+---
+
+## Updates
+
+When an update is available, a green banner appears at the top of the app. Click **Install Update** and it downloads and installs automatically. Then restart the app by closing the terminal window and double-clicking the launcher again.
 
 ---
 
 ## Troubleshooting
 
-### "Could not find product cards"
+**"Python is not installed" on Mac**
+Download Python from [python.org/downloads](https://www.python.org/downloads/) and try again.
 
-Guitar Center occasionally updates their page markup. If this happens:
+**"Windows protected your PC" warning**
+This is normal for apps not sold through the Microsoft Store. Click **More info** → **Run anyway**. The source code is fully visible on GitHub if you want to verify it.
 
-1. Open `gc_debug_page.html` (saved automatically) in your browser.
-2. Right-click a product listing → **Inspect Element**.
-3. Note the CSS class on the outer `<div>` wrapping each product.
-4. Add that class to the `cards = (...)` block in `parse_products()`.
+**"Unverified developer" warning on Mac**
+Right-click the `.command` file → **Open** → **Open** again. You only have to do this once.
 
-### Website uses JavaScript rendering
+**The browser doesn't open automatically**
+Open your browser manually and go to: `http://localhost:5050`
 
-If you see an empty or login page in `gc_debug_page.html`, Guitar Center may be rendering products via JavaScript. In that case:
-
-```bash
-pip install playwright
-playwright install chromium
-```
-
-Then replace the `fetch_page()` function with:
-
-```python
-def fetch_page(start: int = 0) -> str:
-    from playwright.sync_api import sync_playwright
-    url = f"{BASE_URL}?{QUERY}&start={start}"
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(url, wait_until="networkidle")
-        html = page.content()
-        browser.close()
-    return html
-```
-
-### "HTTP error 403" or "Access denied"
-
-The site may be blocking automated requests. Try:
-1. Increase `REQUEST_DELAY` to `3.0` or higher.
-2. Run the script while your browser has a Guitar Center tab open.
+**Port 5050 is already in use**
+Another app is using port 5050. Close it, or set a different port by editing `install_mac.command` or `install_windows.bat` and changing `PORT=5050` to another number like `PORT=5051`. Use the same number in your browser URL.
 
 ---
 
-## Running automatically (optional)
+## Questions or issues
 
-You can schedule this as a cron job on Mac to run daily:
-
-```bash
-# Open crontab editor
-crontab -e
-
-# Add this line to run at 8am daily (adjust path to your script):
-0 8 * * * /usr/bin/python3 /path/to/gc_inventory_tracker.py >> /path/to/gc_tracker.log 2>&1
-```
+Open an issue at [github.com/cboehmig-lab/gc-tracker/issues](https://github.com/cboehmig-lab/gc-tracker/issues)
