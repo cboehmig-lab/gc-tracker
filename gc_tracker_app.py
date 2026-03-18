@@ -331,6 +331,10 @@ def fetch_page(store_name: str, page: int) -> str:
     url   = f"https://www.guitarcenter.com/Used/?{query}&page={page}"
     r = _http.get(url, timeout=20)
     r.raise_for_status()
+    # Save first page of first store as debug dump for condition pattern inspection
+    debug_file = DATA_DIR / "gc_debug_listing.html"
+    if page == 1 and not debug_file.exists():
+        debug_file.write_text(r.text)
     return r.text
 
 
@@ -982,6 +986,56 @@ def api_run():
     t.start()
     return jsonify({"status": "started"})
 
+@app.route("/api/debug-condition")
+@login_required
+def api_debug_condition():
+    """Inspect the saved listing HTML to diagnose condition extraction."""
+    debug_file = DATA_DIR / "gc_debug_listing.html"
+    if not debug_file.exists():
+        return jsonify({"error": "No debug file yet — run the tracker once first to save a listing page."})
+    html = debug_file.read_text(errors="replace")
+
+    import re as _re
+
+    # 1. Find all "Condition:" occurrences and show surrounding context
+    condition_hits = []
+    for m in _re.finditer(r'.{0,120}[Cc]ondition.{0,80}', html):
+        condition_hits.append(m.group(0).replace("<", "&lt;"))
+        if len(condition_hits) >= 10:
+            break
+
+    # 2. Find all product URLs in the HTML
+    product_urls = _re.findall(r'https?://www\.guitarcenter\.com/Used/[^\s"\'<>]+\.gc[^\s"\'<>]*', html)
+    product_urls = list(dict.fromkeys(product_urls))[:5]  # dedupe, first 5
+
+    # 3. Show 400 chars of HTML after first product URL
+    snippet = ""
+    if product_urls:
+        idx = html.find(product_urls[0])
+        if idx >= 0:
+            snippet = html[max(0, idx-200):idx+600].replace("<", "&lt;")
+
+    # 4. Run current extractor and show result
+    cmap = _extract_conditions_from_listing(html)
+
+    return jsonify({
+        "condition_hits_in_html": condition_hits,
+        "sample_product_urls": product_urls,
+        "html_around_first_url": snippet,
+        "extractor_result_count": len(cmap),
+        "extractor_sample": dict(list(cmap.items())[:3]),
+        "html_size": len(html),
+    })
+
+@app.route("/api/debug-condition/reset", methods=["POST"])
+@login_required
+def api_debug_condition_reset():
+    """Delete the debug listing file so a fresh one gets saved on next run."""
+    debug_file = DATA_DIR / "gc_debug_listing.html"
+    if debug_file.exists():
+        debug_file.unlink()
+    return jsonify({"status": "cleared"})
+
 @app.route("/api/stop", methods=["POST"])
 @login_required
 def api_stop():
@@ -991,14 +1045,19 @@ def api_stop():
 @app.route("/api/fill-gaps", methods=["POST"])
 @login_required
 def api_fill_gaps():
-    """Re-fetch product pages for items missing category or condition data."""
+    """Re-scrape listing pages for selected stores to fill missing condition/category data."""
     if not _lock.acquire(blocking=False):
         return jsonify({"error": "A run is already in progress."}), 409
     _stop_event.clear()
     while not _q.empty():
         try: _q.get_nowait()
         except queue.Empty: break
-    t = threading.Thread(target=_fill_gaps, daemon=True)
+    data = request.json or {}
+    stores = data.get("stores", [])
+    if not stores:
+        _lock.release()
+        return jsonify({"error": "No stores selected."}), 400
+    t = threading.Thread(target=_fill_gaps, args=(stores,), daemon=True)
     t.start()
     return jsonify({"status": "started"})
 
@@ -1017,67 +1076,68 @@ def api_progress():
                     headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
 
-def _fill_gaps():
-    """Worker: find items in the category cache missing condition or category, re-fetch their pages."""
+def _fill_gaps(selected_stores: list[str]):
+    """Re-scrape listing pages for selected stores to fill missing condition/category data.
+    Same scrape as a normal run but never marks items as new — only updates the cache."""
     def send(msg): _q.put(msg)
     try:
         _load_cat_cache()
-        # Find SKUs that are missing condition (condition_fetched not set) or missing category
-        gaps = {
-            sku: data for sku, data in _cat_cache.items()
-            if not data.get("condition_fetched") or not data.get("category")
-        }
-        # Also pull URLs from state so we can fetch pages — but we need URLs.
-        # URLs are stored in the Excel file; read them from there.
-        url_map: dict[str, tuple[str, str]] = {}  # sku → (name, url)  — can't recover SKU from Excel easily
-        # Actually we stored URLs keyed by GC listing URL slug which includes SKU-like numbers.
-        # Better: re-read the Excel to get name+url for items that need gaps filled.
-        # The Excel SKU isn't stored directly, so we'll match by URL pattern.
-        # Instead, we track which cache entries have a stored url.
-        url_gaps = {sku: data for sku, data in gaps.items() if data.get("url")}
-        no_url_gaps = {sku: data for sku, data in gaps.items() if not data.get("url")}
+        state      = load_state()
+        seen_ids   = set(state.get("seen_ids", []))
 
-        total = len(gaps)
-        send({"type": "progress", "msg": f"Found {total} items with gaps ({len(url_gaps)} have URLs to fetch, {len(no_url_gaps)} will use keyword classifier)."})
+        send({"type": "progress", "msg": f"Filling gaps for {len(selected_stores)} store(s)…"})
+        send({"type": "progress", "msg": "Re-scraping listing pages to capture Condition, Category, and Subcategory."})
 
-        # For items without URLs, just re-run keyword classifier on cached name
-        fixed_kw = 0
-        for sku, data in no_url_gaps.items():
-            if _stop_event.is_set():
-                break
-            name = data.get("name", "")
-            if not data.get("category") and name:
-                cat, subcat = classify_by_name(name)
-                _cat_cache[sku].update({"category": cat, "subcategory": subcat})
-                fixed_kw += 1
-            _cat_cache[sku]["condition_fetched"] = True  # mark so we don't retry endlessly
-
-        if fixed_kw:
-            send({"type": "progress", "msg": f"  Classified {fixed_kw} items via keyword matcher."})
-
-        # For items with URLs, fetch each page
-        fixed_http = 0
-        for i, (sku, data) in enumerate(url_gaps.items(), 1):
+        fixed = 0
+        for i, store in enumerate(selected_stores, 1):
             if _stop_event.is_set():
                 send({"type": "progress", "msg": "⏹ Stopped by user."})
                 break
-            url  = data.get("url", "")
-            name = data.get("name", "")
-            if (i - 1) % 10 == 0:
-                send({"type": "progress", "msg": f"  Fetching page data… ({i}/{len(url_gaps)})"})
-            cat, subcat, condition = fetch_page_data(url, name)
-            _cat_cache[sku].update({
-                "category": cat, "subcategory": subcat,
-                "condition": condition, "condition_fetched": True,
-            })
-            fixed_http += 1
-            time.sleep(0.4)
+            send({"type": "progress", "msg": f"\n[{i}/{len(selected_stores)}] {store}"})
+            page = 1
+            while page <= 50:
+                if _stop_event.is_set():
+                    break
+                send({"type": "progress", "msg": f"  [{store}] page {page}…"})
+                try:
+                    html = fetch_page(store, page)
+                except Exception as e:
+                    send({"type": "progress", "msg": f"  [{store}] error: {e}"})
+                    break
+                products = parse_products(html, store)
+                if not products:
+                    break
+                for p in products:
+                    sku = p["id"]
+                    cached = _cat_cache.get(sku, {})
+                    needs_fix = (not cached.get("condition") or not cached.get("category"))
+                    if needs_fix:
+                        cat, subcat = classify_by_name(p.get("name", ""))
+                        condition   = p.get("condition", "") or cached.get("condition", "")
+                        _cat_cache[sku] = {
+                            "category": cat or cached.get("category", ""),
+                            "subcategory": subcat or cached.get("subcategory", ""),
+                            "condition": condition,
+                            "condition_fetched": True,
+                            "name": p.get("name", ""),
+                            "url":  p.get("url", ""),
+                        }
+                        fixed += 1
+                    elif not cached.get("condition") and p.get("condition"):
+                        # Has category already, just missing condition
+                        _cat_cache[sku]["condition"] = p["condition"]
+                        _cat_cache[sku]["condition_fetched"] = True
+                        fixed += 1
+                if len(products) < PAGE_SIZE:
+                    break
+                page += 1
+                time.sleep(1.0)
 
         _save_cat_cache()
-        send({"type": "progress", "msg": f"\n✓ Gap fill complete — {fixed_kw + fixed_http} items updated."})
+        send({"type": "progress", "msg": f"\n✓ Done — {fixed} item(s) updated."})
         send({"type": "done", "baseline": False, "stopped": _stop_event.is_set(),
-              "scanned": total, "new_count": 0, "new_items": [], "all_items": [],
-              "gap_fill": True, "fixed": fixed_kw + fixed_http})
+              "scanned": fixed, "new_count": 0, "new_items": [], "all_items": [],
+              "gap_fill": True, "fixed": fixed})
     except Exception as e:
         send({"type": "done", "error": str(e), "scanned": 0, "new_count": 0, "new_items": []})
     finally:
@@ -1351,7 +1411,7 @@ td a:hover{text-decoration:underline}
       </button>
       <button id="fill-gaps-btn" onclick="fillGaps()"
         style="margin-top:6px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:5px;color:#777;font-size:.75rem;cursor:pointer"
-        title="Re-fetch product pages to fill in missing Category, Subcategory, and Condition data">
+        title="Re-scrape selected stores to fill in missing Condition and Category data">
         🔍 Fill Data Gaps
       </button>
     </div>
@@ -1570,8 +1630,17 @@ async function stopRun() {
 
 async function fillGaps() {
   if (running) return;
+  const stores = getSelected();
+  if (!stores.length) {
+    appendLog('Select at least one store before filling gaps.', 'log-err');
+    return;
+  }
   const btn = document.getElementById('fill-gaps-btn');
-  const resp = await fetch('/api/fill-gaps', {method:'POST'});
+  const resp = await fetch('/api/fill-gaps', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({stores})
+  });
   if (!resp.ok) {
     const e = await resp.json();
     appendLog('Fill gaps error: ' + e.error, 'log-err');
@@ -1584,7 +1653,7 @@ async function fillGaps() {
   document.getElementById('stop-btn').disabled = false;
   document.getElementById('stop-btn').textContent = '⏹ Stop Running';
   document.getElementById('log').innerHTML = '';
-  appendLog('🔍 Scanning for missing Category, Subcategory, and Condition data…');
+  appendLog(`🔍 Re-scanning ${stores.length} store(s) to fill missing Condition & Category data…`);
 
   const es = new EventSource('/api/progress');
   es.onmessage = e => {
@@ -1598,7 +1667,7 @@ async function fillGaps() {
       btn.disabled = false;
       updateCount();
       if (msg.gap_fill) {
-        appendLog(`✓ Gap fill complete — ${msg.fixed || 0} items updated. Re-run your stores to see refreshed data.`, 'log-dim');
+        appendLog(`✓ Gap fill complete — ${msg.fixed || 0} items updated. Re-run to see refreshed data.`, 'log-dim');
       }
     }
   };
