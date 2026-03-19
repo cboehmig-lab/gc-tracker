@@ -1823,7 +1823,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .app-tab{padding:11px 28px;font-size:.85rem;font-weight:600;color:#666;cursor:pointer;border:none;background:none;border-bottom:3px solid transparent;margin-bottom:-1px;letter-spacing:.2px;transition:color .15s}
 .app-tab:hover{color:#ccc}
 .app-tab.gc-tab.active{color:#ff4444;border-bottom-color:#c00}
-.app-tab.cl-tab.active{color:#b794ff;border-bottom-color:#9d6bff}
+.app-tab.cl-tab.active{color:#c7d2fe;border-bottom-color:#a5b4fc}
 .app-panel{display:none;flex:1;overflow:hidden}
 .app-panel.active{display:flex}
 
@@ -1916,15 +1916,15 @@ td a:hover{text-decoration:underline}
 .cl-left{width:220px;min-width:200px;background:#1a1a1a;border-right:1px solid #2e2e2e;display:flex;flex-direction:column;flex-shrink:0}
 .cl-left .search-wrap{padding:10px 12px;border-bottom:1px solid #2e2e2e;flex-shrink:0}
 #cl-city-search{width:100%;padding:7px 11px;border-radius:5px;background:#252525;border:1px solid #3a3a3a;color:#eee;font-size:.875rem;outline:none}
-#cl-city-search:focus{border-color:#9d6bff}
+#cl-city-search:focus{border-color:#a5b4fc}
 .cl-sel-btns{display:flex;gap:6px;margin-top:8px}
 .cl-sel-btn{flex:1;padding:5px;background:#252525;border:1px solid #3a3a3a;border-radius:4px;color:#aaa;font-size:.75rem;cursor:pointer}
-.cl-sel-btn:hover{border-color:#9d6bff;color:#fff}
-.cl-sel-btn.active{border-color:#9d6bff;color:#b794ff;background:#231840}
+.cl-sel-btn:hover{border-color:#a5b4fc;color:#fff}
+.cl-sel-btn.active{border-color:#a5b4fc;color:#c7d2fe;background:#1a1f35}
 #cl-city-list{flex:1;overflow-y:auto;padding:4px 0}
 .cl-city-row{display:flex;align-items:center;padding:6px 12px;gap:8px;cursor:pointer}
 .cl-city-row:hover{background:#222}
-.cl-city-row input[type=checkbox]{accent-color:#9d6bff;flex-shrink:0;cursor:pointer}
+.cl-city-row input[type=checkbox]{accent-color:#a5b4fc;flex-shrink:0;cursor:pointer}
 .cl-city-row label{flex:1;font-size:.855rem;cursor:pointer}
 .cl-fav-btn{background:none;border:none;cursor:pointer;font-size:1rem;line-height:1;padding:0 4px;color:#444;flex-shrink:0;transition:color .15s}
 .cl-fav-btn.active{color:#f5c518}
@@ -1933,30 +1933,30 @@ td a:hover{text-decoration:underline}
 .cl-right{display:flex;flex-direction:column;flex:1;overflow:hidden}
 .cl-search-bar{padding:12px 16px;border-bottom:1px solid #2e2e2e;display:flex;gap:10px;align-items:center;flex-shrink:0;background:#111}
 #cl-query{flex:1;padding:9px 14px;border-radius:6px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.95rem;outline:none}
-#cl-query:focus{border-color:#9d6bff}
-#cl-search-btn{padding:9px 20px;background:#9d6bff;color:#fff;border:none;border-radius:6px;font-size:.88rem;font-weight:700;cursor:pointer;white-space:nowrap}
-#cl-search-btn:hover{background:#8b5cf6}
+#cl-query:focus{border-color:#a5b4fc}
+#cl-search-btn{padding:9px 20px;background:#a5b4fc;color:#fff;border:none;border-radius:6px;font-size:.88rem;font-weight:700;cursor:pointer;white-space:nowrap}
+#cl-search-btn:hover{background:#818cf8}
 #cl-search-btn:disabled{opacity:.6;cursor:not-allowed}
-#cl-status{font-size:.8rem;color:#b794ff;padding:0 4px}
+#cl-status{font-size:.8rem;color:#c7d2fe;padding:0 4px}
 .cl-results-hdr{padding:10px 16px;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;gap:10px;flex-shrink:0;background:#141414}
-#cl-count{font-size:.85rem;color:#b794ff;font-weight:600}
+#cl-count{font-size:.85rem;color:#c7d2fe;font-weight:600}
 #cl-res-search{padding:5px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;margin-left:auto;width:200px}
-#cl-res-search:focus{border-color:#9d6bff}
+#cl-res-search:focus{border-color:#a5b4fc}
 #cl-body{flex:1;overflow-y:auto}
 #cl-body table{width:100%;border-collapse:collapse;font-size:.83rem;table-layout:auto}
 #cl-body th{background:#161616;color:#666;font-weight:600;text-align:left;padding:7px 10px;font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:0;cursor:pointer;user-select:none;white-space:nowrap}
 #cl-body th:hover{color:#ccc}
-#cl-body th.sort-asc::after{content:" ▲";color:#9d6bff;font-size:.6rem}
-#cl-body th.sort-desc::after{content:" ▼";color:#9d6bff;font-size:.6rem}
+#cl-body th.sort-asc::after{content:" ▲";color:#a5b4fc;font-size:.6rem}
+#cl-body th.sort-desc::after{content:" ▼";color:#a5b4fc;font-size:.6rem}
 #cl-body td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0}
 #cl-body td:nth-child(1){width:50%;max-width:400px}
 #cl-body td:nth-child(2){width:100px}
 #cl-body td:nth-child(3){width:160px}
 #cl-body td:nth-child(4){width:100px}
 #cl-body tr:hover td{background:#161616}
-#cl-body tr.cl-fav-result td{background:#1e1245}
-#cl-body tr.cl-fav-result:hover td{background:#2a1f50}
-#cl-body td a{color:#b794ff;text-decoration:none}
+#cl-body tr.cl-fav-result td{background:#1a1f35}
+#cl-body tr.cl-fav-result:hover td{background:#252b45}
+#cl-body td a{color:#c7d2fe;text-decoration:none}
 #cl-body td a:hover{text-decoration:underline}
 .cl-empty{padding:32px;color:#555;font-size:.9rem;text-align:center}
 .cl-fav-star{color:#f5c518;margin-right:4px;font-size:.8rem}
@@ -2813,8 +2813,8 @@ function clRenderResults() {
   document.getElementById('cl-res-search').value = '';
   hdr.style.display = 'flex';
 
-  const cols = ['title','price','location','date'];
-  const labels = ['Item','Price','Location','Date'];
+  const cols = ['title','price','location','date','relevance'];
+  const labels = ['Item','Price','Location','Date','Relevance'];
   let html = '<table><thead><tr>';
   labels.forEach((l, i) => {
     const cls = _clSortCol === i ? (_clSortDir === 1 ? 'sort-asc' : 'sort-desc') : '';
@@ -2825,10 +2825,26 @@ function clRenderResults() {
   // Favorites first, then rest — within each group, sort by selected col
   const isFavResult = r => _clFavs.includes(r.cityId);
 
+  // Relevance scoring based on current search query
+  const rawQuery = (document.getElementById('cl-query').value || '').trim().toLowerCase();
+  const queryWords = rawQuery.split(/[ \t]+/).filter(Boolean);
+  function relevanceScore(title) {
+    const t = (title || '').toLowerCase();
+    if (!rawQuery) return 0;
+    if (t.includes(rawQuery)) return 3;          // exact phrase
+    if (queryWords.every(w => t.includes(w))) return 2;  // all words
+    if (queryWords.some(w => t.includes(w))) return 1;   // some words
+    return 0;
+  }
+
   let sorted = [..._clData];
   if (_clSortCol !== null) {
     const key = cols[_clSortCol];
     sorted.sort((a, b) => {
+      if (key === 'relevance') {
+        // For relevance, desc = most relevant first (flip _clSortDir meaning)
+        return _clSortDir * (relevanceScore(b.title) - relevanceScore(a.title));
+      }
       const av = a[key] || '', bv = b[key] || '';
       if (key === 'price') {
         return _clSortDir * ((parseFloat(String(av).replace(/[^0-9.]/g,'')) || 0) -
@@ -2841,8 +2857,10 @@ function clRenderResults() {
   // Favorites float to top only when no sort is active
   let final;
   if (_clSortCol === null) {
-    const favResults  = sorted.filter(r => isFavResult(r));
-    const restResults = sorted.filter(r => !isFavResult(r));
+    // Sort by relevance within each tier
+    const score = r => relevanceScore(r.title);
+    const favResults  = sorted.filter(r =>  isFavResult(r)).sort((a,b) => score(b)-score(a));
+    const restResults = sorted.filter(r => !isFavResult(r)).sort((a,b) => score(b)-score(a));
     final = [...favResults, ...restResults];
   } else {
     final = sorted;
@@ -2865,8 +2883,15 @@ function clRenderResults() {
 }
 
 function clSort(col) {
-  if (_clSortCol === col) _clSortDir *= -1;
-  else { _clSortCol = col; _clSortDir = 1; }
+  const isRelevance = cols && cols[col] === 'relevance';
+  if (isRelevance && _clSortCol === col) {
+    // Second click on Relevance = back to default (fav+relevance, no active sort)
+    _clSortCol = null; _clSortDir = 1;
+  } else if (_clSortCol === col) {
+    _clSortDir *= -1;
+  } else {
+    _clSortCol = col; _clSortDir = 1;
+  }
   clRenderResults();
 }
 </script>
