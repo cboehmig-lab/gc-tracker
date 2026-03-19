@@ -463,6 +463,7 @@ def parse_products(html: str, store_name: str) -> list[dict]:
     # Pre-scan the listing HTML for per-item conditions (visible text on product cards)
     condition_map = _extract_conditions_from_listing(html)
 
+    # Strategy 1: JSON-LD CollectionPage (original format)
     for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL):
         try:
             data = json.loads(block)
@@ -483,20 +484,75 @@ def parse_products(html: str, store_name: str) -> list[dict]:
             raw  = offers.get("price", "")
             try:    price = float(raw) if raw else None
             except: price = None
-            # Prefer condition from the visible card HTML; fall back to JSON-LD itemCondition
             url_key = url.split("?")[0]
             condition = condition_map.get(url_key, "")
             if not condition:
                 raw_cond = offers.get("itemCondition", "")
                 parsed = _parse_condition(raw_cond)
-                # Don't use the generic "Used" fallback — it's meaningless
                 condition = parsed if parsed.lower() not in ("used", "") else ""
             if name and sku:
                 products.append({"id": sku, "name": name, "price": price,
                                   "store": store_name, "url": url,
                                   "condition": condition})
-        return products
+        if products:
+            return products
+
+    # Strategy 2: __NEXT_DATA__ Algolia page (new format as of 2026)
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if m:
+        try:
+            nd = json.loads(m.group(1))
+            products = _parse_algolia_products(nd, store_name, condition_map)
+            if products:
+                return products
+        except Exception:
+            pass
+
     return []
+
+
+def _parse_algolia_products(nd: dict, store_name: str, condition_map: dict) -> list[dict]:
+    """Walk __NEXT_DATA__ looking for Algolia product hits."""
+    products = []
+
+    def walk(obj, depth=0):
+        if depth > 15 or products:
+            return
+        if isinstance(obj, dict):
+            # Look for Algolia hits array
+            hits = obj.get("hits") or obj.get("results") or []
+            if isinstance(hits, list) and hits and isinstance(hits[0], dict):
+                for hit in hits:
+                    sku  = str(hit.get("objectID") or hit.get("sku") or hit.get("productId") or "").strip()
+                    name = _clean_name(hit.get("name") or hit.get("title") or "")
+                    if not sku or not name:
+                        continue
+                    price_raw = hit.get("price") or hit.get("salePrice") or hit.get("listPrice") or 0
+                    try:    price = float(price_raw) if price_raw else None
+                    except: price = None
+                    url = hit.get("url") or hit.get("pdpUrl") or f"https://www.guitarcenter.com/used/{sku}.gc"
+                    if not url.startswith("http"):
+                        url = "https://www.guitarcenter.com" + url
+                    url_key = url.split("?")[0]
+                    condition = condition_map.get(url_key, "")
+                    if not condition:
+                        condition = hit.get("condition") or hit.get("itemCondition") or ""
+                        condition = _parse_condition(condition) if condition else ""
+                    products.append({"id": sku, "name": name, "price": price,
+                                     "store": store_name, "url": url, "condition": condition})
+                return
+            for v in obj.values():
+                if isinstance(v, (dict, list)):
+                    walk(v, depth + 1)
+        elif isinstance(obj, list):
+            for item in obj:
+                if isinstance(item, (dict, list)):
+                    walk(item, depth + 1)
+
+    walk(nd)
+    return products
+
+
 
 
 
@@ -1589,21 +1645,31 @@ def api_debug_fetch():
         has_json_ld  = "CollectionPage" in html
         has_products = len(parse_products(html, store)) > 0
         bot_signals  = [s for s in ["captcha","robot","blocked","access denied","cloudflare","challenge"] if s in html.lower()]
-        # Check what the URL actually redirected to
-        final_url = r.url if hasattr(r, 'url') else url
+        # Check __NEXT_DATA__ structure
+        nd_keys = []
+        nd_sample = ""
+        m2 = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+        if m2:
+            try:
+                nd = json.loads(m2.group(1))
+                nd_keys = list(nd.keys())[:10]
+                nd_sample = m2.group(1)[:1000]
+            except Exception as e:
+                nd_keys = [f"parse error: {e}"]
+
         return jsonify({
             "store":                   store,
             "url_fetched":             url,
             "final_url":               final_url,
             "status_code":             r.status_code,
-            "response_headers":        dict(r.headers),
             "cookies_sent":            len(_http.cookies),
-            "user_agent":              _http.headers.get("User-Agent",""),
             "html_size":               len(html),
             "has_collection_page_json_ld": has_json_ld,
             "products_parsed":         has_products,
             "bot_signals":             bot_signals,
-            "html_snippet":            html[1000:2000],  # skip the <head>, show body start
+            "next_data_keys":          nd_keys,
+            "next_data_sample":        nd_sample,
+            "middleware_rewrite":      r.headers.get("x-middleware-rewrite", ""),
         })
     except Exception as e:
         return jsonify({"error": str(e)})
