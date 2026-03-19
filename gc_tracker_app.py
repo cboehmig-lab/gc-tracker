@@ -2644,40 +2644,40 @@ function switchTab(tab) {
 
 // ── CL City list ──────────────────────────────────────────────────────────────
 const CL_CITIES = [
-  {id:'atlanta',label:'Atlanta'},      {id:'austin',label:'Austin'},
-  {id:'boston',label:'Boston'},        {id:'chicago',label:'Chicago'},
-  {id:'dallas',label:'Dallas'},        {id:'denver',label:'Denver'},
-  {id:'detroit',label:'Detroit'},      {id:'houston',label:'Houston'},
-  {id:'lasvegas',label:'Las Vegas'},   {id:'losangeles',label:'Los Angeles'},
-  {id:'miami',label:'Miami'},          {id:'minneapolis',label:'Minneapolis'},
-  {id:'nashville',label:'Nashville'},  {id:'newyork',label:'New York'},
-  {id:'philadelphia',label:'Philadelphia'}, {id:'phoenix',label:'Phoenix'},
-  {id:'portland',label:'Portland'},    {id:'raleigh',label:'Raleigh'},
-  {id:'sacramento',label:'Sacramento'},{id:'saltlakecity',label:'Salt Lake City'},
-  {id:'sanantonio',label:'San Antonio'},{id:'sandiego',label:'San Diego'},
-  {id:'sfbay',label:'SF Bay Area'},    {id:'seattle',label:'Seattle'},
-  {id:'stlouis',label:'St. Louis'},    {id:'washingtondc',label:'Washington DC'},
-  {id:'baltimore',label:'Baltimore'},  {id:'charlotte',label:'Charlotte'},
-  {id:'cleveland',label:'Cleveland'},  {id:'columbus',label:'Columbus'},
-  {id:'fortworth',label:'Fort Worth'}, {id:'indianapolis',label:'Indianapolis'},
-  {id:'jacksonville',label:'Jacksonville'},{id:'kansascity',label:'Kansas City'},
-  {id:'memphis',label:'Memphis'},      {id:'milwaukee',label:'Milwaukee'},
-  {id:'oklahomacity',label:'Oklahoma City'},{id:'orlando',label:'Orlando'},
-  {id:'pittsburgh',label:'Pittsburgh'},{id:'richmond',label:'Richmond'},
-  {id:'riverside',label:'Riverside'},  {id:'tampabay',label:'Tampa Bay'},
-  {id:'tucson',label:'Tucson'},        {id:'tulsa',label:'Tulsa'},
-  {id:'albuquerque',label:'Albuquerque'},{id:'boise',label:'Boise'},
-  {id:'buffalo',label:'Buffalo'},      {id:'cincinnati',label:'Cincinnati'},
-  {id:'desmoines',label:'Des Moines'}, {id:'elpaso',label:'El Paso'},
-  {id:'fresno',label:'Fresno'},        {id:'grandrapids',label:'Grand Rapids'},
-  {id:'greensboro',label:'Greensboro'},{id:'hartford',label:'Hartford'},
-  {id:'honolulu',label:'Honolulu'},    {id:'knoxville',label:'Knoxville'},
-  {id:'louisville',label:'Louisville'},{id:'madison',label:'Madison'},
-  {id:'neworleans',label:'New Orleans'},{id:'norfolk',label:'Norfolk'},
-  {id:'omaha',label:'Omaha'},          {id:'providence',label:'Providence'},
-  {id:'rochester',label:'Rochester'},  {id:'spokane',label:'Spokane'},
-  {id:'syracuse',label:'Syracuse'},    {id:'toledo',label:'Toledo'},
-  {id:'wichita',label:'Wichita'},      {id:'virginiabeach',label:'Virginia Beach'},
+  {id:'albuquerque',label:'Albuquerque'}, {id:'atlanta',label:'Atlanta'},
+  {id:'austin',label:'Austin'},           {id:'baltimore',label:'Baltimore'},
+  {id:'boise',label:'Boise'},             {id:'boston',label:'Boston'},
+  {id:'buffalo',label:'Buffalo'},         {id:'charlotte',label:'Charlotte'},
+  {id:'chicago',label:'Chicago'},         {id:'cincinnati',label:'Cincinnati'},
+  {id:'cleveland',label:'Cleveland'},     {id:'columbus',label:'Columbus'},
+  {id:'dallas',label:'Dallas'},           {id:'denver',label:'Denver'},
+  {id:'desmoines',label:'Des Moines'},    {id:'detroit',label:'Detroit'},
+  {id:'elpaso',label:'El Paso'},          {id:'fortworth',label:'Fort Worth'},
+  {id:'fresno',label:'Fresno'},           {id:'grandrapids',label:'Grand Rapids'},
+  {id:'greensboro',label:'Greensboro'},   {id:'hartford',label:'Hartford'},
+  {id:'honolulu',label:'Honolulu'},       {id:'houston',label:'Houston'},
+  {id:'indianapolis',label:'Indianapolis'},{id:'jacksonville',label:'Jacksonville'},
+  {id:'kansascity',label:'Kansas City'},  {id:'knoxville',label:'Knoxville'},
+  {id:'lasvegas',label:'Las Vegas'},      {id:'losangeles',label:'Los Angeles'},
+  {id:'louisville',label:'Louisville'},   {id:'madison',label:'Madison'},
+  {id:'memphis',label:'Memphis'},         {id:'miami',label:'Miami'},
+  {id:'milwaukee',label:'Milwaukee'},     {id:'minneapolis',label:'Minneapolis'},
+  {id:'nashville',label:'Nashville'},     {id:'neworleans',label:'New Orleans'},
+  {id:'newyork',label:'New York'},        {id:'norfolk',label:'Norfolk'},
+  {id:'oklahomacity',label:'Oklahoma City'},{id:'omaha',label:'Omaha'},
+  {id:'orlando',label:'Orlando'},         {id:'philadelphia',label:'Philadelphia'},
+  {id:'phoenix',label:'Phoenix'},         {id:'pittsburgh',label:'Pittsburgh'},
+  {id:'portland',label:'Portland'},       {id:'providence',label:'Providence'},
+  {id:'raleigh',label:'Raleigh'},         {id:'richmond',label:'Richmond'},
+  {id:'riverside',label:'Riverside'},     {id:'rochester',label:'Rochester'},
+  {id:'sacramento',label:'Sacramento'},   {id:'saltlakecity',label:'Salt Lake City'},
+  {id:'sanantonio',label:'San Antonio'},  {id:'sandiego',label:'San Diego'},
+  {id:'sfbay',label:'SF Bay Area'},       {id:'seattle',label:'Seattle'},
+  {id:'spokane',label:'Spokane'},         {id:'stlouis',label:'St. Louis'},
+  {id:'syracuse',label:'Syracuse'},       {id:'tampabay',label:'Tampa Bay'},
+  {id:'toledo',label:'Toledo'},           {id:'tucson',label:'Tucson'},
+  {id:'tulsa',label:'Tulsa'},             {id:'virginiabeach',label:'Virginia Beach'},
+  {id:'washingtondc',label:'Washington DC'},{id:'wichita',label:'Wichita'},
 ];
 
 let _clFavs = [];
@@ -2837,10 +2837,15 @@ function clRenderResults() {
     });
   }
 
-  // Split into fav and non-fav
-  const favResults  = sorted.filter(r => isFavResult(r));
-  const restResults = sorted.filter(r => !isFavResult(r));
-  const final = [...favResults, ...restResults];
+  // Favorites float to top only when no sort is active
+  let final;
+  if (_clSortCol === null) {
+    const favResults  = sorted.filter(r => isFavResult(r));
+    const restResults = sorted.filter(r => !isFavResult(r));
+    final = [...favResults, ...restResults];
+  } else {
+    final = sorted;
+  }
 
   final.forEach(r => {
     const isFav = isFavResult(r);
