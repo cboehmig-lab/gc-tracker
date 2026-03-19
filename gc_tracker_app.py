@@ -1266,7 +1266,54 @@ def api_run():
     t.start()
     return jsonify({"status": "started"})
 
-@app.route("/api/cl-search")
+@app.route("/api/export-data")
+@login_required
+def api_export_data():
+    """Export all data files as a JSON bundle for migration."""
+    bundle = {}
+    for name, path in [
+        ("state",     STATE_FILE),
+        ("cat_cache", CAT_CACHE_FILE),
+        ("stores",    STORES_CACHE),
+        ("favorites", FAVORITES_FILE),
+        ("watchlist", WATCHLIST_FILE),
+    ]:
+        if path.exists():
+            try:
+                bundle[name] = json.loads(path.read_text())
+            except Exception:
+                pass
+    from flask import Response
+    return Response(
+        json.dumps(bundle),
+        mimetype="application/json",
+        headers={"Content-Disposition": "attachment; filename=gc_data_export.json"}
+    )
+
+
+@app.route("/api/import-data", methods=["POST"])
+@login_required
+def api_import_data():
+    """Import a data bundle exported from another instance."""
+    bundle = request.json or {}
+    written = []
+    mapping = {
+        "state":     STATE_FILE,
+        "cat_cache": CAT_CACHE_FILE,
+        "stores":    STORES_CACHE,
+        "favorites": FAVORITES_FILE,
+        "watchlist": WATCHLIST_FILE,
+    }
+    for name, path in mapping.items():
+        if name in bundle:
+            path.write_text(json.dumps(bundle[name]))
+            written.append(name)
+    global _cat_cache
+    _cat_cache = {}
+    _load_cat_cache()
+    return jsonify({"imported": written, "status": "Import complete — reload the page."})
+
+
 @login_required
 def api_cl_search():
     q = request.args.get("q", "").strip()
