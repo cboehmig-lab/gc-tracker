@@ -1649,12 +1649,26 @@ def api_debug_fetch():
         # Check __NEXT_DATA__ structure
         nd_keys = []
         nd_sample = ""
+        nd_queries = []
         m2 = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
         if m2:
             try:
                 nd = json.loads(m2.group(1))
                 nd_keys = list(nd.keys())[:10]
-                nd_sample = m2.group(1)[:1000]
+                # Dig into queries to find product data
+                queries = nd.get("props",{}).get("pageProps",{}).get("dehydratedState",{}).get("queries",[])
+                for i, q in enumerate(queries):
+                    data = q.get("state",{}).get("data",{})
+                    if isinstance(data, dict):
+                        keys = list(data.keys())[:8]
+                        # Look for product-like keys
+                        has_hits = any(k in str(data) for k in ["hits","products","items","objectID","sku"])
+                        nd_queries.append({
+                            "query_index": i,
+                            "data_keys": keys,
+                            "has_product_signals": has_hits,
+                            "sample": str(data)[:300] if has_hits else ""
+                        })
             except Exception as e:
                 nd_keys = [f"parse error: {e}"]
 
@@ -1669,7 +1683,7 @@ def api_debug_fetch():
             "products_parsed":         has_products,
             "bot_signals":             bot_signals,
             "next_data_keys":          nd_keys,
-            "next_data_sample":        nd_sample,
+            "next_data_queries":        nd_queries,
             "middleware_rewrite":      r.headers.get("x-middleware-rewrite", ""),
         })
     except Exception as e:
