@@ -320,7 +320,7 @@ def _clean_name(name: str) -> str:
 
 def fetch_page(store_name: str, page: int) -> str:
     _rotate_ua()
-    query = f"filters=stores:{store_name.replace(' ', '%20')}&Ns=cD"
+    query = f"filters=stores:{store_name.replace(' ', '%20')}"
     url   = f"https://www.guitarcenter.com/Used/?{query}&page={page}"
     r = _http.get(url, timeout=20)
     r.raise_for_status()
@@ -1191,9 +1191,24 @@ def _cl_fmt_date(iso: str) -> str:
         return iso[:10] if iso else ""
 
 def _cl_parse_html(html: str, city_id: str) -> list[dict]:
-    """Parse CL search results — data is embedded as JSON-LD ListItem blocks."""
+    """Parse CL search results — ItemList JSON-LD + URLs from HTML anchor tags."""
     items = []
     label = _cl_city_label(city_id)
+
+    # Extract post URLs from the HTML — CL puts them in <a class="cl-app-anchor"> or similar
+    # Pattern: href="https://cityname.craigslist.org/msa/d/title/1234567890.html"
+    post_urls = re.findall(
+        r'href="(https?://[a-z]+\.craigslist\.org/[^"]+/d/[^"]+\.html)"',
+        html)
+    # Dedupe while preserving order
+    seen = set()
+    post_urls_ordered = []
+    for u in post_urls:
+        if u not in seen:
+            seen.add(u)
+            post_urls_ordered.append(u)
+
+    # Find the ItemList JSON-LD block
     for block in re.findall(
             r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
             html, re.DOTALL):
@@ -1201,36 +1216,37 @@ def _cl_parse_html(html: str, city_id: str) -> list[dict]:
             data = json.loads(block)
         except Exception:
             continue
-        entries = []
-        if isinstance(data, list):
-            entries = data
-        elif data.get("@type") == "CollectionPage":
-            entries = data.get("mainEntity", {}).get("itemListElement", [])
-        elif data.get("@type") == "ItemList":
-            entries = data.get("itemListElement", [])
-        elif data.get("@type") == "ListItem":
-            entries = [data]
-        else:
+        if not isinstance(data, dict) or data.get("@type") != "ItemList":
             continue
-        for entry in entries:
-            item = entry.get("item", entry) if isinstance(entry, dict) else {}
+
+        entries = data.get("itemListElement", [])
+        for i, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                continue
+            item = entry.get("item", {})
             if not isinstance(item, dict):
                 continue
-            name  = item.get("name", "")
-            url   = item.get("url", "")
-            if not name or not url:
+            name   = item.get("name", "")
+            if not name:
+                continue
+            # Match URL by position
+            url = post_urls_ordered[i] if i < len(post_urls_ordered) else ""
+            if not url:
                 continue
             offers = item.get("offers", {})
             price  = offers.get("price", "")
             try:    price = f"${float(price):,.0f}" if price else ""
             except: price = str(price)
             avail  = offers.get("availableAtOrFrom", {})
-            addr   = avail.get("address", {}) if avail else {}
+            addr   = avail.get("address", {}) if isinstance(avail, dict) else {}
             hood   = addr.get("addressLocality","") or addr.get("addressRegion","")
             loc    = label + (f" · {hood}" if hood else "")
             date   = _cl_fmt_date(offers.get("validFrom","") or item.get("datePosted",""))
             items.append({"title": name, "url": url, "price": price,
                           "location": loc, "date": date, "cityId": city_id})
+        if items:
+            break  # Found and parsed the ItemList, done
+
     return items
 
 
@@ -1506,7 +1522,7 @@ def _check_store_url(store_name: str) -> tuple[bool, str]:
     Returns (is_valid, working_name). Tries variations if the original fails."""
     def _try(name: str) -> bool:
         try:
-            query = f"filters=stores:{name.replace(' ', '%20')}&Ns=cD"
+            query = f"filters=stores:{name.replace(' ', '%20')}"
             url   = f"https://www.guitarcenter.com/Used/?{query}&page=1"
             r = _http.get(url, timeout=10, allow_redirects=True)
             return r.status_code != 404
