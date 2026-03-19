@@ -1263,7 +1263,38 @@ def _cl_search(query: str, cities: list = None) -> list[dict]:
     return results
 
 
-@app.route("/api/cl-debug")
+@app.route("/api/cl-parse-test")
+@login_required
+def api_cl_parse_test():
+    """Test the CL parser on a live page and show what it finds."""
+    city = request.args.get("city", "sfbay")
+    q    = request.args.get("q", "telecaster")
+    try:
+        url  = f"https://{city}.craigslist.org/search/msa?query={http.utils.quote(q)}&sort=date"
+        r    = _http.get(url, timeout=12)
+        html = r.text
+        # Count JSON-LD blocks
+        blocks = re.findall(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL)
+        # Show first block raw
+        first_block = blocks[0] if blocks else ""
+        try:
+            first_parsed = json.loads(first_block) if first_block else {}
+        except Exception as e:
+            first_parsed = {"parse_error": str(e), "raw": first_block[:500]}
+        # Run the actual parser
+        results = _cl_parse_html(html, city)
+        return jsonify({
+            "html_size":      len(html),
+            "json_ld_blocks": len(blocks),
+            "first_block_type": first_parsed.get("@type","") if isinstance(first_parsed, dict) else type(first_parsed).__name__,
+            "first_block_keys": list(first_parsed.keys())[:10] if isinstance(first_parsed, dict) else [],
+            "first_block_sample": first_block[:800],
+            "parser_results_count": len(results),
+            "parser_sample": results[:3],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
 @login_required
 def api_cl_debug():
     """Probe a CL city to find the right section code and response format."""
