@@ -2555,13 +2555,14 @@ const CL_CITIES = [
   {id:'wichita',label:'Wichita'},      {id:'virginiabeach',label:'Virginia Beach'},
 ];
 
-let _clFavs = JSON.parse(localStorage.getItem('cl_favs') || '[]');
+let _clFavs = [];
+try { _clFavs = JSON.parse(localStorage.getItem('cl_favs') || '[]'); } catch(e) {}
 let _clFavsOnly = false;
 let _clData = [];
 let _clSortCol = null, _clSortDir = 1;
 
 function clSaveFavs() {
-  localStorage.setItem('cl_favs', JSON.stringify(_clFavs));
+  try { localStorage.setItem('cl_favs', JSON.stringify(_clFavs)); } catch(e) {}
 }
 
 function clRenderCities() {
