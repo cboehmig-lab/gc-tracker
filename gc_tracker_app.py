@@ -76,6 +76,23 @@ _HEADERS = {
 _http = http.Session()
 _http.headers.update(_HEADERS)
 
+# Load persisted cookies if available
+COOKIE_FILE = DATA_DIR / "gc_cookies.json"
+
+def _load_cookies():
+    if COOKIE_FILE.exists():
+        try:
+            cookies = json.loads(COOKIE_FILE.read_text())
+            _http.cookies.update(cookies)
+        except Exception:
+            pass
+
+def _save_cookies():
+    try:
+        COOKIE_FILE.write_text(json.dumps(dict(_http.cookies)))
+    except Exception:
+        pass
+
 def _rotate_ua():
     """Pick a random User-Agent for the next request."""
     _http.headers["User-Agent"] = random.choice(_USER_AGENTS)
@@ -338,6 +355,7 @@ def fetch_page(store_name: str, page: int) -> str:
     query = f"filters=stores:{store_name.replace(' ', '%20')}"
     url   = f"https://www.guitarcenter.com/Used/?{query}&page={page}"
     r = _http.get(url, timeout=20)
+    _save_cookies()  # persist any new cookies GC sets
     r.raise_for_status()
     # Save first page of first store as debug dump for condition pattern inspection
     debug_file = DATA_DIR / "gc_debug_listing.html"
@@ -1266,7 +1284,23 @@ def api_run():
     t.start()
     return jsonify({"status": "started"})
 
-@app.route("/api/export-data")
+@app.route("/api/set-cookies", methods=["POST"])
+@login_required
+def api_set_cookies():
+    """Import browser cookies into the HTTP session."""
+    cookie_string = request.json.get("cookies", "")
+    count = 0
+    for part in cookie_string.split(";"):
+        part = part.strip()
+        if "=" in part:
+            k, v = part.split("=", 1)
+            _http.cookies.set(k.strip(), v.strip(), domain=".guitarcenter.com")
+            count += 1
+    _save_cookies()
+    return jsonify({"imported": count, "status": "Cookies set — try running a store now."})
+
+
+
 @login_required
 def api_export_data():
     """Export all data files as a JSON bundle for migration."""
@@ -3449,6 +3483,7 @@ def api_do_update():
 
 if __name__ == "__main__":
     _load_cat_cache()
+    _load_cookies()
     if not STORES_CACHE.exists():
         print("Building store list…")
         refresh_store_list()
