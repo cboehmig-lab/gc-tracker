@@ -1581,22 +1581,29 @@ def api_debug_fetch():
     """Fetch page 1 for a store and return diagnostic info."""
     store = request.args.get("store", "South Austin")
     try:
-        html = fetch_page(store, 1)
-        has_json_ld = "CollectionPage" in html
+        _rotate_ua()
+        query = f"filters=stores:{store.replace(' ', '%20')}"
+        url   = f"https://www.guitarcenter.com/Used/?{query}&page=1"
+        r     = _http.get(url, timeout=20)
+        html  = r.text
+        has_json_ld  = "CollectionPage" in html
         has_products = len(parse_products(html, store)) > 0
-        size = len(html)
-        # Check for bot detection signals
-        bot_signals = []
-        for sig in ["captcha", "robot", "blocked", "access denied", "cloudflare", "challenge"]:
-            if sig in html.lower():
-                bot_signals.append(sig)
+        bot_signals  = [s for s in ["captcha","robot","blocked","access denied","cloudflare","challenge"] if s in html.lower()]
+        # Check what the URL actually redirected to
+        final_url = r.url if hasattr(r, 'url') else url
         return jsonify({
-            "store": store,
-            "html_size": size,
+            "store":                   store,
+            "url_fetched":             url,
+            "final_url":               final_url,
+            "status_code":             r.status_code,
+            "response_headers":        dict(r.headers),
+            "cookies_sent":            len(_http.cookies),
+            "user_agent":              _http.headers.get("User-Agent",""),
+            "html_size":               len(html),
             "has_collection_page_json_ld": has_json_ld,
-            "products_parsed": has_products,
-            "bot_signals": bot_signals,
-            "html_snippet": html[:500],
+            "products_parsed":         has_products,
+            "bot_signals":             bot_signals,
+            "html_snippet":            html[1000:2000],  # skip the <head>, show body start
         })
     except Exception as e:
         return jsonify({"error": str(e)})
