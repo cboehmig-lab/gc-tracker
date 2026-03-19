@@ -1132,19 +1132,26 @@ def api_browse():
     """Return cached inventory for selected stores — instant, no scraping."""
     stores = request.json.get("stores", [])
     if not stores:
-        return jsonify({"items": []})
+        return jsonify({"items": [], "no_store_data": True})
     _load_cat_cache()
     state      = load_state()
     seen_ids   = set(state.get("seen_ids", []))
     item_dates = state.get("item_dates", {})
     wl         = load_watchlist()
     store_set  = set(stores)
+
+    # Check if any cache entries have store field
+    has_store_data = any(v.get("store") for v in _cat_cache.values())
+    if not has_store_data:
+        return jsonify({"items": [], "no_store_data": True,
+                        "message": "Run 'Check for New Items' once to populate store data."})
+
     items = []
     for sku, cached in _cat_cache.items():
         if cached.get("store") not in store_set:
             continue
         if not cached.get("available", True):
-            continue  # skip sold items in browse view
+            continue
         price_raw = cached.get("price", 0) or 0
         items.append({
             "id":         sku,
@@ -1162,7 +1169,7 @@ def api_browse():
             "watched":    sku in wl,
         })
     items.sort(key=lambda x: (not x["isNew"], x.get("date","") or ""))
-    return jsonify({"items": items, "count": len(items)})
+    return jsonify({"items": items, "count": len(items), "no_store_data": False})
 
 
 @app.route("/api/watchlist", methods=["GET"])
@@ -2037,7 +2044,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .left-footer{padding:12px;border-top:1px solid #2e2e2e;flex-shrink:0}
 #sel-count{font-size:.78rem;color:#666;margin-bottom:8px}
 .btn-row{display:flex;gap:8px}
-#run-btn{flex:1;padding:10px;background:#c00;color:#fff;border:none;border-radius:5px;font-size:.95rem;font-weight:700;cursor:pointer}
+#run-btn{flex:1;padding:10px;background:#c00;color:#fff;border:none;border-radius:5px;font-size:.85rem;font-weight:700;cursor:pointer;white-space:nowrap}
 #run-btn:hover{background:#e00}
 #run-btn:disabled{background:#444;cursor:not-allowed}
 #baseline-btn{padding:10px 12px;background:#222;color:#aaa;border:1px solid #3a3a3a;border-radius:5px;font-size:.8rem;cursor:pointer;white-space:nowrap}
@@ -2458,8 +2465,21 @@ async function browseCache() {
       body: JSON.stringify({stores})
     });
     const d = await r.json();
+    if (d.no_store_data) {
+      // Cache exists but doesn't have per-store data yet — prompt a run
+      document.getElementById('res-panel').style.display = 'block';
+      document.getElementById('res-title').textContent = 'No Browse Data Yet';
+      document.getElementById('res-badge').textContent = '';
+      document.getElementById('res-body').innerHTML =
+        '<div class="no-res">Click <b>Check for New Items</b> once to populate store inventory data. After that, selecting stores will instantly show their inventory.</div>';
+      ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+      return;
+    }
     if (!d.items || !d.items.length) {
-      document.getElementById('res-panel').style.display = 'none';
+      document.getElementById('res-panel').style.display = 'block';
+      document.getElementById('res-title').textContent = 'No Items Found';
+      document.getElementById('res-badge').textContent = '';
+      document.getElementById('res-body').innerHTML = '<div class="no-res">No cached inventory for selected store(s). Run Check for New Items to scan.</div>';
       return;
     }
     window._tableData = d.items.map(item => ({...item}));
@@ -2468,7 +2488,7 @@ async function browseCache() {
     const total = d.items.length;
     document.getElementById('res-title').textContent = n > 0 ? `${n} New · ${total} Total` : `${total} Items`;
     document.getElementById('res-badge').textContent = n > 0 ? n + ' NEW' : '';
-    document.getElementById('res-panel').style.display = '';
+    document.getElementById('res-panel').style.display = 'block';
     document.getElementById('res-search').value = '';
     document.getElementById('res-search-count').textContent = '';
     ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
