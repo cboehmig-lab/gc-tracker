@@ -1273,22 +1273,24 @@ def api_cl_parse_test():
         url  = f"https://{city}.craigslist.org/search/msa?query={http.utils.quote(q)}&sort=date"
         r    = _http.get(url, timeout=12)
         html = r.text
-        # Count JSON-LD blocks
         blocks = re.findall(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL)
-        # Show first block raw
-        first_block = blocks[0] if blocks else ""
-        try:
-            first_parsed = json.loads(first_block) if first_block else {}
-        except Exception as e:
-            first_parsed = {"parse_error": str(e), "raw": first_block[:500]}
-        # Run the actual parser
+        parsed_blocks = []
+        for i, b in enumerate(blocks):
+            try:
+                d = json.loads(b)
+                parsed_blocks.append({
+                    "index": i,
+                    "type": d.get("@type","") if isinstance(d, dict) else type(d).__name__,
+                    "keys": list(d.keys())[:15] if isinstance(d, dict) else [],
+                    "sample": b[:1200],
+                })
+            except Exception as e:
+                parsed_blocks.append({"index": i, "parse_error": str(e), "raw": b[:400]})
         results = _cl_parse_html(html, city)
         return jsonify({
-            "html_size":      len(html),
-            "json_ld_blocks": len(blocks),
-            "first_block_type": first_parsed.get("@type","") if isinstance(first_parsed, dict) else type(first_parsed).__name__,
-            "first_block_keys": list(first_parsed.keys())[:10] if isinstance(first_parsed, dict) else [],
-            "first_block_sample": first_block[:800],
+            "html_size": len(html),
+            "json_ld_block_count": len(blocks),
+            "blocks": parsed_blocks,
             "parser_results_count": len(results),
             "parser_sample": results[:3],
         })
