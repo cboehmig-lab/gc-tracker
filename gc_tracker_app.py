@@ -50,16 +50,34 @@ PORT        = int(os.environ.get("PORT", 5050))
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 
 # ── HTTP session ──────────────────────────────────────────────────────────────
+_USER_AGENTS = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+]
+
 _HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
+    "User-Agent":                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language":           "en-US,en;q=0.9",
+    "Accept-Encoding":           "gzip, deflate, br",
+    "Connection":                "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest":            "document",
+    "Sec-Fetch-Mode":            "navigate",
+    "Sec-Fetch-Site":            "none",
+    "Sec-Fetch-User":            "?1",
+    "Cache-Control":             "max-age=0",
 }
+
 _http = http.Session()
 _http.headers.update(_HEADERS)
+
+def _rotate_ua():
+    """Pick a random User-Agent for the next request."""
+    _http.headers["User-Agent"] = random.choice(_USER_AGENTS)
 
 # ── Category cache ────────────────────────────────────────────────────────────
 _cat_cache: dict = {}
@@ -301,6 +319,7 @@ def _clean_name(name: str) -> str:
 
 
 def fetch_page(store_name: str, page: int) -> str:
+    _rotate_ua()
     query = f"filters=stores:{store_name.replace(' ', '%20')}&Ns=cD"
     url   = f"https://www.guitarcenter.com/Used/?{query}&page={page}"
     r = _http.get(url, timeout=20)
@@ -1465,7 +1484,7 @@ def _run(selected_stores: list[str], baseline: bool):
         label = "baseline scan" if baseline else f"{len(stores_to_scan)} store(s)"
         send({"type":"progress","msg":f"Starting {label} — {len(stores_to_scan)} stores total…"})
         if baseline:
-            send({"type":"progress","msg":"⏳ This may take 30–60 min. Feel free to leave it running!"})
+            send({"type":"progress","msg":"⏳ This may take 2–4 hours with anti-bot delays. Feel free to leave it running!"})
 
         all_products, ids_this_run = [], set()
         for i, store in enumerate(stores_to_scan, 1):
@@ -1473,11 +1492,15 @@ def _run(selected_stores: list[str], baseline: bool):
                 send({"type":"progress","msg":"⏹ Stopped by user."})
                 break
             send({"type":"progress","msg":f"\n[{i}/{len(stores_to_scan)}] {store}"})
+            _rotate_ua()  # rotate User-Agent each store
             products, ids = scrape_store(store, seen_ids, send, _stop_event)
             for p in products:
                 if p["id"] not in ids_this_run:
                     all_products.append(p)
             ids_this_run |= ids
+            # Extra pause between stores during baseline to avoid bot detection
+            if baseline and not _stop_event.is_set():
+                _sleep(4.0, 2.0)  # 2–6s between stores during baseline
 
         # ── Classify categories (parallel) & use listing-page condition ─────────
         # Condition is already parsed from the listing page in parse_products — free, no HTTP.
