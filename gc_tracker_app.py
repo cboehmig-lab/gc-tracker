@@ -1240,7 +1240,7 @@ def _cl_parse_html(html: str, city_id: str) -> list[dict]:
             avail  = offers.get("availableAtOrFrom", {})
             addr   = avail.get("address", {}) if isinstance(avail, dict) else {}
             hood   = addr.get("addressLocality","") or addr.get("addressRegion","")
-            loc    = label + (f" · {hood}" if hood else "")
+            loc    = label
             date   = _cl_fmt_date(
                 offers.get("validFrom","") or offers.get("availabilityStarts","") or
                 item.get("datePosted","") or item.get("dateCreated","") or
