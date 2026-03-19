@@ -1241,7 +1241,11 @@ def _cl_parse_html(html: str, city_id: str) -> list[dict]:
             addr   = avail.get("address", {}) if isinstance(avail, dict) else {}
             hood   = addr.get("addressLocality","") or addr.get("addressRegion","")
             loc    = label + (f" · {hood}" if hood else "")
-            date   = _cl_fmt_date(offers.get("validFrom","") or item.get("datePosted",""))
+            date   = _cl_fmt_date(
+                offers.get("validFrom","") or offers.get("availabilityStarts","") or
+                item.get("datePosted","") or item.get("dateCreated","") or
+                item.get("uploadDate","")
+            )
             items.append({"title": name, "url": url, "price": price,
                           "location": loc, "date": date, "cityId": city_id})
         if items:
@@ -1303,11 +1307,27 @@ def api_cl_parse_test():
                 })
             except Exception as e:
                 parsed_blocks.append({"index": i, "parse_error": str(e), "raw": b[:400]})
-        results = _cl_parse_html(html, city)
+        # Also show raw keys from first listing for date debugging
+        raw_keys = {}
+        for block in re.findall(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL):
+            try:
+                d = json.loads(block)
+                entries = []
+                if isinstance(d, list): entries = d
+                elif d.get("@type") == "CollectionPage": entries = d.get("mainEntity",{}).get("itemListElement",[])
+                elif d.get("@type") in ("ItemList","ListItem"): entries = [d]
+                if entries:
+                    item = entries[0].get("item", entries[0]) if isinstance(entries[0], dict) else {}
+                    offers = item.get("offers", {})
+                    raw_keys = {"item_keys": list(item.keys()), "offer_keys": list(offers.keys())}
+                    break
+            except Exception:
+                pass
         return jsonify({
             "html_size": len(html),
             "json_ld_block_count": len(blocks),
             "blocks": parsed_blocks,
+            "first_listing_keys": raw_keys,
             "parser_results_count": len(results),
             "parser_sample": results[:3],
         })
@@ -1949,10 +1969,10 @@ td a:hover{text-decoration:underline}
 #cl-body th.sort-asc::after{content:" ▲";color:#a5b4fc;font-size:.6rem}
 #cl-body th.sort-desc::after{content:" ▼";color:#a5b4fc;font-size:.6rem}
 #cl-body td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0}
-#cl-body td:nth-child(1){width:50%;max-width:400px}
-#cl-body td:nth-child(2){width:100px}
-#cl-body td:nth-child(3){width:160px}
-#cl-body td:nth-child(4){width:100px}
+#cl-body td:nth-child(1){width:45%;max-width:400px}
+#cl-body td:nth-child(2){width:90px}
+#cl-body td:nth-child(3){width:200px}
+#cl-body td:nth-child(4){width:90px}
 #cl-body tr:hover td{background:#161616}
 #cl-body tr.cl-fav-result td{background:#1a1f35}
 #cl-body tr.cl-fav-result:hover td{background:#252b45}
@@ -2814,7 +2834,7 @@ function clRenderResults() {
   hdr.style.display = 'flex';
 
   const cols = ['title','price','location','date','relevance'];
-  const labels = ['Item','Price','Location','Date','Relevance'];
+  const labels = ['Item','Price','Location','Date'];
   let html = '<table><thead><tr>';
   labels.forEach((l, i) => {
     const cls = _clSortCol === i ? (_clSortDir === 1 ? 'sort-asc' : 'sort-desc') : '';
