@@ -1144,10 +1144,12 @@ def api_run():
 @login_required
 def api_cl_search():
     q = request.args.get("q", "").strip()
+    cities_param = request.args.get("cities", "").strip()
     if not q:
         return jsonify({"error": "No search term provided."})
+    cities = [c.strip() for c in cities_param.split(",") if c.strip()] if cities_param else []
     try:
-        results = _cl_search(q)
+        results = _cl_search(q, cities or None)
         return jsonify({"results": results, "count": len(results)})
     except Exception as e:
         return jsonify({"error": str(e)})
@@ -1159,123 +1161,65 @@ _CL_CITIES = [
     "newyork","philadelphia","phoenix","portland","raleigh","sacramento",
     "saltlakecity","sanantonio","sandiego","sfbay","seattle","stlouis",
     "washingtondc","baltimore","charlotte","cleveland","columbus","fortworth",
-    "indianapolis","jacksonville","kansascity","lasvegas","memphis","milwaukee",
-    "oklahomacity","orlando","pittsburgh","richmond","riverside","sandiego",
-    "tampabay","tucson","tulsa","virginiabeach","albuquerque","boise",
-    "buffalo","cincinnati","desmoines","elpaso","fresno","grandrapids",
-    "greensboro","hartford","honolulu","jacksonville","knoxville","louisville",
-    "madison","newOrleans","norfolk","omaha","providence","rochester",
-    "spokane","syracuse","toledo","wichita",
+    "indianapolis","jacksonville","kansascity","memphis","milwaukee",
+    "oklahomacity","orlando","pittsburgh","richmond","riverside","tampabay",
+    "tucson","tulsa","virginiabeach","albuquerque","boise","buffalo",
+    "cincinnati","desmoines","elpaso","fresno","grandrapids","greensboro",
+    "hartford","honolulu","knoxville","louisville","madison","neworleans",
+    "norfolk","omaha","providence","rochester","spokane","syracuse",
+    "toledo","wichita",
 ]
 
-def _cl_search(query: str) -> list[dict]:
-    """Search Craigslist musical instruments nationwide."""
-    results = []
-    seen_urls = set()
+_CL_LABELS = {
+    "sfbay":"SF Bay Area","newyork":"New York","losangeles":"Los Angeles",
+    "washingtondc":"Washington DC","saltlakecity":"Salt Lake City",
+    "sandiego":"San Diego","sanantonio":"San Antonio","lasvegas":"Las Vegas",
+    "tampabay":"Tampa Bay","kansascity":"Kansas City","grandrapids":"Grand Rapids",
+    "desmoines":"Des Moines","fortworth":"Fort Worth","oklahomacity":"Oklahoma City",
+    "virginiabeach":"Virginia Beach","neworleans":"New Orleans","stlouis":"St. Louis",
+}
 
-    # Strategy 1: CL national search endpoint
-    try:
-        url = f"https://www.craigslist.org/search/msa?query={requests.utils.quote(query)}&sort=date"
-        r = _http.get(url, timeout=15)
-        if r.status_code == 200:
-            items = _cl_parse_results(r.text, "National")
-            for item in items:
-                if item["url"] not in seen_urls:
-                    seen_urls.add(item["url"])
-                    results.append(item)
-    except Exception:
-        pass
+def _cl_city_label(city_id: str) -> str:
+    return _CL_LABELS.get(city_id, city_id.title())
 
-    # Strategy 2: search top US cities in parallel
-    def _search_city(city):
+def _cl_search(query: str, cities: list = None) -> list[dict]:
+    """Placeholder — pending CL format confirmation via /api/cl-debug."""
+    return []
+
+
+@app.route("/api/cl-debug")
+@login_required
+def api_cl_debug():
+    """Probe a CL city to find the right section code and response format."""
+    city = request.args.get("city", "sfbay")
+    q    = request.args.get("q", "telecaster")
+    out  = {}
+    for section in ["msa", "msg", "mso", "mlt"]:
+        # Try plain HTML
         try:
-            url = f"https://{city}.craigslist.org/search/msa?query={requests.utils.quote(query)}&sort=date"
-            r = _http.get(url, timeout=10)
-            if r.status_code == 200:
-                return _cl_parse_results(r.text, city)
-        except Exception:
-            pass
-        return []
-
-    cities = list(set(_CL_CITIES))  # dedupe
-    with ThreadPoolExecutor(max_workers=15) as pool:
-        futures = {pool.submit(_search_city, c): c for c in cities}
-        for future in as_completed(futures):
-            for item in future.result():
-                if item["url"] not in seen_urls:
-                    seen_urls.add(item["url"])
-                    results.append(item)
-
-    # Sort by date desc, then by city
-    results.sort(key=lambda x: x.get("date", ""), reverse=True)
-    return results
-
-
-def _cl_parse_results(html: str, city: str) -> list[dict]:
-    """Parse Craigslist search results page."""
-    items = []
-    # CL uses JSON-LD or structured data in newer pages, or classic HTML
-    # Try the newer JSON blob first
-    m = re.search(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL)
-    if m:
+            url = f"https://{city}.craigslist.org/search/{section}?query={http.utils.quote(q)}&sort=date"
+            r   = _http.get(url, timeout=10)
+            out[f"{section}_html"] = {
+                "status": r.status_code,
+                "size":   len(r.text),
+                "has_results": any(x in r.text for x in ["result-row","cl-search-result","listing-id"]),
+                "snippet": r.text[2000:2500],
+            }
+        except Exception as e:
+            out[f"{section}_html"] = {"error": str(e)}
+        # Try format=json
         try:
-            data = json.loads(m.group(1))
-            entries = data if isinstance(data, list) else data.get("itemListElement", [])
-            for e in entries:
-                item = e.get("item", e)
-                title = item.get("name", "")
-                url   = item.get("url", "")
-                price = item.get("offers", {}).get("price", "")
-                if price:
-                    price = f"${price}"
-                if title and url:
-                    items.append({"title": title, "url": url, "price": price,
-                                  "location": city.replace("sfbay","SF Bay Area").title(), "date": ""})
-            if items:
-                return items
-        except Exception:
-            pass
-
-    # Fall back to HTML parsing
-    # New CL: results in <li class="cl-search-result"> or <li class="result-row">
-    for pattern in [
-        r'<li[^>]+class="[^"]*cl-search-result[^"]*"[^>]*>(.*?)</li>',
-        r'<li[^>]+class="[^"]*result-row[^"]*"[^>]*>(.*?)</li>',
-    ]:
-        rows = re.findall(pattern, html, re.DOTALL)
-        if rows:
-            for row in rows:
-                title_m = re.search(r'<a[^>]+href="([^"]+)"[^>]*>([^<]+)</a>', row)
-                price_m = re.search(r'class="[^"]*price[^"]*"[^>]*>\$?([\d,]+)', row)
-                date_m  = re.search(r'datetime="([^"]+)"', row)
-                if title_m:
-                    url   = title_m.group(1)
-                    title = title_m.group(2).strip()
-                    price = "$" + price_m.group(1) if price_m else ""
-                    date  = date_m.group(1)[:10] if date_m else ""
-                    if date:
-                        try:
-                            from datetime import date as ddate
-                            dt = ddate.fromisoformat(date)
-                            date = f"{dt.month}/{dt.day}/{str(dt.year)[2:]}"
-                        except Exception:
-                            pass
-                    loc = city.replace("sfbay","sfbay").replace("newyork","New York")\
-                              .replace("washingtondc","Washington DC").replace("losangeles","Los Angeles")\
-                              .replace("sfbay","SF Bay Area").replace("saltlakecity","Salt Lake City")\
-                              .replace("sandiego","San Diego").replace("sanantonio","San Antonio")\
-                              .replace("lasvegas","Las Vegas").replace("tampabay","Tampa Bay")\
-                              .replace("kansascity","Kansas City").replace("grandrapids","Grand Rapids")\
-                              .replace("desmoines","Des Moines").replace("fortworth","Fort Worth")
-                    loc = loc.title() if loc == loc.lower() else loc
-                    if not url.startswith("http"):
-                        url = f"https://{city}.craigslist.org{url}"
-                    items.append({"title": title, "url": url, "price": price,
-                                  "location": loc, "date": date})
-            if items:
-                return items
-
-    return items
+            url = f"https://{city}.craigslist.org/search/{section}?query={http.utils.quote(q)}&sort=date&format=json"
+            r   = _http.get(url, timeout=10)
+            out[f"{section}_json"] = {
+                "status":       r.status_code,
+                "content_type": r.headers.get("Content-Type",""),
+                "size":         len(r.text),
+                "snippet":      r.text[:1000],
+            }
+        except Exception as e:
+            out[f"{section}_json"] = {"error": str(e)}
+    return jsonify(out)
 
 
 @app.route("/api/debug-fetch")
@@ -1736,7 +1680,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GC Used Tracker</title>
+<title>Gear Finder</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#111;color:#eee;height:100vh;display:flex;flex-direction:column}
@@ -1842,18 +1786,34 @@ td a:hover{text-decoration:underline}
 #pw-confirm{background:#c00;color:#fff}
 #pw-confirm:hover{background:#e00}
 /* ── CL Search tab ── */
-#cl-panel{flex-direction:column}
-.cl-search-bar{padding:16px 24px;border-bottom:1px solid #2e2e2e;display:flex;gap:10px;align-items:center;flex-shrink:0;background:#111}
+#cl-panel{flex-direction:row}
+.cl-left{width:220px;min-width:200px;background:#1a1a1a;border-right:1px solid #2e2e2e;display:flex;flex-direction:column;flex-shrink:0}
+.cl-left .search-wrap{padding:10px 12px;border-bottom:1px solid #2e2e2e;flex-shrink:0}
+#cl-city-search{width:100%;padding:7px 11px;border-radius:5px;background:#252525;border:1px solid #3a3a3a;color:#eee;font-size:.875rem;outline:none}
+#cl-city-search:focus{border-color:#7c3aed}
+.cl-sel-btns{display:flex;gap:6px;margin-top:8px}
+.cl-sel-btn{flex:1;padding:5px;background:#252525;border:1px solid #3a3a3a;border-radius:4px;color:#aaa;font-size:.75rem;cursor:pointer}
+.cl-sel-btn:hover{border-color:#7c3aed;color:#fff}
+.cl-sel-btn.active{border-color:#7c3aed;color:#9b6fff;background:#1e1530}
+#cl-city-list{flex:1;overflow-y:auto;padding:4px 0}
+.cl-city-row{display:flex;align-items:center;padding:6px 12px;gap:8px;cursor:pointer}
+.cl-city-row:hover{background:#222}
+.cl-city-row input[type=checkbox]{accent-color:#7c3aed;flex-shrink:0;cursor:pointer}
+.cl-city-row label{flex:1;font-size:.855rem;cursor:pointer}
+.cl-fav-btn{background:none;border:none;cursor:pointer;font-size:1rem;line-height:1;padding:0 4px;color:#444;flex-shrink:0;transition:color .15s}
+.cl-fav-btn.active{color:#f5c518}
+.cl-fav-btn:hover{color:#f5c518}
+.cl-left-footer{padding:12px;border-top:1px solid #2e2e2e;flex-shrink:0}
+.cl-right{display:flex;flex-direction:column;flex:1;overflow:hidden}
+.cl-search-bar{padding:12px 16px;border-bottom:1px solid #2e2e2e;display:flex;gap:10px;align-items:center;flex-shrink:0;background:#111}
 #cl-query{flex:1;padding:9px 14px;border-radius:6px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.95rem;outline:none}
 #cl-query:focus{border-color:#7c3aed}
 #cl-search-btn{padding:9px 20px;background:#7c3aed;color:#fff;border:none;border-radius:6px;font-size:.88rem;font-weight:700;cursor:pointer;white-space:nowrap}
 #cl-search-btn:hover{background:#6d28d9}
 #cl-search-btn:disabled{opacity:.6;cursor:not-allowed}
-#cl-status{font-size:.8rem;color:#9b6fff;padding:0 8px}
-.cl-results-hdr{padding:10px 20px;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;gap:10px;flex-shrink:0;background:#141414}
+#cl-status{font-size:.8rem;color:#9b6fff;padding:0 4px}
+.cl-results-hdr{padding:10px 16px;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;gap:10px;flex-shrink:0;background:#141414}
 #cl-count{font-size:.85rem;color:#9b6fff;font-weight:600}
-#cl-filter{padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer}
-#cl-filter:focus{border-color:#7c3aed}
 #cl-res-search{padding:5px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;margin-left:auto;width:200px}
 #cl-res-search:focus{border-color:#7c3aed}
 #cl-body{flex:1;overflow-y:auto}
@@ -1868,9 +1828,12 @@ td a:hover{text-decoration:underline}
 #cl-body td:nth-child(3){width:160px}
 #cl-body td:nth-child(4){width:100px}
 #cl-body tr:hover td{background:#161616}
+#cl-body tr.cl-fav-result td{background:#1a1530}
+#cl-body tr.cl-fav-result:hover td{background:#211840}
 #cl-body td a{color:#9b6fff;text-decoration:none}
 #cl-body td a:hover{text-decoration:underline}
 .cl-empty{padding:32px;color:#555;font-size:.9rem;text-align:center}
+.cl-fav-star{color:#f5c518;margin-right:4px;font-size:.8rem}
 </style>
 </head>
 <body>
@@ -1908,7 +1871,7 @@ td a:hover{text-decoration:underline}
 </div>
 
 <header>
-  <h1>🎸 GC Used Inventory Tracker</h1>
+  <h1>🎸 Gear Finder</h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -1998,20 +1961,35 @@ td a:hover{text-decoration:underline}
 
 <!-- ══ CL PANEL ══ -->
 <div class="app-panel" id="cl-panel">
-  <div class="cl-search-bar">
-    <input id="cl-query" type="text" placeholder="Search Craigslist musical instruments nationwide… (e.g. telecaster, les paul, fender twin)" autocomplete="off"
-      onkeydown="if(event.key==='Enter') clSearch()">
-    <span id="cl-status"></span>
-    <button id="cl-search-btn" onclick="clSearch()">Search</button>
+
+  <!-- Left sidebar: city list -->
+  <div class="cl-left">
+    <div class="search-wrap cl-left">
+      <input id="cl-city-search" type="text" placeholder="Search cities…" autocomplete="off" oninput="clFilterCities()">
+      <div class="cl-sel-btns">
+        <button class="cl-sel-btn" id="cl-favs-btn" onclick="clToggleFavs()">★ Favorites</button>
+        <button class="cl-sel-btn" onclick="clSelectAll()">Select All</button>
+        <button class="cl-sel-btn" onclick="clClearAll()">Clear All</button>
+      </div>
+    </div>
+    <div id="cl-city-list"></div>
   </div>
-  <div class="cl-results-hdr" id="cl-results-hdr" style="display:none">
-    <span id="cl-count"></span>
-    <select id="cl-location-filter" onchange="clFilterResults()" style="padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer">
-      <option value="">All Locations</option>
-    </select>
-    <input id="cl-res-search" type="text" placeholder="Filter results…" oninput="clFilterResults()" autocomplete="off">
+
+  <!-- Right content: search bar + results -->
+  <div class="cl-right">
+    <div class="cl-search-bar">
+      <input id="cl-query" type="text" placeholder="e.g. telecaster, les paul, fender twin…" autocomplete="off"
+        onkeydown="if(event.key==='Enter') clSearch()">
+      <span id="cl-status"></span>
+      <button id="cl-search-btn" onclick="clSearch()">Search</button>
+    </div>
+    <div class="cl-results-hdr" id="cl-results-hdr" style="display:none">
+      <span id="cl-count"></span>
+      <input id="cl-res-search" type="text" placeholder="Filter results…" oninput="clFilterResults()" autocomplete="off">
+    </div>
+    <div id="cl-body"><div class="cl-empty">Select cities on the left, enter a search term, and click Search.</div></div>
   </div>
-  <div id="cl-body"><div class="cl-empty">Enter a search term above to find listings across all US Craigslist musical instrument sections.</div></div>
+
 </div>
 
 <script>
@@ -2021,6 +1999,7 @@ const BASELINE_PW = 'Beatle909!';
 // ── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('search').addEventListener('input', filterList);
+  clRenderCities();
   await loadData();
   await loadState();
 });
@@ -2538,22 +2517,123 @@ function switchTab(tab) {
   document.getElementById(tab + '-panel').classList.add('active');
 }
 
-// ── CL Search ─────────────────────────────────────────────────────────────────
+// ── CL City list ──────────────────────────────────────────────────────────────
+const CL_CITIES = [
+  {id:'atlanta',label:'Atlanta'},      {id:'austin',label:'Austin'},
+  {id:'boston',label:'Boston'},        {id:'chicago',label:'Chicago'},
+  {id:'dallas',label:'Dallas'},        {id:'denver',label:'Denver'},
+  {id:'detroit',label:'Detroit'},      {id:'houston',label:'Houston'},
+  {id:'lasvegas',label:'Las Vegas'},   {id:'losangeles',label:'Los Angeles'},
+  {id:'miami',label:'Miami'},          {id:'minneapolis',label:'Minneapolis'},
+  {id:'nashville',label:'Nashville'},  {id:'newyork',label:'New York'},
+  {id:'philadelphia',label:'Philadelphia'}, {id:'phoenix',label:'Phoenix'},
+  {id:'portland',label:'Portland'},    {id:'raleigh',label:'Raleigh'},
+  {id:'sacramento',label:'Sacramento'},{id:'saltlakecity',label:'Salt Lake City'},
+  {id:'sanantonio',label:'San Antonio'},{id:'sandiego',label:'San Diego'},
+  {id:'sfbay',label:'SF Bay Area'},    {id:'seattle',label:'Seattle'},
+  {id:'stlouis',label:'St. Louis'},    {id:'washingtondc',label:'Washington DC'},
+  {id:'baltimore',label:'Baltimore'},  {id:'charlotte',label:'Charlotte'},
+  {id:'cleveland',label:'Cleveland'},  {id:'columbus',label:'Columbus'},
+  {id:'fortworth',label:'Fort Worth'}, {id:'indianapolis',label:'Indianapolis'},
+  {id:'jacksonville',label:'Jacksonville'},{id:'kansascity',label:'Kansas City'},
+  {id:'memphis',label:'Memphis'},      {id:'milwaukee',label:'Milwaukee'},
+  {id:'oklahomacity',label:'Oklahoma City'},{id:'orlando',label:'Orlando'},
+  {id:'pittsburgh',label:'Pittsburgh'},{id:'richmond',label:'Richmond'},
+  {id:'riverside',label:'Riverside'},  {id:'tampabay',label:'Tampa Bay'},
+  {id:'tucson',label:'Tucson'},        {id:'tulsa',label:'Tulsa'},
+  {id:'albuquerque',label:'Albuquerque'},{id:'boise',label:'Boise'},
+  {id:'buffalo',label:'Buffalo'},      {id:'cincinnati',label:'Cincinnati'},
+  {id:'desmoines',label:'Des Moines'}, {id:'elpaso',label:'El Paso'},
+  {id:'fresno',label:'Fresno'},        {id:'grandrapids',label:'Grand Rapids'},
+  {id:'greensboro',label:'Greensboro'},{id:'hartford',label:'Hartford'},
+  {id:'honolulu',label:'Honolulu'},    {id:'knoxville',label:'Knoxville'},
+  {id:'louisville',label:'Louisville'},{id:'madison',label:'Madison'},
+  {id:'neworleans',label:'New Orleans'},{id:'norfolk',label:'Norfolk'},
+  {id:'omaha',label:'Omaha'},          {id:'providence',label:'Providence'},
+  {id:'rochester',label:'Rochester'},  {id:'spokane',label:'Spokane'},
+  {id:'syracuse',label:'Syracuse'},    {id:'toledo',label:'Toledo'},
+  {id:'wichita',label:'Wichita'},      {id:'virginiabeach',label:'Virginia Beach'},
+];
+
+let _clFavs = JSON.parse(localStorage.getItem('cl_favs') || '[]');
+let _clFavsOnly = false;
 let _clData = [];
 let _clSortCol = null, _clSortDir = 1;
 
+function clSaveFavs() {
+  localStorage.setItem('cl_favs', JSON.stringify(_clFavs));
+}
+
+function clRenderCities() {
+  const q   = (document.getElementById('cl-city-search').value || '').toLowerCase();
+  const list = document.getElementById('cl-city-list');
+  const cities = _clFavsOnly
+    ? CL_CITIES.filter(c => _clFavs.includes(c.id))
+    : (q ? CL_CITIES.filter(c => c.label.toLowerCase().includes(q)) : CL_CITIES);
+
+  list.innerHTML = '';
+  cities.forEach(c => {
+    const isFav = _clFavs.includes(c.id);
+    const div = document.createElement('div');
+    div.className = 'cl-city-row';
+    const cbId = 'cl_cb_' + c.id;
+    div.innerHTML =
+      '<input type="checkbox" id="' + cbId + '" value="' + c.id + '">' +
+      '<label for="' + cbId + '">' + c.label + '</label>' +
+      '<button class="cl-fav-btn' + (isFav ? ' active' : '') + '" onclick="clToggleFav(event,\'' + c.id + '\',this)" title="' + (isFav ? 'Remove from' : 'Add to') + ' favorites">★</button>';
+    list.appendChild(div);
+  });
+}
+
+function clFilterCities() { clRenderCities(); }
+
+function clToggleFavs() {
+  _clFavsOnly = !_clFavsOnly;
+  document.getElementById('cl-favs-btn').classList.toggle('active', _clFavsOnly);
+  document.getElementById('cl-city-search').value = '';
+  clRenderCities();
+}
+
+function clToggleFav(e, id, btn) {
+  e.stopPropagation();
+  if (_clFavs.includes(id)) {
+    _clFavs = _clFavs.filter(f => f !== id);
+    btn.classList.remove('active');
+  } else {
+    _clFavs.push(id);
+    btn.classList.add('active');
+  }
+  clSaveFavs();
+  if (_clFavsOnly) clRenderCities();
+}
+
+function clSelectAll() {
+  document.querySelectorAll('#cl-city-list input[type=checkbox]').forEach(cb => cb.checked = true);
+}
+function clClearAll() {
+  document.querySelectorAll('#cl-city-list input[type=checkbox]').forEach(cb => cb.checked = false);
+}
+
+function clGetSelected() {
+  return [...document.querySelectorAll('#cl-city-list input[type=checkbox]:checked')].map(cb => cb.value);
+}
+
+// ── CL Search ─────────────────────────────────────────────────────────────────
 async function clSearch() {
   const q = document.getElementById('cl-query').value.trim();
   if (!q) return;
+  const selected = clGetSelected();
   const btn = document.getElementById('cl-search-btn');
   const status = document.getElementById('cl-status');
   btn.disabled = true;
   btn.textContent = 'Searching…';
-  status.textContent = 'Searching all US Craigslist markets…';
+  const cityCount = selected.length || CL_CITIES.length;
+  status.textContent = 'Searching ' + cityCount + ' markets…';
   document.getElementById('cl-results-hdr').style.display = 'none';
   document.getElementById('cl-body').innerHTML = '<div class="cl-empty">Searching…</div>';
   try {
-    const r = await fetch('/api/cl-search?q=' + encodeURIComponent(q));
+    const cities = selected.length ? selected.join(',') : '';
+    const r = await fetch('/api/cl-search?q=' + encodeURIComponent(q) + (cities ? '&cities=' + encodeURIComponent(cities) : ''));
     const d = await r.json();
     if (d.error) {
       document.getElementById('cl-body').innerHTML = '<div class="cl-empty" style="color:#f88">' + d.error + '</div>';
@@ -2571,32 +2651,26 @@ async function clSearch() {
 }
 
 function clFilterResults() {
-  const q   = (document.getElementById('cl-res-search').value || '').toLowerCase();
-  const loc = document.getElementById('cl-location-filter').value;
+  const q = (document.getElementById('cl-res-search').value || '').toLowerCase();
   const rows = document.querySelectorAll('#cl-body tbody tr');
   let visible = 0;
   rows.forEach(row => {
-    const show = (!q || row.textContent.toLowerCase().includes(q)) &&
-                 (!loc || row.dataset.location === loc);
+    const show = !q || row.textContent.toLowerCase().includes(q);
     row.style.display = show ? '' : 'none';
     if (show) visible++;
   });
   document.getElementById('cl-count').textContent =
-    (q || loc) ? (visible + ' of ' + _clData.length + ' listings') : (_clData.length + ' listings');
+    q ? (visible + ' of ' + _clData.length + ' listings') : (_clData.length + ' listings');
 }
 
 function clRenderResults() {
   const hdr  = document.getElementById('cl-results-hdr');
   const body = document.getElementById('cl-body');
   if (!_clData.length) {
-    body.innerHTML = '<div class="cl-empty">No listings found. Try a different search term.</div>';
+    body.innerHTML = '<div class="cl-empty">No listings found. Try a different search term or select more cities.</div>';
     hdr.style.display = 'none';
     return;
   }
-  const locs = [...new Set(_clData.map(r => r.location).filter(Boolean))].sort();
-  const locSel = document.getElementById('cl-location-filter');
-  locSel.innerHTML = '<option value="">All Locations</option>';
-  locs.forEach(l => { const o = document.createElement('option'); o.value = o.textContent = l; locSel.appendChild(o); });
   document.getElementById('cl-count').textContent = _clData.length + ' listings';
   document.getElementById('cl-res-search').value = '';
   hdr.style.display = 'flex';
@@ -2610,23 +2684,38 @@ function clRenderResults() {
   });
   html += '</tr></thead><tbody>';
 
-  const sorted = [..._clData].sort((a, b) => {
-    if (_clSortCol === null) return 0;
-    const key = cols[_clSortCol];
-    const av = a[key] || '', bv = b[key] || '';
-    if (key === 'price') {
-      return _clSortDir * ((parseFloat(String(av).replace(/[^0-9.]/g,'')) || 0) -
-                           (parseFloat(String(bv).replace(/[^0-9.]/g,'')) || 0));
-    }
-    return _clSortDir * String(av).localeCompare(String(bv));
-  });
+  // Favorites first, then rest — within each group, sort by selected col
+  const isFavResult = r => _clFavs.includes(r.cityId);
 
-  sorted.forEach(r => {
+  let sorted = [..._clData];
+  if (_clSortCol !== null) {
+    const key = cols[_clSortCol];
+    sorted.sort((a, b) => {
+      const av = a[key] || '', bv = b[key] || '';
+      if (key === 'price') {
+        return _clSortDir * ((parseFloat(String(av).replace(/[^0-9.]/g,'')) || 0) -
+                             (parseFloat(String(bv).replace(/[^0-9.]/g,'')) || 0));
+      }
+      return _clSortDir * String(av).localeCompare(String(bv));
+    });
+  }
+
+  // Split into fav and non-fav
+  const favResults  = sorted.filter(r => isFavResult(r));
+  const restResults = sorted.filter(r => !isFavResult(r));
+  const final = [...favResults, ...restResults];
+
+  final.forEach(r => {
+    const isFav = isFavResult(r);
+    const star  = isFav ? '<span class="cl-fav-star">★</span>' : '';
     const title = r.url
-      ? '<a href="' + r.url + '" target="_blank" rel="noopener">' + (r.title || '(no title)') + '</a>'
-      : (r.title || '(no title)');
-    html += '<tr data-location="' + (r.location||'') + '"><td title="' + (r.title||'').replace(/"/g,'&quot;') + '">' + title + '</td>' +
-            '<td>' + (r.price||'') + '</td><td>' + (r.location||'') + '</td><td>' + (r.date||'') + '</td></tr>';
+      ? star + '<a href="' + r.url + '" target="_blank" rel="noopener">' + (r.title || '(no title)') + '</a>'
+      : star + (r.title || '(no title)');
+    html += '<tr class="' + (isFav ? 'cl-fav-result' : '') + '" data-city="' + (r.cityId||'') + '">' +
+            '<td title="' + (r.title||'').replace(/"/g,'&quot;') + '">' + title + '</td>' +
+            '<td>' + (r.price||'') + '</td>' +
+            '<td>' + (r.location||'') + '</td>' +
+            '<td>' + (r.date||'') + '</td></tr>';
   });
   html += '</tbody></table>';
   body.innerHTML = html;
