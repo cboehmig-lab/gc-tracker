@@ -1140,6 +1140,144 @@ def api_run():
     t.start()
     return jsonify({"status": "started"})
 
+@app.route("/api/cl-search")
+@login_required
+def api_cl_search():
+    q = request.args.get("q", "").strip()
+    if not q:
+        return jsonify({"error": "No search term provided."})
+    try:
+        results = _cl_search(q)
+        return jsonify({"results": results, "count": len(results)})
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+_CL_CITIES = [
+    "atlanta","austin","boston","chicago","dallas","denver","detroit",
+    "houston","lasvegas","losangeles","miami","minneapolis","nashville",
+    "newyork","philadelphia","phoenix","portland","raleigh","sacramento",
+    "saltlakecity","sanantonio","sandiego","sfbay","seattle","stlouis",
+    "washingtondc","baltimore","charlotte","cleveland","columbus","fortworth",
+    "indianapolis","jacksonville","kansascity","lasvegas","memphis","milwaukee",
+    "oklahomacity","orlando","pittsburgh","richmond","riverside","sandiego",
+    "tampabay","tucson","tulsa","virginiabeach","albuquerque","boise",
+    "buffalo","cincinnati","desmoines","elpaso","fresno","grandrapids",
+    "greensboro","hartford","honolulu","jacksonville","knoxville","louisville",
+    "madison","newOrleans","norfolk","omaha","providence","rochester",
+    "spokane","syracuse","toledo","wichita",
+]
+
+def _cl_search(query: str) -> list[dict]:
+    """Search Craigslist musical instruments nationwide."""
+    results = []
+    seen_urls = set()
+
+    # Strategy 1: CL national search endpoint
+    try:
+        url = f"https://www.craigslist.org/search/msa?query={requests.utils.quote(query)}&sort=date"
+        r = _http.get(url, timeout=15)
+        if r.status_code == 200:
+            items = _cl_parse_results(r.text, "National")
+            for item in items:
+                if item["url"] not in seen_urls:
+                    seen_urls.add(item["url"])
+                    results.append(item)
+    except Exception:
+        pass
+
+    # Strategy 2: search top US cities in parallel
+    def _search_city(city):
+        try:
+            url = f"https://{city}.craigslist.org/search/msa?query={requests.utils.quote(query)}&sort=date"
+            r = _http.get(url, timeout=10)
+            if r.status_code == 200:
+                return _cl_parse_results(r.text, city)
+        except Exception:
+            pass
+        return []
+
+    cities = list(set(_CL_CITIES))  # dedupe
+    with ThreadPoolExecutor(max_workers=15) as pool:
+        futures = {pool.submit(_search_city, c): c for c in cities}
+        for future in as_completed(futures):
+            for item in future.result():
+                if item["url"] not in seen_urls:
+                    seen_urls.add(item["url"])
+                    results.append(item)
+
+    # Sort by date desc, then by city
+    results.sort(key=lambda x: x.get("date", ""), reverse=True)
+    return results
+
+
+def _cl_parse_results(html: str, city: str) -> list[dict]:
+    """Parse Craigslist search results page."""
+    items = []
+    # CL uses JSON-LD or structured data in newer pages, or classic HTML
+    # Try the newer JSON blob first
+    m = re.search(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if m:
+        try:
+            data = json.loads(m.group(1))
+            entries = data if isinstance(data, list) else data.get("itemListElement", [])
+            for e in entries:
+                item = e.get("item", e)
+                title = item.get("name", "")
+                url   = item.get("url", "")
+                price = item.get("offers", {}).get("price", "")
+                if price:
+                    price = f"${price}"
+                if title and url:
+                    items.append({"title": title, "url": url, "price": price,
+                                  "location": city.replace("sfbay","SF Bay Area").title(), "date": ""})
+            if items:
+                return items
+        except Exception:
+            pass
+
+    # Fall back to HTML parsing
+    # New CL: results in <li class="cl-search-result"> or <li class="result-row">
+    for pattern in [
+        r'<li[^>]+class="[^"]*cl-search-result[^"]*"[^>]*>(.*?)</li>',
+        r'<li[^>]+class="[^"]*result-row[^"]*"[^>]*>(.*?)</li>',
+    ]:
+        rows = re.findall(pattern, html, re.DOTALL)
+        if rows:
+            for row in rows:
+                title_m = re.search(r'<a[^>]+href="([^"]+)"[^>]*>([^<]+)</a>', row)
+                price_m = re.search(r'class="[^"]*price[^"]*"[^>]*>\$?([\d,]+)', row)
+                date_m  = re.search(r'datetime="([^"]+)"', row)
+                if title_m:
+                    url   = title_m.group(1)
+                    title = title_m.group(2).strip()
+                    price = "$" + price_m.group(1) if price_m else ""
+                    date  = date_m.group(1)[:10] if date_m else ""
+                    if date:
+                        try:
+                            from datetime import date as ddate
+                            dt = ddate.fromisoformat(date)
+                            date = f"{dt.month}/{dt.day}/{str(dt.year)[2:]}"
+                        except Exception:
+                            pass
+                    loc = city.replace("sfbay","sfbay").replace("newyork","New York")\
+                              .replace("washingtondc","Washington DC").replace("losangeles","Los Angeles")\
+                              .replace("sfbay","SF Bay Area").replace("saltlakecity","Salt Lake City")\
+                              .replace("sandiego","San Diego").replace("sanantonio","San Antonio")\
+                              .replace("lasvegas","Las Vegas").replace("tampabay","Tampa Bay")\
+                              .replace("kansascity","Kansas City").replace("grandrapids","Grand Rapids")\
+                              .replace("desmoines","Des Moines").replace("fortworth","Fort Worth")
+                    loc = loc.title() if loc == loc.lower() else loc
+                    if not url.startswith("http"):
+                        url = f"https://{city}.craigslist.org{url}"
+                    items.append({"title": title, "url": url, "price": price,
+                                  "location": loc, "date": date})
+            if items:
+                return items
+
+    return items
+
+
 @app.route("/api/debug-fetch")
 @login_required
 def api_debug_fetch():
@@ -1610,6 +1748,15 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #stop-btn:disabled{opacity:.6;cursor:not-allowed}
 #hdr-status{font-size:.8rem;color:#ffbbbb;margin-left:auto}
 
+/* ── Top tabs ── */
+.app-tabs{display:flex;background:#0d0d0d;border-bottom:1px solid #2e2e2e;flex-shrink:0}
+.app-tab{padding:11px 28px;font-size:.85rem;font-weight:600;color:#666;cursor:pointer;border:none;background:none;border-bottom:3px solid transparent;margin-bottom:-1px;letter-spacing:.2px;transition:color .15s}
+.app-tab:hover{color:#ccc}
+.app-tab.gc-tab.active{color:#ff4444;border-bottom-color:#c00}
+.app-tab.cl-tab.active{color:#9b6fff;border-bottom-color:#7c3aed}
+.app-panel{display:none;flex:1;overflow:hidden}
+.app-panel.active{display:flex}
+
 .layout{display:flex;flex:1;overflow:hidden}
 
 /* ── Left panel ── */
@@ -1694,6 +1841,36 @@ td a:hover{text-decoration:underline}
 #pw-cancel:hover{color:#fff}
 #pw-confirm{background:#c00;color:#fff}
 #pw-confirm:hover{background:#e00}
+/* ── CL Search tab ── */
+#cl-panel{flex-direction:column}
+.cl-search-bar{padding:16px 24px;border-bottom:1px solid #2e2e2e;display:flex;gap:10px;align-items:center;flex-shrink:0;background:#111}
+#cl-query{flex:1;padding:9px 14px;border-radius:6px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.95rem;outline:none}
+#cl-query:focus{border-color:#7c3aed}
+#cl-search-btn{padding:9px 20px;background:#7c3aed;color:#fff;border:none;border-radius:6px;font-size:.88rem;font-weight:700;cursor:pointer;white-space:nowrap}
+#cl-search-btn:hover{background:#6d28d9}
+#cl-search-btn:disabled{opacity:.6;cursor:not-allowed}
+#cl-status{font-size:.8rem;color:#9b6fff;padding:0 8px}
+.cl-results-hdr{padding:10px 20px;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;gap:10px;flex-shrink:0;background:#141414}
+#cl-count{font-size:.85rem;color:#9b6fff;font-weight:600}
+#cl-filter{padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer}
+#cl-filter:focus{border-color:#7c3aed}
+#cl-res-search{padding:5px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;margin-left:auto;width:200px}
+#cl-res-search:focus{border-color:#7c3aed}
+#cl-body{flex:1;overflow-y:auto}
+#cl-body table{width:100%;border-collapse:collapse;font-size:.83rem;table-layout:auto}
+#cl-body th{background:#161616;color:#666;font-weight:600;text-align:left;padding:7px 10px;font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:0;cursor:pointer;user-select:none;white-space:nowrap}
+#cl-body th:hover{color:#ccc}
+#cl-body th.sort-asc::after{content:" ▲";color:#7c3aed;font-size:.6rem}
+#cl-body th.sort-desc::after{content:" ▼";color:#7c3aed;font-size:.6rem}
+#cl-body td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0}
+#cl-body td:nth-child(1){width:50%;max-width:400px}
+#cl-body td:nth-child(2){width:100px}
+#cl-body td:nth-child(3){width:160px}
+#cl-body td:nth-child(4){width:100px}
+#cl-body tr:hover td{background:#161616}
+#cl-body td a{color:#9b6fff;text-decoration:none}
+#cl-body td a:hover{text-decoration:underline}
+.cl-empty{padding:32px;color:#555;font-size:.9rem;text-align:center}
 </style>
 </head>
 <body>
@@ -1742,6 +1919,13 @@ td a:hover{text-decoration:underline}
   <button onclick="document.getElementById('update-banner').style.display='none'" style="padding:4px 8px;background:none;color:#666;border:none;cursor:pointer;font-size:.8rem">✕</button>
 </div>
 
+<div class="app-tabs">
+  <button class="app-tab gc-tab active" onclick="switchTab('gc')">🎸 GC Used Inventory</button>
+  <button class="app-tab cl-tab" onclick="switchTab('cl')">🟣 CL National Search</button>
+</div>
+
+<!-- ══ GC PANEL ══ -->
+<div class="app-panel active" id="gc-panel">
 <div class="layout">
 
   <div class="left">
@@ -1809,6 +1993,25 @@ td a:hover{text-decoration:underline}
     </div>
   </div>
 
+</div>
+</div><!-- end gc-panel -->
+
+<!-- ══ CL PANEL ══ -->
+<div class="app-panel" id="cl-panel">
+  <div class="cl-search-bar">
+    <input id="cl-query" type="text" placeholder="Search Craigslist musical instruments nationwide… (e.g. telecaster, les paul, fender twin)" autocomplete="off"
+      onkeydown="if(event.key==='Enter') clSearch()">
+    <span id="cl-status"></span>
+    <button id="cl-search-btn" onclick="clSearch()">Search</button>
+  </div>
+  <div class="cl-results-hdr" id="cl-results-hdr" style="display:none">
+    <span id="cl-count"></span>
+    <select id="cl-location-filter" onchange="clFilterResults()" style="padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer">
+      <option value="">All Locations</option>
+    </select>
+    <input id="cl-res-search" type="text" placeholder="Filter results…" oninput="clFilterResults()" autocomplete="off">
+  </div>
+  <div id="cl-body"><div class="cl-empty">Enter a search term above to find listings across all US Craigslist musical instrument sections.</div></div>
 </div>
 
 <script>
@@ -2325,6 +2528,114 @@ function appendLog(text, cls) {
   line.textContent = text;
   log.appendChild(line);
   log.scrollTop = log.scrollHeight;
+}
+
+// ── Tab switching ─────────────────────────────────────────────────────────────
+function switchTab(tab) {
+  document.querySelectorAll('.app-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.app-panel').forEach(p => p.classList.remove('active'));
+  document.querySelector('.' + tab + '-tab').classList.add('active');
+  document.getElementById(tab + '-panel').classList.add('active');
+}
+
+// ── CL Search ─────────────────────────────────────────────────────────────────
+let _clData = [];
+let _clSortCol = null, _clSortDir = 1;
+
+async function clSearch() {
+  const q = document.getElementById('cl-query').value.trim();
+  if (!q) return;
+  const btn = document.getElementById('cl-search-btn');
+  const status = document.getElementById('cl-status');
+  btn.disabled = true;
+  btn.textContent = 'Searching…';
+  status.textContent = 'Searching all US Craigslist markets…';
+  document.getElementById('cl-results-hdr').style.display = 'none';
+  document.getElementById('cl-body').innerHTML = '<div class="cl-empty">Searching…</div>';
+  try {
+    const r = await fetch('/api/cl-search?q=' + encodeURIComponent(q));
+    const d = await r.json();
+    if (d.error) {
+      document.getElementById('cl-body').innerHTML = '<div class="cl-empty" style="color:#f88">' + d.error + '</div>';
+      return;
+    }
+    _clData = d.results || [];
+    status.textContent = '';
+    clRenderResults();
+  } catch(e) {
+    document.getElementById('cl-body').innerHTML = '<div class="cl-empty" style="color:#f88">Search failed: ' + e.message + '</div>';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Search';
+  }
+}
+
+function clFilterResults() {
+  const q   = (document.getElementById('cl-res-search').value || '').toLowerCase();
+  const loc = document.getElementById('cl-location-filter').value;
+  const rows = document.querySelectorAll('#cl-body tbody tr');
+  let visible = 0;
+  rows.forEach(row => {
+    const show = (!q || row.textContent.toLowerCase().includes(q)) &&
+                 (!loc || row.dataset.location === loc);
+    row.style.display = show ? '' : 'none';
+    if (show) visible++;
+  });
+  document.getElementById('cl-count').textContent =
+    (q || loc) ? (visible + ' of ' + _clData.length + ' listings') : (_clData.length + ' listings');
+}
+
+function clRenderResults() {
+  const hdr  = document.getElementById('cl-results-hdr');
+  const body = document.getElementById('cl-body');
+  if (!_clData.length) {
+    body.innerHTML = '<div class="cl-empty">No listings found. Try a different search term.</div>';
+    hdr.style.display = 'none';
+    return;
+  }
+  const locs = [...new Set(_clData.map(r => r.location).filter(Boolean))].sort();
+  const locSel = document.getElementById('cl-location-filter');
+  locSel.innerHTML = '<option value="">All Locations</option>';
+  locs.forEach(l => { const o = document.createElement('option'); o.value = o.textContent = l; locSel.appendChild(o); });
+  document.getElementById('cl-count').textContent = _clData.length + ' listings';
+  document.getElementById('cl-res-search').value = '';
+  hdr.style.display = 'flex';
+
+  const cols = ['title','price','location','date'];
+  const labels = ['Item','Price','Location','Date'];
+  let html = '<table><thead><tr>';
+  labels.forEach((l, i) => {
+    const cls = _clSortCol === i ? (_clSortDir === 1 ? 'sort-asc' : 'sort-desc') : '';
+    html += '<th class="' + cls + '" onclick="clSort(' + i + ')">' + l + '</th>';
+  });
+  html += '</tr></thead><tbody>';
+
+  const sorted = [..._clData].sort((a, b) => {
+    if (_clSortCol === null) return 0;
+    const key = cols[_clSortCol];
+    const av = a[key] || '', bv = b[key] || '';
+    if (key === 'price') {
+      return _clSortDir * ((parseFloat(String(av).replace(/[^0-9.]/g,'')) || 0) -
+                           (parseFloat(String(bv).replace(/[^0-9.]/g,'')) || 0));
+    }
+    return _clSortDir * String(av).localeCompare(String(bv));
+  });
+
+  sorted.forEach(r => {
+    const title = r.url
+      ? '<a href="' + r.url + '" target="_blank" rel="noopener">' + (r.title || '(no title)') + '</a>'
+      : (r.title || '(no title)');
+    html += '<tr data-location="' + (r.location||'') + '"><td title="' + (r.title||'').replace(/"/g,'&quot;') + '">' + title + '</td>' +
+            '<td>' + (r.price||'') + '</td><td>' + (r.location||'') + '</td><td>' + (r.date||'') + '</td></tr>';
+  });
+  html += '</tbody></table>';
+  body.innerHTML = html;
+}
+
+function clSort(col) {
+  if (_clSortCol === col) _clSortDir *= -1;
+  else { _clSortCol = col; _clSortDir = 1; }
+  clRenderResults();
 }
 </script>
 </body>
