@@ -827,7 +827,7 @@ def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Eve
         products = parse_products(html, store_name)
         if not products:
             break
-        if all(p["id"] in ids_seen for p in products):   # loop guard
+        if all(p["id"] in ids_seen for p in products):   # loop guard — only checks this store's own pages
             break
         for p in products:
             if p["id"] not in ids_seen:
@@ -1121,7 +1121,32 @@ def api_run():
     t.start()
     return jsonify({"status": "started"})
 
-@app.route("/api/debug-condition")
+@app.route("/api/debug-fetch")
+@login_required
+def api_debug_fetch():
+    """Fetch page 1 for a store and return diagnostic info."""
+    store = request.args.get("store", "South Austin")
+    try:
+        html = fetch_page(store, 1)
+        has_json_ld = "CollectionPage" in html
+        has_products = len(parse_products(html, store)) > 0
+        size = len(html)
+        # Check for bot detection signals
+        bot_signals = []
+        for sig in ["captcha", "robot", "blocked", "access denied", "cloudflare", "challenge"]:
+            if sig in html.lower():
+                bot_signals.append(sig)
+        return jsonify({
+            "store": store,
+            "html_size": size,
+            "has_collection_page_json_ld": has_json_ld,
+            "products_parsed": has_products,
+            "bot_signals": bot_signals,
+            "html_snippet": html[:500],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
 @login_required
 def api_debug_condition():
     """Inspect the saved listing HTML to find exactly where condition data lives."""
