@@ -1271,15 +1271,10 @@ def _cl_search(query: str, cities: list = None) -> list[dict]:
         futures = {pool.submit(_search_city, c): c for c in search_cities}
         for future in as_completed(futures):
             for item in future.result():
-                # Dedup by URL first, then by title+price+city combo
-                dedup_key = item["url"] or f"{item['title']}|{item['price']}|{item['cityId']}"
-                if dedup_key not in seen_urls:
-                    seen_urls.add(dedup_key)
-                    # Also block same title+price+city even if URL differs slightly
-                    title_key = f"{item['title'].lower().strip()}|{item['price']}|{item['cityId']}"
-                    if title_key not in seen_urls:
-                        seen_urls.add(title_key)
-                        results.append(item)
+                title_key = f"{item['title'].lower().strip()}|{item['price']}|{item['cityId']}"
+                if title_key not in seen_urls:
+                    seen_urls.add(title_key)
+                    results.append(item)
 
     results.sort(key=lambda x: x.get("date",""), reverse=True)
     return results
