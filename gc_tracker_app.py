@@ -1618,7 +1618,73 @@ def api_stop():
     _stop_event.set()
     return jsonify({"status": "stopping"})
 
-@app.route("/api/validate-stores", methods=["POST"])
+@app.route("/api/populate-store-data", methods=["POST"])
+@login_required
+def api_populate_store_data():
+    """One-time migration: scan all stores to tag cache entries with their store name."""
+    if not _lock.acquire(blocking=False):
+        return jsonify({"error": "A run is already in progress."}), 409
+    _stop_event.clear()
+    while not _q.empty():
+        try: _q.get_nowait()
+        except queue.Empty: break
+    t = threading.Thread(target=_populate_store_data, daemon=True)
+    t.start()
+    return jsonify({"status": "started"})
+
+
+def _populate_store_data():
+    """Fetch page 1+ of each store and tag cache entries with their store name."""
+    def send(msg): _q.put(msg)
+    try:
+        _load_cat_cache()
+        stores = get_store_list()
+        total  = len(stores)
+        updated = 0
+        send({"type": "progress", "msg": f"Tagging cache entries with store names ({total} stores)…"})
+        send({"type": "progress", "msg": "This only needs to run once. You can stop at any time."})
+
+        for i, store in enumerate(stores, 1):
+            if _stop_event.is_set():
+                send({"type": "progress", "msg": "⏹ Stopped."})
+                break
+            if i % 20 == 1:
+                send({"type": "progress", "msg": f"  [{i}/{total}] {store}…"})
+            try:
+                page = 1
+                while page <= 50:
+                    html = fetch_page(store, page)
+                    products = parse_products(html, store)
+                    if not products:
+                        break
+                    for p in products:
+                        sku = p["id"]
+                        if sku in _cat_cache and not _cat_cache[sku].get("store"):
+                            _cat_cache[sku]["store"] = store
+                            _cat_cache[sku]["name"]  = _cat_cache[sku].get("name") or p.get("name","")
+                            _cat_cache[sku]["url"]   = _cat_cache[sku].get("url")  or p.get("url","")
+                            _cat_cache[sku]["price"] = _cat_cache[sku].get("price") or p.get("price",0)
+                            updated += 1
+                    if len(products) < PAGE_SIZE:
+                        break
+                    page += 1
+                    _sleep(1.0, 0.5)
+            except Exception:
+                pass
+            _sleep(1.5, 0.8)
+
+        _save_cat_cache()
+        send({"type": "progress", "msg": f"\n✓ Done — {updated} cache entries tagged with store names."})
+        send({"type": "done", "baseline": False, "stopped": _stop_event.is_set(),
+              "scanned": total, "new_count": 0, "new_items": [], "all_items": [],
+              "gap_fill": True, "fixed": updated})
+    except Exception as e:
+        send({"type": "done", "error": str(e), "scanned": 0, "new_count": 0, "new_items": []})
+    finally:
+        _lock.release()
+
+
+
 @login_required
 def api_validate_stores():
     if not _lock.acquire(blocking=False):
@@ -2236,6 +2302,11 @@ tr.sold-row td a{color:#666}
         title="Check all stores and remove any that no longer exist">
         ✓ Validate Stores
       </button>
+      <button id="populate-store-btn" onclick="populateStoreData()"
+        style="margin-top:6px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:5px;color:#555;font-size:.75rem;cursor:pointer"
+        title="One-time: tag all cached items with their store (enables instant browse)">
+        ⬇ Populate Store Data
+      </button>
       <button id="reset-btn" onclick="resetData()"
         style="margin-top:6px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #5a2a2a;border-radius:5px;color:#a05050;font-size:.75rem;cursor:pointer"
         title="Delete all cached data and start fresh">
@@ -2471,7 +2542,7 @@ async function browseCache() {
       document.getElementById('res-title').textContent = 'No Browse Data Yet';
       document.getElementById('res-badge').textContent = '';
       document.getElementById('res-body').innerHTML =
-        '<div class="no-res">Click <b>Check for New Items</b> once to populate store inventory data. After that, selecting stores will instantly show their inventory.</div>';
+        '<div class="no-res">Click <b>⬇ Populate Store Data</b> in the left panel to tag your existing inventory with store names. This only needs to run once, then selecting stores will instantly show their inventory.</div>';
       ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
       return;
     }
@@ -2852,6 +2923,38 @@ function filterResults() {
   countEl.textContent = (q || cond || cat || subcat) ? `${visible} of ${rows.length}` : '';
   const clearBtn = document.getElementById('clear-filters-btn');
   if (clearBtn) clearBtn.style.display = (cond || cat || subcat) ? '' : 'none';
+}
+
+// ── Populate store data (one-time migration) ──────────────────────────────────
+async function populateStoreData() {
+  if (running) { appendLog('Stop the current run first.', 'log-err'); return; }
+  const btn = document.getElementById('populate-store-btn');
+  const resp = await fetch('/api/populate-store-data', {method: 'POST'});
+  if (!resp.ok) {
+    const e = await resp.json();
+    appendLog('Error: ' + e.error, 'log-err');
+    return;
+  }
+  running = true; updateCount();
+  btn.textContent = '⏳ Populating…';
+  btn.disabled = true;
+  document.getElementById('stop-btn').style.display = 'inline-block';
+  document.getElementById('stop-btn').disabled = false;
+  document.getElementById('log').innerHTML = '';
+  appendLog('Tagging all cached items with store names — this enables instant browse. You can stop at any time.');
+  const es = new EventSource('/api/progress');
+  es.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'ping') return;
+    if (msg.type === 'progress') { appendLog(msg.msg); return; }
+    if (msg.type === 'done') {
+      es.close(); running = false;
+      document.getElementById('stop-btn').style.display = 'none';
+      btn.textContent = '✓ Store Data Populated';
+      btn.disabled = false;
+      updateCount();
+    }
+  };
 }
 
 // ── Validate Stores ───────────────────────────────────────────────────────────
