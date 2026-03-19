@@ -1182,9 +1182,85 @@ _CL_LABELS = {
 def _cl_city_label(city_id: str) -> str:
     return _CL_LABELS.get(city_id, city_id.title())
 
+def _cl_fmt_date(iso: str) -> str:
+    try:
+        from datetime import datetime as dt
+        d = dt.fromisoformat(iso.replace("Z",""))
+        return f"{d.month}/{d.day}/{str(d.year)[2:]}"
+    except Exception:
+        return iso[:10] if iso else ""
+
+def _cl_parse_html(html: str, city_id: str) -> list[dict]:
+    """Parse CL search results — data is embedded as JSON-LD ListItem blocks."""
+    items = []
+    label = _cl_city_label(city_id)
+    for block in re.findall(
+            r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+            html, re.DOTALL):
+        try:
+            data = json.loads(block)
+        except Exception:
+            continue
+        entries = []
+        if isinstance(data, list):
+            entries = data
+        elif data.get("@type") == "CollectionPage":
+            entries = data.get("mainEntity", {}).get("itemListElement", [])
+        elif data.get("@type") == "ItemList":
+            entries = data.get("itemListElement", [])
+        elif data.get("@type") == "ListItem":
+            entries = [data]
+        else:
+            continue
+        for entry in entries:
+            item = entry.get("item", entry) if isinstance(entry, dict) else {}
+            if not isinstance(item, dict):
+                continue
+            name  = item.get("name", "")
+            url   = item.get("url", "")
+            if not name or not url:
+                continue
+            offers = item.get("offers", {})
+            price  = offers.get("price", "")
+            try:    price = f"${float(price):,.0f}" if price else ""
+            except: price = str(price)
+            avail  = offers.get("availableAtOrFrom", {})
+            addr   = avail.get("address", {}) if avail else {}
+            hood   = addr.get("addressLocality","") or addr.get("addressRegion","")
+            loc    = label + (f" · {hood}" if hood else "")
+            date   = _cl_fmt_date(offers.get("validFrom","") or item.get("datePosted",""))
+            items.append({"title": name, "url": url, "price": price,
+                          "location": loc, "date": date, "cityId": city_id})
+    return items
+
+
 def _cl_search(query: str, cities: list = None) -> list[dict]:
-    """Placeholder — pending CL format confirmation via /api/cl-debug."""
-    return []
+    """Search Craigslist musical instruments across US cities."""
+    results   = []
+    seen_urls = set()
+    search_cities = cities if cities else _CL_CITIES
+
+    def _search_city(city_id):
+        try:
+            url = (f"https://{city_id}.craigslist.org/search/msa"
+                   f"?query={http.utils.quote(query)}&sort=date")
+            r = _http.get(url, timeout=12)
+            if r.status_code == 200:
+                return _cl_parse_html(r.text, city_id)
+        except Exception:
+            pass
+        return []
+
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        futures = {pool.submit(_search_city, c): c for c in search_cities}
+        for future in as_completed(futures):
+            for item in future.result():
+                if item["url"] not in seen_urls:
+                    seen_urls.add(item["url"])
+                    results.append(item)
+
+    results.sort(key=lambda x: x.get("date",""), reverse=True)
+    return results
 
 
 @app.route("/api/cl-debug")
