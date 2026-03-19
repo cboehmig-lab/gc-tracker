@@ -1645,6 +1645,7 @@ def api_debug_fetch():
         has_json_ld  = "CollectionPage" in html
         has_products = len(parse_products(html, store)) > 0
         bot_signals  = [s for s in ["captcha","robot","blocked","access denied","cloudflare","challenge"] if s in html.lower()]
+        final_url = r.url if hasattr(r, 'url') else url
         # Check __NEXT_DATA__ structure
         nd_keys = []
         nd_sample = ""
