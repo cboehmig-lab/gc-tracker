@@ -1621,28 +1621,31 @@ def api_stop():
 @app.route("/api/populate-store-data", methods=["POST"])
 @login_required
 def api_populate_store_data():
-    """One-time migration: scan all stores to tag cache entries with their store name."""
+    """One-time migration: scan stores to tag cache entries with their store name."""
     if not _lock.acquire(blocking=False):
         return jsonify({"error": "A run is already in progress."}), 409
     _stop_event.clear()
     while not _q.empty():
         try: _q.get_nowait()
         except queue.Empty: break
-    t = threading.Thread(target=_populate_store_data, daemon=True)
+    data = request.json or {}
+    stores = data.get("stores", [])  # empty = all stores
+    t = threading.Thread(target=_populate_store_data, args=(stores,), daemon=True)
     t.start()
     return jsonify({"status": "started"})
 
 
-def _populate_store_data():
-    """Fetch page 1+ of each store and tag cache entries with their store name."""
+def _populate_store_data(selected_stores: list = None):
+    """Fetch pages of each store and tag cache entries with their store name."""
     def send(msg): _q.put(msg)
     try:
         _load_cat_cache()
-        stores = get_store_list()
+        stores = selected_stores if selected_stores else get_store_list()
         total  = len(stores)
         updated = 0
-        send({"type": "progress", "msg": f"Tagging cache entries with store names ({total} stores)…"})
-        send({"type": "progress", "msg": "This only needs to run once. You can stop at any time."})
+        label = f"{total} selected store(s)" if selected_stores else f"all {total} stores"
+        send({"type": "progress", "msg": f"Tagging cache entries for {label}…"})
+        send({"type": "progress", "msg": "You can stop at any time — progress is saved as it goes."})
 
         for i, store in enumerate(stores, 1):
             if _stop_event.is_set():
@@ -2928,8 +2931,13 @@ function filterResults() {
 // ── Populate store data (one-time migration) ──────────────────────────────────
 async function populateStoreData() {
   if (running) { appendLog('Stop the current run first.', 'log-err'); return; }
+  const selected = getSelected();
   const btn = document.getElementById('populate-store-btn');
-  const resp = await fetch('/api/populate-store-data', {method: 'POST'});
+  const resp = await fetch('/api/populate-store-data', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({stores: selected})
+  });
   if (!resp.ok) {
     const e = await resp.json();
     appendLog('Error: ' + e.error, 'log-err');
@@ -2941,7 +2949,8 @@ async function populateStoreData() {
   document.getElementById('stop-btn').style.display = 'inline-block';
   document.getElementById('stop-btn').disabled = false;
   document.getElementById('log').innerHTML = '';
-  appendLog('Tagging all cached items with store names — this enables instant browse. You can stop at any time.');
+  const label = selected.length ? selected.length + ' store(s)' : 'all stores';
+  appendLog('Tagging cached items for ' + label + ' with store names. You can stop at any time.');
   const es = new EventSource('/api/progress');
   es.onmessage = e => {
     const msg = JSON.parse(e.data);
