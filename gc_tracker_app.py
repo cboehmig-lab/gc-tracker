@@ -2578,10 +2578,22 @@ function clRenderCities() {
     const div = document.createElement('div');
     div.className = 'cl-city-row';
     const cbId = 'cl_cb_' + c.id;
-    div.innerHTML =
-      '<input type="checkbox" id="' + cbId + '" value="' + c.id + '">' +
-      '<label for="' + cbId + '">' + c.label + '</label>' +
-      '<button class="cl-fav-btn' + (isFav ? ' active' : '') + '" onclick="clToggleFav(event,\'' + c.id + '\',this)" title="' + (isFav ? 'Remove from' : 'Add to') + ' favorites">★</button>';
+    const cb  = document.createElement('input');
+    cb.type = 'checkbox'; cb.id = cbId; cb.value = c.id;
+    const lbl = document.createElement('label');
+    lbl.htmlFor = cbId; lbl.textContent = c.label;
+    const btn = document.createElement('button');
+    btn.className = 'cl-fav-btn' + (isFav ? ' active' : '');
+    btn.title = (isFav ? 'Remove from' : 'Add to') + ' favorites';
+    btn.textContent = '★';
+    btn.dataset.cityId = c.id;
+    btn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      clToggleFav(c.id, this);
+    });
+    div.appendChild(cb);
+    div.appendChild(lbl);
+    div.appendChild(btn);
     list.appendChild(div);
   });
 }
@@ -2595,8 +2607,7 @@ function clToggleFavs() {
   clRenderCities();
 }
 
-function clToggleFav(e, id, btn) {
-  e.stopPropagation();
+function clToggleFav(id, btn) {
   if (_clFavs.includes(id)) {
     _clFavs = _clFavs.filter(f => f !== id);
     btn.classList.remove('active');
