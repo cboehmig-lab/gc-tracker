@@ -45,6 +45,7 @@ OUTPUT_FILE    = DATA_DIR / "gc_new_inventory.xlsx"
 STORES_CACHE   = DATA_DIR / "gc_stores_cache.json"
 FAVORITES_FILE = DATA_DIR / "gc_favorites.json"
 CAT_CACHE_FILE = DATA_DIR / "gc_category_cache.json"
+WATCHLIST_FILE = DATA_DIR / "gc_watchlist.json"
 
 PORT        = int(os.environ.get("PORT", 5050))
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
@@ -294,6 +295,20 @@ def load_favorites() -> list[str]:
 
 def save_favorites(favs: list[str]):
     FAVORITES_FILE.write_text(json.dumps(sorted(set(favs))))
+
+
+def load_watchlist() -> dict:
+    """Returns {sku: {name, price, store, url, condition, category, date_added, sold}}"""
+    if WATCHLIST_FILE.exists():
+        try:
+            return json.loads(WATCHLIST_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def save_watchlist(wl: dict):
+    WATCHLIST_FILE.write_text(json.dumps(wl, indent=2))
 
 
 # ── GC scraping ───────────────────────────────────────────────────────────────
@@ -1110,6 +1125,110 @@ def api_favorites():
     save_favorites(favs)
     return jsonify({"favorites": sorted(favs)})
 
+
+@app.route("/api/browse", methods=["POST"])
+@login_required
+def api_browse():
+    """Return cached inventory for selected stores — instant, no scraping."""
+    stores = request.json.get("stores", [])
+    if not stores:
+        return jsonify({"items": []})
+    _load_cat_cache()
+    state      = load_state()
+    seen_ids   = set(state.get("seen_ids", []))
+    item_dates = state.get("item_dates", {})
+    wl         = load_watchlist()
+    store_set  = set(stores)
+    items = []
+    for sku, cached in _cat_cache.items():
+        if cached.get("store") not in store_set:
+            continue
+        if not cached.get("available", True):
+            continue  # skip sold items in browse view
+        price_raw = cached.get("price", 0) or 0
+        items.append({
+            "id":         sku,
+            "name":       cached.get("name", ""),
+            "price":      f"${price_raw:,.2f}" if price_raw else "",
+            "price_raw":  price_raw,
+            "price_drop": 0,
+            "store":      cached.get("store", ""),
+            "url":        cached.get("url", ""),
+            "category":   cached.get("category", ""),
+            "subcategory":cached.get("subcategory", ""),
+            "condition":  cached.get("condition", ""),
+            "date":       _fmt_date(item_dates.get(sku, "")),
+            "isNew":      sku not in seen_ids,
+            "watched":    sku in wl,
+        })
+    items.sort(key=lambda x: (not x["isNew"], x.get("date","") or ""))
+    return jsonify({"items": items, "count": len(items)})
+
+
+@app.route("/api/watchlist", methods=["GET"])
+@login_required
+def api_watchlist_get():
+    wl = load_watchlist()
+    return jsonify({"watchlist": wl})
+
+
+@app.route("/api/watchlist", methods=["POST"])
+@login_required
+def api_watchlist_post():
+    data = request.json
+    sku  = data.get("id", "")
+    action = data.get("action", "")
+    if not sku:
+        return jsonify({"error": "No id provided"}), 400
+    wl = load_watchlist()
+    if action == "add":
+        _load_cat_cache()
+        cached = _cat_cache.get(sku, {})
+        wl[sku] = {
+            "name":       cached.get("name", data.get("name", "")),
+            "price":      cached.get("price", 0),
+            "store":      cached.get("store", data.get("store", "")),
+            "url":        cached.get("url", data.get("url", "")),
+            "condition":  cached.get("condition", ""),
+            "category":   cached.get("category", ""),
+            "date_added": datetime.now().strftime("%Y-%m-%d"),
+            "sold":       False,
+        }
+    elif action == "remove":
+        wl.pop(sku, None)
+    save_watchlist(wl)
+    return jsonify({"watchlist": wl})
+
+
+@app.route("/api/watchlist/items", methods=["GET"])
+@login_required
+def api_watchlist_items():
+    """Return watchlist items formatted for display."""
+    wl         = load_watchlist()
+    item_dates = load_state().get("item_dates", {})
+    items = []
+    for sku, w in wl.items():
+        price_raw = w.get("price", 0) or 0
+        items.append({
+            "id":         sku,
+            "name":       w.get("name", ""),
+            "price":      f"${price_raw:,.2f}" if price_raw else "",
+            "price_raw":  price_raw,
+            "price_drop": 0,
+            "store":      w.get("store", ""),
+            "url":        w.get("url", ""),
+            "category":   w.get("category", ""),
+            "subcategory":"",
+            "condition":  w.get("condition", ""),
+            "date":       _fmt_date(item_dates.get(sku, w.get("date_added",""))),
+            "isNew":      False,
+            "watched":    True,
+            "sold":       w.get("sold", False),
+        })
+    # Sold items at bottom
+    items.sort(key=lambda x: x["sold"])
+    return jsonify({"items": items, "count": len(items)})
+
 @app.route("/api/state")
 @login_required
 def api_state():
@@ -1763,22 +1882,62 @@ def _run(selected_stores: list[str], baseline: bool):
                     if done_count % 10 == 0:
                         send({"type": "progress", "msg": f"  …{done_count}/{len(needs_cat)} categories fetched"})
 
-        # Apply all data to products
+        # Apply all data to products, tracking price drops
         for p in all_products:
             sku    = p["id"]
             cached = _cat_cache.get(sku, {})
-            # Category: from cache (just fetched) or keyword fallback
             cat    = cached.get("category") or classify_by_name(p.get("name", ""))[0]
             subcat = cached.get("subcategory") or classify_by_name(p.get("name", ""))[1]
-            # Condition: from the listing page (parse_products already got it) — never blank it out
             condition = p.get("condition") or cached.get("condition", "")
-            _cat_cache[sku] = {"category": cat, "subcategory": subcat,
-                               "condition": condition, "condition_fetched": True,
-                               "name": p.get("name", ""), "url": p.get("url", "")}
+            # Price drop detection
+            new_price  = p.get("price") or 0
+            last_price = cached.get("price") or 0
+            price_drop = (last_price - new_price) if (last_price and new_price and new_price < last_price) else 0
+            _cat_cache[sku] = {
+                "category":          cat,
+                "subcategory":       subcat,
+                "condition":         condition,
+                "condition_fetched": True,
+                "name":              p.get("name", ""),
+                "url":               p.get("url", ""),
+                "store":             p.get("store", ""),
+                "price":             new_price,
+                "available":         True,
+            }
             p["category"]    = cat
             p["subcategory"] = subcat
             p["condition"]   = condition
+            p["price_drop"]  = price_drop
         _save_cat_cache()
+
+        # ── Mark sold items (not found in this scan for scanned stores) ──────────
+        if not baseline and not _stop_event.is_set():
+            # Only mark items as sold if we scanned ALL their store's pages
+            scanned_store_set = set(stores_to_scan)
+            for sku, cached in _cat_cache.items():
+                if cached.get("store") in scanned_store_set and sku not in ids_this_run:
+                    if cached.get("available", True):
+                        cached["available"] = False
+                        # Flag in watchlist as sold
+                        wl = load_watchlist()
+                        if sku in wl:
+                            wl[sku]["sold"] = True
+                            save_watchlist(wl)
+            _save_cat_cache()
+
+        # ── Update watchlist with latest prices ───────────────────────────────
+        wl = load_watchlist()
+        changed = False
+        for sku, item in wl.items():
+            if sku in _cat_cache and not wl[sku].get("sold"):
+                cached = _cat_cache[sku]
+                wl[sku].update({
+                    "price":     cached.get("price", item.get("price")),
+                    "condition": cached.get("condition", item.get("condition","")),
+                })
+                changed = True
+        if changed:
+            save_watchlist(wl)
 
         # ── Record first-seen dates for new items ─────────────────────────────
         for p in all_products:
@@ -1792,8 +1951,11 @@ def _run(selected_stores: list[str], baseline: bool):
 
         def fmt(p):
             return {
+                "id":         p["id"],
                 "name":       p["name"],
                 "price":      f"${p['price']:,.2f}" if p["price"] else "",
+                "price_raw":  p.get("price") or 0,
+                "price_drop": p.get("price_drop", 0),
                 "store":      p["store"],
                 "url":        p["url"],
                 "category":   p.get("category", ""),
@@ -1914,6 +2076,13 @@ tr:hover td{background:#161616}
 td a{color:#6ab0f5;text-decoration:none}
 td a:hover{text-decoration:underline}
 .tag{background:#c00;color:#fff;font-size:.65rem;font-weight:700;padding:1px 5px;border-radius:3px}
+.tag-drop{background:#1a3a1a;color:#4ade80;font-size:.62rem;font-weight:700;padding:2px 5px;border-radius:3px;border:1px solid #2d6a2d;white-space:nowrap}
+.tag-sold{background:#3a1a1a;color:#f87171;font-size:.62rem;font-weight:700;padding:2px 5px;border-radius:3px;border:1px solid #6a2d2d}
+.watch-btn{background:none;border:none;cursor:pointer;color:#444;font-size:1rem;line-height:1;padding:0 2px;transition:color .15s;flex-shrink:0}
+.watch-btn:hover{color:#f5c518}
+.watch-btn.active{color:#f5c518}
+tr.sold-row td{color:#666}
+tr.sold-row td a{color:#666}
 .no-res{padding:24px 20px;color:#555;font-size:.85rem}
 
 /* ── Password modal ── */
@@ -2052,7 +2221,7 @@ td a:hover{text-decoration:underline}
     <div class="left-footer">
       <div id="sel-count">0 stores selected</div>
       <div class="btn-row">
-        <button id="run-btn"      onclick="runTracker()" disabled>Run</button>
+        <button id="run-btn"      onclick="runTracker()" disabled>Check for New</button>
         <button id="baseline-btn" onclick="runBaseline()" title="Scan every GC store nationwide">🌐 Build Baseline</button>
       </div>
       <button id="validate-stores-btn" onclick="validateStores()"
@@ -2074,6 +2243,10 @@ td a:hover{text-decoration:underline}
       <span>Known items: <b id="s-known">—</b></span>
       <span>Stores: <b id="s-stores">—</b></span>
       <span id="s-excel" style="display:none"><a style="color:#6ab0f5" href="/download/excel">Download Excel ↗</a></span>
+      <button id="watchlist-btn" onclick="showWatchList()"
+        style="margin-left:auto;padding:5px 12px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:4px;color:#aaa;font-size:.78rem;cursor:pointer;white-space:nowrap">
+        ★ My Watch List
+      </button>
     </div>
     <div id="log"><span class="log-dim">Ready — select stores and click Run, or build a full baseline.</span></div>
     <div class="results" id="res-panel" style="display:none">
@@ -2148,6 +2321,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   clRenderCities();
   await loadData();
   await loadState();
+  await loadWatchlist();
 });
 
 async function loadData() {
@@ -2264,13 +2438,106 @@ function updateCount() {
   document.getElementById('sel-count').textContent = n + ' store' + (n===1?'':'s') + ' selected';
   document.getElementById('run-btn').disabled = (n===0 || running);
   document.getElementById('baseline-btn').disabled = running;
+  // Auto-browse cached inventory when stores are selected
+  if (n > 0 && !running) browseCache();
+  else if (n === 0) {
+    document.getElementById('res-panel').style.display = 'none';
+  }
 }
+
+// ── Browse cached inventory ────────────────────────────────────────────────
+let _browseTimer = null;
+async function browseCache() {
+  clearTimeout(_browseTimer);
+  _browseTimer = setTimeout(async () => {
+    const stores = getSelected();
+    if (!stores.length) return;
+    const r = await fetch('/api/browse', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({stores})
+    });
+    const d = await r.json();
+    if (!d.items || !d.items.length) {
+      document.getElementById('res-panel').style.display = 'none';
+      return;
+    }
+    window._tableData = d.items.map(item => ({...item}));
+    window._sortCol = null; window._sortDir = 1;
+    const n = d.items.filter(i => i.isNew).length;
+    const total = d.items.length;
+    document.getElementById('res-title').textContent = n > 0 ? `${n} New · ${total} Total` : `${total} Items`;
+    document.getElementById('res-badge').textContent = n > 0 ? n + ' NEW' : '';
+    document.getElementById('res-panel').style.display = '';
+    document.getElementById('res-search').value = '';
+    document.getElementById('res-search-count').textContent = '';
+    ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+    populateCategoryFilter();
+    renderTable();
+  }, 300);
+}
+
+// ── Watch list ────────────────────────────────────────────────────────────
+window._watchlist = {};
+
+async function loadWatchlist() {
+  try {
+    const r = await fetch('/api/watchlist');
+    const d = await r.json();
+    window._watchlist = d.watchlist || {};
+  } catch(e) {}
+}
+
+async function toggleWatch(id, btn) {
+  const isWatched = !!(window._watchlist[id]);
+  const action = isWatched ? 'remove' : 'add';
+  // Get item data from table row
+  const row = btn.closest('tr');
+  const cells = row ? row.querySelectorAll('td') : [];
+  const itemData = {
+    id,
+    name:  row ? row.dataset.name : '',
+    store: row ? row.dataset.store : '',
+  };
+  const r = await fetch('/api/watchlist', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({...itemData, action})
+  });
+  const d = await r.json();
+  window._watchlist = d.watchlist || {};
+  btn.classList.toggle('active', !isWatched);
+  btn.textContent = isWatched ? '☆' : '★';
+  btn.title = isWatched ? 'Add to watch list' : 'Remove from watch list';
+}
+
+async function showWatchList() {
+  const r = await fetch('/api/watchlist/items');
+  const d = await r.json();
+  if (!d.items || !d.items.length) {
+    appendLog('Your watch list is empty — click ☆ next to any item to add it.', 'log-dim');
+    return;
+  }
+  window._tableData = d.items;
+  window._sortCol = null; window._sortDir = 1;
+  const soldCount = d.items.filter(i => i.sold).length;
+  document.getElementById('res-title').textContent = `Watch List (${d.items.length} items${soldCount ? ', ' + soldCount + ' sold' : ''})`;
+  document.getElementById('res-badge').textContent = '';
+  document.getElementById('res-panel').style.display = '';
+  document.getElementById('res-search').value = '';
+  document.getElementById('res-search-count').textContent = '';
+  ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+  populateCategoryFilter();
+  renderTable();
+}
+
+
 
 function getSelected() {
   return [...document.querySelectorAll('.store-row input:checked')].map(c => c.value);
 }
 
-// ── Baseline password modal ───────────────────────────────────────────────────
+
 function runBaseline() {
   document.getElementById('pw-modal').style.display = 'flex';
   document.getElementById('pw-input').value = '';
@@ -2382,9 +2649,11 @@ function showResults(msg, isBaseline) {
   (msg.new_items || []).forEach(item => window._tableData.push({isNew:true,  ...item}));
   (msg.all_items  || []).forEach(item => window._tableData.push({isNew:false, ...item}));
   window._sortCol = null; window._sortDir = 1;
-
-  populateCategoryFilter();
-  renderTable();
+  // Reload watchlist so sold flags are fresh
+  loadWatchlist().then(() => {
+    populateCategoryFilter();
+    renderTable();
+  });
 }
 
 // ── Category filters ──────────────────────────────────────────────────────────
@@ -2433,7 +2702,9 @@ function renderTable() {
   const data = window._tableData || [];
   let html = `<table id="res-table"><thead><tr>
     <th data-col="0"></th>
+    <th data-col="watch" style="width:32px"></th>
     <th data-col="1">Item</th>
+    <th data-col="drop" style="width:80px"></th>
     <th data-col="2">Price</th>
     <th data-col="3">Condition</th>
     <th data-col="4">Category</th>
@@ -2447,9 +2718,20 @@ function renderTable() {
     const nameCell = item.url
       ? `<a href="${item.url}" target="_blank">${esc(item.name)}</a>`
       : esc(item.name);
-    html += `<tr data-name="${esc(item.name)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}">` +
+    const isSold = item.sold || false;
+    const isWatched = (window._watchlist || {})[item.id || ''];
+    const watchStar = item.id
+      ? `<button class="watch-btn ${isWatched ? 'active' : ''}" onclick="toggleWatch('${(item.id||'').replace(/'/g,"\\'")}',this)" title="${isWatched ? 'Remove from' : 'Add to'} watch list">${isWatched ? '★' : '☆'}</button>`
+      : '';
+    const dropCell = item.price_drop > 0
+      ? `<span class="tag-drop">↓ $${Math.round(item.price_drop)}</span>`
+      : '';
+    const soldBadge = isSold ? ' <span class="tag-sold">Sold</span>' : '';
+    html += `<tr class="${isSold ? 'sold-row' : ''}" data-name="${esc(item.name)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}">` +
       `<td>${item.isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
-      `<td>${nameCell}</td>` +
+      `<td>${watchStar}</td>` +
+      `<td>${nameCell}${soldBadge}</td>` +
+      `<td>${dropCell}</td>` +
       `<td>${item.price||''}</td>` +
       `<td>${esc(item.condition)}</td>` +
       `<td>${esc(item.category)}</td>` +
