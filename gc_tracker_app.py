@@ -562,7 +562,6 @@ def _extract_conditions_from_listing(html: str) -> dict:
 def parse_products(data, store_name: str) -> list[dict]:
     """Parse products from either Algolia API response (dict) or legacy HTML (str)."""
     if isinstance(data, dict):
-        # New Algolia API format
         products = []
         try:
             results = data.get("results", [])
@@ -570,19 +569,22 @@ def parse_products(data, store_name: str) -> list[dict]:
                 return []
             hits = results[0].get("hits", [])
             for hit in hits:
-                sku   = str(hit.get("objectID") or hit.get("sku") or "").strip()
-                name  = _clean_name(hit.get("name") or hit.get("title") or "")
+                sku   = str(hit.get("objectID") or "").strip()
+                name  = _clean_name(hit.get("displayName") or hit.get("name") or "")
                 if not sku or not name:
                     continue
-                price_raw = hit.get("price") or hit.get("salePrice") or 0
+                price_raw = hit.get("price") or hit.get("listPrice") or 0
                 try:    price = float(price_raw) if price_raw else None
                 except: price = None
-                url = hit.get("url") or hit.get("pdpUrl") or ""
-                if url and not url.startswith("http"):
-                    url = "https://www.guitarcenter.com" + url
-                condition = hit.get("condition") or ""
+                seo_url = hit.get("seoUrl") or ""
+                url = ("https://www.guitarcenter.com" + seo_url) if seo_url else ""
+                # Condition: "Used > Great" → "Great"
+                condition = hit.get("condition") or {}
                 if isinstance(condition, dict):
-                    condition = condition.get("lvl0") or condition.get("lvl1") or ""
+                    lvl1 = condition.get("lvl1") or condition.get("lvl0") or ""
+                    condition = lvl1.split(">")[-1].strip() if ">" in lvl1 else lvl1
+                elif isinstance(condition, str):
+                    condition = condition.split(">")[-1].strip()
                 condition = _parse_condition(condition) if condition else ""
                 products.append({
                     "id":        sku,
