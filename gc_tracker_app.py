@@ -1411,7 +1411,9 @@ def api_browse():
             "isNew":      sku not in seen_ids,
             "watched":    sku in wl,
         })
-    items.sort(key=lambda x: (not x["isNew"], x.get("date_raw","") or ""))
+    # NEW items first; within each group, newest dates first
+    items.sort(key=lambda x: x.get("date_raw", "") or "", reverse=True)   # newest first
+    items.sort(key=lambda x: not x["isNew"])                               # NEW items first (stable)
     return jsonify({"items": items, "count": len(items), "no_store_data": False})
 
 
@@ -2830,7 +2832,9 @@ function updateCount() {
 
 // ── Browse cached inventory ────────────────────────────────────────────────
 let _browseTimer = null;
+let _skipBrowse = false;  // Set after a scan to prevent browseCache from overwriting results
 async function browseCache() {
+  if (_skipBrowse) { _skipBrowse = false; return; }
   clearTimeout(_browseTimer);
   _browseTimer = setTimeout(async () => {
     const stores = getSelected();
@@ -2998,6 +3002,7 @@ async function startRun(payload, isBaseline) {
     if (msg.type === 'done') {
       es.close(); running = false;
       stopBtn.style.display = 'none';
+      _skipBrowse = true;  // Prevent browseCache from overwriting scan results
       updateCount(); loadState(); showResults(msg, isBaseline);
     }
   };
