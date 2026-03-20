@@ -601,6 +601,7 @@ def parse_products(data, store_name: str) -> list[dict]:
                     "url":       url,
                     "condition": condition,
                     "date_listed": date_str,
+                    "seo_url":   seo_url,
                 })
         except Exception:
             pass
@@ -875,6 +876,45 @@ def fetch_page_data(url: str, name: str) -> tuple[str, str, str]:
 # Keep old name as alias for any callers
 def fetch_category_from_page(url: str, name: str) -> tuple[str, str]:
     cat, subcat, _ = fetch_page_data(url, name)
+    return cat, subcat
+
+
+def _classify_from_seo_url(seo_url: str) -> tuple[str, str]:
+    """Extract category/subcategory from GC seoUrl.
+    e.g. /Used/Guitars/Solid-Body-Electric-Guitars/Fender/... → (Guitars, Solid Body Electric Guitars)
+         /Used/Amplifiers-Effects/Guitar-Amplifiers/... → (Amplifiers & Effects, Guitar Amplifiers)
+    """
+    if not seo_url:
+        return "", ""
+    parts = [p for p in seo_url.strip("/").split("/") if p and p.lower() not in ("used","vintage")]
+    if not parts:
+        return "", ""
+
+    _CAT_MAP = {
+        "guitars":                    "Guitars",
+        "bass":                       "Bass",
+        "amplifiers-effects":         "Amplifiers & Effects",
+        "drums-percussion":           "Drums & Percussion",
+        "keyboards-midi":             "Keyboards & MIDI",
+        "recording-gear":             "Recording",
+        "microphones-wireless-systems":"Microphones & Wireless",
+        "dj-gear":                    "DJ Equipment",
+        "live-sound":                 "Live Sound",
+        "lighting-stage-effects":     "Lighting & Stage",
+        "accessories":                "Accessories",
+        "folk-traditional-instruments":"Folk & Traditional",
+        "pro-audio":                  "Pro Audio",
+    }
+
+    cat_slug = parts[0].lower()
+    cat = _CAT_MAP.get(cat_slug, parts[0].replace("-", " ").title())
+
+    subcat = ""
+    if len(parts) > 1:
+        subcat = parts[1].replace("-", " ").title()
+        # Strip brand names that sneak in as subcategory
+        subcat = _clean_gc_cat(subcat)
+
     return cat, subcat
 
 
@@ -2195,45 +2235,19 @@ def _run(selected_stores: list[str], baseline: bool):
             if baseline and not _stop_event.is_set():
                 _sleep(4.0, 2.0)  # 2–6s between stores during baseline
 
-        # ── Classify categories (parallel) & use listing-page condition ─────────
-        # Condition is already parsed from the listing page in parse_products — free, no HTTP.
-        # Category requires the individual product page — only fetch for NEW items not in seen_ids,
-        # and only if not already cached. Existing items keep their cached category.
-        new_item_ids = {p["id"] for p in all_products if p["id"] not in seen_ids}
-        needs_cat = [p for p in all_products
-                     if p["id"] in new_item_ids
-                     and not baseline and p.get("url")
-                     and not _cat_cache.get(p["id"], {}).get("category")]
-
-        if needs_cat:
-            send({"type": "progress", "msg": f"\nFetching categories for {len(needs_cat)} item(s) (parallel)…"})
-
-            def _fetch_cat(p):
-                try:
-                    _sleep(0.2, 0.2)  # 0–0.4s jitter so parallel requests stagger
-                    cat, subcat, _ = fetch_page_data(p["url"], p.get("name", ""))
-                    return p["id"], cat, subcat
-                except Exception:
-                    return p["id"], "", ""
-
-            with ThreadPoolExecutor(max_workers=5) as pool:
-                futures = {pool.submit(_fetch_cat, p): p for p in needs_cat}
-                done_count = 0
-                for future in as_completed(futures):
-                    if _stop_event.is_set():
-                        break
-                    sku, cat, subcat = future.result()
-                    _cat_cache.setdefault(sku, {}).update({"category": cat, "subcategory": subcat})
-                    done_count += 1
-                    if done_count % 10 == 0:
-                        send({"type": "progress", "msg": f"  …{done_count}/{len(needs_cat)} categories fetched"})
-
+        # ── Classify categories instantly from seoUrl — no HTTP requests needed ──
         # Apply all data to products, tracking price drops
         for p in all_products:
             sku    = p["id"]
             cached = _cat_cache.get(sku, {})
-            cat    = cached.get("category") or classify_by_name(p.get("name", ""))[0]
-            subcat = cached.get("subcategory") or classify_by_name(p.get("name", ""))[1]
+            # Category: try seoUrl first (instant), then cached, then keyword fallback
+            if not cached.get("category"):
+                cat, subcat = _classify_from_seo_url(p.get("seo_url", ""))
+                if not cat:
+                    cat, subcat = classify_by_name(p.get("name", ""))
+            else:
+                cat    = cached.get("category")
+                subcat = cached.get("subcategory", "")
             condition = p.get("condition") or cached.get("condition", "")
             # Price drop detection
             new_price  = p.get("price") or 0
