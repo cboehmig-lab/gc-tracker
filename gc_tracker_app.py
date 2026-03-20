@@ -2153,6 +2153,13 @@ def api_debug_condition_diag():
 @login_required
 def api_stop():
     _stop_event.set()
+    # Force-release lock after a short delay to prevent stuck state
+    def _force_unlock():
+        import time; time.sleep(5)
+        if _lock.locked():
+            try: _lock.release()
+            except RuntimeError: pass
+    threading.Thread(target=_force_unlock, daemon=True).start()
     return jsonify({"status": "stopping"})
 
 @app.route("/api/populate-store-data", methods=["POST"])
@@ -2600,15 +2607,16 @@ def _run(selected_stores: list[str], baseline: bool):
             }
 
         new_ids = {p["id"] for p in new_items}
-        # For large scans, don't send all_items via SSE — client will use server-side browse
+        # For large scans, don't send full item lists via SSE — client will use server-side browse
         large_scan = len(all_products) > 1000
+        new_items_capped = [fmt(p) for p in new_items[:50]] if large_scan else [fmt(p) for p in new_items]
         send({
             "type":       "done",
             "baseline":   baseline,
             "stopped":    _stop_event.is_set(),
             "scanned":    len(all_products),
             "new_count":  len(new_items),
-            "new_items":  [fmt(p) for p in new_items],
+            "new_items":  new_items_capped,
             "all_items":  [] if (baseline or large_scan) else
                           [fmt(p) for p in all_products if p["id"] not in new_ids],
             "use_browse": large_scan and not baseline,
@@ -3781,7 +3789,11 @@ async function startRun(payload, isBaseline) {
 
   const es = new EventSource('/api/progress');
   es.onmessage = e => {
-    const msg = JSON.parse(e.data);
+    let msg;
+    try { msg = JSON.parse(e.data); } catch(err) {
+      appendLog('Warning: could not parse progress message', 'log-err');
+      return;
+    }
     if (msg.type === 'ping') return;
     if (msg.type === 'progress') { appendLog(msg.msg); return; }
     if (msg.type === 'done') {
@@ -3789,6 +3801,21 @@ async function startRun(payload, isBaseline) {
       stopBtn.style.display = 'none';
       _skipBrowse = true;  // Prevent browseCache from overwriting scan results
       updateCount(); loadState(); showResults(msg, isBaseline);
+    }
+  };
+  es.onerror = () => {
+    // SSE connection dropped — recover gracefully
+    es.close();
+    if (running) {
+      running = false;
+      stopBtn.style.display = 'none';
+      updateCount(); loadState();
+      appendLog('Connection to server lost. Refreshing results…', 'log-dim');
+      // Fall back to browse mode to show whatever data was saved
+      setTimeout(() => {
+        const stores = getSelected();
+        if (stores.length) browseCache();
+      }, 1000);
     }
   };
 }
