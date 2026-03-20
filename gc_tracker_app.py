@@ -987,14 +987,21 @@ def api_run():
     _stop_event.clear()
     data     = request.json
     selected = data.get("stores", [])
-    baseline = data.get("baseline", False)
-    if not selected and not baseline:
+    # No stores selected = scan all stores
+    if not selected:
+        selected = get_store_list()
+        if not selected:
+            # Store list empty — fetch from Algolia first
+            selected = _fetch_stores_from_algolia()
+            if selected:
+                STORES_CACHE.write_text(json.dumps({"stores": sorted(selected), "updated": datetime.now().isoformat(), "count": len(selected)}))
+    if not selected:
         _lock.release()
-        return jsonify({"error": "No stores selected."}), 400
+        return jsonify({"error": "Could not load store list."}), 400
     while not _q.empty():
         try: _q.get_nowait()
         except queue.Empty: break
-    t = threading.Thread(target=_run, args=(selected, baseline), daemon=True)
+    t = threading.Thread(target=_run, args=(selected, False), daemon=True)
     t.start()
     return jsonify({"status": "started"})
 
