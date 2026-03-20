@@ -248,7 +248,9 @@ def fetch_page(store_name: str, page: int) -> dict:
         "query":         "",
         "ruleContexts":  ["used-page", "primary_itemtype", "extension_itemtype"],
     }]}
-    r = _http.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=20)
+    # Use a fresh session per call for thread safety
+    import requests as _req
+    r = _req.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=20)
     r.raise_for_status()
     return r.json()
 
@@ -1310,17 +1312,20 @@ def _run(selected_stores: list[str], baseline: bool = False):
         completed = [0]
         lock = threading.Lock()
 
+        errors = [0]
         def fetch_store(store):
             if _stop_event.is_set():
                 return [], set()
             try:
                 products, ids = scrape_store(store, seen_ids, lambda m: None, _stop_event)
-            except Exception:
+            except Exception as e:
+                with lock:
+                    errors[0] += 1
                 products, ids = [], set()
             with lock:
                 completed[0] += 1
                 if completed[0] % 10 == 0 or completed[0] == len(stores_to_scan):
-                    send({"type":"progress","msg":f"  [{completed[0]}/{len(stores_to_scan)}] stores fetched…"})
+                    send({"type":"progress","msg":f"  [{completed[0]}/{len(stores_to_scan)}] stores fetched… ({len(all_products)} items so far)"})
             return products, ids
 
         max_workers = 10
@@ -1338,6 +1343,8 @@ def _run(selected_stores: list[str], baseline: bool = False):
 
         if _stop_event.is_set():
             send({"type":"progress","msg":"⏹ Stopped by user."})
+        if errors[0]:
+            send({"type":"progress","msg":f"  ⚠ {errors[0]} stores had errors."})
 
 
         # ── Classify categories and apply all data ────────────────────────────
@@ -1733,11 +1740,11 @@ let allStores = [], favorites = [], running = false;
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
-  document.getElementById('search').addEventListener('input', filterList);
-  clRenderCities();
-  await loadData();
-  await loadState();
-  await loadWatchlist();
+  try { document.getElementById('search').addEventListener('input', filterList); } catch(e) {}
+  try { clRenderCities(); } catch(e) { console.error('clRenderCities error:', e); }
+  try { await loadData(); } catch(e) { console.error('loadData error:', e); }
+  try { await loadState(); } catch(e) { console.error('loadState error:', e); }
+  try { await loadWatchlist(); } catch(e) { console.error('loadWatchlist error:', e); }
 });
 
 async function loadData() {
