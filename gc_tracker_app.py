@@ -126,17 +126,6 @@ def get_store_list() -> list[str]:
             cached = json.loads(STORES_CACHE.read_text()).get("stores", [])
         except Exception:
             pass
-    if not cached:
-        try:
-            cached = _fetch_stores_from_algolia()
-            if cached:
-                STORES_CACHE.write_text(json.dumps({
-                    "stores": sorted(cached),
-                    "updated": datetime.now().isoformat(),
-                    "count": len(cached)
-                }))
-        except Exception:
-            pass
     blocklist = _get_blocklist()
     return sorted(set(cached) - blocklist)
 
@@ -341,7 +330,7 @@ def save_watchlist(wl: dict):
 
 # ── GC scraping ───────────────────────────────────────────────────────────────
 
-PAGE_SIZE = 1000
+PAGE_SIZE = 240
 
 def _fmt_date(d: str) -> str:
     """Convert YYYY-MM-DD to M/D/YY."""
@@ -371,29 +360,10 @@ ALGOLIA_HEADERS = {
     "Content-Type":             "application/json",
 }
 
-def _fetch_stores_from_algolia() -> list[str]:
-    """Get the full store list from Algolia's facets — fast and authoritative."""
-    ts = int(time.time())
-    payload = {"requests": [{
-        "indexName":     ALGOLIA_INDEX,
-        "facetFilters":  ["categoryPageIds:Used", "condition.lvl0:Used"],
-        "facets":        ["stores"],
-        "hitsPerPage":   0,
-        "maxValuesPerFacet": 1000,
-        "numericFilters": [f"startDate<={ts}"],
-        "query":         "",
-    }]}
-    r = _http.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=20)
-    r.raise_for_status()
-    data = r.json()
-    facets = data.get("results", [{}])[0].get("facets", {})
-    stores = list(facets.get("stores", {}).keys())
-    return sorted(stores)
-
-
 def fetch_page(store_name: str, page: int) -> dict:
     """Fetch one page of used inventory for a store via Algolia API."""
-    ts = int(time.time())
+    import time as _time
+    ts = int(_time.time())
     payload = {"requests": [{
         "indexName":     ALGOLIA_INDEX,
         "analyticsTags": ["Did Not Search"],
@@ -403,20 +373,22 @@ def fetch_page(store_name: str, page: int) -> dict:
             [f"stores:{store_name}"],
         ],
         "facets":        ["*"],
-        "hitsPerPage":   1000,
+        "hitsPerPage":   240,
         "maxValuesPerFacet": 10,
         "numericFilters": [f"startDate<={ts}"],
         "page":          page - 1,
         "query":         "",
         "ruleContexts":  ["used-page", "primary_itemtype", "extension_itemtype"],
+        "attributesToRetrieve": ["*"],
     }]}
     r = _http.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=20)
     r.raise_for_status()
     return r.json()
 
 
-def parse_products(data: any, store_name: str) -> list[dict]:
-    """Parse Algolia API response into product list."""
+def _parse_products_v1(data: any, store_name: str) -> list[dict]:
+    """SUPERSEDED — old version of parse_products, kept for safety. 
+    The active version is defined further below and extracts brand, categories, etc."""
     # Handle both old HTML string format and new Algolia dict format
     if isinstance(data, str):
         return _parse_products_html(data, store_name)
@@ -608,6 +580,8 @@ def parse_products(data, store_name: str) -> list[dict]:
                 except: price = None
                 seo_url = hit.get("seoUrl") or ""
                 url = ("https://www.guitarcenter.com" + seo_url) if seo_url else ""
+                # Brand
+                brand = hit.get("brand") or ""
                 # Condition: "Used > Great" → "Great"
                 condition = hit.get("condition") or {}
                 if isinstance(condition, dict):
@@ -616,27 +590,45 @@ def parse_products(data, store_name: str) -> list[dict]:
                 elif isinstance(condition, str):
                     condition = condition.split(">")[-1].strip()
                 condition = _parse_condition(condition) if condition else ""
-                # Date listed from startDate (Unix timestamp in seconds)
-                start_ts = hit.get("startDate") or 0
+                # Category from categories array: [{lvl0: "Guitars", lvl1: "Guitars > Electric Guitars", ...}]
+                cats = hit.get("categories") or []
+                cats_slug = hit.get("categoriesSlug") or {}
+                if cats and isinstance(cats, list) and isinstance(cats[0], dict):
+                    category    = cats[0].get("lvl0") or ""
+                    subcategory = cats_slug.get("lvl1") or ""
+                    # Fallback: parse lvl1 from full hierarchy if slug not available
+                    if not subcategory:
+                        lvl1_full = cats[0].get("lvl1") or ""
+                        subcategory = lvl1_full.split(">")[-1].strip() if ">" in lvl1_full else ""
+                else:
+                    category, subcategory = "", ""
+                # Date listed from creationDate (millisecond timestamp)
+                creation_ts = hit.get("creationDate") or 0
                 try:
                     from datetime import datetime as _dt
-                    date_str = _dt.utcfromtimestamp(float(start_ts)).strftime("%Y-%m-%d") if start_ts else ""
+                    date_str = _dt.utcfromtimestamp(float(creation_ts) / 1000).strftime("%Y-%m-%d") if creation_ts else ""
                 except Exception:
                     date_str = ""
+                # Location: storeName gives "Austin, TX" format
+                location = hit.get("storeName") or store_name
                 products.append({
-                    "id":        sku,
-                    "name":      name,
-                    "price":     price,
-                    "store":     store_name,
-                    "url":       url,
-                    "condition": condition,
+                    "id":          sku,
+                    "name":        name,
+                    "brand":       brand,
+                    "price":       price,
+                    "store":       store_name,
+                    "location":    location,
+                    "url":         url,
+                    "condition":   condition,
+                    "category":    category,
+                    "subcategory": subcategory,
                     "date_listed": date_str,
                 })
         except Exception:
             pass
         return products
 
-    # Legacy HTML format fallback
+    # Legacy HTML format fallback (kept for safety — not actively called)
     html = data
     condition_map = _extract_conditions_from_listing(html)
     for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL):
@@ -668,7 +660,9 @@ def parse_products(data, store_name: str) -> list[dict]:
             if name and sku:
                 products.append({"id": sku, "name": name, "price": price,
                                   "store": store_name, "url": url,
-                                  "condition": condition})
+                                  "condition": condition,
+                                  "brand": "", "category": "", "subcategory": "",
+                                  "location": store_name, "date_listed": ""})
         if products:
             return products
     return []
@@ -1170,8 +1164,8 @@ def save_state(seen_ids: list, run_time: str, item_dates: dict = None):
 
 # ── Excel ─────────────────────────────────────────────────────────────────────
 
-_COLS    = ["Status", "Date Found", "Item Name", "Condition", "Category", "Subcategory", "Price", "Store", "Link"]
-_WIDTHS  = [8, 18, 58, 14, 22, 22, 12, 16, 70]
+_COLS    = ["Status", "Date Listed", "Item Name", "Brand", "Condition", "Category", "Subcategory", "Price", "Location", "Link"]
+_WIDTHS  = [8, 14, 50, 16, 14, 22, 22, 12, 18, 70]
 _HDR_FILL = PatternFill("solid", start_color="1F3864", end_color="1F3864")
 _HDR_FONT = Font(name="Arial", bold=True, color="FFFFFF", size=11)
 _ROW_FONT = Font(name="Arial", size=10)
@@ -1205,12 +1199,14 @@ def write_excel(new_items: list[dict]):
         ws.insert_rows(2, amount=n)
         for i, item in enumerate(new_items):
             r = 2 + i
-            ws.cell(r, 1, "New"); ws.cell(r, 2, ts); ws.cell(r, 3, item["name"])
-            ws.cell(r, 4, item.get("condition", ""))
-            ws.cell(r, 5, item.get("category", "")); ws.cell(r, 6, item.get("subcategory", ""))
-            pc = ws.cell(r, 7, item["price"]); pc.number_format = '$#,##0.00'
-            ws.cell(r, 8, item["store"])
-            lc = ws.cell(r, 9, item["url"] or "")
+            date_listed = item.get("date_listed") or ""
+            ws.cell(r, 1, "New"); ws.cell(r, 2, _fmt_date(date_listed) if date_listed else ts)
+            ws.cell(r, 3, item["name"]); ws.cell(r, 4, item.get("brand", ""))
+            ws.cell(r, 5, item.get("condition", ""))
+            ws.cell(r, 6, item.get("category", "")); ws.cell(r, 7, item.get("subcategory", ""))
+            pc = ws.cell(r, 8, item["price"]); pc.number_format = '$#,##0.00'
+            ws.cell(r, 9, item.get("location") or item.get("store", ""))
+            lc = ws.cell(r, 10, item["url"] or "")
             if item["url"]: lc.hyperlink = item["url"]; lc.style = "Hyperlink"
             _fmt_row(ws, r); ws.cell(r, 1).font = _NEW_FONT
         for r in range(2 + n, ws.max_row + 1):
@@ -1227,12 +1223,14 @@ def write_excel(new_items: list[dict]):
             ws.column_dimensions[get_column_letter(ci)].width = w
         for i, item in enumerate(new_items):
             r = 2 + i
-            ws.cell(r, 1, "New"); ws.cell(r, 2, ts); ws.cell(r, 3, item["name"])
-            ws.cell(r, 4, item.get("condition", ""))
-            ws.cell(r, 5, item.get("category", "")); ws.cell(r, 6, item.get("subcategory", ""))
-            pc = ws.cell(r, 7, item["price"]); pc.number_format = '$#,##0.00'
-            ws.cell(r, 8, item["store"])
-            lc = ws.cell(r, 9, item["url"] or "")
+            date_listed = item.get("date_listed") or ""
+            ws.cell(r, 1, "New"); ws.cell(r, 2, _fmt_date(date_listed) if date_listed else ts)
+            ws.cell(r, 3, item["name"]); ws.cell(r, 4, item.get("brand", ""))
+            ws.cell(r, 5, item.get("condition", ""))
+            ws.cell(r, 6, item.get("category", "")); ws.cell(r, 7, item.get("subcategory", ""))
+            pc = ws.cell(r, 8, item["price"]); pc.number_format = '$#,##0.00'
+            ws.cell(r, 9, item.get("location") or item.get("store", ""))
+            lc = ws.cell(r, 10, item["url"] or "")
             if item["url"]: lc.hyperlink = item["url"]; lc.style = "Hyperlink"
             _fmt_row(ws, r); ws.cell(r, 1).font = _NEW_FONT
     wb.save(OUTPUT_FILE)
@@ -1354,23 +1352,6 @@ def api_stores_refresh():
     return jsonify({"stores": stores, "favorites": load_favorites(),
                     "count": len(stores), "info": info})
 
-@app.route("/api/refresh-stores", methods=["POST"])
-@login_required
-def api_refresh_stores():
-    """Rebuild store list from Algolia facets — instant."""
-    try:
-        stores = _fetch_stores_from_algolia()
-        if stores:
-            STORES_CACHE.write_text(json.dumps({
-                "stores": sorted(stores),
-                "updated": datetime.now().isoformat(),
-                "count": len(stores)
-            }))
-        return jsonify({"stores": stores, "count": len(stores), "status": "ok"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 @app.route("/api/favorites", methods=["POST"])
 @login_required
 def api_favorites():
@@ -1415,15 +1396,17 @@ def api_browse():
         items.append({
             "id":         sku,
             "name":       cached.get("name", ""),
+            "brand":      cached.get("brand", ""),
             "price":      f"${price_raw:,.2f}" if price_raw else "",
             "price_raw":  price_raw,
             "price_drop": 0,
             "store":      cached.get("store", ""),
+            "location":   cached.get("location") or cached.get("store", ""),
             "url":        cached.get("url", ""),
             "category":   cached.get("category", ""),
             "subcategory":cached.get("subcategory", ""),
             "condition":  cached.get("condition", ""),
-            "date":       _fmt_date(item_dates.get(sku, "")),
+            "date":       _fmt_date(cached.get("date_listed") or item_dates.get(sku, "")),
             "isNew":      sku not in seen_ids,
             "watched":    sku in wl,
         })
@@ -1452,12 +1435,16 @@ def api_watchlist_post():
         cached = _cat_cache.get(sku, {})
         wl[sku] = {
             "name":       cached.get("name", data.get("name", "")),
+            "brand":      cached.get("brand", data.get("brand", "")),
             "price":      cached.get("price", 0),
             "store":      cached.get("store", data.get("store", "")),
+            "location":   cached.get("location") or cached.get("store", data.get("store", "")),
             "url":        cached.get("url", data.get("url", "")),
             "condition":  cached.get("condition", ""),
             "category":   cached.get("category", ""),
+            "subcategory":cached.get("subcategory", ""),
             "date_added": datetime.now().strftime("%Y-%m-%d"),
+            "date_listed":cached.get("date_listed", ""),
             "sold":       False,
         }
     elif action == "remove":
@@ -1478,15 +1465,17 @@ def api_watchlist_items():
         items.append({
             "id":         sku,
             "name":       w.get("name", ""),
+            "brand":      w.get("brand", ""),
             "price":      f"${price_raw:,.2f}" if price_raw else "",
             "price_raw":  price_raw,
             "price_drop": 0,
             "store":      w.get("store", ""),
+            "location":   w.get("location") or w.get("store", ""),
             "url":        w.get("url", ""),
             "category":   w.get("category", ""),
-            "subcategory":"",
+            "subcategory":w.get("subcategory", ""),
             "condition":  w.get("condition", ""),
-            "date":       _fmt_date(item_dates.get(sku, w.get("date_added",""))),
+            "date":       _fmt_date(w.get("date_listed") or item_dates.get(sku, w.get("date_added",""))),
             "isNew":      False,
             "watched":    True,
             "sold":       w.get("sold", False),
@@ -1542,7 +1531,6 @@ def api_set_cookies():
 
 
 
-@app.route("/api/export-data")
 @login_required
 def api_export_data():
     """Export all data files as a JSON bundle for migration."""
@@ -1590,7 +1578,6 @@ def api_import_data():
     return jsonify({"imported": written, "status": "Import complete — reload the page."})
 
 
-@app.route("/api/cl-search")
 @login_required
 def api_cl_search():
     q = request.args.get("q", "").strip()
@@ -1975,8 +1962,8 @@ def _populate_store_data(selected_stores: list = None):
             try:
                 page = 1
                 while page <= 50:
-                    html = fetch_page(store, page)
-                    products = parse_products(html, store)
+                    data = fetch_page(store, page)
+                    products = parse_products(data, store)
                     if not products:
                         break
                     for p in products:
@@ -1986,6 +1973,11 @@ def _populate_store_data(selected_stores: list = None):
                             _cat_cache[sku]["name"]  = _cat_cache[sku].get("name") or p.get("name","")
                             _cat_cache[sku]["url"]   = _cat_cache[sku].get("url")  or p.get("url","")
                             _cat_cache[sku]["price"] = _cat_cache[sku].get("price") or p.get("price",0)
+                            _cat_cache[sku]["brand"] = _cat_cache[sku].get("brand") or p.get("brand","")
+                            _cat_cache[sku]["location"] = _cat_cache[sku].get("location") or p.get("location","")
+                            _cat_cache[sku]["category"] = _cat_cache[sku].get("category") or p.get("category","")
+                            _cat_cache[sku]["subcategory"] = _cat_cache[sku].get("subcategory") or p.get("subcategory","")
+                            _cat_cache[sku]["date_listed"] = _cat_cache[sku].get("date_listed") or p.get("date_listed","")
                             updated += 1
                     if len(products) < PAGE_SIZE:
                         break
@@ -2244,46 +2236,16 @@ def _run(selected_stores: list[str], baseline: bool):
             if baseline and not _stop_event.is_set():
                 _sleep(4.0, 2.0)  # 2–6s between stores during baseline
 
-        # ── Classify categories (parallel) & use listing-page condition ─────────
-        # Condition is already parsed from the listing page in parse_products — free, no HTTP.
-        # Category requires the individual product page — only fetch for NEW items not in seen_ids,
-        # and only if not already cached. Existing items keep their cached category.
-        new_item_ids = {p["id"] for p in all_products if p["id"] not in seen_ids}
-        needs_cat = [p for p in all_products
-                     if p["id"] in new_item_ids
-                     and not baseline and p.get("url")
-                     and not _cat_cache.get(p["id"], {}).get("category")]
-
-        if needs_cat:
-            send({"type": "progress", "msg": f"\nFetching categories for {len(needs_cat)} item(s) (parallel)…"})
-
-            def _fetch_cat(p):
-                try:
-                    _sleep(0.2, 0.2)  # 0–0.4s jitter so parallel requests stagger
-                    cat, subcat, _ = fetch_page_data(p["url"], p.get("name", ""))
-                    return p["id"], cat, subcat
-                except Exception:
-                    return p["id"], "", ""
-
-            with ThreadPoolExecutor(max_workers=5) as pool:
-                futures = {pool.submit(_fetch_cat, p): p for p in needs_cat}
-                done_count = 0
-                for future in as_completed(futures):
-                    if _stop_event.is_set():
-                        break
-                    sku, cat, subcat = future.result()
-                    _cat_cache.setdefault(sku, {}).update({"category": cat, "subcategory": subcat})
-                    done_count += 1
-                    if done_count % 10 == 0:
-                        send({"type": "progress", "msg": f"  …{done_count}/{len(needs_cat)} categories fetched"})
-
-        # Apply all data to products, tracking price drops
+        # ── Apply data from Algolia API to products, tracking price drops ────────
+        # Categories, condition, brand all come from the API now — no page scraping needed.
         for p in all_products:
             sku    = p["id"]
             cached = _cat_cache.get(sku, {})
-            cat    = cached.get("category") or classify_by_name(p.get("name", ""))[0]
-            subcat = cached.get("subcategory") or classify_by_name(p.get("name", ""))[1]
+            cat    = p.get("category") or cached.get("category") or classify_by_name(p.get("name", ""))[0]
+            subcat = p.get("subcategory") or cached.get("subcategory") or classify_by_name(p.get("name", ""))[1]
             condition = p.get("condition") or cached.get("condition", "")
+            brand     = p.get("brand") or cached.get("brand", "")
+            location  = p.get("location") or cached.get("location", p.get("store", ""))
             # Price drop detection
             new_price  = p.get("price") or 0
             last_price = cached.get("price") or 0
@@ -2292,16 +2254,20 @@ def _run(selected_stores: list[str], baseline: bool):
                 "category":          cat,
                 "subcategory":       subcat,
                 "condition":         condition,
-                "condition_fetched": True,
+                "brand":             brand,
                 "name":              p.get("name", ""),
                 "url":               p.get("url", ""),
                 "store":             p.get("store", ""),
+                "location":          location,
                 "price":             new_price,
                 "available":         True,
+                "date_listed":       p.get("date_listed") or cached.get("date_listed", ""),
             }
             p["category"]    = cat
             p["subcategory"] = subcat
             p["condition"]   = condition
+            p["brand"]       = brand
+            p["location"]    = location
             p["price_drop"]  = price_drop
         _save_cat_cache()
 
@@ -2320,15 +2286,20 @@ def _run(selected_stores: list[str], baseline: bool):
                             save_watchlist(wl)
             _save_cat_cache()
 
-        # ── Update watchlist with latest prices ───────────────────────────────
+        # ── Update watchlist with latest data ─────────────────────────────────
         wl = load_watchlist()
         changed = False
         for sku, item in wl.items():
             if sku in _cat_cache and not wl[sku].get("sold"):
                 cached = _cat_cache[sku]
                 wl[sku].update({
-                    "price":     cached.get("price", item.get("price")),
-                    "condition": cached.get("condition", item.get("condition","")),
+                    "price":      cached.get("price", item.get("price")),
+                    "condition":  cached.get("condition", item.get("condition", "")),
+                    "brand":      cached.get("brand", item.get("brand", "")),
+                    "location":   cached.get("location", item.get("location", "")),
+                    "category":   cached.get("category", item.get("category", "")),
+                    "subcategory":cached.get("subcategory", item.get("subcategory", "")),
+                    "date_listed":cached.get("date_listed", item.get("date_listed", "")),
                 })
                 changed = True
         if changed:
@@ -2345,15 +2316,16 @@ def _run(selected_stores: list[str], baseline: bool):
             write_excel(new_items)
 
         def fmt(p):
-            # Prefer Algolia's listing date over our scan date
-            date_src = p.get("date_listed") or item_dates.get(p["id"], "")
+            date_src = p.get("date_listed") or _cat_cache.get(p["id"], {}).get("date_listed", "") or item_dates.get(p["id"], "")
             return {
                 "id":         p["id"],
                 "name":       p["name"],
+                "brand":      p.get("brand", ""),
                 "price":      f"${p['price']:,.2f}" if p["price"] else "",
                 "price_raw":  p.get("price") or 0,
                 "price_drop": p.get("price_drop", 0),
                 "store":      p["store"],
+                "location":   p.get("location") or p.get("store", ""),
                 "url":        p["url"],
                 "category":   p.get("category", ""),
                 "subcategory":p.get("subcategory", ""),
@@ -2469,9 +2441,12 @@ th.sort-desc::after{content:" ▼";color:#c00;font-size:.6rem}
 td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;max-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 td:nth-child(1){width:52px;min-width:52px;max-width:52px}
 td:nth-child(2){width:28px;min-width:28px;max-width:28px;text-align:center}
-td:nth-child(3){max-width:260px;width:35%}
-td:nth-child(4){width:70px;min-width:70px}
-td:nth-child(8){width:70px;min-width:70px}
+td:nth-child(3){max-width:260px;width:28%}
+td:nth-child(4){width:100px;min-width:80px;max-width:140px}
+td:nth-child(5){width:80px;min-width:70px}
+td:nth-child(6){width:70px;min-width:60px}
+td:nth-child(10){width:80px;min-width:70px}
+td:nth-child(11){width:90px;min-width:80px}
 tr:hover td{background:#161616}
 td a{color:#6ab0f5;text-decoration:none}
 td a:hover{text-decoration:underline}
@@ -2733,24 +2708,15 @@ async function loadData() {
   const r = await fetch('/api/stores');
   const d = await r.json();
   allStores = d.stores; favorites = d.favorites;
-  // If store list is empty, rebuild from Algolia automatically
-  if (allStores.length === 0) {
-    appendLog('Loading store list from Algolia…', 'log-dim');
-    try {
-      const rr = await fetch('/api/refresh-stores', {method: 'POST'});
-      const dd = await rr.json();
-      if (dd.stores && dd.stores.length) {
-        allStores = dd.stores;
-        appendLog(`✓ ${dd.stores.length} stores loaded.`, 'log-dim');
-      }
-    } catch(e) {}
-  }
   renderList();
   const info = d.info || {};
-  const storeLabel = allStores.length + ' stores';
+  const storeLabel = info.count ? info.count + ' stores' : allStores.length + ' stores';
   document.getElementById('hdr-status').textContent = storeLabel + ' available';
   document.getElementById('s-stores').textContent = storeLabel +
-    (info.updated ? ' · checked ' + info.updated.slice(0,10) : '');
+    (info.updated ? ' · checked ' + info.updated.slice(0,10) : ' (fallback list)');
+  if (allStores.length === 0) {
+    appendLog('💡 No stores loaded — click "✓ Validate Stores" to build the store list from GC live data.', 'log-dim');
+  }
 }
 
 async function loadState() {
@@ -2759,10 +2725,8 @@ async function loadState() {
   document.getElementById('s-last').textContent  = s.last_run ? s.last_run.replace('T',' ').slice(0,16) : 'Never';
   document.getElementById('s-known').textContent = s.known_items.toLocaleString();
   if (s.excel_exists) document.getElementById('s-excel').style.display = 'inline';
-  if (s.is_first_run && !window._firstRunTriggered) {
-    window._firstRunTriggered = true;
-    appendLog('🚀 First run — scanning all stores nationwide. This will take a few minutes…', 'log-dim');
-    setTimeout(() => runTracker(), 2000);
+  if (s.is_first_run) {
+    appendLog('💡 First run detected — click "🌐 Build Baseline" to capture the full current GC used inventory as your starting point.', 'log-dim');
   }
   // Check for updates
   try {
@@ -3124,8 +3088,8 @@ function onCatFilterChange() {
 }
 
 // ── Table rendering & sorting ─────────────────────────────────────────────────
-// col indices: 0=status, 1=name, 2=condition, 3=category, 4=subcategory, 5=price, 6=date, 7=store
-const _SORT_COLS = [null, 'name', 'price', 'condition', 'category', 'subcategory', 'date', 'store'];
+// col indices: 0=status, 1=name, 2=brand, 3=price, 4=condition, 5=category, 6=subcategory, 7=date, 8=location
+const _SORT_COLS = [null, 'name', 'brand', 'price', 'condition', 'category', 'subcategory', 'date', 'location'];
 
 function renderTable() {
   const data = window._tableData || [];
@@ -3133,13 +3097,14 @@ function renderTable() {
     <th data-col="0"></th>
     <th data-col="watch" style="width:32px"></th>
     <th data-col="1">Item</th>
+    <th data-col="2">Brand</th>
+    <th data-col="3">Price</th>
     <th data-col="drop" style="width:80px"></th>
-    <th data-col="2">Price</th>
-    <th data-col="3">Condition</th>
-    <th data-col="4">Category</th>
-    <th data-col="5">Subcategory</th>
-    <th data-col="6">Date</th>
-    <th data-col="7">Store</th>
+    <th data-col="4">Condition</th>
+    <th data-col="5">Category</th>
+    <th data-col="6">Subcategory</th>
+    <th data-col="7">Date Listed</th>
+    <th data-col="8">Location</th>
   </tr></thead><tbody>`;
   data.forEach(item => {
     const priceNum = parseFloat((item.price||'').replace(/[^0-9.]/g,'')) || 0;
@@ -3156,17 +3121,18 @@ function renderTable() {
       ? `<span class="tag-drop">↓ $${Math.round(item.price_drop)}</span>`
       : '';
     const soldBadge = isSold ? ' <span class="tag-sold">Sold</span>' : '';
-    html += `<tr class="${isSold ? 'sold-row' : ''}" data-name="${esc(item.name)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}">` +
+    html += `<tr class="${isSold ? 'sold-row' : ''}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}">` +
       `<td>${item.isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
       `<td>${watchStar}</td>` +
       `<td>${nameCell}${soldBadge}</td>` +
-      `<td>${dropCell}</td>` +
+      `<td>${esc(item.brand)}</td>` +
       `<td>${item.price||''}</td>` +
+      `<td>${dropCell}</td>` +
       `<td>${esc(item.condition)}</td>` +
       `<td>${esc(item.category)}</td>` +
       `<td>${esc(item.subcategory)}</td>` +
       `<td>${esc(item.date||'')}</td>` +
-      `<td>${esc(item.store)}</td>` +
+      `<td>${esc(item.location||item.store)}</td>` +
       `</tr>`;
   });
   html += '</tbody></table>';
