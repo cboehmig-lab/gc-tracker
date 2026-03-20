@@ -2597,6 +2597,17 @@ tr.sold-row td{color:#666}
 tr.sold-row td a{color:#666}
 .no-res{padding:24px 20px;color:#555;font-size:.85rem}
 
+/* ── Paginator ── */
+.paginator{display:flex;align-items:center;justify-content:center;gap:2px;padding:14px 16px;border-top:1px solid #1e1e1e;user-select:none}
+.paginator .pg-info{font-size:.75rem;color:#555;margin-right:12px;white-space:nowrap}
+.paginator button{background:none;border:1px solid transparent;color:#888;font-size:.78rem;min-width:32px;height:30px;border-radius:5px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;transition:all .15s;font-weight:500}
+.paginator button:hover:not(:disabled):not(.pg-active){background:#1e1e1e;border-color:#333;color:#ddd}
+.paginator button:disabled{color:#333;cursor:default}
+.paginator button.pg-active{background:#c00;border-color:#c00;color:#fff;font-weight:700}
+.paginator button.pg-nav{font-size:.72rem;color:#666;letter-spacing:-.5px}
+.paginator button.pg-nav:hover:not(:disabled){color:#ccc;background:#1e1e1e;border-color:#333}
+.paginator .pg-ellipsis{color:#444;font-size:.75rem;min-width:24px;text-align:center;line-height:30px}
+
 /* ── Image thumbnail tooltip ── */
 #img-tooltip{display:none;position:fixed;z-index:200;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:8px;padding:6px;box-shadow:0 8px 24px rgba(0,0,0,.6);pointer-events:none}
 #img-tooltip img{display:block;width:200px;height:200px;object-fit:contain;border-radius:4px;background:#111}
@@ -2994,7 +3005,7 @@ function _getBrowseFilters() {
   };
 }
 
-async function _fetchBrowsePage(page, append) {
+async function _fetchBrowsePage(page) {
   if (_srvLoading) return;
   _srvLoading = true;
   const filters = _getBrowseFilters();
@@ -3037,14 +3048,10 @@ async function _fetchBrowsePage(page, append) {
     // Update header
     const hasFilters = filters.filter_q || filters.filter_condition || filters.filter_category || filters.filter_subcategory;
     if (hasFilters) {
-      document.getElementById('res-title').textContent = `${_srvTotalCount} of ${_srvTotalUnfiltered} Items`;
+      document.getElementById('res-title').textContent = `${_srvTotalCount.toLocaleString()} of ${_srvTotalUnfiltered.toLocaleString()} Items`;
     } else {
-      const n = d.items.filter(i => i.isNew).length;
-      // On page 1, show count; on later pages, keep existing title
-      if (!append) {
-        document.getElementById('res-title').textContent = _srvTotalCount > 0
-          ? `${_srvTotalCount.toLocaleString()} Items` : 'No Items Found';
-      }
+      document.getElementById('res-title').textContent = _srvTotalCount > 0
+        ? `${_srvTotalCount.toLocaleString()} Items` : 'No Items Found';
     }
     document.getElementById('res-badge').textContent = '';
     document.getElementById('res-panel').style.display = 'block';
@@ -3052,27 +3059,21 @@ async function _fetchBrowsePage(page, append) {
     // Update filter count
     const countEl = document.getElementById('res-search-count');
     if (hasFilters) {
-      countEl.textContent = `${_srvTotalCount} of ${_srvTotalUnfiltered}`;
+      countEl.textContent = `${_srvTotalCount.toLocaleString()} of ${_srvTotalUnfiltered.toLocaleString()}`;
     } else {
       countEl.textContent = '';
     }
     const clearBtn = document.getElementById('clear-filters-btn');
     if (clearBtn) clearBtn.style.display = (filters.filter_condition || filters.filter_category || filters.filter_subcategory) ? '' : 'none';
 
-    // Populate filter dropdowns from server-provided options (only on page 1 / fresh load)
-    if (!append) {
-      _populateFiltersFromServer(d.conditions || [], d.categories || [], d.subcategories || [], filters);
-    }
+    // Populate filter dropdowns from server-provided options
+    _populateFiltersFromServer(d.conditions || [], d.categories || [], d.subcategories || [], filters);
 
-    // Render rows
-    if (append) {
-      _appendRowsToTable(d.items);
-    } else {
-      _renderServerTable(d.items);
-    }
+    // Render table + paginator
+    _renderServerTable(d.items);
 
-    // Show/hide "Show More" button
-    _updateShowMoreBtn();
+    // Scroll results to top on page change
+    document.querySelector('.results')?.scrollTo(0, 0);
 
   } finally {
     _srvLoading = false;
@@ -3136,6 +3137,62 @@ function _buildRowHtml(item) {
     `</tr>`;
 }
 
+// ── Paginator builder ────────────────────────────────────────────────────────
+function _buildPaginatorHtml(currentPage, totalPages, totalCount, perPage) {
+  if (totalPages <= 1) return '';
+  const startItem = (currentPage - 1) * perPage + 1;
+  const endItem   = Math.min(currentPage * perPage, totalCount);
+
+  let html = '<div class="paginator">';
+  html += `<span class="pg-info">${startItem.toLocaleString()}–${endItem.toLocaleString()} of ${totalCount.toLocaleString()}</span>`;
+
+  // First / Prev
+  html += `<button class="pg-nav" onclick="goToPage(1)" ${currentPage === 1 ? 'disabled' : ''} title="First page">&#x276E;&#x276E;</button>`;
+  html += `<button class="pg-nav" onclick="goToPage(${currentPage - 1})" ${currentPage === 1 ? 'disabled' : ''} title="Previous page">&#x276E;</button>`;
+
+  // Page numbers with smart ellipsis
+  const pages = _getPaginatorRange(currentPage, totalPages);
+  pages.forEach(p => {
+    if (p === '...') {
+      html += '<span class="pg-ellipsis">…</span>';
+    } else {
+      html += `<button class="${p === currentPage ? 'pg-active' : ''}" onclick="goToPage(${p})">${p}</button>`;
+    }
+  });
+
+  // Next / Last
+  html += `<button class="pg-nav" onclick="goToPage(${currentPage + 1})" ${currentPage === totalPages ? 'disabled' : ''} title="Next page">&#x276F;</button>`;
+  html += `<button class="pg-nav" onclick="goToPage(${totalPages})" ${currentPage === totalPages ? 'disabled' : ''} title="Last page">&#x276F;&#x276F;</button>`;
+
+  html += '</div>';
+  return html;
+}
+
+function _getPaginatorRange(current, total) {
+  // Always show first 2, last 2, and 2 around current. Fill gaps with ellipsis.
+  if (total <= 9) return Array.from({length: total}, (_, i) => i + 1);
+
+  const pages = new Set();
+  // First two
+  pages.add(1); pages.add(2);
+  // Last two
+  pages.add(total - 1); pages.add(total);
+  // Around current
+  for (let i = current - 2; i <= current + 2; i++) {
+    if (i >= 1 && i <= total) pages.add(i);
+  }
+
+  const sorted = [...pages].sort((a, b) => a - b);
+  const result = [];
+  for (let i = 0; i < sorted.length; i++) {
+    if (i > 0 && sorted[i] - sorted[i - 1] > 1) {
+      result.push('...');
+    }
+    result.push(sorted[i]);
+  }
+  return result;
+}
+
 function _renderServerTable(items) {
   let html = `<table id="res-table"><thead><tr>
     <th data-col="0"></th>
@@ -3152,7 +3209,7 @@ function _renderServerTable(items) {
   </tr></thead><tbody>`;
   items.forEach(item => { html += _buildRowHtml(item); });
   html += '</tbody></table>';
-  html += '<div id="show-more-wrap" style="text-align:center;padding:12px"></div>';
+  html += _buildPaginatorHtml(_srvPage, _srvTotalPages, _srvTotalCount, 50);
   document.getElementById('res-body').innerHTML = html;
 
   // Attach sort headers
@@ -3166,27 +3223,6 @@ function _renderServerTable(items) {
     th.addEventListener('click', () => sortTable(colIdx));
   });
   autoSizeItemColumn();
-}
-
-function _appendRowsToTable(items) {
-  const tbody = document.querySelector('#res-table tbody');
-  if (!tbody) return;
-  items.forEach(item => {
-    tbody.insertAdjacentHTML('beforeend', _buildRowHtml(item));
-  });
-  autoSizeItemColumn();
-}
-
-function _updateShowMoreBtn() {
-  const wrap = document.getElementById('show-more-wrap');
-  if (!wrap) return;
-  const loaded = document.querySelectorAll('#res-table tbody tr').length;
-  const remaining = _srvTotalCount - loaded;
-  if (remaining > 0) {
-    wrap.innerHTML = `<button onclick="showMore()" style="padding:8px 24px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#aaa;font-size:.82rem;cursor:pointer">Show More (${remaining.toLocaleString()} remaining)</button>`;
-  } else {
-    wrap.innerHTML = '';
-  }
 }
 
 async function browseCache() {
@@ -3207,7 +3243,7 @@ async function browseCache() {
     document.getElementById('cat-filter').value = '';
     document.getElementById('subcat-filter').value = '';
     document.getElementById('subcat-filter').style.display = 'none';
-    await _fetchBrowsePage(1, false);
+    await _fetchBrowsePage(1);
   }, 300);
 }
 
@@ -3254,7 +3290,7 @@ async function showWatchList() {
   }
   _browseMode = 'local';
   window._tableData = d.items;
-  window._sortCol = null; window._sortDir = 1; window._visibleCount = PAGE_SIZE;
+  window._sortCol = null; window._sortDir = 1; window._localPage = 1;
   const soldCount = d.items.filter(i => i.sold).length;
   document.getElementById('res-title').textContent = `Watch List (${d.items.length} items${soldCount ? ', ' + soldCount + ' sold' : ''})`;
   document.getElementById('res-badge').textContent = '';
@@ -3389,7 +3425,7 @@ function showResults(msg, isBaseline) {
   window._tableData.sort((a, b) => {
     return (b.date_raw || '').localeCompare(a.date_raw || '');
   });
-  window._sortCol = null; window._sortDir = 1; window._visibleCount = PAGE_SIZE;
+  window._sortCol = null; window._sortDir = 1; window._localPage = 1;
   // Reload watchlist so sold flags are fresh
   loadWatchlist().then(() => {
     populateCategoryFilter();
@@ -3424,7 +3460,7 @@ function onCatFilterChange() {
     // In server mode, changing category resets subcategory and fetches page 1
     document.getElementById('subcat-filter').value = '';
     _srvPage = 1;
-    _fetchBrowsePage(1, false);
+    _fetchBrowsePage(1);
     return;
   }
   const cat   = document.getElementById('cat-filter').value;
@@ -3448,10 +3484,10 @@ function onCatFilterChange() {
 // col indices: 0=status, 1=name, 2=brand, 3=price, 4=condition, 5=category, 6=subcategory, 7=date, 8=location
 const _SORT_COLS = [null, 'name', 'brand', 'price', 'condition', 'category', 'subcategory', 'date', 'location'];
 const PAGE_SIZE = 50;
-window._visibleCount = PAGE_SIZE;
+window._localPage = 1;
 
 function renderTable() {
-  // In server mode, rendering is handled by _renderServerTable / _appendRowsToTable
+  // In server mode, rendering is handled by _renderServerTable
   if (_browseMode === 'server') return;
 
   const allData = window._tableData || [];
@@ -3469,8 +3505,10 @@ function renderTable() {
            (!subcat || (item.subcategory || '') === subcat);
   });
 
-  const showing = Math.min(window._visibleCount, filtered.length);
-  const hasMore = filtered.length > showing;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  window._localPage = Math.min(window._localPage, totalPages);
+  const start = (window._localPage - 1) * PAGE_SIZE;
+  const pageItems = filtered.slice(start, start + PAGE_SIZE);
 
   let html = `<table id="res-table"><thead><tr>
     <th data-col="0"></th>
@@ -3485,14 +3523,9 @@ function renderTable() {
     <th data-col="7">Date Listed</th>
     <th data-col="8">Location</th>
   </tr></thead><tbody>`;
-  for (let idx = 0; idx < showing; idx++) {
-    html += _buildRowHtml(filtered[idx]);
-  }
+  pageItems.forEach(item => { html += _buildRowHtml(item); });
   html += '</tbody></table>';
-  if (hasMore) {
-    const remaining = filtered.length - showing;
-    html += `<div id="show-more-wrap" style="text-align:center;padding:12px"><button onclick="showMore()" style="padding:8px 24px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#aaa;font-size:.82rem;cursor:pointer">Show More (${remaining} remaining)</button></div>`;
-  }
+  html += _buildPaginatorHtml(window._localPage, totalPages, filtered.length, PAGE_SIZE);
   document.getElementById('res-body').innerHTML = html;
 
   // Update filter count display
@@ -3519,14 +3552,16 @@ function renderTable() {
   autoSizeItemColumn();
 }
 
-function showMore() {
+function goToPage(page) {
   if (_browseMode === 'server') {
-    // Fetch next page from server and append
-    _fetchBrowsePage(_srvPage + 1, true);
+    if (page < 1 || page > _srvTotalPages || page === _srvPage) return;
+    _fetchBrowsePage(page);
     return;
   }
-  window._visibleCount += PAGE_SIZE;
+  // Local mode
+  window._localPage = page;
   renderTable();
+  document.querySelector('.results')?.scrollTo(0, 0);
 }
 
 function sortTable(colIdx) {
@@ -3543,13 +3578,13 @@ function sortTable(colIdx) {
     _srvSortField = field;
     _srvSortDir = (newDir === -1) ? 'desc' : 'asc';
     _srvPage = 1;
-    _fetchBrowsePage(1, false);
+    _fetchBrowsePage(1);
     return;
   }
 
   window._sortDir = (window._sortCol === colIdx) ? window._sortDir * -1 : (field === 'date' ? -1 : 1);
   window._sortCol = colIdx;
-  window._visibleCount = PAGE_SIZE;  // Reset pagination on sort
+  window._localPage = 1;  // Reset pagination on sort
   const dir = window._sortDir;
   window._tableData.sort((a, b) => {
     let av = a[field] || '', bv = b[field] || '';
@@ -3667,11 +3702,11 @@ function filterResults() {
     clearTimeout(_filterTimer);
     _filterTimer = setTimeout(() => {
       _srvPage = 1;
-      _fetchBrowsePage(1, false);
+      _fetchBrowsePage(1);
     }, 250);
     return;
   }
-  window._visibleCount = PAGE_SIZE;  // Reset pagination on filter change
+  window._localPage = 1;  // Reset pagination on filter change
   renderTable();
 }
 
