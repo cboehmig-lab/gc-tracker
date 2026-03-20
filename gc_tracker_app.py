@@ -803,6 +803,8 @@ def api_reset():
     _cat_cache = {}
     return jsonify({"deleted": deleted, "status": "Reset complete. Ready for a fresh baseline."})
 
+@app.route("/")
+@login_required
 def index():
     return HTML_TEMPLATE
 
