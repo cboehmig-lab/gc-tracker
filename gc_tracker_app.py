@@ -119,8 +119,7 @@ def get_store_list() -> list[str]:
                 STORES_CACHE.write_text(json.dumps({"stores": sorted(cached), "updated": datetime.now().isoformat()}))
         except Exception:
             pass
-    blocklist = _get_blocklist()
-    return sorted(set(cached) - blocklist)
+    return sorted(set(cached))
 
 
 def _fetch_stores_from_algolia() -> list[str]:
@@ -254,9 +253,8 @@ def fetch_page(store_name: str, page: int) -> dict:
 
 def parse_products(data: any, store_name: str) -> list[dict]:
     """Parse Algolia API response into product list."""
-    # Handle both old HTML string format and new Algolia dict format
-    if isinstance(data, str):
-        return _parse_products_html(data, store_name)
+    if not isinstance(data, dict):
+        return []  # HTML format no longer supported
 
     products = []
     try:
@@ -353,43 +351,6 @@ def parse_products(data, store_name: str) -> list[dict]:
             pass
         return products
 
-    # Legacy HTML format fallback
-    html = data
-    condition_map = _extract_conditions_from_listing(html)
-    for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL):
-        try:
-            d = json.loads(block)
-        except Exception:
-            continue
-        if d.get("@type") != "CollectionPage":
-            continue
-        items = d.get("mainEntity", {}).get("itemListElement", [])
-        if not items:
-            continue
-        products = []
-        for entry in items:
-            item = entry.get("item", {})
-            name = _clean_name(item.get("name", ""))
-            sku  = item.get("sku",  "").strip()
-            url  = item.get("url",  "").strip()
-            offers = item.get("offers", {})
-            raw  = offers.get("price", "")
-            try:    price = float(raw) if raw else None
-            except: price = None
-            url_key = url.split("?")[0]
-            condition = condition_map.get(url_key, "")
-            if not condition:
-                raw_cond = offers.get("itemCondition", "")
-                parsed = _parse_condition(raw_cond)
-                condition = parsed if parsed.lower() not in ("used", "") else ""
-            if name and sku:
-                products.append({"id": sku, "name": name, "price": price,
-                                  "store": store_name, "url": url,
-                                  "condition": condition})
-        if products:
-            return products
-    return []
-
 
 def _classify_from_seo_url(seo_url: str) -> tuple[str, str]:
     """Extract category/subcategory from GC seoUrl.
@@ -424,8 +385,9 @@ def _classify_from_seo_url(seo_url: str) -> tuple[str, str]:
     subcat = ""
     if len(parts) > 1:
         subcat = parts[1].replace("-", " ").title()
-        # Strip brand names that sneak in as subcategory
-        subcat = _clean_gc_cat(subcat)
+        # Strip "Used " prefix if present
+        if subcat.lower().startswith("used "):
+            subcat = subcat[5:].strip()
 
     return cat, subcat
 
