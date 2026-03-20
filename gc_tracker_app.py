@@ -2560,7 +2560,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Gear Finder</title>
+<title>Gear Tracker</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#111;color:#eee;height:100vh;display:flex;flex-direction:column}
@@ -2650,12 +2650,11 @@ th:hover{color:#ccc}
 th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
 th.sort-desc::after{content:" ▼";color:#c00;font-size:.6rem}
 td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-td:nth-child(1){width:48px;text-align:center}
+td:nth-child(1){width:42px;text-align:center}
 td:nth-child(2){width:52px;text-align:center}
-td:nth-child(3){width:36px;text-align:center}
+td:nth-child(3){width:30px;text-align:center}
 td:nth-child(4){width:26%}
-td:nth-child(6){width:80px}
-td:nth-child(7){width:60px}
+td:nth-child(7){width:56px}
 tr:hover td{background:#161616}
 td a{color:#6ab0f5;text-decoration:none}
 td a:hover{text-decoration:underline}
@@ -2791,7 +2790,7 @@ tr.sold-row td a{color:#666}
 <div id="first-run-modal" style="display:none;position:fixed;inset:0;z-index:100;align-items:center;justify-content:center">
   <div style="position:absolute;inset:0;background:rgba(0,0,0,.7)" onclick="dismissFirstRun()"></div>
   <div style="position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:30px 28px;width:400px;z-index:1">
-    <h2 style="color:#fff;font-size:1.05rem;margin-bottom:10px">🎸 Welcome to Gear Finder</h2>
+    <h2 style="color:#fff;font-size:1.05rem;margin-bottom:10px">🎸 Welcome to Gear Tracker</h2>
     <p style="color:#999;font-size:.85rem;line-height:1.6;margin-bottom:8px">No inventory baseline has been built yet. The baseline captures Guitar Center's full used inventory across ~300 stores so you can track new listings and price changes.</p>
     <p style="color:#777;font-size:.82rem;margin-bottom:20px">This process takes a few minutes. Would you like to build it now?</p>
     <div style="display:flex;gap:10px;justify-content:flex-end">
@@ -2821,7 +2820,7 @@ tr.sold-row td a{color:#666}
 </div>
 
 <header>
-  <h1>🎸 Gear Finder</h1>
+  <h1>🎸 Gear Tracker</h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -2898,10 +2897,6 @@ tr.sold-row td a{color:#666}
         <button id="watchlist-toggle" onclick="toggleWatchFilter()"
           class="cat-sel" style="border-color:#3a3a3a;color:#aaa;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
           ★ Watch List
-        </button>
-        <button onclick="openKeywords()"
-          class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
-          🔑 Keywords
         </button>
         <button onclick="openKeywords()"
           class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
