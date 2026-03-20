@@ -2549,7 +2549,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 
 .empty-msg{padding:24px 16px;color:#555;font-size:.85rem;text-align:center}
 
-.left-footer{padding:12px;border-top:1px solid #2e2e2e;flex-shrink:0}
+.left-footer{padding:12px;border-top:1px solid #2e2e2e;flex-shrink:0;background:#1a1a1a;position:relative;z-index:2}
 #sel-count{font-size:.78rem;color:#666;margin-bottom:8px}
 .btn-row{display:flex;gap:8px}
 #run-btn{flex:1;padding:10px;background:#c00;color:#fff;border:none;border-radius:5px;font-size:.85rem;font-weight:700;cursor:pointer;white-space:nowrap}
@@ -2587,22 +2587,16 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #res-search:focus{border-color:#c00}
 #res-search-count{font-size:.75rem;color:#555;white-space:nowrap}
 
-table{width:100%;border-collapse:collapse;font-size:.83rem;table-layout:auto}
-th{background:#161616;color:#666;font-weight:600;text-align:left;padding:7px 10px;font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:40px;cursor:pointer;user-select:none;white-space:nowrap}
+table{width:100%;border-collapse:collapse;font-size:.83rem;table-layout:fixed}
+th{background:#161616;color:#666;font-weight:600;text-align:left;padding:7px 10px;font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:40px;cursor:pointer;user-select:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 th:hover{color:#ccc}
 th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
 th.sort-desc::after{content:" ▼";color:#c00;font-size:.6rem}
-td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;max-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-td:nth-child(1){width:56px;min-width:56px;max-width:56px;text-align:center}
-td:nth-child(2){width:40px;min-width:40px;max-width:40px;text-align:center}
-td:nth-child(3){max-width:260px;width:28%}
-td:nth-child(4){width:100px;min-width:80px;max-width:140px}
-td:nth-child(5){width:110px;min-width:100px}
-td:nth-child(6){width:70px;min-width:60px}
-td:nth-child(7){width:75px;min-width:68px}
-td:nth-child(8){width:80px;min-width:72px}
-td:nth-child(10){width:80px;min-width:70px}
-td:nth-child(11){width:90px;min-width:80px}
+td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+td:nth-child(1){width:48px;text-align:center}
+td:nth-child(2){width:36px;text-align:center}
+td:nth-child(3){width:26%}
+td:nth-child(6){width:60px}
 tr:hover td{background:#161616}
 td a{color:#6ab0f5;text-decoration:none}
 td a:hover{text-decoration:underline}
@@ -2809,13 +2803,13 @@ tr.sold-row td a{color:#666}
       <span>Last run: <b id="s-last">—</b></span>
       <span>Known items: <b id="s-known">—</b></span>
       <span>Stores: <b id="s-stores">—</b></span>
-      <span id="s-excel" style="display:none"><a style="color:#6ab0f5" href="/download/excel">Download Excel ↗</a></span>
       <div id="global-search-wrap">
         <input id="global-search" type="text" placeholder="Search all stores…"
                onkeydown="if(event.key==='Enter')globalSearch()" autocomplete="off">
         <button id="global-search-btn" onclick="globalSearch()" title="Search all stores">🔍</button>
         <button id="global-search-clear" onclick="clearGlobalSearch()" title="Clear search results" style="display:none">✕</button>
       </div>
+      <span id="s-excel" style="display:none"><a style="color:#6ab0f5" href="/download/excel">Download Excel ↗</a></span>
     </div>
     <div id="log"><span class="log-dim">Ready — select stores and click Run, or build a full baseline.</span></div>
     <div class="results" id="res-panel" style="display:none">
@@ -3277,11 +3271,11 @@ function _getPaginatorRange(current, total) {
 function _renderServerTable(items) {
   let html = `<table id="res-table"><thead><tr>
     <th data-col="0"></th>
-    <th data-col="watch" style="width:40px"></th>
+    <th data-col="watch"></th>
     <th data-col="1">Item</th>
     <th data-col="2">Brand</th>
     <th data-col="3">Price</th>
-    <th data-col="drop" style="width:80px"></th>
+    <th data-col="drop"></th>
     <th data-col="4">Condition</th>
     <th data-col="5">Category</th>
     <th data-col="6">Subcategory</th>
@@ -3652,11 +3646,11 @@ function renderTable() {
 
   let html = `<table id="res-table"><thead><tr>
     <th data-col="0"></th>
-    <th data-col="watch" style="width:40px"></th>
+    <th data-col="watch"></th>
     <th data-col="1">Item</th>
     <th data-col="2">Brand</th>
     <th data-col="3">Price</th>
-    <th data-col="drop" style="width:80px"></th>
+    <th data-col="drop"></th>
     <th data-col="4">Condition</th>
     <th data-col="5">Category</th>
     <th data-col="6">Subcategory</th>
