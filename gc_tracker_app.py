@@ -330,7 +330,7 @@ def save_watchlist(wl: dict):
 
 # ── GC scraping ───────────────────────────────────────────────────────────────
 
-PAGE_SIZE = 240
+PAGE_SIZE = 1000
 
 def _fmt_date(d: str) -> str:
     """Convert YYYY-MM-DD to M/D/YY."""
@@ -373,7 +373,7 @@ def fetch_page(store_name: str, page: int) -> dict:
             [f"stores:{store_name}"],
         ],
         "facets":        ["*"],
-        "hitsPerPage":   240,
+        "hitsPerPage":   1000,
         "maxValuesPerFacet": 10,
         "numericFilters": [f"startDate<={ts}"],
         "page":          page - 1,
