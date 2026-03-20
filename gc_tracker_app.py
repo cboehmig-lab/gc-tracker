@@ -1365,7 +1365,6 @@ def download_excel():
 def api_stores():
     return jsonify({
         "stores":    get_store_list(),
-        "favorites": load_favorites(),
         "info":      get_store_info(),
     })
 
@@ -1374,7 +1373,7 @@ def api_stores():
 def api_stores_refresh():
     stores = refresh_store_list()
     info   = get_store_info()
-    return jsonify({"stores": stores, "favorites": load_favorites(),
+    return jsonify({"stores": stores,
                     "count": len(stores), "info": info})
 
 @app.route("/api/favorites", methods=["POST"])
@@ -1424,8 +1423,9 @@ def api_browse():
     state      = load_state()
     seen_ids   = set(state.get("seen_ids", []))
     item_dates = state.get("item_dates", {})
-    wl         = load_watchlist()
-    keywords   = load_keywords()
+    # Watchlist and keywords now come from the client (localStorage)
+    wl_ids     = set(data.get("watchlist_ids", []))
+    keywords   = data.get("keywords", [])
     store_set  = set(stores) if not search_all else None
 
     # ── Keyword matching helper ───────────────────────────────────────────
@@ -1508,7 +1508,7 @@ def api_browse():
             "date_raw":   date_raw,
             "image_id":   cached.get("image_id", ""),
             "isNew":      sku not in seen_ids,
-            "watched":    sku in wl,
+            "watched":    sku in wl_ids,
             "kwMatch":    kw_hit,
             "isFav":      store in fav_stores if fav_stores else False,
         })
@@ -2449,7 +2449,7 @@ def _run(selected_stores: list[str], baseline: bool):
         state      = load_state()
         seen_ids   = set(state["seen_ids"])
         item_dates = dict(state.get("item_dates", {}))
-        run_time   = datetime.now().isoformat()
+        run_time   = datetime.utcnow().isoformat() + "Z"
         ts         = datetime.now().strftime("%Y-%m-%d")
 
         stores_to_scan = selected_stores if not baseline else []
@@ -3059,20 +3059,31 @@ tr.sold-row td a{color:#666}
 <script>
 let allStores = [], favorites = [], running = false;
 
+// ── localStorage helpers ─────────────────────────────────────────────────────
+function _lsGet(key, fallback) {
+  try { const v = localStorage.getItem('gt_' + key); return v ? JSON.parse(v) : fallback; }
+  catch(e) { return fallback; }
+}
+function _lsSet(key, val) {
+  try { localStorage.setItem('gt_' + key, JSON.stringify(val)); } catch(e) {}
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('search').addEventListener('input', filterList);
+  // Load personal data from localStorage
+  favorites = _lsGet('favorites', []);
+  window._watchlist = _lsGet('watchlist', {});
+  window._keywords = _lsGet('keywords', []);
   clRenderCities();
   await loadData();
   await loadState();
-  await loadWatchlist();
-  await loadKeywords();
 });
 
 async function loadData() {
   const r = await fetch('/api/stores');
   const d = await r.json();
-  allStores = d.stores; favorites = d.favorites;
+  allStores = d.stores;
   renderList();
   const info = d.info || {};
   const storeLabel = info.count ? info.count : allStores.length;
@@ -3201,15 +3212,16 @@ function filterList() {
 }
 
 // ── Favorites ─────────────────────────────────────────────────────────────────
-async function toggleFav(e, name, btn) {
+function toggleFav(e, name, btn) {
   e.stopPropagation();
   const adding = !favorites.includes(name);
-  const r = await fetch('/api/favorites', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({store: name, action: adding ? 'add' : 'remove'})
-  });
-  const d = await r.json();
-  favorites = d.favorites;
+  if (adding) {
+    favorites.push(name);
+  } else {
+    favorites = favorites.filter(f => f !== name);
+  }
+  favorites.sort();
+  _lsSet('favorites', favorites);
   btn.classList.toggle('active', adding);
   btn.title = (adding ? 'Remove from' : 'Add to') + ' favorites';
   if (favsOnly) renderList();
@@ -3270,6 +3282,8 @@ async function _fetchBrowsePage(page) {
     sort_field: _srvSortField,
     sort_dir:   _srvSortDir,
     fav_stores: favorites,
+    keywords:   window._keywords || [],
+    watchlist_ids: Object.keys(window._watchlist || {}),
     ...filters,
   };
   if (_globalSearchActive) {
@@ -3532,32 +3546,22 @@ async function browseCache() {
 // ── Watch list ────────────────────────────────────────────────────────────
 window._watchlist = {};
 
-async function loadWatchlist() {
-  try {
-    const r = await fetch('/api/watchlist');
-    const d = await r.json();
-    window._watchlist = d.watchlist || {};
-  } catch(e) {}
-}
+// loadWatchlist no longer needed — loaded from localStorage in init
 
-async function toggleWatch(id, btn) {
+function toggleWatch(id, btn) {
   const isWatched = !!(window._watchlist[id]);
-  const action = isWatched ? 'remove' : 'add';
-  // Get item data from table row
-  const row = btn.closest('tr');
-  const cells = row ? row.querySelectorAll('td') : [];
-  const itemData = {
-    id,
-    name:  row ? row.dataset.name : '',
-    store: row ? row.dataset.store : '',
-  };
-  const r = await fetch('/api/watchlist', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({...itemData, action})
-  });
-  const d = await r.json();
-  window._watchlist = d.watchlist || {};
+  if (isWatched) {
+    delete window._watchlist[id];
+  } else {
+    const row = btn.closest('tr');
+    window._watchlist[id] = {
+      name:  row ? row.dataset.name : '',
+      store: row ? row.dataset.store : '',
+      location: row ? row.dataset.location : '',
+      date_added: new Date().toISOString().slice(0,10),
+    };
+  }
+  _lsSet('watchlist', window._watchlist);
   btn.classList.toggle('active', !isWatched);
   btn.textContent = isWatched ? '☆' : '★';
   btn.title = isWatched ? 'Add to watch list' : 'Remove from watch list';
@@ -3596,13 +3600,7 @@ function dismissFirstRun() {
 // ── Want List ─────────────────────────────────────────────────────────────────
 window._keywords = [];
 
-async function loadKeywords() {
-  try {
-    const r = await fetch('/api/keywords');
-    const d = await r.json();
-    window._keywords = d.keywords || [];
-  } catch(e) {}
-}
+// loadKeywords no longer needed — loaded from localStorage in init
 
 function openKeywords() {
   document.getElementById('kw-modal').style.display = 'flex';
@@ -3613,7 +3611,6 @@ function openKeywords() {
 
 function closeKeywords() {
   document.getElementById('kw-modal').style.display = 'none';
-  // Refresh the current view so keyword tags update
   if (_browseMode === 'server') {
     _fetchBrowsePage(_srvPage);
   } else {
@@ -3632,47 +3629,35 @@ function renderKeywordList() {
       <span class="tag-kw" style="font-size:.75rem">${kw.replace(/</g,'&lt;')}</span>
       <span style="flex:1"></span>
       <button onclick="removeKeyword('${kw.replace(/'/g,"\\'")}')"
-        style="background:none;border:none;color:#666;font-size:.85rem;cursor:pointer;padding:2px 6px" title="Remove">✕</button>
+        style="background:none;border:none;color:#666;font-size:.85rem;cursor:pointer;padding:2px 6px" title="Remove">&#10005;</button>
     </div>`
   ).join('');
 }
 
-async function addKeyword() {
+function addKeyword() {
   const input = document.getElementById('kw-input');
   const word = input.value.trim();
   if (!word) return;
-  const r = await fetch('/api/keywords', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({action: 'add', keyword: word})
-  });
-  const d = await r.json();
-  window._keywords = d.keywords || [];
+  if (!window._keywords.some(k => k.toLowerCase() === word.toLowerCase())) {
+    window._keywords.push(word);
+    window._keywords.sort();
+    _lsSet('keywords', window._keywords);
+  }
   input.value = '';
   renderKeywordList();
   input.focus();
 }
 
-async function removeKeyword(word) {
-  const r = await fetch('/api/keywords', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({action: 'remove', keyword: word})
-  });
-  const d = await r.json();
-  window._keywords = d.keywords || [];
+function removeKeyword(word) {
+  window._keywords = window._keywords.filter(k => k.toLowerCase() !== word.toLowerCase());
+  _lsSet('keywords', window._keywords);
   renderKeywordList();
 }
 
-async function clearAllKeywords() {
+function clearAllKeywords() {
   if (!window._keywords.length) return;
-  const r = await fetch('/api/keywords', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({action: 'clear'})
-  });
-  const d = await r.json();
-  window._keywords = d.keywords || [];
+  window._keywords = [];
+  _lsSet('keywords', window._keywords);
   renderKeywordList();
 }
 
@@ -3890,11 +3875,8 @@ function showResults(msg, isBaseline) {
     return (b.date_raw || '').localeCompare(a.date_raw || '');
   });
   window._sortCol = null; window._sortDir = 1; window._localPage = 1;
-  // Reload watchlist so sold flags are fresh
-  loadWatchlist().then(() => {
-    populateCategoryFilter();
-    renderTable();
-  });
+  populateCategoryFilter();
+  renderTable();
 }
 
 // ── Category filters ──────────────────────────────────────────────────────────
@@ -4717,16 +4699,17 @@ function clSort(col) {
   clRenderResults();
 }
 
-async function clToggleWatch(id, name, url, price, location, btn) {
+function clToggleWatch(id, name, url, price, location, btn) {
   const isWatched = !!(window._watchlist[id]);
-  const action = isWatched ? 'remove' : 'add';
-  const r = await fetch('/api/watchlist', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({id, name, url, store: location, action})
-  });
-  const d = await r.json();
-  window._watchlist = d.watchlist || {};
+  if (isWatched) {
+    delete window._watchlist[id];
+  } else {
+    window._watchlist[id] = {
+      name: name, url: url, store: location, price: price,
+      date_added: new Date().toISOString().slice(0,10),
+    };
+  }
+  _lsSet('watchlist', window._watchlist);
   btn.classList.toggle('active', !isWatched);
   btn.textContent = isWatched ? '☆' : '★';
   btn.title = isWatched ? 'Add to watch list' : 'Remove from watch list';
