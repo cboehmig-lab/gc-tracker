@@ -391,9 +391,9 @@ def _fetch_stores_from_algolia() -> list[str]:
     return sorted(stores)
 
 
+def fetch_page(store_name: str, page: int) -> dict:
     """Fetch one page of used inventory for a store via Algolia API."""
-    import time as _time
-    ts = int(_time.time())
+    ts = int(time.time())
     payload = {"requests": [{
         "indexName":     ALGOLIA_INDEX,
         "analyticsTags": ["Did Not Search"],
