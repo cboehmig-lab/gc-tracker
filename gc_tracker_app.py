@@ -2977,10 +2977,7 @@ tr.fav-row td:last-child{color:#4ade80}
           class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
           🎯 Want List
         </button>
-        <button onclick="searchWantList()"
-          class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px;background:#0a3a1a">
-          🔍 Search Want List
-        </button>
+        <a onclick="searchWantList()" style="color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;text-decoration:none;margin-left:2px" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Search Want List</a>
         <div id="brand-dropdown" class="brand-dd" style="display:none;position:relative">
           <button id="brand-dd-btn" class="cat-sel" onclick="toggleBrandDropdown()" style="cursor:pointer;white-space:nowrap">All Brands ▾</button>
           <div id="brand-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:260px;max-height:320px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
