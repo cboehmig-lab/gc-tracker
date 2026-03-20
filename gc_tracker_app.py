@@ -1672,19 +1672,23 @@ def api_debug_fetch():
             except Exception as e:
                 nd_keys = [f"parse error: {e}"]
 
+        # Search for Algolia credentials in the page
+        algolia_app_id = re.search(r'"appId"\s*:\s*"([^"]+)"', html)
+        algolia_api_key = re.search(r'"apiKey"\s*:\s*"([^"]{20,})"', html)
+        algolia_index = re.search(r'"indexName"\s*:\s*"([^"]+)"', html)
+        # Also look for Algolia config patterns
+        algolia_config = re.search(r'ALGOLIA[_\s]*APP[_\s]*ID["\s:=]+([A-Z0-9]{8,})', html, re.IGNORECASE)
+
         return jsonify({
             "store":                   store,
-            "url_fetched":             url,
-            "final_url":               final_url,
             "status_code":             r.status_code,
-            "cookies_sent":            len(_http.cookies),
-            "html_size":               len(html),
-            "has_collection_page_json_ld": has_json_ld,
-            "products_parsed":         has_products,
-            "bot_signals":             bot_signals,
-            "next_data_keys":          nd_keys,
-            "next_data_queries":        nd_queries,
             "middleware_rewrite":      r.headers.get("x-middleware-rewrite", ""),
+            "products_parsed":         has_products,
+            "next_data_queries":       nd_queries,
+            "algolia_app_id":          algolia_app_id.group(1) if algolia_app_id else None,
+            "algolia_api_key":         algolia_api_key.group(1)[:20] + "..." if algolia_api_key else None,
+            "algolia_index":           algolia_index.group(1) if algolia_index else None,
+            "algolia_config_pattern":  algolia_config.group(1) if algolia_config else None,
         })
     except Exception as e:
         return jsonify({"error": str(e)})
