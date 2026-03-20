@@ -559,19 +559,54 @@ def _extract_conditions_from_listing(html: str) -> dict:
     return {url: cond for url, cond in zip(urls, conditions) if cond}
 
 
-def parse_products(html: str, store_name: str) -> list[dict]:
-    # Pre-scan the listing HTML for per-item conditions (visible text on product cards)
-    condition_map = _extract_conditions_from_listing(html)
+def parse_products(data, store_name: str) -> list[dict]:
+    """Parse products from either Algolia API response (dict) or legacy HTML (str)."""
+    if isinstance(data, dict):
+        # New Algolia API format
+        products = []
+        try:
+            results = data.get("results", [])
+            if not results:
+                return []
+            hits = results[0].get("hits", [])
+            for hit in hits:
+                sku   = str(hit.get("objectID") or hit.get("sku") or "").strip()
+                name  = _clean_name(hit.get("name") or hit.get("title") or "")
+                if not sku or not name:
+                    continue
+                price_raw = hit.get("price") or hit.get("salePrice") or 0
+                try:    price = float(price_raw) if price_raw else None
+                except: price = None
+                url = hit.get("url") or hit.get("pdpUrl") or ""
+                if url and not url.startswith("http"):
+                    url = "https://www.guitarcenter.com" + url
+                condition = hit.get("condition") or ""
+                if isinstance(condition, dict):
+                    condition = condition.get("lvl0") or condition.get("lvl1") or ""
+                condition = _parse_condition(condition) if condition else ""
+                products.append({
+                    "id":        sku,
+                    "name":      name,
+                    "price":     price,
+                    "store":     store_name,
+                    "url":       url,
+                    "condition": condition,
+                })
+        except Exception:
+            pass
+        return products
 
-    # Strategy 1: JSON-LD CollectionPage (original format)
+    # Legacy HTML format fallback
+    html = data
+    condition_map = _extract_conditions_from_listing(html)
     for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL):
         try:
-            data = json.loads(block)
+            d = json.loads(block)
         except Exception:
             continue
-        if data.get("@type") != "CollectionPage":
+        if d.get("@type") != "CollectionPage":
             continue
-        items = data.get("mainEntity", {}).get("itemListElement", [])
+        items = d.get("mainEntity", {}).get("itemListElement", [])
         if not items:
             continue
         products = []
@@ -596,18 +631,6 @@ def parse_products(html: str, store_name: str) -> list[dict]:
                                   "condition": condition})
         if products:
             return products
-
-    # Strategy 2: __NEXT_DATA__ Algolia page (new format as of 2026)
-    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
-    if m:
-        try:
-            nd = json.loads(m.group(1))
-            products = _parse_algolia_products(nd, store_name, condition_map)
-            if products:
-                return products
-        except Exception:
-            pass
-
     return []
 
 
