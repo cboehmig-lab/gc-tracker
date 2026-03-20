@@ -2777,7 +2777,7 @@ tr.sold-row td a{color:#666}
 #cl-body th.sort-desc::after{content:" ▼";color:#a5b4fc;font-size:.6rem}
 #cl-body td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0}
 #cl-body td:nth-child(1){width:30px;min-width:30px;max-width:30px;text-align:center;overflow:visible}
-#cl-body td:nth-child(2){width:50%;max-width:none}
+#cl-body td:nth-child(2){width:50%;max-width:none;text-align:left}
 #cl-body td:nth-child(3){width:90px}
 #cl-body td:nth-child(4){width:140px}
 #cl-body td:nth-child(5){width:90px}
