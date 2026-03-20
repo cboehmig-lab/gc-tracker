@@ -77,7 +77,7 @@ _http = http.Session()
 _http.headers.update(_HEADERS)
 
 # Load persisted cookies if available
-COOKIE_FILE = DATA_DIR / "gc_cookies.json"
+
 
 def _load_cat_cache():
     global _cat_cache
@@ -2662,10 +2662,6 @@ def api_do_update():
 
 if __name__ == "__main__":
     _load_cat_cache()
-    _load_cookies()
-    if not STORES_CACHE.exists():
-        print("Building store list…")
-        refresh_store_list()
 
     # Check for updates silently on startup
     try:
