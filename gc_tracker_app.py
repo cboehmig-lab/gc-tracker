@@ -618,6 +618,8 @@ def parse_products(data, store_name: str = None) -> list[dict]:
                 # Store: from hit's stores array when querying all stores
                 hit_stores = hit.get("stores") or []
                 store = store_name or (hit_stores[0] if hit_stores else "")
+                # Image ID for thumbnail hover
+                image_id = hit.get("imageId") or ""
                 products.append({
                     "id":          sku,
                     "name":        name,
@@ -630,6 +632,7 @@ def parse_products(data, store_name: str = None) -> list[dict]:
                     "category":    category,
                     "subcategory": subcategory,
                     "date_listed": date_str,
+                    "image_id":    image_id,
                 })
         except Exception:
             pass
@@ -1415,6 +1418,7 @@ def api_browse():
             "condition":  cached.get("condition", ""),
             "date":       _fmt_date(cached.get("date_listed") or item_dates.get(sku, "")),
             "date_raw":   cached.get("date_listed") or item_dates.get(sku, ""),
+            "image_id":   cached.get("image_id", ""),
             "isNew":      sku not in seen_ids,
             "watched":    sku in wl,
         })
@@ -1455,6 +1459,7 @@ def api_watchlist_post():
             "subcategory":cached.get("subcategory", ""),
             "date_added": datetime.now().strftime("%Y-%m-%d"),
             "date_listed":cached.get("date_listed", ""),
+            "image_id":   cached.get("image_id", ""),
             "sold":       False,
         }
     elif action == "remove":
@@ -1487,6 +1492,7 @@ def api_watchlist_items():
             "condition":  w.get("condition", ""),
             "date":       _fmt_date(w.get("date_listed") or item_dates.get(sku, w.get("date_added",""))),
             "date_raw":   w.get("date_listed") or item_dates.get(sku, w.get("date_added","")),
+            "image_id":   w.get("image_id", ""),
             "isNew":      False,
             "watched":    True,
             "sold":       w.get("sold", False),
@@ -2305,6 +2311,7 @@ def _run(selected_stores: list[str], baseline: bool):
                 "price":             new_price,
                 "available":         True,
                 "date_listed":       p.get("date_listed") or cached.get("date_listed", ""),
+                "image_id":          p.get("image_id") or cached.get("image_id", ""),
             }
             p["category"]    = cat
             p["subcategory"] = subcat
@@ -2375,6 +2382,7 @@ def _run(selected_stores: list[str], baseline: bool):
                 "condition":  p.get("condition", ""),
                 "date":       _fmt_date(date_src),
                 "date_raw":   date_src,
+                "image_id":   p.get("image_id") or _cat_cache.get(p["id"], {}).get("image_id", ""),
             }
 
         new_ids = {p["id"] for p in new_items}
@@ -2504,6 +2512,10 @@ tr.sold-row td{color:#666}
 tr.sold-row td a{color:#666}
 .no-res{padding:24px 20px;color:#555;font-size:.85rem}
 
+/* ── Image thumbnail tooltip ── */
+#img-tooltip{display:none;position:fixed;z-index:200;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:8px;padding:6px;box-shadow:0 8px 24px rgba(0,0,0,.6);pointer-events:none}
+#img-tooltip img{display:block;width:200px;height:200px;object-fit:contain;border-radius:4px;background:#111}
+
 /* ── Password modal ── */
 #pw-modal{display:none;position:fixed;inset:0;z-index:100;align-items:center;justify-content:center}
 #pw-overlay{position:absolute;inset:0;background:rgba(0,0,0,.7)}
@@ -2571,6 +2583,9 @@ tr.sold-row td a{color:#666}
 </style>
 </head>
 <body>
+
+<!-- Image thumbnail tooltip -->
+<div id="img-tooltip"><img src="" alt=""></div>
 
 <!-- Password modal -->
 <!-- Validate stores modal -->
@@ -3168,7 +3183,7 @@ function renderTable() {
       ? `<span class="tag-drop">↓ $${Math.round(item.price_drop)}</span>`
       : '';
     const soldBadge = isSold ? ' <span class="tag-sold">Sold</span>' : '';
-    html += `<tr class="${isSold ? 'sold-row' : ''}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}">` +
+    html += `<tr class="${isSold ? 'sold-row' : ''}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}" data-image-id="${esc(item.image_id)}">` +
       `<td>${item.isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
       `<td>${watchStar}</td>` +
       `<td>${nameCell}${soldBadge}</td>` +
@@ -3245,6 +3260,55 @@ function autoSizeItemColumn() {
     td.style.maxWidth = colW + 'px';
   });
 }
+
+// ── Image thumbnail hover ────────────────────────────────────────────────────
+(function() {
+  const tooltip = document.getElementById('img-tooltip');
+  const tooltipImg = tooltip.querySelector('img');
+  let hoverTimer = null;
+  const HOVER_DELAY = 400; // ms before showing thumbnail
+
+  document.addEventListener('mouseenter', function(e) {
+    // Only trigger on item links inside the results table
+    const link = e.target.closest('#res-body a');
+    if (!link) return;
+    const row = link.closest('tr');
+    if (!row) return;
+    const imageId = row.dataset.imageId;
+    if (!imageId) return;
+
+    clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(function() {
+      const url = 'https://media.guitarcenter.com/is/image/MMGS7/' + imageId + '?wid=200&hei=200&fmt=png-alpha';
+      tooltipImg.src = url;
+      // Position tooltip to the right of the cursor, offset down slightly
+      const rect = link.getBoundingClientRect();
+      let left = rect.right + 12;
+      let top = rect.top - 40;
+      // Keep tooltip on screen
+      if (left + 220 > window.innerWidth) left = rect.left - 220;
+      if (top + 220 > window.innerHeight) top = window.innerHeight - 225;
+      if (top < 5) top = 5;
+      tooltip.style.left = left + 'px';
+      tooltip.style.top = top + 'px';
+      tooltip.style.display = 'block';
+    }, HOVER_DELAY);
+  }, true);
+
+  document.addEventListener('mouseleave', function(e) {
+    const link = e.target.closest('#res-body a');
+    if (!link) return;
+    clearTimeout(hoverTimer);
+    tooltip.style.display = 'none';
+    tooltipImg.src = '';
+  }, true);
+
+  // Also hide on scroll
+  document.querySelector('.results')?.addEventListener('scroll', function() {
+    clearTimeout(hoverTimer);
+    tooltip.style.display = 'none';
+  });
+})();
 
 // ── Results filter ────────────────────────────────────────────────────────────
 function clearFilters() {
