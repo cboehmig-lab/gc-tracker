@@ -1078,7 +1078,6 @@ def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Eve
         if stop_event.is_set():
             send({"type": "progress", "msg": f"  [{store_name}] stopped."})
             break
-        send({"type": "progress", "msg": f"  [{store_name}] page {page}…"})
         try:
             data = fetch_page(store_name, page)
         except Exception as e:
@@ -1106,7 +1105,8 @@ def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Eve
             if len(products) < PAGE_SIZE:
                 break
         page += 1
-        _sleep(1.0, 0.5)  # slightly faster now that we're using API not HTML
+        # No sleep needed between Algolia API pages
+    send({"type": "progress", "msg": f"  [{store_name}] {len(all_products)} items"})
     return all_products, ids_seen
 
 
@@ -1407,10 +1407,11 @@ def api_browse():
             "subcategory":cached.get("subcategory", ""),
             "condition":  cached.get("condition", ""),
             "date":       _fmt_date(cached.get("date_listed") or item_dates.get(sku, "")),
+            "date_raw":   cached.get("date_listed") or item_dates.get(sku, ""),
             "isNew":      sku not in seen_ids,
             "watched":    sku in wl,
         })
-    items.sort(key=lambda x: (not x["isNew"], x.get("date","") or ""))
+    items.sort(key=lambda x: (not x["isNew"], x.get("date_raw","") or ""))
     return jsonify({"items": items, "count": len(items), "no_store_data": False})
 
 
@@ -1476,6 +1477,7 @@ def api_watchlist_items():
             "subcategory":w.get("subcategory", ""),
             "condition":  w.get("condition", ""),
             "date":       _fmt_date(w.get("date_listed") or item_dates.get(sku, w.get("date_added",""))),
+            "date_raw":   w.get("date_listed") or item_dates.get(sku, w.get("date_added","")),
             "isNew":      False,
             "watched":    True,
             "sold":       w.get("sold", False),
@@ -2241,8 +2243,8 @@ def _run(selected_stores: list[str], baseline: bool):
         for p in all_products:
             sku    = p["id"]
             cached = _cat_cache.get(sku, {})
-            cat    = p.get("category") or cached.get("category") or classify_by_name(p.get("name", ""))[0]
-            subcat = p.get("subcategory") or cached.get("subcategory") or classify_by_name(p.get("name", ""))[1]
+            cat    = p.get("category") or cached.get("category", "")
+            subcat = p.get("subcategory") or cached.get("subcategory", "")
             condition = p.get("condition") or cached.get("condition", "")
             brand     = p.get("brand") or cached.get("brand", "")
             location  = p.get("location") or cached.get("location", p.get("store", ""))
@@ -2331,6 +2333,7 @@ def _run(selected_stores: list[str], baseline: bool):
                 "subcategory":p.get("subcategory", ""),
                 "condition":  p.get("condition", ""),
                 "date":       _fmt_date(date_src),
+                "date_raw":   date_src,
             }
 
         new_ids = {p["id"] for p in new_items}
@@ -2439,7 +2442,7 @@ th:hover{color:#ccc}
 th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
 th.sort-desc::after{content:" ▼";color:#c00;font-size:.6rem}
 td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;max-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-td:nth-child(1){width:52px;min-width:52px;max-width:52px}
+td:nth-child(1){width:56px;min-width:56px;max-width:56px;text-align:center}
 td:nth-child(2){width:28px;min-width:28px;max-width:28px;text-align:center}
 td:nth-child(3){max-width:260px;width:28%}
 td:nth-child(4){width:100px;min-width:80px;max-width:140px}
@@ -3167,7 +3170,9 @@ function sortTable(colIdx) {
       return (av - bv) * dir;
     }
     if (field === 'date') {
-      // Sort dates descending by default (newest first), ascending on toggle
+      // Sort on ISO date string (YYYY-MM-DD) for correct chronological order
+      av = a['date_raw'] || '';
+      bv = b['date_raw'] || '';
       return av.toString().localeCompare(bv.toString()) * dir;
     }
     return av.toString().localeCompare(bv.toString()) * dir;
