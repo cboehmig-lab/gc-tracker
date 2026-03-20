@@ -586,6 +586,8 @@ def parse_products(data, store_name: str) -> list[dict]:
                 elif isinstance(condition, str):
                     condition = condition.split(">")[-1].strip()
                 condition = _parse_condition(condition) if condition else ""
+                # Brand directly from Algolia
+                brand = hit.get("brand") or ""
                 # Date listed from startDate (Unix timestamp in seconds)
                 start_ts = hit.get("startDate") or 0
                 try:
@@ -594,14 +596,15 @@ def parse_products(data, store_name: str) -> list[dict]:
                 except Exception:
                     date_str = ""
                 products.append({
-                    "id":        sku,
-                    "name":      name,
-                    "price":     price,
-                    "store":     store_name,
-                    "url":       url,
-                    "condition": condition,
+                    "id":          sku,
+                    "name":        name,
+                    "price":       price,
+                    "store":       store_name,
+                    "url":         url,
+                    "condition":   condition,
+                    "brand":       brand,
+                    "seo_url":     seo_url,
                     "date_listed": date_str,
-                    "seo_url":   seo_url,
                 })
         except Exception:
             pass
@@ -1122,7 +1125,7 @@ def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Eve
             if len(products) < PAGE_SIZE:
                 break
         page += 1
-        _sleep(1.0, 0.5)  # slightly faster now that we're using API not HTML
+        _sleep(0.1, 0.1)  # minimal delay — Algolia API, not HTML scraping
     return all_products, ids_seen
 
 
@@ -2217,38 +2220,53 @@ def _run(selected_stores: list[str], baseline: bool):
         label = "baseline scan" if baseline else f"{len(stores_to_scan)} store(s)"
         send({"type":"progress","msg":f"Starting {label} — {len(stores_to_scan)} stores total…"})
         if baseline:
-            send({"type":"progress","msg":"⏳ This may take 2–4 hours with anti-bot delays. Feel free to leave it running!"})
+            send({"type":"progress","msg":"⚡ Using Algolia API with parallel fetching — baseline should take 5–15 minutes!"})
 
         all_products, ids_this_run = [], set()
-        for i, store in enumerate(stores_to_scan, 1):
-            if _stop_event.is_set():
-                send({"type":"progress","msg":"⏹ Stopped by user."})
-                break
-            send({"type":"progress","msg":f"\n[{i}/{len(stores_to_scan)}] {store}"})
-            _rotate_ua()  # rotate User-Agent each store
-            products, ids = scrape_store(store, seen_ids, send, _stop_event)
-            for p in products:
-                if p["id"] not in ids_this_run:
-                    all_products.append(p)
-            ids_this_run |= ids
-            # Extra pause between stores during baseline to avoid bot detection
-            if baseline and not _stop_event.is_set():
-                _sleep(4.0, 2.0)  # 2–6s between stores during baseline
+        completed = [0]
+        lock = threading.Lock()
 
-        # ── Classify categories instantly from seoUrl — no HTTP requests needed ──
-        # Apply all data to products, tracking price drops
+        def fetch_store(store):
+            if _stop_event.is_set():
+                return [], set()
+            try:
+                products, ids = scrape_store(store, seen_ids, lambda m: None, _stop_event)
+            except Exception:
+                products, ids = [], set()
+            with lock:
+                completed[0] += 1
+                if completed[0] % 10 == 0 or completed[0] == len(stores_to_scan):
+                    send({"type":"progress","msg":f"  [{completed[0]}/{len(stores_to_scan)}] stores fetched…"})
+            return products, ids
+
+        max_workers = 10 if baseline else 5
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(fetch_store, store): store for store in stores_to_scan}
+            for future in as_completed(futures):
+                if _stop_event.is_set():
+                    break
+                products, ids = future.result()
+                with lock:
+                    for p in products:
+                        if p["id"] not in ids_this_run:
+                            all_products.append(p)
+                    ids_this_run |= ids
+
+        if _stop_event.is_set():
+            send({"type":"progress","msg":"⏹ Stopped by user."})
+
+
+        # ── Classify categories and apply all data ────────────────────────────
         for p in all_products:
             sku    = p["id"]
             cached = _cat_cache.get(sku, {})
-            # Category: try seoUrl first (instant), then cached, then keyword fallback
-            if not cached.get("category"):
-                cat, subcat = _classify_from_seo_url(p.get("seo_url", ""))
-                if not cat:
-                    cat, subcat = classify_by_name(p.get("name", ""))
-            else:
-                cat    = cached.get("category")
+            # Always re-classify using name (most accurate) — seoUrl structure varies
+            cat, subcat = classify_by_name(p.get("name", ""))
+            if not cat:
+                cat    = cached.get("category", "")
                 subcat = cached.get("subcategory", "")
             condition = p.get("condition") or cached.get("condition", "")
+            brand = p.get("brand") or cached.get("brand", "")
             # Price drop detection
             new_price  = p.get("price") or 0
             last_price = cached.get("price") or 0
@@ -2262,11 +2280,13 @@ def _run(selected_stores: list[str], baseline: bool):
                 "url":               p.get("url", ""),
                 "store":             p.get("store", ""),
                 "price":             new_price,
+                "brand":             brand,
                 "available":         True,
             }
             p["category"]    = cat
             p["subcategory"] = subcat
             p["condition"]   = condition
+            p["brand"]       = brand
             p["price_drop"]  = price_drop
         _save_cat_cache()
 
@@ -2310,7 +2330,6 @@ def _run(selected_stores: list[str], baseline: bool):
             write_excel(new_items)
 
         def fmt(p):
-            # Prefer Algolia's listing date over our scan date
             date_src = p.get("date_listed") or item_dates.get(p["id"], "")
             return {
                 "id":         p["id"],
@@ -2320,6 +2339,7 @@ def _run(selected_stores: list[str], baseline: bool):
                 "price_drop": p.get("price_drop", 0),
                 "store":      p["store"],
                 "url":        p["url"],
+                "brand":      p.get("brand", ""),
                 "category":   p.get("category", ""),
                 "subcategory":p.get("subcategory", ""),
                 "condition":  p.get("condition", ""),
@@ -2402,9 +2422,6 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #run-btn{flex:1;padding:10px;background:#c00;color:#fff;border:none;border-radius:5px;font-size:.85rem;font-weight:700;cursor:pointer;white-space:nowrap}
 #run-btn:hover{background:#e00}
 #run-btn:disabled{background:#444;cursor:not-allowed}
-#baseline-btn{padding:10px 12px;background:#222;color:#aaa;border:1px solid #3a3a3a;border-radius:5px;font-size:.8rem;cursor:pointer;white-space:nowrap}
-#baseline-btn:hover{border-color:#c00;color:#fff}
-#baseline-btn:disabled{opacity:.4;cursor:not-allowed}
 
 /* ── Right panel ── */
 .right{flex:1;display:flex;flex-direction:column;overflow:hidden}
@@ -2451,20 +2468,7 @@ tr.sold-row td a{color:#666}
 .no-res{padding:24px 20px;color:#555;font-size:.85rem}
 
 /* ── Password modal ── */
-#pw-modal{display:none;position:fixed;inset:0;z-index:100;align-items:center;justify-content:center}
-#pw-overlay{position:absolute;inset:0;background:rgba(0,0,0,.7)}
-#pw-box{position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:30px 28px;width:340px;z-index:1}
-#pw-box h2{color:#fff;font-size:1.05rem;margin-bottom:6px}
-#pw-box p{color:#777;font-size:.82rem;margin-bottom:18px;line-height:1.5}
-#pw-input{width:100%;padding:9px 12px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#eee;font-size:.95rem;outline:none;margin-bottom:10px}
-#pw-input:focus{border-color:#c00}
-#pw-err{color:#f88;font-size:.8rem;margin-bottom:10px;display:none}
-.pw-btns{display:flex;gap:8px}
-.pw-btns button{flex:1;padding:9px;border-radius:5px;font-size:.88rem;font-weight:600;cursor:pointer;border:none}
-#pw-cancel{background:#2a2a2a;color:#aaa;border:1px solid #3a3a3a!important}
-#pw-cancel:hover{color:#fff}
-#pw-confirm{background:#c00;color:#fff}
-#pw-confirm:hover{background:#e00}
+
 /* ── CL Search tab ── */
 #cl-panel{flex-direction:row}
 .cl-left{width:220px;min-width:200px;background:#1a1a1a;border-right:1px solid #2e2e2e;display:flex;flex-direction:column;flex-shrink:0}
@@ -2535,20 +2539,6 @@ tr.sold-row td a{color:#666}
   </div>
 </div>
 
-<div id="pw-modal">
-  <div id="pw-overlay" onclick="cancelBaseline()"></div>
-  <div id="pw-box">
-    <h2>🌐 Build Nationwide Baseline</h2>
-    <p>This scan covers ~300 stores and takes 30–60 minutes. Enter the password to continue.</p>
-    <input type="password" id="pw-input" placeholder="Password"
-           onkeydown="if(event.key==='Enter')confirmBaseline()">
-    <div id="pw-err">Incorrect password.</div>
-    <div class="pw-btns">
-      <button id="pw-cancel" onclick="cancelBaseline()">Cancel</button>
-      <button id="pw-confirm" onclick="confirmBaseline()">Continue →</button>
-    </div>
-  </div>
-</div>
 
 <header>
   <h1>🎸 Gear Finder</h1>
@@ -2586,8 +2576,7 @@ tr.sold-row td a{color:#666}
     <div class="left-footer">
       <div id="sel-count">0 stores selected</div>
       <div class="btn-row">
-        <button id="run-btn"      onclick="runTracker()" disabled>Check for New</button>
-        <button id="baseline-btn" onclick="runBaseline()" title="Scan every GC store nationwide">🌐 Build Baseline</button>
+        <button id="run-btn" onclick="runTracker()">Check for New</button>
       </div>
       <button id="validate-stores-btn" onclick="validateStores()"
         style="margin-top:8px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:5px;color:#777;font-size:.75rem;cursor:pointer"
@@ -2683,7 +2672,9 @@ tr.sold-row td a{color:#666}
 
 <script>
 let allStores = [], favorites = [], running = false;
-const BASELINE_PW = 'Beatle909!';
+  if (s.is_first_run) {
+    appendLog('💡 First run detected — click "Check for New" with no stores selected to scan all stores nationwide.', 'log-dim');
+  }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
@@ -2716,7 +2707,7 @@ async function loadState() {
   document.getElementById('s-known').textContent = s.known_items.toLocaleString();
   if (s.excel_exists) document.getElementById('s-excel').style.display = 'inline';
   if (s.is_first_run) {
-    appendLog('💡 First run detected — click "🌐 Build Baseline" to capture the full current GC used inventory as your starting point.', 'log-dim');
+    appendLog('💡 First run detected — click "Check for New" with no stores selected to scan all stores nationwide.', 'log-dim');
   }
   // Check for updates
   try {
@@ -2805,9 +2796,10 @@ async function toggleFav(e, name, btn) {
 function updateCount() {
   const checked = [...document.querySelectorAll('.store-row input:checked')];
   const n = checked.length;
-  document.getElementById('sel-count').textContent = n + ' store' + (n===1?'':'s') + ' selected';
-  document.getElementById('run-btn').disabled = (n===0 || running);
-  document.getElementById('baseline-btn').disabled = running;
+  document.getElementById('sel-count').textContent = n > 0
+    ? n + ' store' + (n===1?'':'s') + ' selected'
+    : 'All stores (none selected)';
+  document.getElementById('run-btn').disabled = running;
   // Auto-browse cached inventory when stores are selected
   if (n > 0 && !running) browseCache();
   else if (n === 0) {
@@ -2921,32 +2913,10 @@ function getSelected() {
 }
 
 
-function runBaseline() {
-  document.getElementById('pw-modal').style.display = 'flex';
-  document.getElementById('pw-input').value = '';
-  document.getElementById('pw-err').style.display = 'none';
-  setTimeout(() => document.getElementById('pw-input').focus(), 50);
-}
-
-function cancelBaseline() {
-  document.getElementById('pw-modal').style.display = 'none';
-}
-
-function confirmBaseline() {
-  const pw = document.getElementById('pw-input').value;
-  if (pw !== BASELINE_PW) {
-    document.getElementById('pw-err').style.display = 'block';
-    document.getElementById('pw-input').select();
-    return;
-  }
-  document.getElementById('pw-modal').style.display = 'none';
-  startRun({stores:[], baseline:true}, true);
-}
-
 // ── Run ───────────────────────────────────────────────────────────────────────
 async function runTracker() {
   const stores = getSelected();
-  if (!stores.length) return;
+  // If no stores selected, scan all stores nationwide
   await startRun({stores}, false);
 }
 
@@ -3006,11 +2976,11 @@ function showResults(msg, isBaseline) {
   const stoppedNote = msg.stopped ? ' (stopped early)' : '';
   appendLog(`\\n✓ Done${stoppedNote} — ${msg.scanned.toLocaleString()} items scanned, ${n} new.`, 'log-dim');
 
-  if (isBaseline && n === 0) {
-    document.getElementById('res-title').textContent = 'Baseline Complete';
+  if (n === 0 && msg.scanned > 0) {
+    document.getElementById('res-title').textContent = 'Scan Complete';
     document.getElementById('res-badge').textContent = '';
     document.getElementById('res-body').innerHTML =
-      `<div class="no-res">Full inventory baseline saved (${msg.scanned.toLocaleString()} items)${stoppedNote}. Run again any time to see what's new!</div>`;
+      `<div class="no-res">${msg.scanned.toLocaleString()} items scanned${stoppedNote}. No new items found.</div>`;
     ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
     return;
   }
@@ -3079,17 +3049,18 @@ function onCatFilterChange() {
 
 // ── Table rendering & sorting ─────────────────────────────────────────────────
 // col indices: 0=status, 1=name, 2=condition, 3=category, 4=subcategory, 5=price, 6=date, 7=store
-const _SORT_COLS = [null, 'name', 'price', 'condition', 'category', 'subcategory', 'date', 'store'];
+const _SORT_COLS = [null, 'name', 'price', 'condition', 'category', 'subcategory', 'date', 'store', 'brand'];
 
 function renderTable() {
   const data = window._tableData || [];
   let html = `<table id="res-table"><thead><tr>
-    <th data-col="0"></th>
-    <th data-col="watch" style="width:32px"></th>
+    <th data-col="0" style="width:46px"></th>
+    <th data-col="watch" style="width:28px"></th>
     <th data-col="1">Item</th>
-    <th data-col="drop" style="width:80px"></th>
+    <th data-col="drop" style="width:70px"></th>
     <th data-col="2">Price</th>
     <th data-col="3">Condition</th>
+    <th data-col="8">Brand</th>
     <th data-col="4">Category</th>
     <th data-col="5">Subcategory</th>
     <th data-col="6">Date</th>
@@ -3117,6 +3088,7 @@ function renderTable() {
       `<td>${dropCell}</td>` +
       `<td>${item.price||''}</td>` +
       `<td>${esc(item.condition)}</td>` +
+      `<td>${esc(item.brand||'')}</td>` +
       `<td>${esc(item.category)}</td>` +
       `<td>${esc(item.subcategory)}</td>` +
       `<td>${esc(item.date||'')}</td>` +
