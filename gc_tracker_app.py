@@ -6,7 +6,7 @@ Run with:  python3 gc_tracker_app.py
 Then open: http://localhost:5050
 """
 
-import json, os, re, sys, time, threading, queue, webbrowser, random
+import json, os, re, sys, time, threading, queue, webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from functools import wraps
@@ -126,8 +126,7 @@ def get_store_list() -> list[str]:
 
 def _fetch_stores_from_algolia() -> list[str]:
     """Get the full store list from Algolia's facets — fast and authoritative."""
-    import time as _time
-    ts = int(_time.time())
+    ts = int(time.time())
     payload = {"requests": [{
         "indexName":     ALGOLIA_INDEX,
         "facetFilters":  ["categoryPageIds:Used", "condition.lvl0:Used"],
@@ -137,7 +136,7 @@ def _fetch_stores_from_algolia() -> list[str]:
         "numericFilters": [f"startDate<={ts}"],
         "query":         "",
     }]}
-    r = _http.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=20)
+    r = http.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=20)
     r.raise_for_status()
     data = r.json()
     facets = data.get("results", [{}])[0].get("facets", {})
@@ -230,8 +229,7 @@ ALGOLIA_HEADERS = {
 
 def fetch_page(store_name: str, page: int) -> dict:
     """Fetch one page of used inventory for a store via Algolia API."""
-    import time as _time
-    ts = int(_time.time())
+    ts = int(time.time())
     payload = {"requests": [{
         "indexName":     ALGOLIA_INDEX,
         "analyticsTags": ["Did Not Search"],
@@ -248,9 +246,8 @@ def fetch_page(store_name: str, page: int) -> dict:
         "query":         "",
         "ruleContexts":  ["used-page", "primary_itemtype", "extension_itemtype"],
     }]}
-    # Use a fresh session per call for thread safety
-    import requests as _req
-    r = _req.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=20)
+    # Use http.post directly (thread-safe for simple POST calls)
+    r = http.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=20)
     r.raise_for_status()
     return r.json()
 
@@ -1025,6 +1022,7 @@ def api_import_data():
     return jsonify({"imported": written, "status": "Import complete — reload the page."})
 
 
+@app.route("/api/cl-search")
 @login_required
 def api_cl_search():
     q = request.args.get("q", "").strip()
@@ -1218,6 +1216,7 @@ def api_cl_parse_test():
     except Exception as e:
         return jsonify({"error": str(e)})
 
+@app.route("/api/cl-debug")
 @login_required
 def api_cl_debug():
     """Probe a CL city to find the right section code and response format."""
