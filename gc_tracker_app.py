@@ -13,9 +13,7 @@ from functools import wraps
 from pathlib import Path
 
 
-def _sleep(base: float, jitter: float = 0.5):
-    """Sleep for base ± jitter seconds to avoid looking like a bot."""
-    time.sleep(max(0.1, base + random.uniform(-jitter, jitter)))
+
 
 try:
     from flask import (Flask, request, jsonify, Response, stream_with_context,
@@ -76,7 +74,15 @@ _HEADERS = {
 _http = http.Session()
 _http.headers.update(_HEADERS)
 
-# Load persisted cookies if available
+# Pre-fetch store list at module load time (runs on Railway/gunicorn startup)
+def _startup_fetch_stores():
+    if not STORES_CACHE.exists():
+        try:
+            stores = _fetch_stores_from_algolia()
+            if stores:
+                STORES_CACHE.write_text(json.dumps({"stores": sorted(stores), "updated": datetime.now().isoformat(), "count": len(stores)}))
+        except Exception:
+            pass
 
 
 def _load_cat_cache():
@@ -613,7 +619,7 @@ def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Eve
             if len(products) < PAGE_SIZE:
                 break
         page += 1
-        _sleep(0.1, 0.1)  # minimal delay — Algolia API, not HTML scraping
+        time.sleep(0.1)
     return all_products, ids_seen
 
 
@@ -2667,9 +2673,11 @@ def api_do_update():
     return jsonify({"status": "started"})
 
 
-if __name__ == "__main__":
-    _load_cat_cache()
+# Run on both Railway (gunicorn) and local startup
+_load_cat_cache()
+_startup_fetch_stores()
 
+if __name__ == "__main__":
     # Check for updates silently on startup
     try:
         update_available, latest = _check_for_update()
