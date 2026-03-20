@@ -1879,8 +1879,16 @@ def _cl_parse_html(html: str, city_id: str) -> list[dict]:
                 item.get("datePosted","") or item.get("dateCreated","") or
                 item.get("uploadDate","")
             )
+            # Extract thumbnail image
+            img = item.get("image", "")
+            if isinstance(img, list):
+                img = img[0] if img else ""
+            if isinstance(img, dict):
+                img = img.get("url", "") or img.get("contentUrl", "")
+
             items.append({"title": name, "url": url, "price": price,
-                          "location": loc, "date": date, "cityId": city_id})
+                          "location": loc, "date": date, "cityId": city_id,
+                          "image": img or ""})
         if items:
             break  # Found and parsed the ItemList, done
 
@@ -2768,10 +2776,11 @@ tr.sold-row td a{color:#666}
 #cl-body th.sort-asc::after{content:" ▲";color:#a5b4fc;font-size:.6rem}
 #cl-body th.sort-desc::after{content:" ▼";color:#a5b4fc;font-size:.6rem}
 #cl-body td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0}
-#cl-body td:nth-child(1){width:45%;max-width:400px}
-#cl-body td:nth-child(2){width:90px}
-#cl-body td:nth-child(3){width:200px}
-#cl-body td:nth-child(4){width:90px}
+#cl-body td:nth-child(1){width:30px;min-width:30px;max-width:30px;text-align:center;overflow:visible}
+#cl-body td:nth-child(2){width:50%;max-width:none}
+#cl-body td:nth-child(3){width:90px}
+#cl-body td:nth-child(4){width:140px}
+#cl-body td:nth-child(5){width:90px}
 #cl-body tr:hover td{background:#161616}
 #cl-body tr.cl-fav-result td{background:#1a1f35}
 #cl-body tr.cl-fav-result:hover td{background:#252b45}
@@ -4023,23 +4032,30 @@ function autoSizeItemColumn() {
   const HOVER_DELAY = 400; // ms before showing thumbnail
 
   document.addEventListener('mouseenter', function(e) {
-    // Only trigger on item links inside the results table
-    const link = e.target.closest('#res-body a');
+    // GC results
+    const gcLink = e.target.closest('#res-body a');
+    // CL results
+    const clLink = e.target.closest('#cl-body a');
+    const link = gcLink || clLink;
     if (!link) return;
     const row = link.closest('tr');
     if (!row) return;
-    const imageId = row.dataset.imageId;
-    if (!imageId) return;
+
+    let imgUrl = '';
+    if (gcLink) {
+      const imageId = row.dataset.imageId;
+      if (imageId) imgUrl = 'https://media.guitarcenter.com/is/image/MMGS7/' + imageId + '-00-600x600.jpg';
+    } else if (clLink) {
+      imgUrl = row.dataset.clImage || '';
+    }
+    if (!imgUrl) return;
 
     clearTimeout(hoverTimer);
     hoverTimer = setTimeout(function() {
-      const url = 'https://media.guitarcenter.com/is/image/MMGS7/' + imageId + '-00-600x600.jpg';
-      tooltipImg.src = url;
-      // Position tooltip to the right of the cursor, offset down slightly
+      tooltipImg.src = imgUrl;
       const rect = link.getBoundingClientRect();
       let left = rect.right + 12;
       let top = rect.top - 40;
-      // Keep tooltip on screen
       if (left + 220 > window.innerWidth) left = rect.left - 220;
       if (top + 220 > window.innerHeight) top = window.innerHeight - 225;
       if (top < 5) top = 5;
@@ -4050,15 +4066,19 @@ function autoSizeItemColumn() {
   }, true);
 
   document.addEventListener('mouseleave', function(e) {
-    const link = e.target.closest('#res-body a');
+    const link = e.target.closest('#res-body a') || e.target.closest('#cl-body a');
     if (!link) return;
     clearTimeout(hoverTimer);
     tooltip.style.display = 'none';
     tooltipImg.src = '';
   }, true);
 
-  // Also hide on scroll
+  // Also hide on scroll (both panels)
   document.querySelector('.results')?.addEventListener('scroll', function() {
+    clearTimeout(hoverTimer);
+    tooltip.style.display = 'none';
+  });
+  document.getElementById('cl-body')?.addEventListener('scroll', function() {
     clearTimeout(hoverTimer);
     tooltip.style.display = 'none';
   });
@@ -4502,7 +4522,7 @@ function clRenderResults() {
     const title = r.url
       ? star + '<a href="' + r.url + '" target="_blank" rel="noopener">' + (r.title || '(no title)') + '</a>'
       : star + (r.title || '(no title)');
-    html += '<tr class="' + (isFav ? 'cl-fav-result' : '') + '" data-city="' + (r.cityId||'') + '">' +
+    html += '<tr class="' + (isFav ? 'cl-fav-result' : '') + '" data-city="' + (r.cityId||'') + '" data-cl-image="' + (r.image||'').replace(/"/g,'&quot;') + '">' +
             '<td style="text-align:center">' + watchStar + '</td>' +
             '<td title="' + (r.title||'').replace(/"/g,'&quot;') + '">' + title + '</td>' +
             '<td>' + (r.price||'') + '</td>' +
