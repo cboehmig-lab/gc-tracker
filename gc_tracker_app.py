@@ -1775,6 +1775,7 @@ def api_debug_fetch():
             "nb_pages":       first.get("nbPages", 0),
             "products_found": len(products),
             "sample":         products[:3],
+            "raw_hit_sample": first.get("hits", [{}])[:2],
         })
     except Exception as e:
         return jsonify({"error": str(e)})
