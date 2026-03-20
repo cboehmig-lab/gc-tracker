@@ -1698,10 +1698,13 @@ def api_keywords_post():
 def api_state():
     _load_cat_cache()
     total_items = sum(1 for v in _cat_cache.values() if v.get("available", True))
+    last_scan_file = DATA_DIR / "gc_last_scan.txt"
+    last_scan = last_scan_file.read_text().strip() if last_scan_file.exists() else None
     return jsonify({
         "total_items":  total_items,
         "excel_exists": OUTPUT_FILE.exists(),
         "is_first_run": total_items == 0,
+        "last_scan":    last_scan,
     })
 
 @app.route("/api/run", methods=["POST"])
@@ -1713,9 +1716,7 @@ def api_run():
     data     = request.json
     selected = data.get("stores", [])
     baseline = data.get("baseline", False)
-    if not selected and not baseline:
-        _lock.release()
-        return jsonify({"error": "No stores selected."}), 400
+    # Empty stores = nationwide scan (used by both baseline and Check for New)
     while not _q.empty():
         try: _q.get_nowait()
         except queue.Empty: break
@@ -2575,6 +2576,8 @@ def _run(selected_stores: list[str], baseline: bool):
 
         send({"type":"progress","msg":f"  {len(all_products):,} products scanned."})
         _save_cat_cache()
+        # Record scan completion time
+        (DATA_DIR / "gc_last_scan.txt").write_text(run_time)
 
         def fmt(p):
             date_src = p.get("date_listed") or _cat_cache.get(p["id"], {}).get("date_listed", "")
@@ -2930,7 +2933,7 @@ tr.fav-row td:last-child{color:#4ade80}
     <div class="left-footer">
       <div id="sel-count">0 stores selected</div>
       <div class="btn-row">
-        <button id="run-btn"      onclick="runTracker()" disabled>Check for New</button>
+        <button id="run-btn" onclick="runTracker()" disabled style="display:none">Check for New</button>
         <button id="baseline-btn" onclick="runBaseline()" title="Scan every GC store nationwide" style="display:none">🌐 Build Baseline</button>
       </div>
       <button id="validate-stores-btn" onclick="validateStores()"
@@ -3113,14 +3116,26 @@ function _updateRelativeTime() {
 async function loadState() {
   // Per-user timing from localStorage
   window._lastRunISO = _lsGet('last_run', null);
-  _updateRelativeTime();
-  document.getElementById('check-now-btn').style.display = window._lastRunISO ? 'inline' : 'none';
 
   // Shared state from server
   const r = await fetch('/api/state');
   const s = await r.json();
   document.getElementById('s-known').textContent = s.total_items.toLocaleString();
   if (s.excel_exists) document.getElementById('s-excel').style.display = 'inline';
+
+  // Use server's last_scan if it's more recent than user's last_run
+  // (e.g. nightly scan ran while user was away)
+  if (s.last_scan) {
+    const serverTime = new Date(s.last_scan).getTime();
+    const userTime = window._lastRunISO ? new Date(window._lastRunISO).getTime() : 0;
+    if (serverTime > userTime) {
+      window._lastRunISO = s.last_scan;
+    }
+  }
+
+  _updateRelativeTime();
+  document.getElementById('check-now-btn').style.display = 'inline';
+
   if (s.is_first_run && !window._seenIds.size) {
     document.getElementById('first-run-modal').style.display = 'flex';
   }
@@ -3788,9 +3803,8 @@ function confirmReset() {
 
 // ── Run ───────────────────────────────────────────────────────────────────────
 async function runTracker() {
-  const stores = getSelected();
-  if (!stores.length) return;
-  await startRun({stores}, false);
+  // Always scan nationwide so seen_ids stays complete
+  await startRun({stores:[], baseline:false}, false);
 }
 
 async function stopRun() {
@@ -4932,6 +4946,9 @@ def _nightly_scan():
                             break
                         page += 1
                     _save_cat_cache()
+                    # Record scan completion time so clients know when last check happened
+                    scan_time = datetime.utcnow().isoformat() + "Z"
+                    (DATA_DIR / "gc_last_scan.txt").write_text(scan_time)
                     print(f"  🌙 Nightly scan complete — {total:,} items updated.")
                 finally:
                     _lock.release()
