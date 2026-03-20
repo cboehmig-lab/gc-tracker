@@ -126,8 +126,38 @@ def get_store_list() -> list[str]:
             cached = json.loads(STORES_CACHE.read_text()).get("stores", [])
         except Exception:
             pass
+    if not cached:
+        # No cache — fetch from Algolia directly
+        try:
+            cached = _fetch_stores_from_algolia()
+            if cached:
+                STORES_CACHE.write_text(json.dumps({"stores": sorted(cached), "updated": datetime.now().isoformat()}))
+        except Exception:
+            pass
     blocklist = _get_blocklist()
     return sorted(set(cached) - blocklist)
+
+
+def _fetch_stores_from_algolia() -> list[str]:
+    """Get the full store list from Algolia's facets — fast and authoritative."""
+    import time as _time
+    ts = int(_time.time())
+    payload = {"requests": [{
+        "indexName":     ALGOLIA_INDEX,
+        "facetFilters":  ["categoryPageIds:Used", "condition.lvl0:Used"],
+        "facets":        ["stores"],
+        "hitsPerPage":   0,
+        "maxValuesPerFacet": 1000,
+        "numericFilters": [f"startDate<={ts}"],
+        "query":         "",
+    }]}
+    r = _http.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+    facets = data.get("results", [{}])[0].get("facets", {})
+    stores = list(facets.get("stores", {}).keys())
+    return sorted(stores)
+
 
 
 _US_STATES = [
@@ -216,44 +246,38 @@ def _extract_stores_from_used_page(html: str) -> list[str]:
 
 
 def refresh_store_list(send_progress=None) -> list[str]:
-    """Fetch authoritative store list from GC's used inventory page filter facets,
-    then fall back to state-by-state scraping. Removes blocklisted stores."""
-    live_names = []
-
-    # Strategy 1: fetch GC's used inventory page and extract store names from filter facets
-    # This is the gold standard — these are the exact names the filter system accepts
+    """Fetch store list directly from Algolia facets — fast and authoritative."""
+    import time as _time
+    ts = int(_time.time())
     try:
-        r = _http.get("https://www.guitarcenter.com/Used/", timeout=20)
-        if r.status_code == 200:
-            live_names = _extract_stores_from_used_page(r.text)
-    except Exception:
-        pass
+        payload = {"requests": [{
+            "indexName":     ALGOLIA_INDEX,
+            "facetFilters":  ["categoryPageIds:Used", "condition.lvl0:Used"],
+            "facets":        ["stores"],
+            "hitsPerPage":   0,
+            "maxValuesPerFacet": 1000,
+            "numericFilters": [f"startDate<={ts}"],
+            "query":         "",
+        }]}
+        r = _http.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        facets = data.get("results", [{}])[0].get("facets", {})
+        stores = sorted(facets.get("stores", {}).keys())
+        if stores:
+            invalid = set(json.loads(INVALID_STORES_FILE.read_text()) if INVALID_STORES_FILE.exists() else [])
+            stores = [s for s in stores if s not in invalid]
+            d = {"stores": stores, "updated": datetime.now().isoformat()[:10]}
+            STORES_CACHE.write_text(json.dumps(d))
+            if send_progress:
+                send_progress(f"  ✓ {len(stores)} stores loaded from Algolia")
+            return stores
+    except Exception as e:
+        if send_progress:
+            send_progress(f"  ✗ Algolia store fetch failed: {e}")
+    return get_store_list()
 
-    # Strategy 2: scrape stores.guitarcenter.com state by state in parallel
-    if len(live_names) < 50:
-        try:
-            with ThreadPoolExecutor(max_workers=10) as pool:
-                futures = {pool.submit(_fetch_state_stores, st): st for st in _US_STATES}
-                for future in as_completed(futures):
-                    try:
-                        live_names.extend(future.result())
-                    except Exception:
-                        pass
-        except Exception:
-            pass
 
-    # Strategy 3: main stores page URL pattern
-    if len(live_names) < 20:
-        try:
-            r = _http.get("https://www.guitarcenter.com/Stores/", timeout=15)
-            r.raise_for_status()
-            html = r.text
-            for slug in re.findall(r'href="https?://stores\.guitarcenter\.com/([a-z]{2})/([a-z][a-z0-9\-]+)/(\d+)"', html):
-                _, city_slug, _ = slug
-                name = " ".join(w.capitalize() for w in city_slug.split("-"))
-                live_names.append(name)
-        except Exception:
-            pass
 
     # Strip nav garbage
     _NAV_GARBAGE = {
@@ -1353,19 +1377,30 @@ def download_excel():
 @app.route("/api/stores")
 @login_required
 def api_stores():
-    return jsonify({
-        "stores":    get_store_list(),
-        "favorites": load_favorites(),
-        "info":      get_store_info(),
-    })
+    stores = get_store_list()
+    favs   = load_favorites()
+    info   = {}
+    if STORES_CACHE.exists():
+        try:
+            d = json.loads(STORES_CACHE.read_text())
+            info = {"count": len(d.get("stores",[])), "updated": d.get("updated","")}
+        except Exception:
+            pass
+    return jsonify({"stores": stores, "favorites": favs, "info": info})
 
-@app.route("/api/stores/refresh", methods=["POST"])
+
+@app.route("/api/refresh-stores", methods=["POST"])
 @login_required
-def api_stores_refresh():
-    stores = refresh_store_list()
-    info   = get_store_info()
-    return jsonify({"stores": stores, "favorites": load_favorites(),
-                    "count": len(stores), "info": info})
+def api_refresh_stores():
+    """Rebuild store list from Algolia facets — instant."""
+    try:
+        stores = _fetch_stores_from_algolia()
+        if stores:
+            STORES_CACHE.write_text(json.dumps({"stores": sorted(stores), "updated": datetime.now().isoformat(), "count": len(stores)}))
+        return jsonify({"stores": stores, "count": len(stores), "status": "ok"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/favorites", methods=["POST"])
 @login_required
@@ -2689,15 +2724,22 @@ async function loadData() {
   const r = await fetch('/api/stores');
   const d = await r.json();
   allStores = d.stores; favorites = d.favorites;
+  // If store list is empty, rebuild from Algolia automatically
+  if (allStores.length === 0) {
+    appendLog('Store list empty — rebuilding from Algolia…', 'log-dim');
+    const rr = await fetch('/api/refresh-stores', {method: 'POST'});
+    const dd = await rr.json();
+    if (dd.stores && dd.stores.length) {
+      allStores = dd.stores;
+      appendLog(`✓ ${dd.stores.length} stores loaded.`, 'log-dim');
+    }
+  }
   renderList();
   const info = d.info || {};
   const storeLabel = info.count ? info.count + ' stores' : allStores.length + ' stores';
   document.getElementById('hdr-status').textContent = storeLabel + ' available';
   document.getElementById('s-stores').textContent = storeLabel +
     (info.updated ? ' · checked ' + info.updated.slice(0,10) : ' (fallback list)');
-  if (allStores.length === 0) {
-    appendLog('💡 No stores loaded — click "✓ Validate Stores" to build the store list from GC live data.', 'log-dim');
-  }
 }
 
 async function loadState() {
