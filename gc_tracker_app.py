@@ -3073,7 +3073,7 @@ async function loadData() {
   const r = await fetch('/api/stores');
   const d = await r.json();
   allStores = d.stores;
-  renderList();
+  renderList(new Set(d.stores));  // Select all stores on initial load
   const info = d.info || {};
   const storeLabel = info.count ? info.count : allStores.length;
   document.getElementById('hdr-status').textContent = storeLabel + ' stores available';
