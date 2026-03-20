@@ -350,18 +350,118 @@ def _clean_name(name: str) -> str:
     return name
 
 
-def fetch_page(store_name: str, page: int) -> str:
-    _rotate_ua()
-    query = f"filters=stores:{store_name.replace(' ', '%20')}"
-    url   = f"https://www.guitarcenter.com/Used/?{query}&page={page}"
-    r = _http.get(url, timeout=20)
-    _save_cookies()  # persist any new cookies GC sets
+ALGOLIA_APP_ID  = "7AQ22QS8RJ"
+ALGOLIA_API_KEY = "d04d765e552eb08aff3601eae8f2b729"
+ALGOLIA_INDEX   = "cD-guitarcenter"
+ALGOLIA_URL     = f"https://{ALGOLIA_APP_ID.lower()}-dsn.algolia.net/1/indexes/*/queries"
+ALGOLIA_HEADERS = {
+    "x-algolia-application-id": ALGOLIA_APP_ID,
+    "x-algolia-api-key":        ALGOLIA_API_KEY,
+    "Content-Type":             "application/json",
+}
+
+def fetch_page(store_name: str, page: int) -> dict:
+    """Fetch one page of used inventory for a store via Algolia API."""
+    import time as _time
+    ts = int(_time.time())
+    payload = {"requests": [{
+        "indexName":     ALGOLIA_INDEX,
+        "analyticsTags": ["Did Not Search"],
+        "facetFilters":  [
+            "categoryPageIds:Used",
+            "condition.lvl0:Used",
+            [f"stores:{store_name}"],
+        ],
+        "facets":        ["*"],
+        "hitsPerPage":   24,
+        "maxValuesPerFacet": 10,
+        "numericFilters": [f"startDate<={ts}"],
+        "page":          page - 1,  # Algolia is 0-indexed
+        "query":         "",
+        "ruleContexts":  ["used-page", "primary_itemtype", "extension_itemtype"],
+    }]}
+    r = _http.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=20)
     r.raise_for_status()
-    # Save first page of first store as debug dump for condition pattern inspection
-    debug_file = DATA_DIR / "gc_debug_listing.html"
-    if page == 1 and not debug_file.exists():
-        debug_file.write_text(r.text)
-    return r.text
+    return r.json()
+
+
+def parse_products(data: any, store_name: str) -> list[dict]:
+    """Parse Algolia API response into product list."""
+    # Handle both old HTML string format and new Algolia dict format
+    if isinstance(data, str):
+        return _parse_products_html(data, store_name)
+
+    products = []
+    try:
+        results = data.get("results", [])
+        if not results:
+            return []
+        hits = results[0].get("hits", [])
+        for hit in hits:
+            sku   = str(hit.get("objectID") or hit.get("sku") or "").strip()
+            name  = _clean_name(hit.get("name") or hit.get("title") or "")
+            if not sku or not name:
+                continue
+            price_raw = hit.get("price") or hit.get("salePrice") or 0
+            try:    price = float(price_raw) if price_raw else None
+            except: price = None
+            url = hit.get("url") or hit.get("pdpUrl") or ""
+            if url and not url.startswith("http"):
+                url = "https://www.guitarcenter.com" + url
+            # Condition from hit
+            condition = hit.get("condition") or ""
+            if isinstance(condition, dict):
+                condition = condition.get("lvl0") or condition.get("lvl1") or ""
+            condition = _parse_condition(condition) if condition else ""
+            products.append({
+                "id":        sku,
+                "name":      name,
+                "price":     price,
+                "store":     store_name,
+                "url":       url,
+                "condition": condition,
+            })
+    except Exception:
+        pass
+    return products
+
+
+def _parse_products_html(html: str, store_name: str) -> list[dict]:
+    """Legacy HTML parser — kept as fallback."""
+    condition_map = _extract_conditions_from_listing(html)
+    for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL):
+        try:
+            data = json.loads(block)
+        except Exception:
+            continue
+        if data.get("@type") != "CollectionPage":
+            continue
+        items = data.get("mainEntity", {}).get("itemListElement", [])
+        if not items:
+            continue
+        products = []
+        for entry in items:
+            item = entry.get("item", {})
+            name = _clean_name(item.get("name", ""))
+            sku  = item.get("sku",  "").strip()
+            url  = item.get("url",  "").strip()
+            offers = item.get("offers", {})
+            raw  = offers.get("price", "")
+            try:    price = float(raw) if raw else None
+            except: price = None
+            url_key = url.split("?")[0]
+            condition = condition_map.get(url_key, "")
+            if not condition:
+                raw_cond = offers.get("itemCondition", "")
+                parsed = _parse_condition(raw_cond)
+                condition = parsed if parsed.lower() not in ("used", "") else ""
+            if name and sku:
+                products.append({"id": sku, "name": name, "price": price,
+                                  "store": store_name, "url": url,
+                                  "condition": condition})
+        if products:
+            return products
+    return []
 
 
 _CONDITION_MAP = {
@@ -923,28 +1023,33 @@ def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Eve
             break
         send({"type": "progress", "msg": f"  [{store_name}] page {page}…"})
         try:
-            html = fetch_page(store_name, page)
+            data = fetch_page(store_name, page)
         except Exception as e:
-            # 404 = store doesn't exist — remove it from cache silently
             if "404" in str(e):
                 send({"type": "progress", "msg": f"  [{store_name}] not found — removing from store list."})
                 _remove_invalid_store(store_name)
             else:
                 send({"type": "progress", "msg": f"  [{store_name}] error: {e}"})
             break
-        products = parse_products(html, store_name)
+        products = parse_products(data, store_name)
         if not products:
             break
-        if all(p["id"] in ids_seen for p in products):   # loop guard — only checks this store's own pages
+        if all(p["id"] in ids_seen for p in products):
             break
         for p in products:
             if p["id"] not in ids_seen:
                 all_products.append(p)
                 ids_seen.add(p["id"])
-        if len(products) < PAGE_SIZE:
-            break
+        # Algolia tells us total pages via nbPages
+        try:
+            nb_pages = data.get("results", [{}])[0].get("nbPages", 1)
+            if page >= nb_pages:
+                break
+        except Exception:
+            if len(products) < PAGE_SIZE:
+                break
         page += 1
-        _sleep(1.5, 0.8)  # 0.7–2.3s between pages
+        _sleep(1.0, 0.5)  # slightly faster now that we're using API not HTML
     return all_products, ids_seen
 
 
@@ -1634,61 +1739,19 @@ def api_cl_debug():
 @app.route("/api/debug-fetch")
 @login_required
 def api_debug_fetch():
-    """Fetch page 1 for a store and return diagnostic info."""
-    store = request.args.get("store", "South Austin")
+    """Test Algolia API fetch for a store."""
+    store = request.args.get("store", "Austin")
     try:
-        _rotate_ua()
-        query = f"filters=stores:{store.replace(' ', '%20')}"
-        url   = f"https://www.guitarcenter.com/Used/?{query}&page=1"
-        r     = _http.get(url, timeout=20)
-        html  = r.text
-        has_json_ld  = "CollectionPage" in html
-        has_products = len(parse_products(html, store)) > 0
-        bot_signals  = [s for s in ["captcha","robot","blocked","access denied","cloudflare","challenge"] if s in html.lower()]
-        final_url = r.url if hasattr(r, 'url') else url
-        # Check __NEXT_DATA__ structure
-        nd_keys = []
-        nd_sample = ""
-        nd_queries = []
-        m2 = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
-        if m2:
-            try:
-                nd = json.loads(m2.group(1))
-                nd_keys = list(nd.keys())[:10]
-                # Dig into queries to find product data
-                queries = nd.get("props",{}).get("pageProps",{}).get("dehydratedState",{}).get("queries",[])
-                for i, q in enumerate(queries):
-                    data = q.get("state",{}).get("data",{})
-                    if isinstance(data, dict):
-                        keys = list(data.keys())[:8]
-                        # Look for product-like keys
-                        has_hits = any(k in str(data) for k in ["hits","products","items","objectID","sku"])
-                        nd_queries.append({
-                            "query_index": i,
-                            "data_keys": keys,
-                            "has_product_signals": has_hits,
-                            "sample": str(data)[:300] if has_hits else ""
-                        })
-            except Exception as e:
-                nd_keys = [f"parse error: {e}"]
-
-        # Search for Algolia credentials in the page
-        algolia_app_id = re.search(r'"appId"\s*:\s*"([^"]+)"', html)
-        algolia_api_key = re.search(r'"apiKey"\s*:\s*"([^"]{20,})"', html)
-        algolia_index = re.search(r'"indexName"\s*:\s*"([^"]+)"', html)
-        # Also look for Algolia config patterns
-        algolia_config = re.search(r'ALGOLIA[_\s]*APP[_\s]*ID["\s:=]+([A-Z0-9]{8,})', html, re.IGNORECASE)
-
+        data     = fetch_page(store, 1)
+        products = parse_products(data, store)
+        results  = data.get("results", [{}])
+        first    = results[0] if results else {}
         return jsonify({
-            "store":                   store,
-            "status_code":             r.status_code,
-            "middleware_rewrite":      r.headers.get("x-middleware-rewrite", ""),
-            "products_parsed":         has_products,
-            "next_data_queries":       nd_queries,
-            "algolia_app_id":          algolia_app_id.group(1) if algolia_app_id else None,
-            "algolia_api_key":         algolia_api_key.group(1)[:20] + "..." if algolia_api_key else None,
-            "algolia_index":           algolia_index.group(1) if algolia_index else None,
-            "algolia_config_pattern":  algolia_config.group(1) if algolia_config else None,
+            "store":          store,
+            "nb_hits":        first.get("nbHits", 0),
+            "nb_pages":       first.get("nbPages", 0),
+            "products_found": len(products),
+            "sample":         products[:3],
         })
     except Exception as e:
         return jsonify({"error": str(e)})
