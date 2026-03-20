@@ -3159,7 +3159,7 @@ function renderTable() {
 function sortTable(colIdx) {
   const field = _SORT_COLS[colIdx];
   if (!field) return;
-  window._sortDir = (window._sortCol === colIdx) ? window._sortDir * -1 : 1;
+  window._sortDir = (window._sortCol === colIdx) ? window._sortDir * -1 : (field === 'date' ? -1 : 1);
   window._sortCol = colIdx;
   const dir = window._sortDir;
   window._tableData.sort((a, b) => {
