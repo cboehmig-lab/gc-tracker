@@ -1418,6 +1418,8 @@ def api_browse():
     f_cat   = data.get("filter_category") or ""
     f_sub   = data.get("filter_subcategory") or ""
     f_watched = bool(data.get("filter_watched"))
+    f_want_only = bool(data.get("filter_want_list_only"))
+    force_fav_sort = bool(data.get("force_fav_sort"))
 
     _load_cat_cache()
     state      = load_state()
@@ -1530,6 +1532,8 @@ def api_browse():
                                  (i["category"] or ""), (i["subcategory"] or ""))).lower()
                 return all(w in text for w in words)
             filtered = [i for i in filtered if _text_match(i)]
+    if f_want_only:
+        filtered = [i for i in filtered if i["kwMatch"]]
     if f_watched:
         filtered = [i for i in filtered if i["watched"]]
     if f_brand:
@@ -1549,24 +1553,22 @@ def api_browse():
                 scoped_subcats.add(i["subcategory"])
 
     # ── Sort ──────────────────────────────────────────────────────────────
-    # Priority: keyword matches first, then favorites, then rest
-    # (NEW detection is per-user and handled client-side)
+    # Priority tiers for sorting:
+    # - force_fav_sort (global searches): favorites ALWAYS on top, then keyword matches, then rest
+    # - normal browse: keyword matches first, then favorites, then rest
     reverse = (sort_dir == "desc")
+    def _sort_tier(x):
+        if force_fav_sort:
+            return 0 if x.get("isFav") else (1 if x.get("kwMatch") else 2)
+        else:
+            return 0 if x.get("kwMatch") else (1 if x.get("isFav") else 2)
+
     if sort_field == "price":
-        filtered.sort(key=lambda x: (
-            0 if x.get("kwMatch") else (1 if x.get("isFav") else 2),
-            x.get("price_raw") or 0
-        ), reverse=reverse)
+        filtered.sort(key=lambda x: (_sort_tier(x), x.get("price_raw") or 0), reverse=reverse)
     elif sort_field == "date":
-        filtered.sort(key=lambda x: (
-            0 if x.get("kwMatch") else (1 if x.get("isFav") else 2),
-            x.get("date_raw") or ""
-        ), reverse=reverse)
+        filtered.sort(key=lambda x: (_sort_tier(x), x.get("date_raw") or ""), reverse=reverse)
     else:
-        filtered.sort(key=lambda x: (
-            0 if x.get("kwMatch") else (1 if x.get("isFav") else 2),
-            (x.get(sort_field) or "").lower()
-        ), reverse=reverse)
+        filtered.sort(key=lambda x: (_sort_tier(x), (x.get(sort_field) or "").lower()), reverse=reverse)
 
     total_filtered = len(filtered)
     total_pages    = max(1, -(-total_filtered // per_page))  # ceil division
@@ -2733,6 +2735,7 @@ td a:hover{text-decoration:underline}
 .watch-btn.active{color:#f5c518}
 tr.sold-row td{color:#666}
 tr.sold-row td a{color:#666}
+tr.fav-row td:last-child{color:#4ade80}
 .no-res{padding:24px 20px;color:#555;font-size:.85rem}
 
 /* ── Paginator ── */
@@ -2973,6 +2976,10 @@ tr.sold-row td a{color:#666}
         <button onclick="openKeywords()"
           class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
           🎯 Want List
+        </button>
+        <button onclick="searchWantList()"
+          class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px;background:#0a3a1a">
+          🔍 Search Want List
         </button>
         <div id="brand-dropdown" class="brand-dd" style="display:none;position:relative">
           <button id="brand-dd-btn" class="cat-sel" onclick="toggleBrandDropdown()" style="cursor:pointer;white-space:nowrap">All Brands ▾</button>
@@ -3238,6 +3245,7 @@ let _skipBrowse = false;  // Set after a scan to prevent browseCache from overwr
 let _watchFilterActive = false;
 let _globalSearchActive = false;
 let _globalSearchQuery = '';
+let _wantListSearchActive = false;
 
 // Mode: 'server' = browse with server-side pagination, 'local' = scan/watchlist with client data
 let _browseMode = 'server';
@@ -3280,6 +3288,10 @@ async function _fetchBrowsePage(page) {
   if (_globalSearchActive) {
     body.all_stores = true;
     body.filter_q = _globalSearchQuery;
+    body.force_fav_sort = true;  // Global searches: favorites always on top
+    if (_wantListSearchActive) {
+      body.filter_want_list_only = true;
+    }
   } else {
     body.stores = _srvStores;
   }
@@ -3314,7 +3326,11 @@ async function _fetchBrowsePage(page) {
 
     // Update header
     const hasFilters = filters.filter_q || filters.filter_brand || filters.filter_condition || filters.filter_category || filters.filter_subcategory || filters.filter_watched;
-    if (_globalSearchActive) {
+    if (_wantListSearchActive) {
+      document.getElementById('res-title').textContent = _srvTotalCount > 0
+        ? `${_srvTotalCount.toLocaleString()} Want List matches nationwide`
+        : 'No Want List matches found';
+    } else if (_globalSearchActive) {
       const label = _srvTotalCount > 0
         ? `${_srvTotalCount.toLocaleString()} results for "${_globalSearchQuery}"`
         : `No results for "${_globalSearchQuery}"`;
@@ -3401,7 +3417,8 @@ function _buildRowHtml(item) {
     : '';
   const soldBadge = isSold ? ' <span class="tag-sold">Sold</span>' : '';
   const isNew = item.isNew || (item.id && window._newIds && window._newIds.has(item.id));
-  return `<tr class="${isSold ? 'sold-row' : ''}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}" data-image-id="${esc(item.image_id)}">` +
+  const rowClass = [isSold ? 'sold-row' : '', item.isFav ? 'fav-row' : ''].filter(Boolean).join(' ');
+  return `<tr class="${rowClass}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}" data-image-id="${esc(item.image_id)}">` +
     `<td>${isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
     `<td>${item.kwMatch ? '<span class="tag-kw">WANT</span>' : ''}</td>` +
     `<td>${watchStar}</td>` +
@@ -3513,7 +3530,7 @@ async function browseCache() {
     const stores = getSelected();
     if (!stores.length) return;
     _browseMode = 'server';
-    _globalSearchActive = false;
+    _globalSearchActive = false; _wantListSearchActive = false;
     _globalSearchQuery = '';
     document.getElementById('global-search').value = '';
     document.getElementById('global-search-clear').style.display = 'none';
@@ -3676,6 +3693,7 @@ function globalSearch() {
   const q = document.getElementById('global-search').value.trim();
   if (!q) return;
   _globalSearchActive = true;
+  _wantListSearchActive = false;
   _globalSearchQuery = q;
   _browseMode = 'server';
   _srvPage = 1;
@@ -3698,7 +3716,7 @@ function globalSearch() {
 }
 
 function clearGlobalSearch() {
-  _globalSearchActive = false;
+  _globalSearchActive = false; _wantListSearchActive = false;
   _globalSearchQuery = '';
   document.getElementById('global-search').value = '';
   document.getElementById('global-search-clear').style.display = 'none';
@@ -3709,6 +3727,33 @@ function clearGlobalSearch() {
   } else {
     document.getElementById('res-panel').style.display = 'none';
   }
+}
+
+function searchWantList() {
+  if (!window._keywords || !window._keywords.length) {
+    openKeywords();
+    return;
+  }
+  _globalSearchActive = true;
+  _wantListSearchActive = true;
+  _globalSearchQuery = '';
+  _browseMode = 'server';
+  _srvPage = 1;
+  _srvSortField = 'date';
+  _srvSortDir = 'desc';
+  window._sortCol = null; window._sortDir = 1;
+  document.getElementById('res-search').value = '';
+  document.getElementById('res-search-count').textContent = '';
+  window._selectedBrand = ''; document.getElementById('brand-dd-btn').textContent = 'All Brands ▾';
+  document.getElementById('cond-filter').value = '';
+  document.getElementById('cat-filter').value = '';
+  document.getElementById('subcat-filter').value = '';
+  document.getElementById('subcat-filter').style.display = 'none';
+  _watchFilterActive = false;
+  document.getElementById('watchlist-toggle').classList.remove('wl-active');
+  document.getElementById('global-search-clear').style.display = '';
+  document.getElementById('global-search').value = '🎯 Want List Search';
+  _fetchBrowsePage(1);
 }
 
 function runBaseline() {
@@ -3874,7 +3919,7 @@ function showResults(msg, isBaseline) {
     _watchFilterActive = false;
     document.getElementById('watchlist-toggle').classList.remove('wl-active');
     if (!_srvStores.length) {
-      _globalSearchActive = false;
+      _globalSearchActive = false; _wantListSearchActive = false;
       _globalSearchQuery = '';
     }
     _fetchBrowsePage(1);
