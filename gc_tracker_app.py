@@ -1397,9 +1397,11 @@ def api_browse():
 
     # Filter params
     fq      = (data.get("filter_q") or "").lower().strip()
+    f_brand = data.get("filter_brand") or ""
     f_cond  = data.get("filter_condition") or ""
     f_cat   = data.get("filter_category") or ""
     f_sub   = data.get("filter_subcategory") or ""
+    f_watched = bool(data.get("filter_watched"))
 
     _load_cat_cache()
     state      = load_state()
@@ -1416,7 +1418,7 @@ def api_browse():
 
     # ── Build full item list for selected stores (lightweight dicts) ──────
     all_items = []
-    cond_set = set(); cat_set = set(); subcat_set = set()
+    brand_set = set(); cond_set = set(); cat_set = set(); subcat_set = set()
     for sku, cached in _cat_cache.items():
         if cached.get("store") not in store_set:
             continue
@@ -1433,6 +1435,7 @@ def api_browse():
         store      = cached.get("store", "")
 
         # Collect filter options from ALL items (pre-filter)
+        if brand:      brand_set.add(brand)
         if condition:  cond_set.add(condition)
         if category:   cat_set.add(category)
         if subcategory: subcat_set.add(subcategory)
@@ -1469,6 +1472,10 @@ def api_browse():
                     fq in (i["location"] or "").lower() or
                     fq in (i["category"] or "").lower() or
                     fq in (i["subcategory"] or "").lower()]
+    if f_watched:
+        filtered = [i for i in filtered if i["watched"]]
+    if f_brand:
+        filtered = [i for i in filtered if i["brand"] == f_brand]
     if f_cond:
         filtered = [i for i in filtered if i["condition"] == f_cond]
     if f_cat:
@@ -1507,6 +1514,7 @@ def api_browse():
         "total_pages":      total_pages,
         "no_store_data":    False,
         # Filter option lists (always full set so dropdowns stay populated)
+        "brands":           sorted(brand_set),
         "conditions":       sorted(cond_set),
         "categories":       sorted(cat_set),
         "subcategories":    sorted(scoped_subcats) if f_cat else sorted(subcat_set),
@@ -2565,6 +2573,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .badge{background:#c00;color:#fff;font-size:.7rem;font-weight:700;padding:2px 7px;border-radius:10px}
 .cat-sel{padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer}
 .cat-sel:focus{border-color:#c00}
+#watchlist-toggle.wl-active{background:#c00;border-color:#c00;color:#fff}
 #res-search-wrap{margin-left:auto;display:flex;align-items:center;gap:6px}
 #res-search{padding:5px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.8rem;width:180px;outline:none}
 #res-search:focus{border-color:#c00}
@@ -2577,11 +2586,13 @@ th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
 th.sort-desc::after{content:" ▼";color:#c00;font-size:.6rem}
 td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;max-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 td:nth-child(1){width:56px;min-width:56px;max-width:56px;text-align:center}
-td:nth-child(2){width:28px;min-width:28px;max-width:28px;text-align:center}
+td:nth-child(2){width:40px;min-width:40px;max-width:40px;text-align:center}
 td:nth-child(3){max-width:260px;width:28%}
 td:nth-child(4){width:100px;min-width:80px;max-width:140px}
-td:nth-child(5){width:80px;min-width:70px}
+td:nth-child(5){width:110px;min-width:100px}
 td:nth-child(6){width:70px;min-width:60px}
+td:nth-child(7){width:65px;min-width:55px}
+td:nth-child(8){width:65px;min-width:55px}
 td:nth-child(10){width:80px;min-width:70px}
 td:nth-child(11){width:90px;min-width:80px}
 tr:hover td{background:#161616}
@@ -2755,12 +2766,12 @@ tr.sold-row td a{color:#666}
         <button id="baseline-btn" onclick="runBaseline()" title="Scan every GC store nationwide">🌐 Build Baseline</button>
       </div>
       <button id="validate-stores-btn" onclick="validateStores()"
-        style="margin-top:8px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:5px;color:#777;font-size:.75rem;cursor:pointer"
+        style="display:none"
         title="Check all stores and remove any that no longer exist">
         ✓ Validate Stores
       </button>
       <button id="populate-store-btn" onclick="populateStoreData()"
-        style="margin-top:6px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:5px;color:#555;font-size:.75rem;cursor:pointer"
+        style="display:none"
         title="One-time: tag all cached items with their store (enables instant browse)">
         ⬇ Populate Store Data
       </button>
@@ -2778,16 +2789,19 @@ tr.sold-row td a{color:#666}
       <span>Known items: <b id="s-known">—</b></span>
       <span>Stores: <b id="s-stores">—</b></span>
       <span id="s-excel" style="display:none"><a style="color:#6ab0f5" href="/download/excel">Download Excel ↗</a></span>
-      <button id="watchlist-btn" onclick="showWatchList()"
-        style="margin-left:auto;padding:5px 12px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:4px;color:#aaa;font-size:.78rem;cursor:pointer;white-space:nowrap">
-        ★ My Watch List
-      </button>
     </div>
     <div id="log"><span class="log-dim">Ready — select stores and click Run, or build a full baseline.</span></div>
     <div class="results" id="res-panel" style="display:none">
       <div class="results-hdr">
         <span id="res-title">New Items</span>
         <span class="badge" id="res-badge"></span>
+        <button id="watchlist-toggle" onclick="toggleWatchFilter()"
+          class="cat-sel" style="border-color:#3a3a3a;color:#aaa;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
+          ★ Watch List
+        </button>
+        <select id="brand-filter" class="cat-sel" style="display:none" onchange="filterResults()">
+          <option value="">All Brands</option>
+        </select>
         <select id="cond-filter" class="cat-sel" style="display:none" onchange="filterResults()">
           <option value="">All Conditions</option>
         </select>
@@ -2983,6 +2997,7 @@ function updateCount() {
 // ── Browse cached inventory (server-side pagination) ──────────────────────
 let _browseTimer = null;
 let _skipBrowse = false;  // Set after a scan to prevent browseCache from overwriting results
+let _watchFilterActive = false;
 
 // Mode: 'server' = browse with server-side pagination, 'local' = scan/watchlist with client data
 let _browseMode = 'server';
@@ -2999,9 +3014,11 @@ let _srvLoading = false;
 function _getBrowseFilters() {
   return {
     filter_q:           document.getElementById('res-search').value.trim(),
+    filter_brand:       document.getElementById('brand-filter').value,
     filter_condition:   document.getElementById('cond-filter').value,
     filter_category:    document.getElementById('cat-filter').value,
     filter_subcategory: document.getElementById('subcat-filter').value,
+    filter_watched:     _watchFilterActive,
   };
 }
 
@@ -3029,7 +3046,7 @@ async function _fetchBrowsePage(page) {
       document.getElementById('res-badge').textContent = '';
       document.getElementById('res-body').innerHTML =
         '<div class="no-res">Click <b>⬇ Populate Store Data</b> in the left panel to tag your existing inventory with store names. This only needs to run once, then selecting stores will instantly show their inventory.</div>';
-      ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+      ['brand-filter','cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
       return;
     }
     if (!d.items || (!d.items.length && page === 1)) {
@@ -3046,7 +3063,7 @@ async function _fetchBrowsePage(page) {
     _srvTotalPages     = d.total_pages;
 
     // Update header
-    const hasFilters = filters.filter_q || filters.filter_condition || filters.filter_category || filters.filter_subcategory;
+    const hasFilters = filters.filter_q || filters.filter_brand || filters.filter_condition || filters.filter_category || filters.filter_subcategory || filters.filter_watched;
     if (hasFilters) {
       document.getElementById('res-title').textContent = `${_srvTotalCount.toLocaleString()} of ${_srvTotalUnfiltered.toLocaleString()} Items`;
     } else {
@@ -3064,10 +3081,10 @@ async function _fetchBrowsePage(page) {
       countEl.textContent = '';
     }
     const clearBtn = document.getElementById('clear-filters-btn');
-    if (clearBtn) clearBtn.style.display = (filters.filter_condition || filters.filter_category || filters.filter_subcategory) ? '' : 'none';
+    if (clearBtn) clearBtn.style.display = (filters.filter_brand || filters.filter_condition || filters.filter_category || filters.filter_subcategory) ? '' : 'none';
 
     // Populate filter dropdowns from server-provided options
-    _populateFiltersFromServer(d.conditions || [], d.categories || [], d.subcategories || [], filters);
+    _populateFiltersFromServer(d.brands || [], d.conditions || [], d.categories || [], d.subcategories || [], filters);
 
     // Render table + paginator
     _renderServerTable(d.items);
@@ -3080,7 +3097,14 @@ async function _fetchBrowsePage(page) {
   }
 }
 
-function _populateFiltersFromServer(conditions, categories, subcategories, currentFilters) {
+function _populateFiltersFromServer(brands, conditions, categories, subcategories, currentFilters) {
+  const brandEl = document.getElementById('brand-filter');
+  const savedBrand = currentFilters.filter_brand;
+  brandEl.innerHTML = '<option value="">All Brands</option>';
+  brands.forEach(b => { const o = document.createElement('option'); o.value=o.textContent=b; brandEl.appendChild(o); });
+  brandEl.style.display = brands.length ? '' : 'none';
+  brandEl.value = savedBrand;
+
   const condEl = document.getElementById('cond-filter');
   const savedCond = currentFilters.filter_condition;
   condEl.innerHTML = '<option value="">All Conditions</option>';
@@ -3196,7 +3220,7 @@ function _getPaginatorRange(current, total) {
 function _renderServerTable(items) {
   let html = `<table id="res-table"><thead><tr>
     <th data-col="0"></th>
-    <th data-col="watch" style="width:32px"></th>
+    <th data-col="watch" style="width:40px"></th>
     <th data-col="1">Item</th>
     <th data-col="2">Brand</th>
     <th data-col="3">Price</th>
@@ -3239,10 +3263,13 @@ async function browseCache() {
     window._sortCol = null; window._sortDir = 1;
     document.getElementById('res-search').value = '';
     document.getElementById('res-search-count').textContent = '';
+    document.getElementById('brand-filter').value = '';
     document.getElementById('cond-filter').value = '';
     document.getElementById('cat-filter').value = '';
     document.getElementById('subcat-filter').value = '';
     document.getElementById('subcat-filter').style.display = 'none';
+    _watchFilterActive = false;
+    document.getElementById('watchlist-toggle').classList.remove('wl-active');
     await _fetchBrowsePage(1);
   }, 300);
 }
@@ -3281,25 +3308,23 @@ async function toggleWatch(id, btn) {
   btn.title = isWatched ? 'Add to watch list' : 'Remove from watch list';
 }
 
-async function showWatchList() {
-  const r = await fetch('/api/watchlist/items');
-  const d = await r.json();
-  if (!d.items || !d.items.length) {
-    appendLog('Your watch list is empty — click ☆ next to any item to add it.', 'log-dim');
-    return;
+function toggleWatchFilter() {
+  _watchFilterActive = !_watchFilterActive;
+  const btn = document.getElementById('watchlist-toggle');
+  btn.classList.toggle('wl-active', _watchFilterActive);
+
+  if (_browseMode === 'server') {
+    _srvPage = 1;
+    _fetchBrowsePage(1);
+  } else {
+    window._localPage = 1;
+    renderTable();
   }
-  _browseMode = 'local';
-  window._tableData = d.items;
-  window._sortCol = null; window._sortDir = 1; window._localPage = 1;
-  const soldCount = d.items.filter(i => i.sold).length;
-  document.getElementById('res-title').textContent = `Watch List (${d.items.length} items${soldCount ? ', ' + soldCount + ' sold' : ''})`;
-  document.getElementById('res-badge').textContent = '';
-  document.getElementById('res-panel').style.display = '';
-  document.getElementById('res-search').value = '';
-  document.getElementById('res-search-count').textContent = '';
-  ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
-  populateCategoryFilter();
-  renderTable();
+}
+
+// Legacy showWatchList — now just activates the toggle
+async function showWatchList() {
+  if (!_watchFilterActive) toggleWatchFilter();
 }
 
 
@@ -3400,7 +3425,7 @@ function showResults(msg, isBaseline) {
     document.getElementById('res-badge').textContent = '';
     document.getElementById('res-body').innerHTML =
       `<div class="no-res">Full inventory baseline saved (${msg.scanned.toLocaleString()} items)${stoppedNote}. Run again any time to see what's new!</div>`;
-    ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+    ['brand-filter','cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
     return;
   }
 
@@ -3413,7 +3438,7 @@ function showResults(msg, isBaseline) {
 
   if (total === 0) {
     document.getElementById('res-body').innerHTML = '<div class="no-res">Nothing found for selected stores.</div>';
-    ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+    ['brand-filter','cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
     return;
   }
 
@@ -3438,6 +3463,13 @@ function populateCategoryFilter() {
   // In server mode, filters are populated by _populateFiltersFromServer — this is for local mode only
   if (_browseMode === 'server') return;
   const data = window._tableData || [];
+  // Brand filter
+  const brands = [...new Set(data.map(i => i.brand).filter(Boolean))].sort();
+  const brandEl = document.getElementById('brand-filter');
+  brandEl.innerHTML = '<option value="">All Brands</option>';
+  brands.forEach(b => { const o = document.createElement('option'); o.value=o.textContent=b; brandEl.appendChild(o); });
+  brandEl.style.display = brands.length ? '' : 'none';
+  brandEl.value = '';
   // Condition filter
   const conds = [...new Set(data.map(i => i.condition).filter(Boolean))].sort();
   const condEl = document.getElementById('cond-filter');
@@ -3494,12 +3526,15 @@ function renderTable() {
 
   // Apply filters to get the filtered set
   const q      = document.getElementById('res-search').value.toLowerCase().trim();
+  const brand  = document.getElementById('brand-filter').value;
   const cond   = document.getElementById('cond-filter').value;
   const cat    = document.getElementById('cat-filter').value;
   const subcat = document.getElementById('subcat-filter').value;
 
   const filtered = allData.filter(item => {
+    if (_watchFilterActive && !(window._watchlist || {})[item.id || '']) return false;
     return (!q      || (item.name||'').toLowerCase().includes(q) || (item.brand||'').toLowerCase().includes(q) || (item.store||'').toLowerCase().includes(q) || (item.location||'').toLowerCase().includes(q) || (item.category||'').toLowerCase().includes(q) || (item.subcategory||'').toLowerCase().includes(q)) &&
+           (!brand  || (item.brand || '') === brand) &&
            (!cond   || (item.condition || '') === cond) &&
            (!cat    || (item.category  || '') === cat) &&
            (!subcat || (item.subcategory || '') === subcat);
@@ -3512,7 +3547,7 @@ function renderTable() {
 
   let html = `<table id="res-table"><thead><tr>
     <th data-col="0"></th>
-    <th data-col="watch" style="width:32px"></th>
+    <th data-col="watch" style="width:40px"></th>
     <th data-col="1">Item</th>
     <th data-col="2">Brand</th>
     <th data-col="3">Price</th>
@@ -3530,13 +3565,13 @@ function renderTable() {
 
   // Update filter count display
   const countEl = document.getElementById('res-search-count');
-  if (q || cond || cat || subcat) {
+  if (q || brand || cond || cat || subcat) {
     countEl.textContent = `${filtered.length} of ${allData.length}`;
   } else {
     countEl.textContent = '';
   }
   const clearBtn = document.getElementById('clear-filters-btn');
-  if (clearBtn) clearBtn.style.display = (cond || cat || subcat) ? '' : 'none';
+  if (clearBtn) clearBtn.style.display = (brand || cond || cat || subcat) ? '' : 'none';
 
   if (window._sortCol !== null) {
     const th = document.querySelector(`#res-table th[data-col="${window._sortCol}"]`);
@@ -3686,13 +3721,20 @@ function autoSizeItemColumn() {
 
 // ── Results filter ────────────────────────────────────────────────────────────
 let _filterTimer = null;
+
 function clearFilters() {
+  document.getElementById('brand-filter').value = '';
   document.getElementById('cond-filter').value = '';
   document.getElementById('cat-filter').value = '';
   const subEl = document.getElementById('subcat-filter');
   subEl.value = '';
   subEl.style.display = 'none';
   document.getElementById('clear-filters-btn').style.display = 'none';
+  // Also turn off watch filter if active
+  if (_watchFilterActive) {
+    _watchFilterActive = false;
+    document.getElementById('watchlist-toggle').classList.remove('wl-active');
+  }
   filterResults();
 }
 
