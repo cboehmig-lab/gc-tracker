@@ -46,6 +46,7 @@ STORES_CACHE   = DATA_DIR / "gc_stores_cache.json"
 FAVORITES_FILE = DATA_DIR / "gc_favorites.json"
 CAT_CACHE_FILE = DATA_DIR / "gc_category_cache.json"
 WATCHLIST_FILE = DATA_DIR / "gc_watchlist.json"
+KEYWORDS_FILE  = DATA_DIR / "gc_keywords.json"
 
 PORT        = int(os.environ.get("PORT", 5050))
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
@@ -326,6 +327,19 @@ def load_watchlist() -> dict:
 
 def save_watchlist(wl: dict):
     WATCHLIST_FILE.write_text(json.dumps(wl, indent=2))
+
+
+def load_keywords() -> list:
+    if KEYWORDS_FILE.exists():
+        try:
+            return json.loads(KEYWORDS_FILE.read_text())
+        except Exception:
+            pass
+    return []
+
+
+def save_keywords(kw: list):
+    KEYWORDS_FILE.write_text(json.dumps(sorted(set(kw))))
 
 
 # ── GC scraping ───────────────────────────────────────────────────────────────
@@ -1309,7 +1323,8 @@ def logout():
 def api_reset():
     """Delete state, category cache, and Excel file to start fresh."""
     data = request.json or {}
-    if data.get("password") != APP_PASSWORD and APP_PASSWORD:
+    reset_pw = "Beatle909!"
+    if data.get("password") != reset_pw:
         return jsonify({"error": "Incorrect password."}), 403
     deleted = []
     for f in [STATE_FILE, CAT_CACHE_FILE, OUTPUT_FILE,
@@ -1409,6 +1424,8 @@ def api_browse():
     seen_ids   = set(state.get("seen_ids", []))
     item_dates = state.get("item_dates", {})
     wl         = load_watchlist()
+    keywords   = load_keywords()
+    kw_lower   = [k.lower() for k in keywords]
     store_set  = set(stores) if not search_all else None
 
     # Check if any cache entries have store field
@@ -1441,6 +1458,11 @@ def api_browse():
         if category:   cat_set.add(category)
         if subcategory: subcat_set.add(subcategory)
 
+        # Check keyword match
+        name_lower = name.lower()
+        brand_lower = brand.lower()
+        kw_hit = any(k in name_lower or k in brand_lower for k in kw_lower)
+
         all_items.append({
             "id":         sku,
             "name":       name,
@@ -1459,6 +1481,7 @@ def api_browse():
             "image_id":   cached.get("image_id", ""),
             "isNew":      sku not in seen_ids,
             "watched":    sku in wl,
+            "kwMatch":    kw_hit,
         })
 
     total_unfiltered = len(all_items)
@@ -1496,7 +1519,11 @@ def api_browse():
     if sort_field == "price":
         filtered.sort(key=lambda x: x.get("price_raw") or 0, reverse=reverse)
     elif sort_field == "date":
-        filtered.sort(key=lambda x: x.get("date_raw") or "", reverse=reverse)
+        # NEW+keyword items sort to the very top, then normal date order
+        filtered.sort(key=lambda x: (
+            0 if (x.get("isNew") and x.get("kwMatch")) else 1,
+            x.get("date_raw") or ""
+        ), reverse=reverse)
     else:
         filtered.sort(key=lambda x: (x.get(sort_field) or "").lower(), reverse=reverse)
 
@@ -1595,6 +1622,34 @@ def api_watchlist_items():
     items.sort(key=lambda x: x["sold"])
     return jsonify({"items": items, "count": len(items)})
 
+
+@app.route("/api/keywords", methods=["GET"])
+@login_required
+def api_keywords_get():
+    return jsonify({"keywords": load_keywords()})
+
+
+@app.route("/api/keywords", methods=["POST"])
+@login_required
+def api_keywords_post():
+    data = request.json or {}
+    action = data.get("action", "")
+    kw_list = load_keywords()
+    if action == "add":
+        word = (data.get("keyword") or "").strip()
+        if word and word.lower() not in [k.lower() for k in kw_list]:
+            kw_list.append(word)
+            save_keywords(kw_list)
+    elif action == "remove":
+        word = (data.get("keyword") or "").strip().lower()
+        kw_list = [k for k in kw_list if k.lower() != word]
+        save_keywords(kw_list)
+    elif action == "clear":
+        kw_list = []
+        save_keywords(kw_list)
+    return jsonify({"keywords": load_keywords()})
+
+
 @app.route("/api/state")
 @login_required
 def api_state():
@@ -1652,6 +1707,7 @@ def api_export_data():
         ("stores",    STORES_CACHE),
         ("favorites", FAVORITES_FILE),
         ("watchlist", WATCHLIST_FILE),
+        ("keywords",  KEYWORDS_FILE),
     ]:
         if path.exists():
             try:
@@ -1678,6 +1734,7 @@ def api_import_data():
         "stores":    STORES_CACHE,
         "favorites": FAVORITES_FILE,
         "watchlist": WATCHLIST_FILE,
+        "keywords":  KEYWORDS_FILE,
     }
     for name, path in mapping.items():
         if name in bundle:
@@ -2594,13 +2651,16 @@ th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
 th.sort-desc::after{content:" ▼";color:#c00;font-size:.6rem}
 td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 td:nth-child(1){width:48px;text-align:center}
-td:nth-child(2){width:36px;text-align:center}
-td:nth-child(3){width:26%}
-td:nth-child(6){width:60px}
+td:nth-child(2){width:52px;text-align:center}
+td:nth-child(3){width:36px;text-align:center}
+td:nth-child(4){width:26%}
+td:nth-child(6){width:80px}
+td:nth-child(7){width:60px}
 tr:hover td{background:#161616}
 td a{color:#6ab0f5;text-decoration:none}
 td a:hover{text-decoration:underline}
 .tag{background:#c00;color:#fff;font-size:.65rem;font-weight:700;padding:1px 5px;border-radius:3px}
+.tag-kw{background:#0a5c2a;color:#4ade80;font-size:.65rem;font-weight:700;padding:1px 5px;border-radius:3px;border:1px solid #2d6a2d}
 .tag-drop{background:#1a3a1a;color:#4ade80;font-size:.62rem;font-weight:700;padding:2px 5px;border-radius:3px;border:1px solid #2d6a2d;white-space:nowrap}
 .tag-sold{background:#3a1a1a;color:#f87171;font-size:.62rem;font-weight:700;padding:2px 5px;border-radius:3px;border:1px solid #6a2d2d}
 .watch-btn{background:none;border:none;cursor:pointer;color:#444;font-size:1rem;line-height:1;padding:0 2px;transition:color .15s;flex-shrink:0}
@@ -2714,16 +2774,16 @@ tr.sold-row td a{color:#666}
 </div>
 
 <div id="pw-modal">
-  <div id="pw-overlay" onclick="cancelBaseline()"></div>
+  <div id="pw-overlay" onclick="cancelReset()"></div>
   <div id="pw-box">
-    <h2>🌐 Build Nationwide Baseline</h2>
-    <p>This scan covers ~300 stores and takes 30–60 minutes. Enter the password to continue.</p>
+    <h2>🗑 Reset All Data</h2>
+    <p>This will delete all cached inventory, scan history, and the Excel export. Keywords will be preserved. Enter the password to continue.</p>
     <input type="password" id="pw-input" placeholder="Password"
-           onkeydown="if(event.key==='Enter')confirmBaseline()">
+           onkeydown="if(event.key==='Enter')confirmReset()">
     <div id="pw-err">Incorrect password.</div>
     <div class="pw-btns">
-      <button id="pw-cancel" onclick="cancelBaseline()">Cancel</button>
-      <button id="pw-confirm" onclick="confirmBaseline()">Continue →</button>
+      <button id="pw-cancel" onclick="cancelReset()">Cancel</button>
+      <button id="pw-confirm" onclick="confirmReset()">Reset →</button>
     </div>
   </div>
 </div>
@@ -2737,6 +2797,25 @@ tr.sold-row td a{color:#666}
     <div style="display:flex;gap:10px;justify-content:flex-end">
       <button onclick="dismissFirstRun()" style="padding:8px 18px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#aaa;font-size:.85rem;cursor:pointer">Not Now</button>
       <button onclick="dismissFirstRun();runBaseline()" style="padding:8px 18px;background:#c00;border:none;border-radius:5px;color:#fff;font-size:.85rem;font-weight:700;cursor:pointer">Build Baseline</button>
+    </div>
+  </div>
+</div>
+
+<div id="kw-modal" style="display:none;position:fixed;inset:0;z-index:100;align-items:center;justify-content:center">
+  <div style="position:absolute;inset:0;background:rgba(0,0,0,.7)" onclick="closeKeywords()"></div>
+  <div style="position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:24px 24px 20px;width:420px;max-height:80vh;overflow-y:auto;z-index:1">
+    <h2 style="color:#fff;font-size:1.05rem;margin-bottom:4px">🔑 Keyword Alerts</h2>
+    <p style="color:#777;font-size:.82rem;margin-bottom:16px;line-height:1.5">Items matching your keywords are highlighted in the results. New items that also match a keyword sort to the top.</p>
+    <div style="display:flex;gap:6px;margin-bottom:16px">
+      <input id="kw-input" type="text" placeholder="Add a keyword…"
+             style="flex:1;padding:8px 12px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#eee;font-size:.9rem;outline:none"
+             onkeydown="if(event.key==='Enter')addKeyword()">
+      <button onclick="addKeyword()" style="padding:8px 16px;background:#0a5c2a;border:1px solid #2d6a2d;border-radius:5px;color:#4ade80;font-size:.85rem;cursor:pointer;white-space:nowrap">+ Add</button>
+    </div>
+    <div id="kw-list" style="margin-bottom:16px"></div>
+    <div style="display:flex;gap:10px;justify-content:space-between;border-top:1px solid #2e2e2e;padding-top:14px">
+      <button onclick="clearAllKeywords()" style="padding:6px 14px;background:#1a1a1a;border:1px solid #5a2a2a;border-radius:5px;color:#a05050;font-size:.78rem;cursor:pointer">Delete All Keywords</button>
+      <button onclick="closeKeywords()" style="padding:6px 18px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#aaa;font-size:.85rem;cursor:pointer">Done</button>
     </div>
   </div>
 </div>
@@ -2800,8 +2879,8 @@ tr.sold-row td a{color:#666}
 
   <div class="right">
     <div class="status-bar">
-      <span>Last run: <b id="s-last">—</b></span>
-      <span>Known items: <b id="s-known">—</b></span>
+      <span>Most recent check: <b id="s-last">—</b></span>
+      <span>Items: <b id="s-known">—</b></span>
       <span>Stores: <b id="s-stores">—</b></span>
       <div id="global-search-wrap">
         <input id="global-search" type="text" placeholder="Search all stores…"
@@ -2819,6 +2898,14 @@ tr.sold-row td a{color:#666}
         <button id="watchlist-toggle" onclick="toggleWatchFilter()"
           class="cat-sel" style="border-color:#3a3a3a;color:#aaa;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
           ★ Watch List
+        </button>
+        <button onclick="openKeywords()"
+          class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
+          🔑 Keywords
+        </button>
+        <button onclick="openKeywords()"
+          class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
+          🔑 Keywords
         </button>
         <select id="brand-filter" class="cat-sel" style="display:none" onchange="filterResults()">
           <option value="">All Brands</option>
@@ -2883,7 +2970,6 @@ tr.sold-row td a{color:#666}
 
 <script>
 let allStores = [], favorites = [], running = false;
-const BASELINE_PW = 'Beatle909!';
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
@@ -2892,6 +2978,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadData();
   await loadState();
   await loadWatchlist();
+  await loadKeywords();
 });
 
 async function loadData() {
@@ -2900,10 +2987,9 @@ async function loadData() {
   allStores = d.stores; favorites = d.favorites;
   renderList();
   const info = d.info || {};
-  const storeLabel = info.count ? info.count + ' stores' : allStores.length + ' stores';
-  document.getElementById('hdr-status').textContent = storeLabel + ' available';
-  document.getElementById('s-stores').textContent = storeLabel +
-    (info.updated ? ' · checked ' + info.updated.slice(0,10) : ' (fallback list)');
+  const storeLabel = info.count ? info.count : allStores.length;
+  document.getElementById('hdr-status').textContent = storeLabel + ' stores available';
+  document.getElementById('s-stores').textContent = storeLabel;
   if (allStores.length === 0) {
     appendLog('💡 No stores loaded — click "✓ Validate Stores" to build the store list from GC live data.', 'log-dim');
   }
@@ -2912,7 +2998,9 @@ async function loadData() {
 async function loadState() {
   const r = await fetch('/api/state');
   const s = await r.json();
-  document.getElementById('s-last').textContent  = s.last_run ? s.last_run.replace('T',' ').slice(0,16) : 'Never';
+  document.getElementById('s-last').textContent  = s.last_run
+    ? new Date(s.last_run).toLocaleString([], {month:'numeric', day:'numeric', year:'2-digit', hour:'numeric', minute:'2-digit'})
+    : 'Never';
   document.getElementById('s-known').textContent = s.known_items.toLocaleString();
   if (s.excel_exists) document.getElementById('s-excel').style.display = 'inline';
   if (s.is_first_run) {
@@ -3199,6 +3287,7 @@ function _buildRowHtml(item) {
   const soldBadge = isSold ? ' <span class="tag-sold">Sold</span>' : '';
   return `<tr class="${isSold ? 'sold-row' : ''}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}" data-image-id="${esc(item.image_id)}">` +
     `<td>${item.isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
+    `<td>${item.kwMatch ? '<span class="tag-kw">KEYWORD</span>' : ''}</td>` +
     `<td>${watchStar}</td>` +
     `<td>${nameCell}${soldBadge}</td>` +
     `<td>${esc(item.brand)}</td>` +
@@ -3271,6 +3360,7 @@ function _getPaginatorRange(current, total) {
 function _renderServerTable(items) {
   let html = `<table id="res-table"><thead><tr>
     <th data-col="0"></th>
+    <th data-col="kw"></th>
     <th data-col="watch"></th>
     <th data-col="1">Item</th>
     <th data-col="2">Brand</th>
@@ -3393,6 +3483,96 @@ function dismissFirstRun() {
   document.getElementById('first-run-modal').style.display = 'none';
 }
 
+// ── Keywords ─────────────────────────────────────────────────────────────────
+window._keywords = [];
+
+async function loadKeywords() {
+  try {
+    const r = await fetch('/api/keywords');
+    const d = await r.json();
+    window._keywords = d.keywords || [];
+  } catch(e) {}
+}
+
+function openKeywords() {
+  document.getElementById('kw-modal').style.display = 'flex';
+  document.getElementById('kw-input').value = '';
+  renderKeywordList();
+  setTimeout(() => document.getElementById('kw-input').focus(), 50);
+}
+
+function closeKeywords() {
+  document.getElementById('kw-modal').style.display = 'none';
+  // Refresh the current view so keyword tags update
+  if (_browseMode === 'server') {
+    _fetchBrowsePage(_srvPage);
+  } else {
+    renderTable();
+  }
+}
+
+function renderKeywordList() {
+  const el = document.getElementById('kw-list');
+  if (!window._keywords.length) {
+    el.innerHTML = '<div style="color:#555;font-size:.82rem;padding:8px 0">No keywords yet. Add one above.</div>';
+    return;
+  }
+  el.innerHTML = window._keywords.map(kw =>
+    `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #222">
+      <span class="tag-kw" style="font-size:.75rem">${kw.replace(/</g,'&lt;')}</span>
+      <span style="flex:1"></span>
+      <button onclick="removeKeyword('${kw.replace(/'/g,"\\'")}')"
+        style="background:none;border:none;color:#666;font-size:.85rem;cursor:pointer;padding:2px 6px" title="Remove">✕</button>
+    </div>`
+  ).join('');
+}
+
+async function addKeyword() {
+  const input = document.getElementById('kw-input');
+  const word = input.value.trim();
+  if (!word) return;
+  const r = await fetch('/api/keywords', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({action: 'add', keyword: word})
+  });
+  const d = await r.json();
+  window._keywords = d.keywords || [];
+  input.value = '';
+  renderKeywordList();
+  input.focus();
+}
+
+async function removeKeyword(word) {
+  const r = await fetch('/api/keywords', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({action: 'remove', keyword: word})
+  });
+  const d = await r.json();
+  window._keywords = d.keywords || [];
+  renderKeywordList();
+}
+
+async function clearAllKeywords() {
+  if (!window._keywords.length) return;
+  const r = await fetch('/api/keywords', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({action: 'clear'})
+  });
+  const d = await r.json();
+  window._keywords = d.keywords || [];
+  renderKeywordList();
+}
+
+function _itemMatchesKeyword(item) {
+  if (!window._keywords.length) return false;
+  const name = (item.name || '').toLowerCase();
+  const brand = (item.brand || '').toLowerCase();
+  return window._keywords.some(k => name.includes(k.toLowerCase()) || brand.includes(k.toLowerCase()));
+}
+
 // ── Global search (all stores) ───────────────────────────────────────────────
 function globalSearch() {
   const q = document.getElementById('global-search').value.trim();
@@ -3434,25 +3614,22 @@ function clearGlobalSearch() {
 }
 
 function runBaseline() {
-  document.getElementById('pw-modal').style.display = 'flex';
-  document.getElementById('pw-input').value = '';
-  document.getElementById('pw-err').style.display = 'none';
-  setTimeout(() => document.getElementById('pw-input').focus(), 50);
+  startRun({stores:[], baseline:true}, true);
 }
 
-function cancelBaseline() {
+function cancelReset() {
   document.getElementById('pw-modal').style.display = 'none';
 }
 
-function confirmBaseline() {
+function confirmReset() {
   const pw = document.getElementById('pw-input').value;
-  if (pw !== BASELINE_PW) {
+  if (pw !== 'Beatle909!') {
     document.getElementById('pw-err').style.display = 'block';
     document.getElementById('pw-input').select();
     return;
   }
   document.getElementById('pw-modal').style.display = 'none';
-  startRun({stores:[], baseline:true}, true);
+  doReset(pw);
 }
 
 // ── Run ───────────────────────────────────────────────────────────────────────
@@ -3543,10 +3720,13 @@ function showResults(msg, isBaseline) {
 
   _browseMode = 'local';
   window._tableData = [];
-  (msg.new_items || []).forEach(item => window._tableData.push({isNew:true,  ...item}));
-  (msg.all_items  || []).forEach(item => window._tableData.push({isNew:false, ...item}));
-  // Sort by date descending (newest first)
+  (msg.new_items || []).forEach(item => window._tableData.push({isNew:true, kwMatch: _itemMatchesKeyword(item), ...item}));
+  (msg.all_items  || []).forEach(item => window._tableData.push({isNew:false, kwMatch: _itemMatchesKeyword(item), ...item}));
+  // Sort: NEW+keyword items first, then by date descending
   window._tableData.sort((a, b) => {
+    const aTop = (a.isNew && a.kwMatch) ? 0 : 1;
+    const bTop = (b.isNew && b.kwMatch) ? 0 : 1;
+    if (aTop !== bTop) return aTop - bTop;
     return (b.date_raw || '').localeCompare(a.date_raw || '');
   });
   window._sortCol = null; window._sortDir = 1; window._localPage = 1;
@@ -3646,6 +3826,7 @@ function renderTable() {
 
   let html = `<table id="res-table"><thead><tr>
     <th data-col="0"></th>
+    <th data-col="kw"></th>
     <th data-col="watch"></th>
     <th data-col="1">Item</th>
     <th data-col="2">Brand</th>
@@ -3728,7 +3909,10 @@ function sortTable(colIdx) {
       return (av - bv) * dir;
     }
     if (field === 'date') {
-      // Sort on ISO date string (YYYY-MM-DD) for correct chronological order
+      // NEW+keyword items sort to top, then chronological
+      const aTop = (a.isNew && a.kwMatch) ? 0 : 1;
+      const bTop = (b.isNew && b.kwMatch) ? 0 : 1;
+      if (aTop !== bTop) return (aTop - bTop);
       av = a['date_raw'] || '';
       bv = b['date_raw'] || '';
       return av.toString().localeCompare(bv.toString()) * dir;
@@ -3963,9 +4147,13 @@ async function installUpdate() {
 // ── Reset ─────────────────────────────────────────────────────────────────────
 async function resetData() {
   if (running) { appendLog('Stop the current run before resetting.', 'log-err'); return; }
-  const pw = prompt('Enter your app password to reset all data (state, cache, Excel):');
-  if (pw === null) return;
-  if (!pw) return;
+  document.getElementById('pw-modal').style.display = 'flex';
+  document.getElementById('pw-input').value = '';
+  document.getElementById('pw-err').style.display = 'none';
+  setTimeout(() => document.getElementById('pw-input').focus(), 50);
+}
+
+async function doReset(pw) {
   const r = await fetch('/api/reset', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
