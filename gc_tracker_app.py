@@ -1781,7 +1781,7 @@ async function loadData() {
   allStores = d.stores; favorites = d.favorites;
   // If store list is empty, rebuild from Algolia automatically
   if (allStores.length === 0) {
-    appendLog('Store list empty — rebuilding from Algolia…', 'log-dim');
+    appendLog('Loading store list from Algolia…', 'log-dim');
     const rr = await fetch('/api/refresh-stores', {method: 'POST'});
     const dd = await rr.json();
     if (dd.stores && dd.stores.length) {
@@ -1790,11 +1790,9 @@ async function loadData() {
     }
   }
   renderList();
-  const info = d.info || {};
-  const storeLabel = info.count ? info.count + ' stores' : allStores.length + ' stores';
+  const storeLabel = allStores.length + ' stores';
   document.getElementById('hdr-status').textContent = storeLabel + ' available';
-  document.getElementById('s-stores').textContent = storeLabel +
-    (info.updated ? ' · checked ' + info.updated.slice(0,10) : ' (fallback list)');
+  document.getElementById('s-stores').textContent = storeLabel;
 }
 
 async function loadState() {
