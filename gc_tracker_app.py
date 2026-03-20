@@ -1516,13 +1516,20 @@ def api_browse():
     # ── Apply filters ─────────────────────────────────────────────────────
     filtered = all_items
     if fq:
-        filtered = [i for i in filtered if
-                    fq in (i["name"] or "").lower() or
-                    fq in (i["brand"] or "").lower() or
-                    fq in (i["store"] or "").lower() or
-                    fq in (i["location"] or "").lower() or
-                    fq in (i["category"] or "").lower() or
-                    fq in (i["subcategory"] or "").lower()]
+        # Quoted = exact phrase, otherwise all words must appear (AND)
+        if fq.startswith('"') and fq.endswith('"') and len(fq) > 2:
+            phrase = fq[1:-1]
+            filtered = [i for i in filtered if
+                        phrase in (i["name"] or "").lower() or
+                        phrase in (i["brand"] or "").lower()]
+        else:
+            words = fq.split()
+            def _text_match(i):
+                text = " ".join(((i["name"] or ""), (i["brand"] or ""),
+                                 (i["store"] or ""), (i["location"] or ""),
+                                 (i["category"] or ""), (i["subcategory"] or ""))).lower()
+                return all(w in text for w in words)
+            filtered = [i for i in filtered if _text_match(i)]
     if f_watched:
         filtered = [i for i in filtered if i["watched"]]
     if f_brand:
@@ -3895,8 +3902,17 @@ function renderTable() {
 
   const filtered = allData.filter(item => {
     if (_watchFilterActive && !(window._watchlist || {})[item.id || '']) return false;
-    return (!q      || (item.name||'').toLowerCase().includes(q) || (item.brand||'').toLowerCase().includes(q) || (item.store||'').toLowerCase().includes(q) || (item.location||'').toLowerCase().includes(q) || (item.category||'').toLowerCase().includes(q) || (item.subcategory||'').toLowerCase().includes(q)) &&
-           (!brand  || (item.brand || '') === brand) &&
+    // Text filter: all words must match (AND), or exact phrase if quoted
+    if (q) {
+      const text = ((item.name||'')+' '+(item.brand||'')+' '+(item.store||'')+' '+(item.location||'')+' '+(item.category||'')+' '+(item.subcategory||'')).toLowerCase();
+      if (q.startsWith('"') && q.endsWith('"') && q.length > 2) {
+        if (!text.includes(q.slice(1,-1))) return false;
+      } else {
+        const words = q.split(/\s+/).filter(Boolean);
+        if (!words.every(w => text.includes(w))) return false;
+      }
+    }
+    return (!brand  || (item.brand || '') === brand) &&
            (!cond   || (item.condition || '') === cond) &&
            (!cat    || (item.category  || '') === cat) &&
            (!subcat || (item.subcategory || '') === subcat);
