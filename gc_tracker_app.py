@@ -1094,7 +1094,7 @@ def fetch_category(sku: str, name: str, url: str) -> tuple[str, str]:
     return cat, subcat
 
 
-def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Event) -> tuple[list[dict], set]:
+def scrape_store(store_name: str, send, stop_event: threading.Event) -> tuple[list[dict], set]:
     """Returns (all_products_found, ids_seen_this_store)."""
     all_products, ids_seen = [], set()
     page = 1
@@ -2495,7 +2495,7 @@ def _run(selected_stores: list[str], baseline: bool):
                     break
                 send({"type":"progress","msg":f"\n[{i}/{len(stores_to_scan)}] {store}"})
                 _rotate_ua()
-                products, ids = scrape_store(store, seen_ids, send, _stop_event)
+                products, ids = scrape_store(store, send, _stop_event)
                 for p in products:
                     if p["id"] not in ids_this_run:
                         all_products.append(p)
@@ -3062,6 +3062,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   favorites = _lsGet('favorites', []);
   window._watchlist = _lsGet('watchlist', {});
   window._keywords = _lsGet('keywords', []);
+  window._seenIds = new Set(_lsGet('seen_ids', []));
+  window._newIds = new Set(_lsGet('new_ids', []));  // Items flagged NEW from last Check for New
   clRenderCities();
   await loadData();
   await loadState();
@@ -3105,8 +3107,7 @@ function _updateRelativeTime() {
 }
 
 async function loadState() {
-  // Per-user state from localStorage
-  window._seenIds = new Set(_lsGet('seen_ids', []));
+  // Per-user timing from localStorage
   window._lastRunISO = _lsGet('last_run', null);
   _updateRelativeTime();
   document.getElementById('check-now-btn').style.display = window._lastRunISO ? 'inline' : 'none';
@@ -3399,7 +3400,7 @@ function _buildRowHtml(item) {
     ? `<span class="tag-drop">↓ $${Math.round(item.price_drop)}</span>`
     : '';
   const soldBadge = isSold ? ' <span class="tag-sold">Sold</span>' : '';
-  const isNew = item.isNew || (item.id && window._seenIds && !window._seenIds.has(item.id));
+  const isNew = item.isNew || (item.id && window._newIds && window._newIds.has(item.id));
   return `<tr class="${isSold ? 'sold-row' : ''}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}" data-image-id="${esc(item.image_id)}">` +
     `<td>${isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
     `<td>${item.kwMatch ? '<span class="tag-kw">WANT</span>' : ''}</td>` +
@@ -3812,15 +3813,23 @@ function showResults(msg, isBaseline) {
 
   // Determine what's new for THIS USER by comparing against their localStorage seen_ids
   const allIds = msg.all_ids || [];
+  const isFirstRun = window._seenIds.size === 0;
   const newIdSet = new Set();
-  allIds.forEach(id => { if (!window._seenIds.has(id)) newIdSet.add(id); });
+  if (!isFirstRun) {
+    // Normal run: items not in seen_ids are new
+    allIds.forEach(id => { if (!window._seenIds.has(id)) newIdSet.add(id); });
+  }
+  // else: first run — everything gets seeded as "seen", nothing is "new"
   const newCount = newIdSet.size;
 
-  appendLog(`\\n✓ Done${stoppedNote} — ${msg.scanned.toLocaleString()} items scanned, ${newCount.toLocaleString()} new for you.`, 'log-dim');
+  appendLog(`\\n✓ Done${stoppedNote} — ${msg.scanned.toLocaleString()} items scanned, ${isFirstRun ? 'initial database built' : newCount.toLocaleString() + ' new for you'}.`, 'log-dim');
 
   // Update per-user state in localStorage
   allIds.forEach(id => window._seenIds.add(id));
   _lsSet('seen_ids', [...window._seenIds]);
+  // Save the NEW ids so they persist across page loads until next Check for New
+  window._newIds = newIdSet;
+  _lsSet('new_ids', [...newIdSet]);
   window._lastRunISO = new Date().toISOString();
   _lsSet('last_run', window._lastRunISO);
   _updateRelativeTime();
