@@ -360,18 +360,22 @@ ALGOLIA_HEADERS = {
     "Content-Type":             "application/json",
 }
 
-def fetch_page(store_name: str, page: int) -> dict:
-    """Fetch one page of used inventory for a store via Algolia API."""
+def fetch_page(store_name: str = None, page: int = 1) -> dict:
+    """Fetch one page of used inventory via Algolia API.
+    If store_name is provided, filters to that store.
+    If store_name is None, fetches ALL used inventory nationwide."""
     import time as _time
     ts = int(_time.time())
+    facet_filters = [
+        "categoryPageIds:Used",
+        "condition.lvl0:Used",
+    ]
+    if store_name:
+        facet_filters.append([f"stores:{store_name}"])
     payload = {"requests": [{
         "indexName":     ALGOLIA_INDEX,
         "analyticsTags": ["Did Not Search"],
-        "facetFilters":  [
-            "categoryPageIds:Used",
-            "condition.lvl0:Used",
-            [f"stores:{store_name}"],
-        ],
+        "facetFilters":  facet_filters,
         "facets":        ["*"],
         "hitsPerPage":   240,
         "maxValuesPerFacet": 10,
@@ -561,8 +565,8 @@ def _extract_conditions_from_listing(html: str) -> dict:
     return {url: cond for url, cond in zip(urls, conditions) if cond}
 
 
-def parse_products(data, store_name: str) -> list[dict]:
-    """Parse products from either Algolia API response (dict) or legacy HTML (str)."""
+def parse_products(data, store_name: str = None) -> list[dict]:
+    """Parse products from Algolia API response. store_name can be None for all-stores queries."""
     if isinstance(data, dict):
         products = []
         try:
@@ -610,13 +614,16 @@ def parse_products(data, store_name: str) -> list[dict]:
                 except Exception:
                     date_str = ""
                 # Location: storeName gives "Austin, TX" format
-                location = hit.get("storeName") or store_name
+                location = hit.get("storeName") or store_name or ""
+                # Store: from hit's stores array when querying all stores
+                hit_stores = hit.get("stores") or []
+                store = store_name or (hit_stores[0] if hit_stores else "")
                 products.append({
                     "id":          sku,
                     "name":        name,
                     "brand":       brand,
                     "price":       price,
-                    "store":       store_name,
+                    "store":       store,
                     "location":    location,
                     "url":         url,
                     "condition":   condition,
@@ -2218,27 +2225,59 @@ def _run(selected_stores: list[str], baseline: bool):
         run_time   = datetime.now().isoformat()
         ts         = datetime.now().strftime("%Y-%m-%d")
 
-        stores_to_scan = get_store_list() if baseline else selected_stores
-        label = "baseline scan" if baseline else f"{len(stores_to_scan)} store(s)"
-        send({"type":"progress","msg":f"Starting {label} — {len(stores_to_scan)} stores total…"})
-        if baseline:
-            send({"type":"progress","msg":"⏳ This may take 2–4 hours with anti-bot delays. Feel free to leave it running!"})
+        stores_to_scan = selected_stores if not baseline else []
+        label = "baseline scan (all stores)" if baseline else f"{len(stores_to_scan)} store(s)"
+        send({"type":"progress","msg":f"Starting {label}…"})
 
         all_products, ids_this_run = [], set()
-        for i, store in enumerate(stores_to_scan, 1):
-            if _stop_event.is_set():
-                send({"type":"progress","msg":"⏹ Stopped by user."})
-                break
-            send({"type":"progress","msg":f"\n[{i}/{len(stores_to_scan)}] {store}"})
-            _rotate_ua()  # rotate User-Agent each store
-            products, ids = scrape_store(store, seen_ids, send, _stop_event)
-            for p in products:
-                if p["id"] not in ids_this_run:
-                    all_products.append(p)
-            ids_this_run |= ids
-            # Extra pause between stores during baseline to avoid bot detection
-            if baseline and not _stop_event.is_set():
-                _sleep(4.0, 2.0)  # 2–6s between stores during baseline
+
+        if baseline:
+            # ── Baseline: query ALL used inventory at once (no store filter) ──────
+            send({"type":"progress","msg":"Fetching all used inventory nationwide via API…"})
+            page = 1
+            while page <= 1000:
+                if _stop_event.is_set():
+                    send({"type":"progress","msg":"⏹ Stopped by user."})
+                    break
+                try:
+                    data = fetch_page(None, page)
+                except Exception as e:
+                    send({"type":"progress","msg":f"  API error on page {page}: {e}"})
+                    break
+                products = parse_products(data, None)
+                if not products:
+                    break
+                for p in products:
+                    if p["id"] not in ids_this_run:
+                        all_products.append(p)
+                        ids_this_run.add(p["id"])
+                # Check total pages
+                try:
+                    nb_pages = data.get("results", [{}])[0].get("nbPages", 1)
+                    nb_hits  = data.get("results", [{}])[0].get("nbHits", 0)
+                    if page == 1:
+                        send({"type":"progress","msg":f"  {nb_hits:,} items across {nb_pages} pages"})
+                except Exception:
+                    nb_pages = 1
+                if page >= nb_pages:
+                    break
+                if page % 10 == 0:
+                    send({"type":"progress","msg":f"  page {page}/{nb_pages}… ({len(all_products):,} items so far)"})
+                page += 1
+            send({"type":"progress","msg":f"  Fetched {len(all_products):,} items total."})
+        else:
+            # ── Normal scan: query selected stores ───────────────────────────────
+            for i, store in enumerate(stores_to_scan, 1):
+                if _stop_event.is_set():
+                    send({"type":"progress","msg":"⏹ Stopped by user."})
+                    break
+                send({"type":"progress","msg":f"\n[{i}/{len(stores_to_scan)}] {store}"})
+                _rotate_ua()
+                products, ids = scrape_store(store, seen_ids, send, _stop_event)
+                for p in products:
+                    if p["id"] not in ids_this_run:
+                        all_products.append(p)
+                ids_this_run |= ids
 
         # ── Apply data from Algolia API to products, tracking price drops ────────
         # Categories, condition, brand all come from the API now — no page scraping needed.
