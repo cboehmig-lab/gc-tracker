@@ -74,6 +74,8 @@ _HEADERS = {
 _http = http.Session()
 _http.headers.update(_HEADERS)
 
+_cat_cache: dict = {}
+
 # Pre-fetch store list at module load time (runs on Railway/gunicorn startup)
 def _startup_fetch_stores():
     if not STORES_CACHE.exists():
@@ -1730,9 +1732,7 @@ tr.sold-row td a{color:#666}
 
 <script>
 let allStores = [], favorites = [], running = false;
-  if (s.is_first_run) {
-    appendLog('💡 First run detected — click "Check for New" with no stores selected to scan all stores nationwide.', 'log-dim');
-  }
+  if (s.is_first_run) {} // auto-handled by loadState
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
@@ -1770,7 +1770,8 @@ async function loadState() {
   document.getElementById('s-known').textContent = s.known_items.toLocaleString();
   if (s.excel_exists) document.getElementById('s-excel').style.display = 'inline';
   if (s.is_first_run) {
-    appendLog('💡 First run detected — click "Check for New" with no stores selected to scan all stores nationwide.', 'log-dim');
+    appendLog('🚀 First run — loading all stores nationwide. This will take a few minutes…', 'log-dim');
+    setTimeout(() => runTracker(), 1500);  // slight delay so stores load first
   }
   // Check for updates
   try {
