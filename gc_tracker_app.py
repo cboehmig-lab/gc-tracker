@@ -1425,8 +1425,35 @@ def api_browse():
     item_dates = state.get("item_dates", {})
     wl         = load_watchlist()
     keywords   = load_keywords()
-    kw_lower   = [k.lower() for k in keywords]
     store_set  = set(stores) if not search_all else None
+
+    # ── Keyword matching helper ───────────────────────────────────────────
+    import re as _re
+    _kw_compiled = []
+    for kw in keywords:
+        kw_stripped = kw.strip()
+        if kw_stripped.startswith('"') and kw_stripped.endswith('"') and len(kw_stripped) > 2:
+            # Exact substring match (quoted)
+            _kw_compiled.append(("exact", kw_stripped[1:-1].lower()))
+        elif "," in kw_stripped:
+            # All-terms match (comma-separated)
+            terms = [t.strip().lower() for t in kw_stripped.split(",") if t.strip()]
+            if terms:
+                _kw_compiled.append(("all", terms))
+        else:
+            # Simple contains
+            _kw_compiled.append(("contains", kw_stripped.lower()))
+
+    def _kw_match(name_l, brand_l):
+        text = name_l + " " + brand_l
+        for mode, val in _kw_compiled:
+            if mode == "exact" and val in text:
+                return True
+            elif mode == "all" and all(t in text for t in val):
+                return True
+            elif mode == "contains" and val in text:
+                return True
+        return False
 
     # Check if any cache entries have store field
     has_store_data = any(v.get("store") for v in _cat_cache.values())
@@ -1461,7 +1488,7 @@ def api_browse():
         # Check keyword match
         name_lower = name.lower()
         brand_lower = brand.lower()
-        kw_hit = any(k in name_lower or k in brand_lower for k in kw_lower)
+        kw_hit = _kw_match(name_lower, brand_lower) if _kw_compiled else False
 
         all_items.append({
             "id":         sku,
@@ -2537,6 +2564,8 @@ def _run(selected_stores: list[str], baseline: bool):
             }
 
         new_ids = {p["id"] for p in new_items}
+        # For large scans, don't send all_items via SSE — client will use server-side browse
+        large_scan = len(all_products) > 1000
         send({
             "type":       "done",
             "baseline":   baseline,
@@ -2544,8 +2573,9 @@ def _run(selected_stores: list[str], baseline: bool):
             "scanned":    len(all_products),
             "new_count":  len(new_items),
             "new_items":  [fmt(p) for p in new_items],
-            "all_items":  [] if baseline else
+            "all_items":  [] if (baseline or large_scan) else
                           [fmt(p) for p in all_products if p["id"] not in new_ids],
+            "use_browse": large_scan and not baseline,
         })
     except Exception as e:
         send({"type":"done","error":str(e),"scanned":0,"new_count":0,"new_items":[]})
@@ -2804,7 +2834,12 @@ tr.sold-row td a{color:#666}
   <div style="position:absolute;inset:0;background:rgba(0,0,0,.7)" onclick="closeKeywords()"></div>
   <div style="position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:24px 24px 20px;width:420px;max-height:80vh;overflow-y:auto;z-index:1">
     <h2 style="color:#fff;font-size:1.05rem;margin-bottom:4px">🔑 Keyword Alerts</h2>
-    <p style="color:#777;font-size:.82rem;margin-bottom:16px;line-height:1.5">Items matching your keywords are highlighted in the results. New items that also match a keyword sort to the top.</p>
+    <p style="color:#777;font-size:.82rem;margin-bottom:16px;line-height:1.5">Items matching your keywords are highlighted in the results. New items that also match a keyword sort to the top.<br><br>
+      <span style="color:#999">Matching modes:</span><br>
+      <span style="color:#4ade80">Thorpy</span> — matches any item containing "Thorpy"<br>
+      <span style="color:#4ade80">Paiste, 2002</span> — matches items containing both words<br>
+      <span style="color:#4ade80">"Fender Strat"</span> — exact phrase match only
+    </p>
     <div style="display:flex;gap:6px;margin-bottom:16px">
       <input id="kw-input" type="text" placeholder="Add a keyword…"
              style="flex:1;padding:8px 12px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#eee;font-size:.9rem;outline:none"
@@ -3563,9 +3598,20 @@ async function clearAllKeywords() {
 
 function _itemMatchesKeyword(item) {
   if (!window._keywords.length) return false;
-  const name = (item.name || '').toLowerCase();
-  const brand = (item.brand || '').toLowerCase();
-  return window._keywords.some(k => name.includes(k.toLowerCase()) || brand.includes(k.toLowerCase()));
+  const text = ((item.name || '') + ' ' + (item.brand || '')).toLowerCase();
+  return window._keywords.some(kw => {
+    kw = kw.trim();
+    if (kw.startsWith('"') && kw.endsWith('"') && kw.length > 2) {
+      // Exact substring match
+      return text.includes(kw.slice(1, -1).toLowerCase());
+    } else if (kw.includes(',')) {
+      // All-terms match
+      return kw.split(',').map(t => t.trim().toLowerCase()).filter(Boolean).every(t => text.includes(t));
+    } else {
+      // Simple contains
+      return text.includes(kw.toLowerCase());
+    }
+  });
 }
 
 // ── Global search (all stores) ───────────────────────────────────────────────
@@ -3702,14 +3748,34 @@ function showResults(msg, isBaseline) {
 
   document.getElementById('res-search').value = '';
   document.getElementById('res-search-count').textContent = '';
-  const total = n + (msg.all_items ? msg.all_items.length : 0);
-  document.getElementById('res-title').textContent = n > 0 ? `${n} New · ${total} Total` : `${total} Items (nothing new)`;
+  const total = n + (msg.all_items ? msg.all_items.length : 0) + (msg.use_browse ? msg.scanned - n : 0);
+  document.getElementById('res-title').textContent = n > 0 ? `${n} New · ${msg.scanned.toLocaleString()} Total` : `${msg.scanned.toLocaleString()} Items (nothing new)`;
   document.getElementById('res-badge').textContent  = n > 0 ? n + ' NEW' : '';
   if (n > 0) document.getElementById('s-excel').style.display = 'inline';
 
-  if (total === 0) {
+  if (msg.scanned === 0 && n === 0) {
     document.getElementById('res-body').innerHTML = '<div class="no-res">Nothing found for selected stores.</div>';
     ['brand-filter','cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+    return;
+  }
+
+  // For large scans, switch to server-side browse instead of rendering all items client-side
+  if (msg.use_browse) {
+    _browseMode = 'server';
+    _srvStores = getSelected();
+    if (!_srvStores.length) _srvStores = []; // all-stores scan
+    _srvPage = 1;
+    _srvSortField = 'date';
+    _srvSortDir = 'desc';
+    window._sortCol = null; window._sortDir = 1;
+    _watchFilterActive = false;
+    document.getElementById('watchlist-toggle').classList.remove('wl-active');
+    // Use all_stores if no specific stores selected (baseline-like full scan)
+    if (!_srvStores.length) {
+      _globalSearchActive = false;
+      _globalSearchQuery = '';
+    }
+    _fetchBrowsePage(1);
     return;
   }
 
