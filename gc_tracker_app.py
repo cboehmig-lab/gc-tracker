@@ -2977,7 +2977,7 @@ tr.fav-row td:last-child{color:#4ade80}
           class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
           🎯 Want List
         </button>
-        <a onclick="searchWantList()" style="color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;text-decoration:none;margin-left:2px" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Search Want List</a>
+        <a id="search-wl-link" onclick="searchWantList()" style="color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;text-decoration:none;margin-left:2px" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Search Want List</a>
         <div id="brand-dropdown" class="brand-dd" style="display:none;position:relative">
           <button id="brand-dd-btn" class="cat-sel" onclick="toggleBrandDropdown()" style="cursor:pointer;white-space:nowrap">All Brands ▾</button>
           <div id="brand-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:260px;max-height:320px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
@@ -3531,6 +3531,7 @@ async function browseCache() {
     _globalSearchQuery = '';
     document.getElementById('global-search').value = '';
     document.getElementById('global-search-clear').style.display = 'none';
+    _resetWantListLink();
     _srvStores = stores;
     _srvPage = 1;
     _srvSortField = 'date';
@@ -3717,6 +3718,7 @@ function clearGlobalSearch() {
   _globalSearchQuery = '';
   document.getElementById('global-search').value = '';
   document.getElementById('global-search-clear').style.display = 'none';
+  _resetWantListLink();
   // Go back to whatever stores are selected
   const stores = getSelected();
   if (stores.length) {
@@ -3727,6 +3729,11 @@ function clearGlobalSearch() {
 }
 
 function searchWantList() {
+  // Toggle: if already searching want list, clear it
+  if (_wantListSearchActive) {
+    clearGlobalSearch();
+    return;
+  }
   if (!window._keywords || !window._keywords.length) {
     openKeywords();
     return;
@@ -3750,7 +3757,14 @@ function searchWantList() {
   document.getElementById('watchlist-toggle').classList.remove('wl-active');
   document.getElementById('global-search-clear').style.display = '';
   document.getElementById('global-search').value = '🎯 Want List Search';
+  document.getElementById('search-wl-link').textContent = 'Clear Want List Search';
+  document.getElementById('search-wl-link').style.color = '#f88';
   _fetchBrowsePage(1);
+}
+
+function _resetWantListLink() {
+  document.getElementById('search-wl-link').textContent = 'Search Want List';
+  document.getElementById('search-wl-link').style.color = '#4ade80';
 }
 
 function runBaseline() {
