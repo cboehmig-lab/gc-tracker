@@ -330,7 +330,7 @@ def save_watchlist(wl: dict):
 
 # ── GC scraping ───────────────────────────────────────────────────────────────
 
-PAGE_SIZE = 24
+PAGE_SIZE = 240
 
 def _fmt_date(d: str) -> str:
     """Convert YYYY-MM-DD to M/D/YY."""
@@ -373,10 +373,10 @@ def fetch_page(store_name: str, page: int) -> dict:
             [f"stores:{store_name}"],
         ],
         "facets":        ["*"],
-        "hitsPerPage":   24,
+        "hitsPerPage":   240,
         "maxValuesPerFacet": 10,
         "numericFilters": [f"startDate<={ts}"],
-        "page":          page - 1,  # Algolia is 0-indexed
+        "page":          page - 1,
         "query":         "",
         "ruleContexts":  ["used-page", "primary_itemtype", "extension_itemtype"],
     }]}
@@ -586,6 +586,13 @@ def parse_products(data, store_name: str) -> list[dict]:
                 elif isinstance(condition, str):
                     condition = condition.split(">")[-1].strip()
                 condition = _parse_condition(condition) if condition else ""
+                # Date listed from startDate (Unix timestamp in seconds)
+                start_ts = hit.get("startDate") or 0
+                try:
+                    from datetime import datetime as _dt
+                    date_str = _dt.utcfromtimestamp(float(start_ts)).strftime("%Y-%m-%d") if start_ts else ""
+                except Exception:
+                    date_str = ""
                 products.append({
                     "id":        sku,
                     "name":      name,
@@ -593,6 +600,7 @@ def parse_products(data, store_name: str) -> list[dict]:
                     "store":     store_name,
                     "url":       url,
                     "condition": condition,
+                    "date_listed": date_str,
                 })
         except Exception:
             pass
@@ -2288,6 +2296,8 @@ def _run(selected_stores: list[str], baseline: bool):
             write_excel(new_items)
 
         def fmt(p):
+            # Prefer Algolia's listing date over our scan date
+            date_src = p.get("date_listed") or item_dates.get(p["id"], "")
             return {
                 "id":         p["id"],
                 "name":       p["name"],
@@ -2299,7 +2309,7 @@ def _run(selected_stores: list[str], baseline: bool):
                 "category":   p.get("category", ""),
                 "subcategory":p.get("subcategory", ""),
                 "condition":  p.get("condition", ""),
-                "date":       _fmt_date(item_dates.get(p["id"], "")),
+                "date":       _fmt_date(date_src),
             }
 
         new_ids = {p["id"] for p in new_items}
@@ -2408,8 +2418,11 @@ th:hover{color:#ccc}
 th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
 th.sort-desc::after{content:" ▼";color:#c00;font-size:.6rem}
 td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;max-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-td:nth-child(1){width:62px;min-width:62px;max-width:62px}
-td:nth-child(2){max-width:260px;width:35%}
+td:nth-child(1){width:52px;min-width:52px;max-width:52px}
+td:nth-child(2){width:28px;min-width:28px;max-width:28px;text-align:center}
+td:nth-child(3){max-width:260px;width:35%}
+td:nth-child(4){width:70px;min-width:70px}
+td:nth-child(8){width:70px;min-width:70px}
 tr:hover td{background:#161616}
 td a{color:#6ab0f5;text-decoration:none}
 td a:hover{text-decoration:underline}
@@ -3153,7 +3166,7 @@ function autoSizeItemColumn() {
   const th = document.querySelector('#res-table th[data-col="1"]');
   if (th) th.style.width = colW + 'px';
   // Also set td widths via col group or direct style on first td of each row
-  document.querySelectorAll('#res-table tbody tr td:nth-child(2)').forEach(td => {
+  document.querySelectorAll('#res-table tbody tr td:nth-child(3)').forEach(td => {
     td.style.maxWidth = colW + 'px';
   });
 }
