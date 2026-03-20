@@ -1384,7 +1384,8 @@ def api_browse():
     so the browser never has to hold 80K items in memory."""
     data = request.json or {}
     stores = data.get("stores", [])
-    if not stores:
+    search_all = bool(data.get("all_stores"))
+    if not stores and not search_all:
         return jsonify({"items": [], "no_store_data": True})
 
     # Pagination params
@@ -1408,7 +1409,7 @@ def api_browse():
     seen_ids   = set(state.get("seen_ids", []))
     item_dates = state.get("item_dates", {})
     wl         = load_watchlist()
-    store_set  = set(stores)
+    store_set  = set(stores) if not search_all else None
 
     # Check if any cache entries have store field
     has_store_data = any(v.get("store") for v in _cat_cache.values())
@@ -1420,7 +1421,7 @@ def api_browse():
     all_items = []
     brand_set = set(); cond_set = set(); cat_set = set(); subcat_set = set()
     for sku, cached in _cat_cache.items():
-        if cached.get("store") not in store_set:
+        if store_set is not None and cached.get("store") not in store_set:
             continue
         if not cached.get("available", True):
             continue
@@ -2563,6 +2564,13 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 
 .status-bar{padding:8px 20px;background:#161616;border-bottom:1px solid #2e2e2e;font-size:.78rem;color:#666;display:flex;gap:20px;flex-wrap:wrap;flex-shrink:0}
 .status-bar b{color:#bbb}
+#global-search-wrap{margin-left:auto;display:flex;align-items:center;gap:4px;flex-shrink:0}
+#global-search{padding:5px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;width:200px;outline:none}
+#global-search:focus{border-color:#c00}
+#global-search-btn{background:none;border:1px solid #3a3a3a;border-radius:4px;color:#888;font-size:.72rem;padding:4px 8px;cursor:pointer;line-height:1}
+#global-search-btn:hover{border-color:#c00;color:#eee}
+#global-search-clear{background:none;border:1px solid #c00;border-radius:4px;color:#f88;font-size:.72rem;padding:4px 8px;cursor:pointer;line-height:1}
+#global-search-clear:hover{background:#3a1a1a}
 
 #log{height:52px;overflow-y:auto;padding:6px 20px;font-family:monospace;font-size:.78rem;color:#6dba8d;line-height:1.75;flex-shrink:0;border-bottom:1px solid #2e2e2e}
 .log-dim{color:#555}
@@ -2591,8 +2599,8 @@ td:nth-child(3){max-width:260px;width:28%}
 td:nth-child(4){width:100px;min-width:80px;max-width:140px}
 td:nth-child(5){width:110px;min-width:100px}
 td:nth-child(6){width:70px;min-width:60px}
-td:nth-child(7){width:65px;min-width:55px}
-td:nth-child(8){width:65px;min-width:55px}
+td:nth-child(7){width:75px;min-width:68px}
+td:nth-child(8){width:80px;min-width:72px}
 td:nth-child(10){width:80px;min-width:70px}
 td:nth-child(11){width:90px;min-width:80px}
 tr:hover td{background:#161616}
@@ -2726,6 +2734,19 @@ tr.sold-row td a{color:#666}
   </div>
 </div>
 
+<div id="first-run-modal" style="display:none;position:fixed;inset:0;z-index:100;align-items:center;justify-content:center">
+  <div style="position:absolute;inset:0;background:rgba(0,0,0,.7)" onclick="dismissFirstRun()"></div>
+  <div style="position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:30px 28px;width:400px;z-index:1">
+    <h2 style="color:#fff;font-size:1.05rem;margin-bottom:10px">🎸 Welcome to Gear Finder</h2>
+    <p style="color:#999;font-size:.85rem;line-height:1.6;margin-bottom:8px">No inventory baseline has been built yet. The baseline captures Guitar Center's full used inventory across ~300 stores so you can track new listings and price changes.</p>
+    <p style="color:#777;font-size:.82rem;margin-bottom:20px">This process takes a few minutes. Would you like to build it now?</p>
+    <div style="display:flex;gap:10px;justify-content:flex-end">
+      <button onclick="dismissFirstRun()" style="padding:8px 18px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#aaa;font-size:.85rem;cursor:pointer">Not Now</button>
+      <button onclick="dismissFirstRun();runBaseline()" style="padding:8px 18px;background:#c00;border:none;border-radius:5px;color:#fff;font-size:.85rem;font-weight:700;cursor:pointer">Build Baseline</button>
+    </div>
+  </div>
+</div>
+
 <header>
   <h1>🎸 Gear Finder</h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
@@ -2749,7 +2770,7 @@ tr.sold-row td a{color:#666}
 
   <div class="left">
     <div class="search-wrap" id="search-wrap">
-      <input id="search" type="text" placeholder="Search stores…" autocomplete="off">
+      <input id="search" type="text" placeholder="Filter by location name…" autocomplete="off">
       <div class="sel-btns">
         <button class="sel-btn" id="favs-btn" onclick="toggleFavsFilter()">★ Favorites</button>
         <button class="sel-btn" onclick="selectAll()">Select All</button>
@@ -2789,6 +2810,12 @@ tr.sold-row td a{color:#666}
       <span>Known items: <b id="s-known">—</b></span>
       <span>Stores: <b id="s-stores">—</b></span>
       <span id="s-excel" style="display:none"><a style="color:#6ab0f5" href="/download/excel">Download Excel ↗</a></span>
+      <div id="global-search-wrap">
+        <input id="global-search" type="text" placeholder="Search all stores…"
+               onkeydown="if(event.key==='Enter')globalSearch()" autocomplete="off">
+        <button id="global-search-btn" onclick="globalSearch()" title="Search all stores">🔍</button>
+        <button id="global-search-clear" onclick="clearGlobalSearch()" title="Clear search results" style="display:none">✕</button>
+      </div>
     </div>
     <div id="log"><span class="log-dim">Ready — select stores and click Run, or build a full baseline.</span></div>
     <div class="results" id="res-panel" style="display:none">
@@ -2895,7 +2922,7 @@ async function loadState() {
   document.getElementById('s-known').textContent = s.known_items.toLocaleString();
   if (s.excel_exists) document.getElementById('s-excel').style.display = 'inline';
   if (s.is_first_run) {
-    appendLog('💡 First run detected — click "🌐 Build Baseline" to capture the full current GC used inventory as your starting point.', 'log-dim');
+    document.getElementById('first-run-modal').style.display = 'flex';
   }
   // Check for updates
   try {
@@ -2916,12 +2943,21 @@ async function loadState() {
 // ── Mode switching ────────────────────────────────────────────────────────────
 let favsOnly = false;
 
+function _getCheckedStores() {
+  return new Set([...document.querySelectorAll('.store-row input:checked')].map(c => c.value));
+}
+
 function toggleFavsFilter() {
+  const wasChecked = _getCheckedStores();
   favsOnly = !favsOnly;
   const btn = document.getElementById('favs-btn');
   btn.classList.toggle('active', favsOnly);
   document.getElementById('search').value = '';
-  renderList();
+  // When switching TO favs view, auto-select all favorites
+  if (favsOnly) {
+    favorites.forEach(f => wasChecked.add(f));
+  }
+  renderList(wasChecked);
 }
 
 function selectAll() {
@@ -2934,7 +2970,9 @@ function clearAll() {
 }
 
 // ── Render store list ─────────────────────────────────────────────────────────
-function renderList() {
+function renderList(preserveChecked) {
+  // Capture current selections if not provided
+  const checked = preserveChecked || _getCheckedStores();
   const el = document.getElementById('store-list');
   const q  = document.getElementById('search').value.toLowerCase();
   let stores = favsOnly ? favorites : allStores;
@@ -2952,8 +2990,9 @@ function renderList() {
     div.className = 'store-row';
     div.dataset.name = name;
     const id = 'cb_' + name.replace(/[^a-zA-Z0-9]/g,'_');
+    const isChecked = checked.has(name);
     div.innerHTML =
-      `<input type="checkbox" id="${id}" value="${name}">` +
+      `<input type="checkbox" id="${id}" value="${name}" ${isChecked ? 'checked' : ''}>` +
       `<label for="${id}">${name}</label>` +
       `<button class="fav-btn ${isFav?'active':''}" title="${isFav?'Remove from':'Add to'} favorites"
         onclick="toggleFav(event,'${name.replace(/'/g,"\\'")}',this)">★</button>`;
@@ -2963,7 +3002,9 @@ function renderList() {
   updateCount();
 }
 
-function filterList() { renderList(); }
+function filterList() {
+  renderList();  // preserves current selections via _getCheckedStores
+}
 
 // ── Favorites ─────────────────────────────────────────────────────────────────
 async function toggleFav(e, name, btn) {
@@ -2988,8 +3029,8 @@ function updateCount() {
   document.getElementById('run-btn').disabled = (n===0 || running);
   document.getElementById('baseline-btn').disabled = running;
   // Auto-browse cached inventory when stores are selected
-  if (n > 0 && !running) browseCache();
-  else if (n === 0) {
+  if (n > 0 && !running && !_globalSearchActive) browseCache();
+  else if (n === 0 && !_globalSearchActive) {
     document.getElementById('res-panel').style.display = 'none';
   }
 }
@@ -2998,6 +3039,8 @@ function updateCount() {
 let _browseTimer = null;
 let _skipBrowse = false;  // Set after a scan to prevent browseCache from overwriting results
 let _watchFilterActive = false;
+let _globalSearchActive = false;
+let _globalSearchQuery = '';
 
 // Mode: 'server' = browse with server-side pagination, 'local' = scan/watchlist with client data
 let _browseMode = 'server';
@@ -3026,18 +3069,25 @@ async function _fetchBrowsePage(page) {
   if (_srvLoading) return;
   _srvLoading = true;
   const filters = _getBrowseFilters();
+  // In global search mode, override filter_q with the global query and search all stores
+  const body = {
+    page:       page,
+    per_page:   50,
+    sort_field: _srvSortField,
+    sort_dir:   _srvSortDir,
+    ...filters,
+  };
+  if (_globalSearchActive) {
+    body.all_stores = true;
+    body.filter_q = _globalSearchQuery;
+  } else {
+    body.stores = _srvStores;
+  }
   try {
     const r = await fetch('/api/browse', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({
-        stores:     _srvStores,
-        page:       page,
-        per_page:   50,
-        sort_field: _srvSortField,
-        sort_dir:   _srvSortDir,
-        ...filters,
-      })
+      body: JSON.stringify(body)
     });
     const d = await r.json();
     if (d.no_store_data) {
@@ -3064,7 +3114,14 @@ async function _fetchBrowsePage(page) {
 
     // Update header
     const hasFilters = filters.filter_q || filters.filter_brand || filters.filter_condition || filters.filter_category || filters.filter_subcategory || filters.filter_watched;
-    if (hasFilters) {
+    if (_globalSearchActive) {
+      const label = _srvTotalCount > 0
+        ? `${_srvTotalCount.toLocaleString()} results for "${_globalSearchQuery}"`
+        : `No results for "${_globalSearchQuery}"`;
+      document.getElementById('res-title').textContent = hasFilters
+        ? `${_srvTotalCount.toLocaleString()} of ${_srvTotalUnfiltered.toLocaleString()} results for "${_globalSearchQuery}"`
+        : label;
+    } else if (hasFilters) {
       document.getElementById('res-title').textContent = `${_srvTotalCount.toLocaleString()} of ${_srvTotalUnfiltered.toLocaleString()} Items`;
     } else {
       document.getElementById('res-title').textContent = _srvTotalCount > 0
@@ -3256,6 +3313,10 @@ async function browseCache() {
     const stores = getSelected();
     if (!stores.length) return;
     _browseMode = 'server';
+    _globalSearchActive = false;
+    _globalSearchQuery = '';
+    document.getElementById('global-search').value = '';
+    document.getElementById('global-search-clear').style.display = 'none';
     _srvStores = stores;
     _srvPage = 1;
     _srvSortField = 'date';
@@ -3333,6 +3394,50 @@ function getSelected() {
   return [...document.querySelectorAll('.store-row input:checked')].map(c => c.value);
 }
 
+
+function dismissFirstRun() {
+  document.getElementById('first-run-modal').style.display = 'none';
+}
+
+// ── Global search (all stores) ───────────────────────────────────────────────
+function globalSearch() {
+  const q = document.getElementById('global-search').value.trim();
+  if (!q) return;
+  _globalSearchActive = true;
+  _globalSearchQuery = q;
+  _browseMode = 'server';
+  _srvPage = 1;
+  _srvSortField = 'date';
+  _srvSortDir = 'desc';
+  window._sortCol = null; window._sortDir = 1;
+  // Reset filters
+  document.getElementById('res-search').value = '';
+  document.getElementById('res-search-count').textContent = '';
+  document.getElementById('brand-filter').value = '';
+  document.getElementById('cond-filter').value = '';
+  document.getElementById('cat-filter').value = '';
+  document.getElementById('subcat-filter').value = '';
+  document.getElementById('subcat-filter').style.display = 'none';
+  _watchFilterActive = false;
+  document.getElementById('watchlist-toggle').classList.remove('wl-active');
+  // Show the clear button
+  document.getElementById('global-search-clear').style.display = '';
+  _fetchBrowsePage(1);
+}
+
+function clearGlobalSearch() {
+  _globalSearchActive = false;
+  _globalSearchQuery = '';
+  document.getElementById('global-search').value = '';
+  document.getElementById('global-search-clear').style.display = 'none';
+  // Go back to whatever stores are selected
+  const stores = getSelected();
+  if (stores.length) {
+    browseCache();
+  } else {
+    document.getElementById('res-panel').style.display = 'none';
+  }
+}
 
 function runBaseline() {
   document.getElementById('pw-modal').style.display = 'flex';
