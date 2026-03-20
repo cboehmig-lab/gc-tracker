@@ -946,7 +946,7 @@ def api_state():
         "last_run":    s.get("last_run"),
         "known_items": len(s.get("seen_ids", [])),
         "excel_exists": OUTPUT_FILE.exists(),
-        "is_first_run": not STATE_FILE.exists() or len(s.get("seen_ids", [])) == 0,
+        "is_first_run": not STATE_FILE.exists() or not s.get("last_run"),
     })
 
 @app.route("/api/run", methods=["POST"])
@@ -1292,7 +1292,7 @@ def api_progress():
                     headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
 
-def _run(selected_stores: list[str], baseline: bool):
+def _run(selected_stores: list[str], baseline: bool = False):
     def send(msg): _q.put(msg)
     try:
         state      = load_state()
@@ -1301,11 +1301,10 @@ def _run(selected_stores: list[str], baseline: bool):
         run_time   = datetime.now().isoformat()
         ts         = datetime.now().strftime("%Y-%m-%d")
 
-        stores_to_scan = get_store_list() if baseline else selected_stores
-        label = "baseline scan" if baseline else f"{len(stores_to_scan)} store(s)"
+        stores_to_scan = selected_stores
+        label = f"{len(stores_to_scan)} store(s)"
         send({"type":"progress","msg":f"Starting {label} — {len(stores_to_scan)} stores total…"})
-        if baseline:
-            send({"type":"progress","msg":"⚡ Using Algolia API with parallel fetching — baseline should take 5–15 minutes!"})
+        send({"type":"progress","msg":"⚡ Using Algolia API with parallel fetching…"})
 
         all_products, ids_this_run = [], set()
         completed = [0]
@@ -1324,7 +1323,7 @@ def _run(selected_stores: list[str], baseline: bool):
                     send({"type":"progress","msg":f"  [{completed[0]}/{len(stores_to_scan)}] stores fetched…"})
             return products, ids
 
-        max_workers = 10 if baseline else 5
+        max_workers = 10
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {pool.submit(fetch_store, store): store for store in stores_to_scan}
             for future in as_completed(futures):
@@ -1376,7 +1375,7 @@ def _run(selected_stores: list[str], baseline: bool):
         _save_cat_cache()
 
         # ── Mark sold items (not found in this scan for scanned stores) ──────────
-        if not baseline and not _stop_event.is_set():
+        if not _stop_event.is_set():
             # Only mark items as sold if we scanned ALL their store's pages
             scanned_store_set = set(stores_to_scan)
             for sku, cached in _cat_cache.items():
@@ -1434,13 +1433,11 @@ def _run(selected_stores: list[str], baseline: bool):
         new_ids = {p["id"] for p in new_items}
         send({
             "type":       "done",
-            "baseline":   baseline,
             "stopped":    _stop_event.is_set(),
             "scanned":    len(all_products),
             "new_count":  len(new_items),
             "new_items":  [fmt(p) for p in new_items],
-            "all_items":  [] if baseline else
-                          [fmt(p) for p in all_products if p["id"] not in new_ids],
+            "all_items":  [fmt(p) for p in all_products if p["id"] not in new_ids],
         })
     except Exception as e:
         send({"type":"done","error":str(e),"scanned":0,"new_count":0,"new_items":[]})
@@ -1769,9 +1766,10 @@ async function loadState() {
   document.getElementById('s-last').textContent  = s.last_run ? s.last_run.replace('T',' ').slice(0,16) : 'Never';
   document.getElementById('s-known').textContent = s.known_items.toLocaleString();
   if (s.excel_exists) document.getElementById('s-excel').style.display = 'inline';
-  if (s.is_first_run) {
-    appendLog('🚀 First run — loading all stores nationwide. This will take a few minutes…', 'log-dim');
-    setTimeout(() => runTracker(), 1500);  // slight delay so stores load first
+  if (s.is_first_run && !window._firstRunTriggered) {
+    window._firstRunTriggered = true;
+    appendLog('🚀 First run — loading all store inventory nationwide. This will take a few minutes…', 'log-dim');
+    setTimeout(() => runTracker(), 1500);
   }
   // Check for updates
   try {
@@ -1979,8 +1977,7 @@ function getSelected() {
 // ── Run ───────────────────────────────────────────────────────────────────────
 async function runTracker() {
   const stores = getSelected();
-  // If no stores selected, scan all stores nationwide
-  await startRun({stores}, false);
+  await startRun({stores});
 }
 
 async function stopRun() {
@@ -1990,7 +1987,7 @@ async function stopRun() {
   await fetch('/api/stop', {method:'POST'});
 }
 
-async function startRun(payload, isBaseline) {
+async function startRun(payload) {
   running = true; updateCount();
   const stopBtn = document.getElementById('stop-btn');
   stopBtn.style.display = 'inline-block';
@@ -2018,13 +2015,13 @@ async function startRun(payload, isBaseline) {
     if (msg.type === 'done') {
       es.close(); running = false;
       stopBtn.style.display = 'none';
-      updateCount(); loadState(); showResults(msg, isBaseline);
+      updateCount(); loadState(); showResults(msg);
     }
   };
 }
 
 // ── Results ───────────────────────────────────────────────────────────────────
-function showResults(msg, isBaseline) {
+function showResults(msg) {
   const panel = document.getElementById('res-panel');
   panel.style.display = 'block';
 
