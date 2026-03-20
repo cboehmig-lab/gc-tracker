@@ -1379,10 +1379,28 @@ def api_favorites():
 @app.route("/api/browse", methods=["POST"])
 @login_required
 def api_browse():
-    """Return cached inventory for selected stores — instant, no scraping."""
-    stores = request.json.get("stores", [])
+    """Return cached inventory for selected stores with server-side
+    pagination, sorting, and filtering.  Sends only one page at a time
+    so the browser never has to hold 80K items in memory."""
+    data = request.json or {}
+    stores = data.get("stores", [])
     if not stores:
         return jsonify({"items": [], "no_store_data": True})
+
+    # Pagination params
+    page     = max(int(data.get("page", 1)), 1)
+    per_page = min(max(int(data.get("per_page", 50)), 10), 200)
+
+    # Sort params  (defaults: date descending = newest first)
+    sort_field = data.get("sort_field", "date")    # name|brand|price|condition|category|subcategory|date|location
+    sort_dir   = data.get("sort_dir", "desc")      # asc | desc
+
+    # Filter params
+    fq      = (data.get("filter_q") or "").lower().strip()
+    f_cond  = data.get("filter_condition") or ""
+    f_cat   = data.get("filter_category") or ""
+    f_sub   = data.get("filter_subcategory") or ""
+
     _load_cat_cache()
     state      = load_state()
     seen_ids   = set(state.get("seen_ids", []))
@@ -1396,36 +1414,103 @@ def api_browse():
         return jsonify({"items": [], "no_store_data": True,
                         "message": "Run 'Check for New Items' once to populate store data."})
 
-    items = []
+    # ── Build full item list for selected stores (lightweight dicts) ──────
+    all_items = []
+    cond_set = set(); cat_set = set(); subcat_set = set()
     for sku, cached in _cat_cache.items():
         if cached.get("store") not in store_set:
             continue
         if not cached.get("available", True):
             continue
-        price_raw = cached.get("price", 0) or 0
-        items.append({
+        price_raw  = cached.get("price", 0) or 0
+        name       = cached.get("name", "")
+        brand      = cached.get("brand", "")
+        location   = cached.get("location") or cached.get("store", "")
+        category   = cached.get("category", "")
+        subcategory= cached.get("subcategory", "")
+        condition  = cached.get("condition", "")
+        date_raw   = cached.get("date_listed") or item_dates.get(sku, "")
+        store      = cached.get("store", "")
+
+        # Collect filter options from ALL items (pre-filter)
+        if condition:  cond_set.add(condition)
+        if category:   cat_set.add(category)
+        if subcategory: subcat_set.add(subcategory)
+
+        all_items.append({
             "id":         sku,
-            "name":       cached.get("name", ""),
-            "brand":      cached.get("brand", ""),
+            "name":       name,
+            "brand":      brand,
             "price":      f"${price_raw:,.2f}" if price_raw else "",
             "price_raw":  price_raw,
             "price_drop": 0,
-            "store":      cached.get("store", ""),
-            "location":   cached.get("location") or cached.get("store", ""),
+            "store":      store,
+            "location":   location,
             "url":        cached.get("url", ""),
-            "category":   cached.get("category", ""),
-            "subcategory":cached.get("subcategory", ""),
-            "condition":  cached.get("condition", ""),
-            "date":       _fmt_date(cached.get("date_listed") or item_dates.get(sku, "")),
-            "date_raw":   cached.get("date_listed") or item_dates.get(sku, ""),
+            "category":   category,
+            "subcategory":subcategory,
+            "condition":  condition,
+            "date":       _fmt_date(date_raw),
+            "date_raw":   date_raw,
             "image_id":   cached.get("image_id", ""),
             "isNew":      sku not in seen_ids,
             "watched":    sku in wl,
         })
-    # NEW items first; within each group, newest dates first
-    items.sort(key=lambda x: x.get("date_raw", "") or "", reverse=True)   # newest first
-    items.sort(key=lambda x: not x["isNew"])                               # NEW items first (stable)
-    return jsonify({"items": items, "count": len(items), "no_store_data": False})
+
+    total_unfiltered = len(all_items)
+
+    # ── Apply filters ─────────────────────────────────────────────────────
+    filtered = all_items
+    if fq:
+        filtered = [i for i in filtered if
+                    fq in (i["name"] or "").lower() or
+                    fq in (i["brand"] or "").lower() or
+                    fq in (i["store"] or "").lower() or
+                    fq in (i["location"] or "").lower() or
+                    fq in (i["category"] or "").lower() or
+                    fq in (i["subcategory"] or "").lower()]
+    if f_cond:
+        filtered = [i for i in filtered if i["condition"] == f_cond]
+    if f_cat:
+        filtered = [i for i in filtered if i["category"] == f_cat]
+    if f_sub:
+        filtered = [i for i in filtered if i["subcategory"] == f_sub]
+
+    # Subcategory options scoped to current category filter
+    scoped_subcats = set()
+    if f_cat:
+        for i in all_items:
+            if i["category"] == f_cat and i["subcategory"]:
+                scoped_subcats.add(i["subcategory"])
+
+    # ── Sort ──────────────────────────────────────────────────────────────
+    reverse = (sort_dir == "desc")
+    if sort_field == "price":
+        filtered.sort(key=lambda x: x.get("price_raw") or 0, reverse=reverse)
+    elif sort_field == "date":
+        filtered.sort(key=lambda x: x.get("date_raw") or "", reverse=reverse)
+    else:
+        filtered.sort(key=lambda x: (x.get(sort_field) or "").lower(), reverse=reverse)
+
+    total_filtered = len(filtered)
+    total_pages    = max(1, -(-total_filtered // per_page))  # ceil division
+    page           = min(page, total_pages)
+    start          = (page - 1) * per_page
+    page_items     = filtered[start:start + per_page]
+
+    return jsonify({
+        "items":            page_items,
+        "page":             page,
+        "per_page":         per_page,
+        "total_count":      total_filtered,
+        "total_unfiltered": total_unfiltered,
+        "total_pages":      total_pages,
+        "no_store_data":    False,
+        # Filter option lists (always full set so dropdowns stay populated)
+        "conditions":       sorted(cond_set),
+        "categories":       sorted(cat_set),
+        "subcategories":    sorted(scoped_subcats) if f_cat else sorted(subcat_set),
+    })
 
 
 @app.route("/api/watchlist", methods=["GET"])
@@ -2433,7 +2518,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .layout{display:flex;flex:1;overflow:hidden}
 
 /* ── Left panel ── */
-.left{width:220px;min-width:200px;background:#1a1a1a;border-right:1px solid #2e2e2e;display:flex;flex-direction:column;flex-shrink:0}
+.left{width:220px;min-width:200px;background:#1a1a1a;border-right:1px solid #2e2e2e;display:flex;flex-direction:column;flex-shrink:0;position:relative;z-index:10}
 
 .sel-btns{display:flex;gap:6px;margin-top:8px}
 .sel-btn{flex:1;padding:5px;background:#252525;border:1px solid #3a3a3a;border-radius:4px;color:#aaa;font-size:.75rem;cursor:pointer}
@@ -2466,7 +2551,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #baseline-btn:disabled{opacity:.4;cursor:not-allowed}
 
 /* ── Right panel ── */
-.right{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.right{flex:1;display:flex;flex-direction:column;overflow:hidden;position:relative;z-index:1}
 
 .status-bar{padding:8px 20px;background:#161616;border-bottom:1px solid #2e2e2e;font-size:.78rem;color:#666;display:flex;gap:20px;flex-wrap:wrap;flex-shrink:0}
 .status-bar b{color:#bbb}
@@ -2884,23 +2969,50 @@ function updateCount() {
   }
 }
 
-// ── Browse cached inventory ────────────────────────────────────────────────
+// ── Browse cached inventory (server-side pagination) ──────────────────────
 let _browseTimer = null;
 let _skipBrowse = false;  // Set after a scan to prevent browseCache from overwriting results
-async function browseCache() {
-  if (_skipBrowse) { _skipBrowse = false; return; }
-  clearTimeout(_browseTimer);
-  _browseTimer = setTimeout(async () => {
-    const stores = getSelected();
-    if (!stores.length) return;
+
+// Mode: 'server' = browse with server-side pagination, 'local' = scan/watchlist with client data
+let _browseMode = 'server';
+// Server-side pagination state
+let _srvStores = [];
+let _srvPage = 1;
+let _srvSortField = 'date';
+let _srvSortDir = 'desc';
+let _srvTotalCount = 0;
+let _srvTotalUnfiltered = 0;
+let _srvTotalPages = 1;
+let _srvLoading = false;
+
+function _getBrowseFilters() {
+  return {
+    filter_q:           document.getElementById('res-search').value.trim(),
+    filter_condition:   document.getElementById('cond-filter').value,
+    filter_category:    document.getElementById('cat-filter').value,
+    filter_subcategory: document.getElementById('subcat-filter').value,
+  };
+}
+
+async function _fetchBrowsePage(page, append) {
+  if (_srvLoading) return;
+  _srvLoading = true;
+  const filters = _getBrowseFilters();
+  try {
     const r = await fetch('/api/browse', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({stores})
+      body: JSON.stringify({
+        stores:     _srvStores,
+        page:       page,
+        per_page:   50,
+        sort_field: _srvSortField,
+        sort_dir:   _srvSortDir,
+        ...filters,
+      })
     });
     const d = await r.json();
     if (d.no_store_data) {
-      // Cache exists but doesn't have per-store data yet — prompt a run
       document.getElementById('res-panel').style.display = 'block';
       document.getElementById('res-title').textContent = 'No Browse Data Yet';
       document.getElementById('res-badge').textContent = '';
@@ -2909,25 +3021,193 @@ async function browseCache() {
       ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
       return;
     }
-    if (!d.items || !d.items.length) {
+    if (!d.items || (!d.items.length && page === 1)) {
       document.getElementById('res-panel').style.display = 'block';
       document.getElementById('res-title').textContent = 'No Items Found';
       document.getElementById('res-badge').textContent = '';
       document.getElementById('res-body').innerHTML = '<div class="no-res">No cached inventory for selected store(s). Run Check for New Items to scan.</div>';
       return;
     }
-    window._tableData = d.items.map(item => ({...item}));
-    window._sortCol = null; window._sortDir = 1;
-    const n = d.items.filter(i => i.isNew).length;
-    const total = d.items.length;
-    document.getElementById('res-title').textContent = n > 0 ? `${n} New · ${total} Total` : `${total} Items`;
-    document.getElementById('res-badge').textContent = n > 0 ? n + ' NEW' : '';
+
+    _srvPage           = d.page;
+    _srvTotalCount     = d.total_count;
+    _srvTotalUnfiltered = d.total_unfiltered;
+    _srvTotalPages     = d.total_pages;
+
+    // Update header
+    const hasFilters = filters.filter_q || filters.filter_condition || filters.filter_category || filters.filter_subcategory;
+    if (hasFilters) {
+      document.getElementById('res-title').textContent = `${_srvTotalCount} of ${_srvTotalUnfiltered} Items`;
+    } else {
+      const n = d.items.filter(i => i.isNew).length;
+      // On page 1, show count; on later pages, keep existing title
+      if (!append) {
+        document.getElementById('res-title').textContent = _srvTotalCount > 0
+          ? `${_srvTotalCount.toLocaleString()} Items` : 'No Items Found';
+      }
+    }
+    document.getElementById('res-badge').textContent = '';
     document.getElementById('res-panel').style.display = 'block';
+
+    // Update filter count
+    const countEl = document.getElementById('res-search-count');
+    if (hasFilters) {
+      countEl.textContent = `${_srvTotalCount} of ${_srvTotalUnfiltered}`;
+    } else {
+      countEl.textContent = '';
+    }
+    const clearBtn = document.getElementById('clear-filters-btn');
+    if (clearBtn) clearBtn.style.display = (filters.filter_condition || filters.filter_category || filters.filter_subcategory) ? '' : 'none';
+
+    // Populate filter dropdowns from server-provided options (only on page 1 / fresh load)
+    if (!append) {
+      _populateFiltersFromServer(d.conditions || [], d.categories || [], d.subcategories || [], filters);
+    }
+
+    // Render rows
+    if (append) {
+      _appendRowsToTable(d.items);
+    } else {
+      _renderServerTable(d.items);
+    }
+
+    // Show/hide "Show More" button
+    _updateShowMoreBtn();
+
+  } finally {
+    _srvLoading = false;
+  }
+}
+
+function _populateFiltersFromServer(conditions, categories, subcategories, currentFilters) {
+  const condEl = document.getElementById('cond-filter');
+  const savedCond = currentFilters.filter_condition;
+  condEl.innerHTML = '<option value="">All Conditions</option>';
+  conditions.forEach(c => { const o = document.createElement('option'); o.value=o.textContent=c; condEl.appendChild(o); });
+  condEl.style.display = conditions.length ? '' : 'none';
+  condEl.value = savedCond;
+
+  const catEl = document.getElementById('cat-filter');
+  const savedCat = currentFilters.filter_category;
+  catEl.innerHTML = '<option value="">All Categories</option>';
+  categories.forEach(c => { const o = document.createElement('option'); o.value=o.textContent=c; catEl.appendChild(o); });
+  catEl.style.display = categories.length ? '' : 'none';
+  catEl.value = savedCat;
+
+  const subEl = document.getElementById('subcat-filter');
+  const savedSub = currentFilters.filter_subcategory;
+  if (subcategories.length && savedCat) {
+    subEl.innerHTML = '<option value="">All Subcategories</option>';
+    subcategories.forEach(s => { const o = document.createElement('option'); o.value=o.textContent=s; subEl.appendChild(o); });
+    subEl.style.display = '';
+  } else {
+    subEl.style.display = 'none';
+  }
+  subEl.value = savedSub;
+}
+
+function _buildRowHtml(item) {
+  const priceNum = parseFloat((item.price||'').replace(/[^0-9.]/g,'')) || 0;
+  const esc = s => (s||'').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+  const nameCell = item.url
+    ? `<a href="${item.url}" target="_blank">${esc(item.name)}</a>`
+    : esc(item.name);
+  const isSold = item.sold || false;
+  const isWatched = (window._watchlist || {})[item.id || ''];
+  const watchStar = item.id
+    ? `<button class="watch-btn ${isWatched ? 'active' : ''}" onclick="toggleWatch('${(item.id||'').replace(/'/g,"\\'")}',this)" title="${isWatched ? 'Remove from' : 'Add to'} watch list">${isWatched ? '★' : '☆'}</button>`
+    : '';
+  const dropCell = item.price_drop > 0
+    ? `<span class="tag-drop">↓ $${Math.round(item.price_drop)}</span>`
+    : '';
+  const soldBadge = isSold ? ' <span class="tag-sold">Sold</span>' : '';
+  return `<tr class="${isSold ? 'sold-row' : ''}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}" data-image-id="${esc(item.image_id)}">` +
+    `<td>${item.isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
+    `<td>${watchStar}</td>` +
+    `<td>${nameCell}${soldBadge}</td>` +
+    `<td>${esc(item.brand)}</td>` +
+    `<td>${item.price||''}</td>` +
+    `<td>${dropCell}</td>` +
+    `<td>${esc(item.condition)}</td>` +
+    `<td>${esc(item.category)}</td>` +
+    `<td>${esc(item.subcategory)}</td>` +
+    `<td>${esc(item.date||'')}</td>` +
+    `<td>${esc(item.location||item.store)}</td>` +
+    `</tr>`;
+}
+
+function _renderServerTable(items) {
+  let html = `<table id="res-table"><thead><tr>
+    <th data-col="0"></th>
+    <th data-col="watch" style="width:32px"></th>
+    <th data-col="1">Item</th>
+    <th data-col="2">Brand</th>
+    <th data-col="3">Price</th>
+    <th data-col="drop" style="width:80px"></th>
+    <th data-col="4">Condition</th>
+    <th data-col="5">Category</th>
+    <th data-col="6">Subcategory</th>
+    <th data-col="7">Date Listed</th>
+    <th data-col="8">Location</th>
+  </tr></thead><tbody>`;
+  items.forEach(item => { html += _buildRowHtml(item); });
+  html += '</tbody></table>';
+  html += '<div id="show-more-wrap" style="text-align:center;padding:12px"></div>';
+  document.getElementById('res-body').innerHTML = html;
+
+  // Attach sort headers
+  if (window._sortCol !== null) {
+    const th = document.querySelector(`#res-table th[data-col="${window._sortCol}"]`);
+    if (th) th.classList.add(window._sortDir === 1 ? 'sort-asc' : 'sort-desc');
+  }
+  document.querySelectorAll('#res-table thead th[data-col]').forEach(th => {
+    const colIdx = parseInt(th.dataset.col);
+    if (!_SORT_COLS[colIdx]) return;
+    th.addEventListener('click', () => sortTable(colIdx));
+  });
+  autoSizeItemColumn();
+}
+
+function _appendRowsToTable(items) {
+  const tbody = document.querySelector('#res-table tbody');
+  if (!tbody) return;
+  items.forEach(item => {
+    tbody.insertAdjacentHTML('beforeend', _buildRowHtml(item));
+  });
+  autoSizeItemColumn();
+}
+
+function _updateShowMoreBtn() {
+  const wrap = document.getElementById('show-more-wrap');
+  if (!wrap) return;
+  const loaded = document.querySelectorAll('#res-table tbody tr').length;
+  const remaining = _srvTotalCount - loaded;
+  if (remaining > 0) {
+    wrap.innerHTML = `<button onclick="showMore()" style="padding:8px 24px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#aaa;font-size:.82rem;cursor:pointer">Show More (${remaining.toLocaleString()} remaining)</button>`;
+  } else {
+    wrap.innerHTML = '';
+  }
+}
+
+async function browseCache() {
+  if (_skipBrowse) { _skipBrowse = false; return; }
+  clearTimeout(_browseTimer);
+  _browseTimer = setTimeout(async () => {
+    const stores = getSelected();
+    if (!stores.length) return;
+    _browseMode = 'server';
+    _srvStores = stores;
+    _srvPage = 1;
+    _srvSortField = 'date';
+    _srvSortDir = 'desc';
+    window._sortCol = null; window._sortDir = 1;
     document.getElementById('res-search').value = '';
     document.getElementById('res-search-count').textContent = '';
-    ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
-    populateCategoryFilter();
-    renderTable();
+    document.getElementById('cond-filter').value = '';
+    document.getElementById('cat-filter').value = '';
+    document.getElementById('subcat-filter').value = '';
+    document.getElementById('subcat-filter').style.display = 'none';
+    await _fetchBrowsePage(1, false);
   }, 300);
 }
 
@@ -2972,8 +3252,9 @@ async function showWatchList() {
     appendLog('Your watch list is empty — click ☆ next to any item to add it.', 'log-dim');
     return;
   }
+  _browseMode = 'local';
   window._tableData = d.items;
-  window._sortCol = null; window._sortDir = 1;
+  window._sortCol = null; window._sortDir = 1; window._visibleCount = PAGE_SIZE;
   const soldCount = d.items.filter(i => i.sold).length;
   document.getElementById('res-title').textContent = `Watch List (${d.items.length} items${soldCount ? ', ' + soldCount + ' sold' : ''})`;
   document.getElementById('res-badge').textContent = '';
@@ -3100,15 +3381,15 @@ function showResults(msg, isBaseline) {
     return;
   }
 
+  _browseMode = 'local';
   window._tableData = [];
   (msg.new_items || []).forEach(item => window._tableData.push({isNew:true,  ...item}));
   (msg.all_items  || []).forEach(item => window._tableData.push({isNew:false, ...item}));
-  // Sort: NEW items first, then by date descending (newest first)
+  // Sort by date descending (newest first)
   window._tableData.sort((a, b) => {
-    if (a.isNew !== b.isNew) return a.isNew ? -1 : 1;
     return (b.date_raw || '').localeCompare(a.date_raw || '');
   });
-  window._sortCol = null; window._sortDir = 1;
+  window._sortCol = null; window._sortDir = 1; window._visibleCount = PAGE_SIZE;
   // Reload watchlist so sold flags are fresh
   loadWatchlist().then(() => {
     populateCategoryFilter();
@@ -3118,6 +3399,8 @@ function showResults(msg, isBaseline) {
 
 // ── Category filters ──────────────────────────────────────────────────────────
 function populateCategoryFilter() {
+  // In server mode, filters are populated by _populateFiltersFromServer — this is for local mode only
+  if (_browseMode === 'server') return;
   const data = window._tableData || [];
   // Condition filter
   const conds = [...new Set(data.map(i => i.condition).filter(Boolean))].sort();
@@ -3137,6 +3420,13 @@ function populateCategoryFilter() {
 }
 
 function onCatFilterChange() {
+  if (_browseMode === 'server') {
+    // In server mode, changing category resets subcategory and fetches page 1
+    document.getElementById('subcat-filter').value = '';
+    _srvPage = 1;
+    _fetchBrowsePage(1, false);
+    return;
+  }
   const cat   = document.getElementById('cat-filter').value;
   const data  = window._tableData || [];
   const subcats = [...new Set(
@@ -3157,9 +3447,31 @@ function onCatFilterChange() {
 // ── Table rendering & sorting ─────────────────────────────────────────────────
 // col indices: 0=status, 1=name, 2=brand, 3=price, 4=condition, 5=category, 6=subcategory, 7=date, 8=location
 const _SORT_COLS = [null, 'name', 'brand', 'price', 'condition', 'category', 'subcategory', 'date', 'location'];
+const PAGE_SIZE = 50;
+window._visibleCount = PAGE_SIZE;
 
 function renderTable() {
-  const data = window._tableData || [];
+  // In server mode, rendering is handled by _renderServerTable / _appendRowsToTable
+  if (_browseMode === 'server') return;
+
+  const allData = window._tableData || [];
+
+  // Apply filters to get the filtered set
+  const q      = document.getElementById('res-search').value.toLowerCase().trim();
+  const cond   = document.getElementById('cond-filter').value;
+  const cat    = document.getElementById('cat-filter').value;
+  const subcat = document.getElementById('subcat-filter').value;
+
+  const filtered = allData.filter(item => {
+    return (!q      || (item.name||'').toLowerCase().includes(q) || (item.brand||'').toLowerCase().includes(q) || (item.store||'').toLowerCase().includes(q) || (item.location||'').toLowerCase().includes(q) || (item.category||'').toLowerCase().includes(q) || (item.subcategory||'').toLowerCase().includes(q)) &&
+           (!cond   || (item.condition || '') === cond) &&
+           (!cat    || (item.category  || '') === cat) &&
+           (!subcat || (item.subcategory || '') === subcat);
+  });
+
+  const showing = Math.min(window._visibleCount, filtered.length);
+  const hasMore = filtered.length > showing;
+
   let html = `<table id="res-table"><thead><tr>
     <th data-col="0"></th>
     <th data-col="watch" style="width:32px"></th>
@@ -3173,37 +3485,25 @@ function renderTable() {
     <th data-col="7">Date Listed</th>
     <th data-col="8">Location</th>
   </tr></thead><tbody>`;
-  data.forEach(item => {
-    const priceNum = parseFloat((item.price||'').replace(/[^0-9.]/g,'')) || 0;
-    const esc = s => (s||'').replace(/"/g,'&quot;').replace(/</g,'&lt;');
-    const nameCell = item.url
-      ? `<a href="${item.url}" target="_blank">${esc(item.name)}</a>`
-      : esc(item.name);
-    const isSold = item.sold || false;
-    const isWatched = (window._watchlist || {})[item.id || ''];
-    const watchStar = item.id
-      ? `<button class="watch-btn ${isWatched ? 'active' : ''}" onclick="toggleWatch('${(item.id||'').replace(/'/g,"\\'")}',this)" title="${isWatched ? 'Remove from' : 'Add to'} watch list">${isWatched ? '★' : '☆'}</button>`
-      : '';
-    const dropCell = item.price_drop > 0
-      ? `<span class="tag-drop">↓ $${Math.round(item.price_drop)}</span>`
-      : '';
-    const soldBadge = isSold ? ' <span class="tag-sold">Sold</span>' : '';
-    html += `<tr class="${isSold ? 'sold-row' : ''}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}" data-image-id="${esc(item.image_id)}">` +
-      `<td>${item.isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
-      `<td>${watchStar}</td>` +
-      `<td>${nameCell}${soldBadge}</td>` +
-      `<td>${esc(item.brand)}</td>` +
-      `<td>${item.price||''}</td>` +
-      `<td>${dropCell}</td>` +
-      `<td>${esc(item.condition)}</td>` +
-      `<td>${esc(item.category)}</td>` +
-      `<td>${esc(item.subcategory)}</td>` +
-      `<td>${esc(item.date||'')}</td>` +
-      `<td>${esc(item.location||item.store)}</td>` +
-      `</tr>`;
-  });
+  for (let idx = 0; idx < showing; idx++) {
+    html += _buildRowHtml(filtered[idx]);
+  }
   html += '</tbody></table>';
+  if (hasMore) {
+    const remaining = filtered.length - showing;
+    html += `<div id="show-more-wrap" style="text-align:center;padding:12px"><button onclick="showMore()" style="padding:8px 24px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#aaa;font-size:.82rem;cursor:pointer">Show More (${remaining} remaining)</button></div>`;
+  }
   document.getElementById('res-body').innerHTML = html;
+
+  // Update filter count display
+  const countEl = document.getElementById('res-search-count');
+  if (q || cond || cat || subcat) {
+    countEl.textContent = `${filtered.length} of ${allData.length}`;
+  } else {
+    countEl.textContent = '';
+  }
+  const clearBtn = document.getElementById('clear-filters-btn');
+  if (clearBtn) clearBtn.style.display = (cond || cat || subcat) ? '' : 'none';
 
   if (window._sortCol !== null) {
     const th = document.querySelector(`#res-table th[data-col="${window._sortCol}"]`);
@@ -3216,15 +3516,40 @@ function renderTable() {
     th.addEventListener('click', () => sortTable(colIdx));
   });
 
-  filterResults();
   autoSizeItemColumn();
+}
+
+function showMore() {
+  if (_browseMode === 'server') {
+    // Fetch next page from server and append
+    _fetchBrowsePage(_srvPage + 1, true);
+    return;
+  }
+  window._visibleCount += PAGE_SIZE;
+  renderTable();
 }
 
 function sortTable(colIdx) {
   const field = _SORT_COLS[colIdx];
   if (!field) return;
+
+  if (_browseMode === 'server') {
+    // Determine new direction
+    const newDir = (window._sortCol === colIdx)
+      ? (window._sortDir === 1 ? -1 : 1)
+      : (field === 'date' ? -1 : 1);
+    window._sortCol = colIdx;
+    window._sortDir = newDir;
+    _srvSortField = field;
+    _srvSortDir = (newDir === -1) ? 'desc' : 'asc';
+    _srvPage = 1;
+    _fetchBrowsePage(1, false);
+    return;
+  }
+
   window._sortDir = (window._sortCol === colIdx) ? window._sortDir * -1 : (field === 'date' ? -1 : 1);
   window._sortCol = colIdx;
+  window._visibleCount = PAGE_SIZE;  // Reset pagination on sort
   const dir = window._sortDir;
   window._tableData.sort((a, b) => {
     let av = a[field] || '', bv = b[field] || '';
@@ -3246,16 +3571,25 @@ function sortTable(colIdx) {
 
 function autoSizeItemColumn() {
   // Measure the longest visible item name using a hidden canvas for accuracy
-  const data = window._tableData || [];
-  if (!data.length) return;
   const canvas = autoSizeItemColumn._canvas || (autoSizeItemColumn._canvas = document.createElement('canvas'));
   const ctx = canvas.getContext('2d');
   ctx.font = '13.3px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'; // matches td font ~.83rem
   let maxW = 80;
-  data.forEach(item => {
-    const w = ctx.measureText(item.name || '').width;
-    if (w > maxW) maxW = w;
-  });
+  // In server mode, read names from DOM rows; in local mode, use _tableData
+  if (_browseMode === 'server') {
+    document.querySelectorAll('#res-table tbody tr').forEach(tr => {
+      const name = tr.dataset.name || '';
+      const w = ctx.measureText(name).width;
+      if (w > maxW) maxW = w;
+    });
+  } else {
+    const data = window._tableData || [];
+    if (!data.length) return;
+    data.forEach(item => {
+      const w = ctx.measureText(item.name || '').width;
+      if (w > maxW) maxW = w;
+    });
+  }
   // Add padding (link underline cursor area + 24px right padding)
   const colW = Math.min(Math.ceil(maxW) + 32, 520); // cap at 520px
   const th = document.querySelector('#res-table th[data-col="1"]');
@@ -3316,6 +3650,7 @@ function autoSizeItemColumn() {
 })();
 
 // ── Results filter ────────────────────────────────────────────────────────────
+let _filterTimer = null;
 function clearFilters() {
   document.getElementById('cond-filter').value = '';
   document.getElementById('cat-filter').value = '';
@@ -3327,24 +3662,17 @@ function clearFilters() {
 }
 
 function filterResults() {
-  const q      = document.getElementById('res-search').value.toLowerCase().trim();
-  const cond   = document.getElementById('cond-filter').value;
-  const cat    = document.getElementById('cat-filter').value;
-  const subcat = document.getElementById('subcat-filter').value;
-  const rows   = document.querySelectorAll('#res-body tbody tr');
-  let visible  = 0;
-  rows.forEach(row => {
-    const show = (!q      || row.textContent.toLowerCase().includes(q)) &&
-                 (!cond   || (row.dataset.condition   || '') === cond) &&
-                 (!cat    || (row.dataset.category    || '') === cat) &&
-                 (!subcat || (row.dataset.subcategory || '') === subcat);
-    row.style.display = show ? '' : 'none';
-    if (show) visible++;
-  });
-  const countEl = document.getElementById('res-search-count');
-  countEl.textContent = (q || cond || cat || subcat) ? `${visible} of ${rows.length}` : '';
-  const clearBtn = document.getElementById('clear-filters-btn');
-  if (clearBtn) clearBtn.style.display = (cond || cat || subcat) ? '' : 'none';
+  if (_browseMode === 'server') {
+    // Debounce text input, fire immediately for dropdowns
+    clearTimeout(_filterTimer);
+    _filterTimer = setTimeout(() => {
+      _srvPage = 1;
+      _fetchBrowsePage(1, false);
+    }, 250);
+    return;
+  }
+  window._visibleCount = PAGE_SIZE;  // Reset pagination on filter change
+  renderTable();
 }
 
 // ── Populate store data (one-time migration) ──────────────────────────────────
