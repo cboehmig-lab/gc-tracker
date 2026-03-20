@@ -6,14 +6,16 @@ Run with:  python3 gc_tracker_app.py
 Then open: http://localhost:5050
 """
 
-import json, os, re, sys, time, threading, queue, webbrowser
+import json, os, re, sys, time, threading, queue, webbrowser, random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
 
 
-
+def _sleep(base: float, jitter: float = 0.5):
+    """Sleep for base ± jitter seconds to avoid looking like a bot."""
+    time.sleep(max(0.1, base + random.uniform(-jitter, jitter)))
 
 try:
     from flask import (Flask, request, jsonify, Response, stream_with_context,
@@ -74,18 +76,29 @@ _HEADERS = {
 _http = http.Session()
 _http.headers.update(_HEADERS)
 
-_cat_cache: dict = {}
+# Load persisted cookies if available
+COOKIE_FILE = DATA_DIR / "gc_cookies.json"
 
-# Pre-fetch store list at module load time (runs on Railway/gunicorn startup)
-def _startup_fetch_stores():
-    if not STORES_CACHE.exists():
+def _load_cookies():
+    if COOKIE_FILE.exists():
         try:
-            stores = _fetch_stores_from_algolia()
-            if stores:
-                STORES_CACHE.write_text(json.dumps({"stores": sorted(stores), "updated": datetime.now().isoformat(), "count": len(stores)}))
+            cookies = json.loads(COOKIE_FILE.read_text())
+            _http.cookies.update(cookies)
         except Exception:
             pass
 
+def _save_cookies():
+    try:
+        COOKIE_FILE.write_text(json.dumps(dict(_http.cookies)))
+    except Exception:
+        pass
+
+def _rotate_ua():
+    """Pick a random User-Agent for the next request."""
+    _http.headers["User-Agent"] = random.choice(_USER_AGENTS)
+
+# ── Category cache ────────────────────────────────────────────────────────────
+_cat_cache: dict = {}
 
 def _load_cat_cache():
     global _cat_cache
@@ -114,34 +127,18 @@ def get_store_list() -> list[str]:
         except Exception:
             pass
     if not cached:
-        # No cache — fetch from Algolia directly
         try:
             cached = _fetch_stores_from_algolia()
             if cached:
-                STORES_CACHE.write_text(json.dumps({"stores": sorted(cached), "updated": datetime.now().isoformat()}))
+                STORES_CACHE.write_text(json.dumps({
+                    "stores": sorted(cached),
+                    "updated": datetime.now().isoformat(),
+                    "count": len(cached)
+                }))
         except Exception:
             pass
-    return sorted(set(cached))
-
-
-def _fetch_stores_from_algolia() -> list[str]:
-    """Get the full store list from Algolia's facets — fast and authoritative."""
-    ts = int(time.time())
-    payload = {"requests": [{
-        "indexName":     ALGOLIA_INDEX,
-        "facetFilters":  ["categoryPageIds:Used", "condition.lvl0:Used"],
-        "facets":        ["stores"],
-        "hitsPerPage":   0,
-        "maxValuesPerFacet": 1000,
-        "numericFilters": [f"startDate<={ts}"],
-        "query":         "",
-    }]}
-    r = http.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=20)
-    r.raise_for_status()
-    data = r.json()
-    facets = data.get("results", [{}])[0].get("facets", {})
-    stores = list(facets.get("stores", {}).keys())
-    return sorted(stores)
+    blocklist = _get_blocklist()
+    return sorted(set(cached) - blocklist)
 
 
 _US_STATES = [
@@ -150,6 +147,153 @@ _US_STATES = [
     "nh","nj","nm","ny","nc","nd","oh","ok","or","pa","ri","sc","sd","tn",
     "tx","ut","vt","va","wa","wv","wi","wy","dc",
 ]
+
+def _fetch_state_stores(state: str) -> list[str]:
+    """Fetch store city names for a single state from stores.guitarcenter.com.
+    Only extracts names from confirmed store-page URLs matching /{state}/{city}/{id},
+    which is the only reliable signal — headings and link text pick up nav garbage."""
+    try:
+        r = _http.get(f"https://stores.guitarcenter.com/{state}/", timeout=10)
+        if r.status_code != 200:
+            return []
+        html = r.text
+        # Only trust URLs in the form /state/city-slug/numeric-id
+        # These uniquely identify actual store pages; nav links never match this pattern.
+        slug_to_name = {}
+        for slug in re.findall(
+            rf'href="/{re.escape(state)}/([a-z][a-z0-9\-]+)/(\d+)(?:/[^"]*)?"',
+            html
+        ):
+            city_slug, store_id = slug
+            # Convert slug to display name: "south-austin" → "South Austin"
+            name = " ".join(w.capitalize() for w in city_slug.split("-"))
+            slug_to_name[city_slug] = name
+        return list(slug_to_name.values())
+    except Exception:
+        return []
+
+
+def _extract_stores_from_used_page(html: str) -> list[str]:
+    """Extract all store names from GC's used inventory page filter facets.
+    The __NEXT_DATA__ blob or page HTML contains the complete list of valid store
+    names exactly as the filters=stores: parameter expects them."""
+    stores = []
+
+    # Strategy 1: __NEXT_DATA__ — find facet values for the 'stores' facet
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if m:
+        try:
+            nd = json.loads(m.group(1))
+            # Walk looking for arrays of facet values near a 'stores' key
+            def find_store_facets(obj, depth=0):
+                if depth > 12: return
+                if isinstance(obj, dict):
+                    # Look for facet arrays keyed by 'stores' or containing store-like values
+                    for k, v in obj.items():
+                        if k.lower() in ('stores', 'store') and isinstance(v, list):
+                            for item in v:
+                                if isinstance(item, dict):
+                                    val = item.get('displayValue') or item.get('value') or item.get('name') or ''
+                                elif isinstance(item, str):
+                                    val = item
+                                else:
+                                    continue
+                                if isinstance(val, str) and 2 < len(val) < 60:
+                                    stores.append(val)
+                        elif isinstance(v, (dict, list)):
+                            find_store_facets(v, depth + 1)
+                elif isinstance(obj, list):
+                    for item in obj:
+                        find_store_facets(item, depth + 1)
+            find_store_facets(nd)
+        except Exception:
+            pass
+
+    # Strategy 2: look for displayValue patterns near "stores" in the raw JSON
+    if len(stores) < 10:
+        # Find JSON arrays that look like store facets
+        for m2 in re.finditer(r'"(?:stores|store)"[^[]*(\[[^\]]{100,}\])', html, re.DOTALL):
+            try:
+                arr = json.loads(m2.group(1))
+                for item in arr:
+                    if isinstance(item, dict):
+                        val = item.get('displayValue') or item.get('value') or ''
+                        if isinstance(val, str) and 2 < len(val) < 60:
+                            stores.append(val)
+            except Exception:
+                pass
+
+    return stores
+
+
+def refresh_store_list(send_progress=None) -> list[str]:
+    """Fetch authoritative store list from GC's used inventory page filter facets,
+    then fall back to state-by-state scraping. Removes blocklisted stores."""
+    live_names = []
+
+    # Strategy 1: fetch GC's used inventory page and extract store names from filter facets
+    # This is the gold standard — these are the exact names the filter system accepts
+    try:
+        r = _http.get("https://www.guitarcenter.com/Used/", timeout=20)
+        if r.status_code == 200:
+            live_names = _extract_stores_from_used_page(r.text)
+    except Exception:
+        pass
+
+    # Strategy 2: scrape stores.guitarcenter.com state by state in parallel
+    if len(live_names) < 50:
+        try:
+            with ThreadPoolExecutor(max_workers=10) as pool:
+                futures = {pool.submit(_fetch_state_stores, st): st for st in _US_STATES}
+                for future in as_completed(futures):
+                    try:
+                        live_names.extend(future.result())
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    # Strategy 3: main stores page URL pattern
+    if len(live_names) < 20:
+        try:
+            r = _http.get("https://www.guitarcenter.com/Stores/", timeout=15)
+            r.raise_for_status()
+            html = r.text
+            for slug in re.findall(r'href="https?://stores\.guitarcenter\.com/([a-z]{2})/([a-z][a-z0-9\-]+)/(\d+)"', html):
+                _, city_slug, _ = slug
+                name = " ".join(w.capitalize() for w in city_slug.split("-"))
+                live_names.append(name)
+        except Exception:
+            pass
+
+    # Strip nav garbage
+    _NAV_GARBAGE = {
+        "find your local guitar center store", "my account", "sign in", "track order",
+        "returns", "faqs", "store locator", "guitar center lessons", "guitar center",
+        "home", "shop all", "new arrivals", "top sellers", "on sale", "price drop",
+        "used", "vintage", "sell your gear", "financing", "outlet", "deals",
+        "daily pick", "gc pro", "lessons", "repairs", "rentals", "riffs blog",
+        "accessibility statement", "privacy policy", "terms of use", "site map",
+        "careers", "about", "contact us", "press room", "service", "support",
+        "all rights reserved", "california transparency", "do not sell",
+    }
+    live_names = [
+        n for n in live_names
+        if n.strip().lower() not in _NAV_GARBAGE
+        and len(n.strip()) >= 3
+        and not any(bad in n.lower() for bad in ("guitar center", "my account", "sign in",
+                                                   "track order", "©", "all rights"))
+    ]
+
+    blocklist = _get_blocklist()
+    merged = sorted(set(live_names) - blocklist)
+    STORES_CACHE.write_text(json.dumps({
+        "stores":      merged,
+        "live_count":  len(set(live_names)),
+        "updated":     datetime.now().isoformat(),
+    }))
+    return merged
+
 
 def get_store_info() -> dict:
     """Return metadata about the store list (count, last updated, live vs fallback)."""
@@ -227,9 +371,29 @@ ALGOLIA_HEADERS = {
     "Content-Type":             "application/json",
 }
 
-def fetch_page(store_name: str, page: int) -> dict:
-    """Fetch one page of used inventory for a store via Algolia API."""
+def _fetch_stores_from_algolia() -> list[str]:
+    """Get the full store list from Algolia's facets — fast and authoritative."""
     ts = int(time.time())
+    payload = {"requests": [{
+        "indexName":     ALGOLIA_INDEX,
+        "facetFilters":  ["categoryPageIds:Used", "condition.lvl0:Used"],
+        "facets":        ["stores"],
+        "hitsPerPage":   0,
+        "maxValuesPerFacet": 1000,
+        "numericFilters": [f"startDate<={ts}"],
+        "query":         "",
+    }]}
+    r = _http.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+    facets = data.get("results", [{}])[0].get("facets", {})
+    stores = list(facets.get("stores", {}).keys())
+    return sorted(stores)
+
+
+    """Fetch one page of used inventory for a store via Algolia API."""
+    import time as _time
+    ts = int(_time.time())
     payload = {"requests": [{
         "indexName":     ALGOLIA_INDEX,
         "analyticsTags": ["Did Not Search"],
@@ -246,16 +410,16 @@ def fetch_page(store_name: str, page: int) -> dict:
         "query":         "",
         "ruleContexts":  ["used-page", "primary_itemtype", "extension_itemtype"],
     }]}
-    # Use http.post directly (thread-safe for simple POST calls)
-    r = http.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=20)
+    r = _http.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=20)
     r.raise_for_status()
     return r.json()
 
 
 def parse_products(data: any, store_name: str) -> list[dict]:
     """Parse Algolia API response into product list."""
-    if not isinstance(data, dict):
-        return []  # HTML format no longer supported
+    # Handle both old HTML string format and new Algolia dict format
+    if isinstance(data, str):
+        return _parse_products_html(data, store_name)
 
     products = []
     try:
@@ -292,6 +456,58 @@ def parse_products(data: any, store_name: str) -> list[dict]:
     return products
 
 
+def _parse_products_html(html: str, store_name: str) -> list[dict]:
+    """Legacy HTML parser — kept as fallback."""
+    condition_map = _extract_conditions_from_listing(html)
+    for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL):
+        try:
+            data = json.loads(block)
+        except Exception:
+            continue
+        if data.get("@type") != "CollectionPage":
+            continue
+        items = data.get("mainEntity", {}).get("itemListElement", [])
+        if not items:
+            continue
+        products = []
+        for entry in items:
+            item = entry.get("item", {})
+            name = _clean_name(item.get("name", ""))
+            sku  = item.get("sku",  "").strip()
+            url  = item.get("url",  "").strip()
+            offers = item.get("offers", {})
+            raw  = offers.get("price", "")
+            try:    price = float(raw) if raw else None
+            except: price = None
+            url_key = url.split("?")[0]
+            condition = condition_map.get(url_key, "")
+            if not condition:
+                raw_cond = offers.get("itemCondition", "")
+                parsed = _parse_condition(raw_cond)
+                condition = parsed if parsed.lower() not in ("used", "") else ""
+            if name and sku:
+                products.append({"id": sku, "name": name, "price": price,
+                                  "store": store_name, "url": url,
+                                  "condition": condition})
+        if products:
+            return products
+    return []
+
+
+_CONDITION_MAP = {
+    "new":          "New",
+    "likenew":      "Like New",
+    "excellent":    "Excellent",
+    "great":        "Great",
+    "verygood":     "Very Good",
+    "good":         "Good",
+    "fair":         "Fair",
+    "poor":         "Poor",
+    "usedcondition":"Used",
+    "refurbished":  "Refurbished",
+    "blemished":    "Blemished",
+}
+
 def _parse_condition(raw: str) -> str:
     """Normalise a schema.org itemCondition URL or plain text to a readable label."""
     if not raw:
@@ -299,6 +515,78 @@ def _parse_condition(raw: str) -> str:
     # Strip schema.org URL prefix, e.g. "https://schema.org/GoodCondition" → "GoodCondition"
     key = raw.split("/")[-1].lower().replace("condition", "").replace(" ", "").replace("-", "")
     return _CONDITION_MAP.get(key, raw.split("/")[-1])  # fall back to raw tail if unknown
+
+
+def _extract_conditions_from_listing(html: str) -> dict:
+    """
+    Build a map of {url → condition} from the GC 24-item listing page.
+    Card structure (from screenshot):
+      Available at: City, ST
+      Condition: Good
+    Condition comes AFTER 'Available at:' — look forward within 200 chars.
+    """
+    # 1. Extract ordered URLs from JSON-LD
+    urls = []
+    ld_end = 0
+    for m in re.finditer(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>',
+                         html, re.DOTALL):
+        try:
+            data = json.loads(m.group(1))
+            if data.get("@type") == "CollectionPage":
+                for entry in data.get("mainEntity", {}).get("itemListElement", []):
+                    url = entry.get("item", {}).get("url", "").split("?")[0]
+                    if url:
+                        urls.append(url)
+                ld_end = m.end()
+                break
+        except Exception:
+            pass
+
+    if not urls or not ld_end:
+        return {}
+
+    card_html = html[ld_end:]
+
+    cond_re = re.compile(
+        r'Condition:\s*(?:<!--[^>]*>\s*)*([A-Z][A-Za-z ]{1,19}?)(?:\s*[<\n\r])',
+        re.DOTALL
+    )
+
+    # Find all "Available at:" — one per card, condition follows within ~200 chars
+    avail_anchors = [m.start() for m in re.finditer(r'Available\s*at:', card_html)]
+
+    conditions = []
+    if len(avail_anchors) >= len(urls):
+        for anchor_pos in avail_anchors[:len(urls)]:
+            # Look FORWARD up to 200 chars after "Available at:" for the condition
+            chunk = card_html[anchor_pos:anchor_pos + 200]
+            m = cond_re.search(chunk)
+            conditions.append(m.group(1).strip() if m else "")
+    else:
+        # Fallback: positional scan after ld_end
+        for m in cond_re.finditer(card_html):
+            conditions.append(m.group(1).strip())
+            if len(conditions) == len(urls):
+                break
+
+    # Diagnostics
+    try:
+        # Show what's after the first Available at:
+        after_sample = ""
+        if avail_anchors:
+            after_sample = card_html[avail_anchors[0]:avail_anchors[0]+200].replace("\n", "\\n")
+        (DATA_DIR / "gc_condition_diag.json").write_text(json.dumps({
+            "generated": datetime.now().isoformat(),
+            "url_count": len(urls),
+            "avail_anchor_count": len(avail_anchors),
+            "conditions_found": sum(1 for c in conditions if c),
+            "sample_conditions": conditions[:5],
+            "html_after_first_available_at": after_sample,
+        }, indent=2))
+    except Exception:
+        pass
+
+    return {url: cond for url, cond in zip(urls, conditions) if cond}
 
 
 def parse_products(data, store_name: str) -> list[dict]:
@@ -328,8 +616,6 @@ def parse_products(data, store_name: str) -> list[dict]:
                 elif isinstance(condition, str):
                     condition = condition.split(">")[-1].strip()
                 condition = _parse_condition(condition) if condition else ""
-                # Brand directly from Algolia
-                brand = hit.get("brand") or ""
                 # Date listed from startDate (Unix timestamp in seconds)
                 start_ts = hit.get("startDate") or 0
                 try:
@@ -338,58 +624,287 @@ def parse_products(data, store_name: str) -> list[dict]:
                 except Exception:
                     date_str = ""
                 products.append({
-                    "id":          sku,
-                    "name":        name,
-                    "price":       price,
-                    "store":       store_name,
-                    "url":         url,
-                    "condition":   condition,
-                    "brand":       brand,
-                    "seo_url":     seo_url,
+                    "id":        sku,
+                    "name":      name,
+                    "price":     price,
+                    "store":     store_name,
+                    "url":       url,
+                    "condition": condition,
                     "date_listed": date_str,
                 })
         except Exception:
             pass
         return products
 
+    # Legacy HTML format fallback
+    html = data
+    condition_map = _extract_conditions_from_listing(html)
+    for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL):
+        try:
+            d = json.loads(block)
+        except Exception:
+            continue
+        if d.get("@type") != "CollectionPage":
+            continue
+        items = d.get("mainEntity", {}).get("itemListElement", [])
+        if not items:
+            continue
+        products = []
+        for entry in items:
+            item = entry.get("item", {})
+            name = _clean_name(item.get("name", ""))
+            sku  = item.get("sku",  "").strip()
+            url  = item.get("url",  "").strip()
+            offers = item.get("offers", {})
+            raw  = offers.get("price", "")
+            try:    price = float(raw) if raw else None
+            except: price = None
+            url_key = url.split("?")[0]
+            condition = condition_map.get(url_key, "")
+            if not condition:
+                raw_cond = offers.get("itemCondition", "")
+                parsed = _parse_condition(raw_cond)
+                condition = parsed if parsed.lower() not in ("used", "") else ""
+            if name and sku:
+                products.append({"id": sku, "name": name, "price": price,
+                                  "store": store_name, "url": url,
+                                  "condition": condition})
+        if products:
+            return products
+    return []
 
-def _classify_from_seo_url(seo_url: str) -> tuple[str, str]:
-    """Extract category/subcategory from GC seoUrl.
-    e.g. /Used/Guitars/Solid-Body-Electric-Guitars/Fender/... → (Guitars, Solid Body Electric Guitars)
-         /Used/Amplifiers-Effects/Guitar-Amplifiers/... → (Amplifiers & Effects, Guitar Amplifiers)
-    """
-    if not seo_url:
-        return "", ""
-    parts = [p for p in seo_url.strip("/").split("/") if p and p.lower() not in ("used","vintage")]
-    if not parts:
-        return "", ""
 
-    _CAT_MAP = {
-        "guitars":                    "Guitars",
-        "bass":                       "Bass",
-        "amplifiers-effects":         "Amplifiers & Effects",
-        "drums-percussion":           "Drums & Percussion",
-        "keyboards-midi":             "Keyboards & MIDI",
-        "recording-gear":             "Recording",
-        "microphones-wireless-systems":"Microphones & Wireless",
-        "dj-gear":                    "DJ Equipment",
-        "live-sound":                 "Live Sound",
-        "lighting-stage-effects":     "Lighting & Stage",
-        "accessories":                "Accessories",
-        "folk-traditional-instruments":"Folk & Traditional",
-        "pro-audio":                  "Pro Audio",
-    }
+def _parse_algolia_products(nd: dict, store_name: str, condition_map: dict) -> list[dict]:
+    """Walk __NEXT_DATA__ looking for Algolia product hits."""
+    products = []
 
-    cat_slug = parts[0].lower()
-    cat = _CAT_MAP.get(cat_slug, parts[0].replace("-", " ").title())
+    def walk(obj, depth=0):
+        if depth > 15 or products:
+            return
+        if isinstance(obj, dict):
+            # Look for Algolia hits array
+            hits = obj.get("hits") or obj.get("results") or []
+            if isinstance(hits, list) and hits and isinstance(hits[0], dict):
+                for hit in hits:
+                    sku  = str(hit.get("objectID") or hit.get("sku") or hit.get("productId") or "").strip()
+                    name = _clean_name(hit.get("name") or hit.get("title") or "")
+                    if not sku or not name:
+                        continue
+                    price_raw = hit.get("price") or hit.get("salePrice") or hit.get("listPrice") or 0
+                    try:    price = float(price_raw) if price_raw else None
+                    except: price = None
+                    url = hit.get("url") or hit.get("pdpUrl") or f"https://www.guitarcenter.com/used/{sku}.gc"
+                    if not url.startswith("http"):
+                        url = "https://www.guitarcenter.com" + url
+                    url_key = url.split("?")[0]
+                    condition = condition_map.get(url_key, "")
+                    if not condition:
+                        condition = hit.get("condition") or hit.get("itemCondition") or ""
+                        condition = _parse_condition(condition) if condition else ""
+                    products.append({"id": sku, "name": name, "price": price,
+                                     "store": store_name, "url": url, "condition": condition})
+                return
+            for v in obj.values():
+                if isinstance(v, (dict, list)):
+                    walk(v, depth + 1)
+        elif isinstance(obj, list):
+            for item in obj:
+                if isinstance(item, (dict, list)):
+                    walk(item, depth + 1)
 
-    subcat = ""
-    if len(parts) > 1:
-        subcat = parts[1].replace("-", " ").title()
-        # Strip "Used " prefix if present
-        if subcat.lower().startswith("used "):
-            subcat = subcat[5:].strip()
+    walk(nd)
+    return products
 
+
+
+
+
+def _clean_gc_cat(s: str) -> str:
+    """Strip 'Used ' prefix from GC category breadcrumb names."""
+    s = s.strip()
+    if s.lower().startswith("used "):
+        s = s[5:].strip()
+    return s
+
+
+def _find_breadcrumbs_in_json(data, depth: int = 0):
+    """Recursively search for a breadcrumb array inside __NEXT_DATA__ JSON."""
+    if depth > 8:
+        return None
+    if isinstance(data, dict):
+        for key in ("breadcrumbs", "breadcrumb", "breadCrumbs", "Breadcrumbs",
+                    "crumbs", "navCrumbs", "categoryPath", "categories"):
+            val = data.get(key)
+            if isinstance(val, list) and len(val) >= 2:
+                name_keys = ("name", "displayName", "label", "text", "title")
+                if all(isinstance(v, dict) and any(k in v for k in name_keys) for v in val):
+                    return val
+        for v in data.values():
+            if isinstance(v, (dict, list)):
+                result = _find_breadcrumbs_in_json(v, depth + 1)
+                if result:
+                    return result
+    elif isinstance(data, list):
+        for item in data:
+            if isinstance(item, (dict, list)):
+                result = _find_breadcrumbs_in_json(item, depth + 1)
+                if result:
+                    return result
+    return None
+
+
+def _extract_condition_from_html(html: str) -> str:
+    """Extract condition label from a GC page (listing or product page).
+    Prioritises the visible 'Condition: X' text that appears on both page types."""
+
+    _VALID = {"new", "like new", "excellent", "great", "very good", "good", "fair", "poor",
+              "blemished", "refurbished", "used"}
+
+    # Strategy A: plain visible text — "Condition: Good" / "Condition: Very Good"
+    # This is the most reliable; it's what the shopper sees on the page.
+    m = re.search(r'[Cc]ondition\s*[:\-–]\s*([A-Za-z][A-Za-z\s]{1,20}?)(?:\s*[<\n\r,]|$)', html)
+    if m:
+        val = m.group(1).strip().rstrip(".,;")
+        if val.lower() in _VALID:
+            return val.title()
+
+    # Strategy B: JSON-LD itemCondition on a Product page
+    for block in re.findall(
+        r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL
+    ):
+        try:
+            d = json.loads(block)
+            offers = None
+            if d.get("@type") == "Product":
+                offers = d.get("offers", {})
+            elif d.get("@type") == "CollectionPage":
+                items = d.get("mainEntity", {}).get("itemListElement", [])
+                if items:
+                    offers = items[0].get("item", {}).get("offers", {})
+            if offers:
+                raw = offers.get("itemCondition", "")
+                if raw:
+                    parsed = _parse_condition(raw)
+                    if parsed.lower() not in ("used", "usedcondition") and parsed:
+                        return parsed
+        except Exception:
+            pass
+
+    # Strategy C: __NEXT_DATA__ JSON — look for condition keys
+    m2 = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if m2:
+        try:
+            nd = json.loads(m2.group(1))
+            cond = _find_key_in_json(nd, ("conditionDisplayName", "usedCondition",
+                                          "productCondition", "itemCondition", "condition"))
+            if cond and str(cond).lower() in _VALID:
+                return str(cond).strip().title()
+        except Exception:
+            pass
+
+    # Strategy D: data attributes / inline JSON strings
+    for pat in [
+        r'data-condition="([^"]+)"',
+        r'"conditionDisplayName"\s*:\s*"([^"]+)"',
+        r'"usedCondition"\s*:\s*"([^"]+)"',
+    ]:
+        m3 = re.search(pat, html)
+        if m3:
+            val = m3.group(1).strip()
+            if val.lower() in _VALID:
+                return val.title()
+
+    return ""
+
+
+def _find_key_in_json(data, keys: tuple, depth: int = 0):
+    """Recursively search a JSON structure for any of the given keys."""
+    if depth > 10:
+        return None
+    if isinstance(data, dict):
+        for k in keys:
+            if k in data and isinstance(data[k], str) and data[k]:
+                return data[k]
+        for v in data.values():
+            result = _find_key_in_json(v, keys, depth + 1)
+            if result:
+                return result
+    elif isinstance(data, list):
+        for item in data:
+            result = _find_key_in_json(item, keys, depth + 1)
+            if result:
+                return result
+    return None
+
+
+def fetch_page_data(url: str, name: str) -> tuple[str, str, str]:
+    """Fetch (category, subcategory, condition) from a GC product page URL.
+    Tries JSON-LD BreadcrumbList first, then __NEXT_DATA__, then keyword fallback."""
+    try:
+        r = _http.get(url, timeout=15)
+        if r.status_code != 200:
+            cat, subcat = classify_by_name(name)
+            return cat, subcat, ""
+        html = r.text
+
+        condition = _extract_condition_from_html(html)
+
+        # Strategy 1: JSON-LD BreadcrumbList
+        for block in re.findall(
+            r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>',
+            html, re.DOTALL
+        ):
+            try:
+                d = json.loads(block)
+                if d.get("@type") == "BreadcrumbList":
+                    els = sorted(d.get("itemListElement", []),
+                                 key=lambda x: x.get("position", 0))
+                    names = []
+                    for el in els:
+                        n = ((el.get("item") or {}).get("name") or el.get("name") or "").strip()
+                        if n and n.lower() not in ("home", "used & vintage", "used"):
+                            names.append(_clean_gc_cat(n))
+                    if names:
+                        cat    = names[0]
+                        subcat = names[2] if len(names) >= 3 else (names[1] if len(names) >= 2 else "")
+                        return cat, subcat, condition
+            except Exception:
+                pass
+
+        # Strategy 2: __NEXT_DATA__ JSON blob (Next.js server-side props)
+        m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+        if m:
+            try:
+                nd = json.loads(m.group(1))
+                crumbs = _find_breadcrumbs_in_json(nd)
+                if crumbs:
+                    names = []
+                    for c in crumbs:
+                        n = (c.get("displayName") or c.get("name") or
+                             c.get("label") or c.get("text") or "").strip()
+                        if n and n.lower() not in ("home", "used & vintage", "used"):
+                            names.append(_clean_gc_cat(n))
+                    if names:
+                        cat    = names[0]
+                        subcat = names[2] if len(names) >= 3 else (names[1] if len(names) >= 2 else "")
+                        return cat, subcat, condition
+            except Exception:
+                pass
+
+        cat, subcat = classify_by_name(name)
+        return cat, subcat, condition
+
+    except Exception:
+        pass
+
+    # Final fallback: keyword classification
+    cat, subcat = classify_by_name(name)
+    return cat, subcat, ""
+
+
+# Keep old name as alias for any callers
+def fetch_category_from_page(url: str, name: str) -> tuple[str, str]:
+    cat, subcat, _ = fetch_page_data(url, name)
     return cat, subcat
 
 
@@ -546,6 +1061,21 @@ def classify_by_name(name: str) -> tuple[str, str]:
     return ("", "")
 
 
+def fetch_category(sku: str, name: str, url: str) -> tuple[str, str]:
+    """Return (category, subcategory) for a product.
+    Uses keyword classification from the product name (fast, no HTTP).
+    Falls back to cached value if already known."""
+    if sku in _cat_cache:
+        d = _cat_cache[sku]
+        # Re-classify if cache has empty values and we have a name
+        if d.get("category") or not name:
+            return d.get("category", ""), d.get("subcategory", "")
+
+    cat, subcat = classify_by_name(name)
+    _cat_cache[sku] = {"category": cat, "subcategory": subcat}
+    return cat, subcat
+
+
 def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Event) -> tuple[list[dict], set]:
     """Returns (all_products_found, ids_seen_this_store)."""
     all_products, ids_seen = [], set()
@@ -582,7 +1112,7 @@ def scrape_store(store_name: str, seen_ids: set, send, stop_event: threading.Eve
             if len(products) < PAGE_SIZE:
                 break
         page += 1
-        time.sleep(0.1)
+        _sleep(1.0, 0.5)  # slightly faster now that we're using API not HTML
     return all_products, ids_seen
 
 
@@ -610,6 +1140,19 @@ def _remove_invalid_store(store_name: str):
     except Exception:
         pass
 
+
+def _get_blocklist() -> set:
+    """Return the set of stores confirmed invalid (404'd)."""
+    blocklist_file = DATA_DIR / "gc_invalid_stores.json"
+    try:
+        if blocklist_file.exists():
+            return set(json.loads(blocklist_file.read_text()))
+    except Exception:
+        pass
+    return set()
+
+
+# ── State ─────────────────────────────────────────────────────────────────────
 
 def load_state() -> dict:
     if STATE_FILE.exists():
@@ -772,6 +1315,15 @@ def api_reset():
     _cat_cache = {}
     return jsonify({"deleted": deleted, "status": "Reset complete. Ready for a fresh baseline."})
 
+@app.route("/api/clear-blocklist", methods=["POST"])
+@login_required
+def api_clear_blocklist():
+    """Remove the invalid stores blocklist so all stores are re-evaluated."""
+    f = DATA_DIR / "gc_invalid_stores.json"
+    if f.exists():
+        f.unlink()
+    return jsonify({"status": "Blocklist cleared. Run Validate Stores to re-check all stores."})
+
 @app.route("/")
 @login_required
 def index():
@@ -788,17 +1340,19 @@ def download_excel():
 @app.route("/api/stores")
 @login_required
 def api_stores():
-    stores = get_store_list()
-    favs   = load_favorites()
-    info   = {}
-    if STORES_CACHE.exists():
-        try:
-            d = json.loads(STORES_CACHE.read_text())
-            info = {"count": len(d.get("stores",[])), "updated": d.get("updated","")}
-        except Exception:
-            pass
-    return jsonify({"stores": stores, "favorites": favs, "info": info})
+    return jsonify({
+        "stores":    get_store_list(),
+        "favorites": load_favorites(),
+        "info":      get_store_info(),
+    })
 
+@app.route("/api/stores/refresh", methods=["POST"])
+@login_required
+def api_stores_refresh():
+    stores = refresh_store_list()
+    info   = get_store_info()
+    return jsonify({"stores": stores, "favorites": load_favorites(),
+                    "count": len(stores), "info": info})
 
 @app.route("/api/refresh-stores", methods=["POST"])
 @login_required
@@ -807,7 +1361,11 @@ def api_refresh_stores():
     try:
         stores = _fetch_stores_from_algolia()
         if stores:
-            STORES_CACHE.write_text(json.dumps({"stores": sorted(stores), "updated": datetime.now().isoformat(), "count": len(stores)}))
+            STORES_CACHE.write_text(json.dumps({
+                "stores": sorted(stores),
+                "updated": datetime.now().isoformat(),
+                "count": len(stores)
+            }))
         return jsonify({"stores": stores, "count": len(stores), "status": "ok"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -945,7 +1503,7 @@ def api_state():
         "last_run":    s.get("last_run"),
         "known_items": len(s.get("seen_ids", [])),
         "excel_exists": OUTPUT_FILE.exists(),
-        "is_first_run": not STATE_FILE.exists() or not s.get("last_run"),
+        "is_first_run": not STATE_FILE.exists() or len(s.get("seen_ids", [])) == 0,
     })
 
 @app.route("/api/run", methods=["POST"])
@@ -956,23 +1514,33 @@ def api_run():
     _stop_event.clear()
     data     = request.json
     selected = data.get("stores", [])
-    # No stores selected = scan all stores
-    if not selected:
-        selected = get_store_list()
-        if not selected:
-            # Store list empty — fetch from Algolia first
-            selected = _fetch_stores_from_algolia()
-            if selected:
-                STORES_CACHE.write_text(json.dumps({"stores": sorted(selected), "updated": datetime.now().isoformat(), "count": len(selected)}))
-    if not selected:
+    baseline = data.get("baseline", False)
+    if not selected and not baseline:
         _lock.release()
-        return jsonify({"error": "Could not load store list."}), 400
+        return jsonify({"error": "No stores selected."}), 400
     while not _q.empty():
         try: _q.get_nowait()
         except queue.Empty: break
-    t = threading.Thread(target=_run, args=(selected, False), daemon=True)
+    t = threading.Thread(target=_run, args=(selected, baseline), daemon=True)
     t.start()
     return jsonify({"status": "started"})
+
+@app.route("/api/set-cookies", methods=["POST"])
+@login_required
+def api_set_cookies():
+    """Import browser cookies into the HTTP session."""
+    cookie_string = request.json.get("cookies", "")
+    count = 0
+    for part in cookie_string.split(";"):
+        part = part.strip()
+        if "=" in part:
+            k, v = part.split("=", 1)
+            _http.cookies.set(k.strip(), v.strip(), domain=".guitarcenter.com")
+            count += 1
+    _save_cookies()
+    return jsonify({"imported": count, "status": "Cookies set — try running a store now."})
+
+
 
 @app.route("/api/export-data")
 @login_required
@@ -1216,7 +1784,6 @@ def api_cl_parse_test():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-@app.route("/api/cl-debug")
 @login_required
 def api_cl_debug():
     """Probe a CL city to find the right section code and response format."""
@@ -1272,11 +1839,203 @@ def api_debug_fetch():
     except Exception as e:
         return jsonify({"error": str(e)})
 
+@login_required
+def api_debug_condition():
+    """Inspect the saved listing HTML to find exactly where condition data lives."""
+    debug_file = DATA_DIR / "gc_debug_listing.html"
+    if not debug_file.exists():
+        return jsonify({"error": "No debug file yet — run the tracker once to save a listing page, then visit this URL."})
+    html = debug_file.read_text(errors="replace")
+
+    report = {"html_size": len(html)}
+
+    # 1. All "Condition" occurrences in raw HTML (catches server-rendered text)
+    condition_hits = []
+    for m in re.finditer(r'.{0,60}[Cc]ondition.{0,60}', html):
+        txt = m.group(0).strip()
+        if txt not in condition_hits:
+            condition_hits.append(txt)
+        if len(condition_hits) >= 15:
+            break
+    report["condition_in_raw_html"] = condition_hits
+
+    # 2. Dig into __NEXT_DATA__ and find ALL keys that contain condition-like words
+    nd_condition_fields = {}
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if m:
+        try:
+            nd = json.loads(m.group(1))
+            report["has_next_data"] = True
+            report["next_data_size"] = len(m.group(1))
+
+            # Walk every key/value pair and collect anything condition-related
+            def walk(obj, path=""):
+                if isinstance(obj, dict):
+                    for k, v in obj.items():
+                        full = f"{path}.{k}" if path else k
+                        if any(c in k.lower() for c in ("condition", "grade", "quality", "rating")):
+                            nd_condition_fields[full] = str(v)[:120]
+                        if isinstance(v, (dict, list)):
+                            walk(v, full)
+                elif isinstance(obj, list):
+                    for i, item in enumerate(obj[:5]):  # only first 5 items
+                        walk(item, f"{path}[{i}]")
+            walk(nd)
+        except Exception as e:
+            report["next_data_parse_error"] = str(e)
+    else:
+        report["has_next_data"] = False
+
+    report["next_data_condition_fields"] = nd_condition_fields
+
+    # 3. All JSON-LD blocks — show the full offers object for first item
+    ld_offers = []
+    for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL):
+        try:
+            d = json.loads(block)
+            if d.get("@type") == "CollectionPage":
+                items = d.get("mainEntity", {}).get("itemListElement", [])
+                for entry in items[:3]:
+                    item = entry.get("item", {})
+                    ld_offers.append({
+                        "name": item.get("name", "")[:60],
+                        "offers": item.get("offers", {}),
+                    })
+        except Exception:
+            pass
+    report["jsonld_first_3_offers"] = ld_offers
+
+    # 4. Show raw HTML snippet around first .gc product URL
+    m2 = re.search(r'https?://www\.guitarcenter\.com/Used/[^"\'<>\s]+\.gc', html)
+    if m2:
+        start = max(0, m2.start() - 300)
+        end = min(len(html), m2.end() + 600)
+        report["html_around_first_product_url"] = html[start:end]
+
+    return jsonify(report)
+
+@app.route("/api/debug-condition/reset", methods=["GET", "POST"])
+@login_required
+def api_debug_condition_reset():
+    debug_file = DATA_DIR / "gc_debug_listing.html"
+    if debug_file.exists():
+        debug_file.unlink()
+    return jsonify({"status": "cleared"})
+
+@app.route("/api/debug-condition/diag")
+@login_required
+def api_debug_condition_diag():
+    """Read the condition extraction diagnostic log."""
+    diag_file = DATA_DIR / "gc_condition_diag.json"
+    if not diag_file.exists():
+        return jsonify({"error": "No diagnostic file yet — run the tracker first."})
+    return diag_file.read_text()
+
 @app.route("/api/stop", methods=["POST"])
 @login_required
 def api_stop():
     _stop_event.set()
     return jsonify({"status": "stopping"})
+
+@app.route("/api/populate-store-data", methods=["POST"])
+@login_required
+def api_populate_store_data():
+    """One-time migration: scan stores to tag cache entries with their store name."""
+    if not _lock.acquire(blocking=False):
+        return jsonify({"error": "A run is already in progress."}), 409
+    _stop_event.clear()
+    while not _q.empty():
+        try: _q.get_nowait()
+        except queue.Empty: break
+    data = request.json or {}
+    stores = data.get("stores", [])  # empty = all stores
+    t = threading.Thread(target=_populate_store_data, args=(stores,), daemon=True)
+    t.start()
+    return jsonify({"status": "started"})
+
+
+def _populate_store_data(selected_stores: list = None):
+    """Fetch pages of each store and tag cache entries with their store name."""
+    def send(msg): _q.put(msg)
+    try:
+        _load_cat_cache()
+        stores = selected_stores if selected_stores else get_store_list()
+        total  = len(stores)
+        updated = 0
+        label = f"{total} selected store(s)" if selected_stores else f"all {total} stores"
+        send({"type": "progress", "msg": f"Tagging cache entries for {label}…"})
+        send({"type": "progress", "msg": "You can stop at any time — progress is saved as it goes."})
+
+        for i, store in enumerate(stores, 1):
+            if _stop_event.is_set():
+                send({"type": "progress", "msg": "⏹ Stopped."})
+                break
+            if i % 20 == 1:
+                send({"type": "progress", "msg": f"  [{i}/{total}] {store}…"})
+            try:
+                page = 1
+                while page <= 50:
+                    html = fetch_page(store, page)
+                    products = parse_products(html, store)
+                    if not products:
+                        break
+                    for p in products:
+                        sku = p["id"]
+                        if sku in _cat_cache and not _cat_cache[sku].get("store"):
+                            _cat_cache[sku]["store"] = store
+                            _cat_cache[sku]["name"]  = _cat_cache[sku].get("name") or p.get("name","")
+                            _cat_cache[sku]["url"]   = _cat_cache[sku].get("url")  or p.get("url","")
+                            _cat_cache[sku]["price"] = _cat_cache[sku].get("price") or p.get("price",0)
+                            updated += 1
+                    if len(products) < PAGE_SIZE:
+                        break
+                    page += 1
+                    _sleep(1.0, 0.5)
+            except Exception:
+                pass
+            _sleep(1.5, 0.8)
+
+        _save_cat_cache()
+        send({"type": "progress", "msg": f"\n✓ Done — {updated} cache entries tagged with store names."})
+        send({"type": "done", "baseline": False, "stopped": _stop_event.is_set(),
+              "scanned": total, "new_count": 0, "new_items": [], "all_items": [],
+              "gap_fill": True, "fixed": updated})
+    except Exception as e:
+        send({"type": "done", "error": str(e), "scanned": 0, "new_count": 0, "new_items": []})
+    finally:
+        _lock.release()
+
+
+
+@login_required
+def api_validate_stores():
+    if not _lock.acquire(blocking=False):
+        return jsonify({"error": "A run is already in progress."}), 409
+    _stop_event.clear()
+    while not _q.empty():
+        try: _q.get_nowait()
+        except queue.Empty: break
+    t = threading.Thread(target=_validate_stores, daemon=True)
+    t.start()
+    return jsonify({"status": "started"})
+
+@login_required
+def api_fill_gaps():
+    """Re-scrape listing pages for selected stores to fill missing condition/category data."""
+    if not _lock.acquire(blocking=False):
+        return jsonify({"error": "A run is already in progress."}), 409
+    _stop_event.clear()
+    while not _q.empty():
+        try: _q.get_nowait()
+        except queue.Empty: break
+    data = request.json or {}
+    stores = data.get("stores", [])
+    if not stores:
+        _lock.release()
+        return jsonify({"error": "No stores selected."}), 400
+    t = threading.Thread(target=_fill_gaps, args=(stores,), daemon=True)
+    t.start()
+    return jsonify({"status": "started"})
 
 @app.route("/api/progress")
 @login_required
@@ -1293,7 +2052,168 @@ def api_progress():
                     headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
 
-def _run(selected_stores: list[str], baseline: bool = False):
+def _check_store_url(store_name: str) -> tuple[bool, str]:
+    """Check if a store name works in the GC filter URL.
+    Returns (is_valid, working_name). Tries variations if the original fails."""
+    def _try(name: str) -> bool:
+        try:
+            query = f"filters=stores:{name.replace(' ', '%20')}"
+            url   = f"https://www.guitarcenter.com/Used/?{query}&page=1"
+            r = _http.get(url, timeout=10, allow_redirects=True)
+            return r.status_code != 404
+        except Exception:
+            return True  # network error — assume valid
+
+    if _try(store_name):
+        return True, store_name
+
+    # Try stripping state suffix (e.g. "Albany NY" → "Albany")
+    parts = store_name.rsplit(' ', 1)
+    if len(parts) == 2 and len(parts[1]) == 2 and parts[1].isupper():
+        bare = parts[0]
+        if _try(bare):
+            return True, bare
+
+    return False, store_name
+
+
+def _validate_stores():
+    """Check every store with a page-1 fetch, auto-fix names, remove 404s, then rebuild."""
+    def send(msg): _q.put(msg)
+    try:
+        stores = get_store_list()
+        total  = len(stores)
+        removed = []
+        renamed = []
+        send({"type": "progress", "msg": f"Step 1: Validating {total} stores…"})
+        send({"type": "progress", "msg": "About 0.5s per store. You can stop at any time."})
+
+        updated_stores = list(stores)
+        for i, store in enumerate(stores, 1):
+            if _stop_event.is_set():
+                send({"type": "progress", "msg": "⏹ Stopped by user."})
+                break
+            if i % 25 == 1:
+                send({"type": "progress", "msg": f"  [{i}/{total}] checking…"})
+            is_valid, working_name = _check_store_url(store)
+            if not is_valid:
+                _remove_invalid_store(store)
+                removed.append(store)
+                if store in updated_stores:
+                    updated_stores.remove(store)
+                send({"type": "progress", "msg": f"  ✗ Removed: {store}"})
+            elif working_name != store:
+                idx = updated_stores.index(store) if store in updated_stores else -1
+                if idx >= 0:
+                    updated_stores[idx] = working_name
+                renamed.append(f"{store} → {working_name}")
+                send({"type": "progress", "msg": f"  ✎ Renamed: {store} → {working_name}"})
+            _sleep(0.5, 0.3)  # 0.2–0.8s between store checks
+
+        # Save corrected names back to cache
+        if renamed:
+            try:
+                d = json.loads(STORES_CACHE.read_text()) if STORES_CACHE.exists() else {}
+                d["stores"] = sorted(set(updated_stores))
+                STORES_CACHE.write_text(json.dumps(d))
+            except Exception:
+                pass
+
+        if removed:
+            send({"type": "progress", "msg": f"\n  Removed {len(removed)}: {', '.join(removed)}"})
+        if renamed:
+            send({"type": "progress", "msg": f"  Renamed {len(renamed)}: {', '.join(renamed)}"})
+        if not removed and not renamed:
+            send({"type": "progress", "msg": "\n  All stores validated — none removed or renamed."})
+
+        if not _stop_event.is_set():
+            send({"type": "progress", "msg": "\nStep 2: Rebuilding store list from GC's live data…"})
+            try:
+                new_stores = refresh_store_list()
+                send({"type": "progress", "msg": f"  ✓ Store list rebuilt — {len(new_stores)} stores."})
+            except Exception as e:
+                send({"type": "progress", "msg": f"  Rebuild failed: {e}"})
+
+        final_stores = get_store_list()
+        send({"type": "progress", "msg": f"\n✓ Done — {len(final_stores)} valid stores in list."})
+        send({"type": "done", "baseline": False, "stopped": _stop_event.is_set(),
+              "scanned": total, "new_count": 0, "new_items": [], "all_items": [],
+              "gap_fill": True, "fixed": len(removed)})
+    except Exception as e:
+        send({"type": "done", "error": str(e), "scanned": 0, "new_count": 0, "new_items": []})
+    finally:
+        _lock.release()
+
+
+def _fill_gaps(selected_stores: list[str]):
+    """Fetch individual product pages for items missing category or condition data."""
+    def send(msg): _q.put(msg)
+    try:
+        _load_cat_cache()
+
+        # Find cache entries that need fixing — missing category OR empty condition
+        gaps = {
+            sku: data for sku, data in _cat_cache.items()
+            if data.get("url")
+            and (not data.get("category") or not data.get("condition"))
+        }
+
+        total = len(gaps)
+        if total == 0:
+            send({"type": "progress", "msg": "No gaps found — all items already have category and condition data."})
+            send({"type": "done", "baseline": False, "stopped": False,
+                  "scanned": 0, "new_count": 0, "new_items": [], "all_items": [],
+                  "gap_fill": True, "fixed": 0})
+            return
+
+        send({"type": "progress", "msg": f"Found {total} items with missing data. Fetching product pages in parallel…"})
+        send({"type": "progress", "msg": f"(You can stop at any time.)"})
+
+        fixed = 0
+        gap_list = list(gaps.items())
+
+        def _fetch_gap(item):
+            sku, data = item
+            url  = data.get("url", "")
+            name = data.get("name", "")
+            try:
+                _sleep(0.3, 0.2)  # 0.1–0.5s jitter
+                cat, subcat, condition = fetch_page_data(url, name)
+                return sku, cat, subcat, condition
+            except Exception:
+                return sku, "", "", ""
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {pool.submit(_fetch_gap, item): item for item in gap_list}
+            for future in as_completed(futures):
+                if _stop_event.is_set():
+                    send({"type": "progress", "msg": "⏹ Stopped by user."})
+                    break
+                sku, cat, subcat, condition = future.result()
+                data = gaps[sku]
+                _cat_cache[sku].update({
+                    "category":          cat or data.get("category", ""),
+                    "subcategory":       subcat or data.get("subcategory", ""),
+                    "condition":         condition or data.get("condition", ""),
+                    "condition_fetched": True,
+                })
+                fixed += 1
+                if fixed % 10 == 0:
+                    send({"type": "progress", "msg": f"  …{fixed}/{total} items updated"})
+
+        _save_cat_cache()
+        send({"type": "progress", "msg": f"\n✓ Done — {fixed} item(s) updated. Re-run your stores to see the refreshed data."})
+        send({"type": "done", "baseline": False, "stopped": _stop_event.is_set(),
+              "scanned": fixed, "new_count": 0, "new_items": [], "all_items": [],
+              "gap_fill": True, "fixed": fixed})
+    except Exception as e:
+        send({"type": "done", "error": str(e), "scanned": 0, "new_count": 0, "new_items": []})
+    finally:
+        _lock.release()
+
+
+
+def _run(selected_stores: list[str], baseline: bool):
     def send(msg): _q.put(msg)
     try:
         state      = load_state()
@@ -1302,61 +2222,68 @@ def _run(selected_stores: list[str], baseline: bool = False):
         run_time   = datetime.now().isoformat()
         ts         = datetime.now().strftime("%Y-%m-%d")
 
-        stores_to_scan = selected_stores
-        label = f"{len(stores_to_scan)} store(s)"
+        stores_to_scan = get_store_list() if baseline else selected_stores
+        label = "baseline scan" if baseline else f"{len(stores_to_scan)} store(s)"
         send({"type":"progress","msg":f"Starting {label} — {len(stores_to_scan)} stores total…"})
-        send({"type":"progress","msg":"⚡ Using Algolia API with parallel fetching…"})
+        if baseline:
+            send({"type":"progress","msg":"⏳ This may take 2–4 hours with anti-bot delays. Feel free to leave it running!"})
 
         all_products, ids_this_run = [], set()
-        completed = [0]
-        lock = threading.Lock()
-
-        errors = [0]
-        def fetch_store(store):
+        for i, store in enumerate(stores_to_scan, 1):
             if _stop_event.is_set():
-                return [], set()
-            try:
-                products, ids = scrape_store(store, seen_ids, lambda m: None, _stop_event)
-            except Exception as e:
-                with lock:
-                    errors[0] += 1
-                products, ids = [], set()
-            with lock:
-                completed[0] += 1
-                if completed[0] % 10 == 0 or completed[0] == len(stores_to_scan):
-                    send({"type":"progress","msg":f"  [{completed[0]}/{len(stores_to_scan)}] stores fetched… ({len(all_products)} items so far)"})
-            return products, ids
+                send({"type":"progress","msg":"⏹ Stopped by user."})
+                break
+            send({"type":"progress","msg":f"\n[{i}/{len(stores_to_scan)}] {store}"})
+            _rotate_ua()  # rotate User-Agent each store
+            products, ids = scrape_store(store, seen_ids, send, _stop_event)
+            for p in products:
+                if p["id"] not in ids_this_run:
+                    all_products.append(p)
+            ids_this_run |= ids
+            # Extra pause between stores during baseline to avoid bot detection
+            if baseline and not _stop_event.is_set():
+                _sleep(4.0, 2.0)  # 2–6s between stores during baseline
 
-        max_workers = 10
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {pool.submit(fetch_store, store): store for store in stores_to_scan}
-            for future in as_completed(futures):
-                if _stop_event.is_set():
-                    break
-                products, ids = future.result()
-                with lock:
-                    for p in products:
-                        if p["id"] not in ids_this_run:
-                            all_products.append(p)
-                    ids_this_run |= ids
+        # ── Classify categories (parallel) & use listing-page condition ─────────
+        # Condition is already parsed from the listing page in parse_products — free, no HTTP.
+        # Category requires the individual product page — only fetch for NEW items not in seen_ids,
+        # and only if not already cached. Existing items keep their cached category.
+        new_item_ids = {p["id"] for p in all_products if p["id"] not in seen_ids}
+        needs_cat = [p for p in all_products
+                     if p["id"] in new_item_ids
+                     and not baseline and p.get("url")
+                     and not _cat_cache.get(p["id"], {}).get("category")]
 
-        if _stop_event.is_set():
-            send({"type":"progress","msg":"⏹ Stopped by user."})
-        if errors[0]:
-            send({"type":"progress","msg":f"  ⚠ {errors[0]} stores had errors."})
+        if needs_cat:
+            send({"type": "progress", "msg": f"\nFetching categories for {len(needs_cat)} item(s) (parallel)…"})
 
+            def _fetch_cat(p):
+                try:
+                    _sleep(0.2, 0.2)  # 0–0.4s jitter so parallel requests stagger
+                    cat, subcat, _ = fetch_page_data(p["url"], p.get("name", ""))
+                    return p["id"], cat, subcat
+                except Exception:
+                    return p["id"], "", ""
 
-        # ── Classify categories and apply all data ────────────────────────────
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                futures = {pool.submit(_fetch_cat, p): p for p in needs_cat}
+                done_count = 0
+                for future in as_completed(futures):
+                    if _stop_event.is_set():
+                        break
+                    sku, cat, subcat = future.result()
+                    _cat_cache.setdefault(sku, {}).update({"category": cat, "subcategory": subcat})
+                    done_count += 1
+                    if done_count % 10 == 0:
+                        send({"type": "progress", "msg": f"  …{done_count}/{len(needs_cat)} categories fetched"})
+
+        # Apply all data to products, tracking price drops
         for p in all_products:
             sku    = p["id"]
             cached = _cat_cache.get(sku, {})
-            # Always re-classify using name (most accurate) — seoUrl structure varies
-            cat, subcat = classify_by_name(p.get("name", ""))
-            if not cat:
-                cat    = cached.get("category", "")
-                subcat = cached.get("subcategory", "")
+            cat    = cached.get("category") or classify_by_name(p.get("name", ""))[0]
+            subcat = cached.get("subcategory") or classify_by_name(p.get("name", ""))[1]
             condition = p.get("condition") or cached.get("condition", "")
-            brand = p.get("brand") or cached.get("brand", "")
             # Price drop detection
             new_price  = p.get("price") or 0
             last_price = cached.get("price") or 0
@@ -1370,18 +2297,16 @@ def _run(selected_stores: list[str], baseline: bool = False):
                 "url":               p.get("url", ""),
                 "store":             p.get("store", ""),
                 "price":             new_price,
-                "brand":             brand,
                 "available":         True,
             }
             p["category"]    = cat
             p["subcategory"] = subcat
             p["condition"]   = condition
-            p["brand"]       = brand
             p["price_drop"]  = price_drop
         _save_cat_cache()
 
         # ── Mark sold items (not found in this scan for scanned stores) ──────────
-        if not _stop_event.is_set():
+        if not baseline and not _stop_event.is_set():
             # Only mark items as sold if we scanned ALL their store's pages
             scanned_store_set = set(stores_to_scan)
             for sku, cached in _cat_cache.items():
@@ -1420,6 +2345,7 @@ def _run(selected_stores: list[str], baseline: bool = False):
             write_excel(new_items)
 
         def fmt(p):
+            # Prefer Algolia's listing date over our scan date
             date_src = p.get("date_listed") or item_dates.get(p["id"], "")
             return {
                 "id":         p["id"],
@@ -1429,7 +2355,6 @@ def _run(selected_stores: list[str], baseline: bool = False):
                 "price_drop": p.get("price_drop", 0),
                 "store":      p["store"],
                 "url":        p["url"],
-                "brand":      p.get("brand", ""),
                 "category":   p.get("category", ""),
                 "subcategory":p.get("subcategory", ""),
                 "condition":  p.get("condition", ""),
@@ -1439,11 +2364,13 @@ def _run(selected_stores: list[str], baseline: bool = False):
         new_ids = {p["id"] for p in new_items}
         send({
             "type":       "done",
+            "baseline":   baseline,
             "stopped":    _stop_event.is_set(),
             "scanned":    len(all_products),
             "new_count":  len(new_items),
             "new_items":  [fmt(p) for p in new_items],
-            "all_items":  [fmt(p) for p in all_products if p["id"] not in new_ids],
+            "all_items":  [] if baseline else
+                          [fmt(p) for p in all_products if p["id"] not in new_ids],
         })
     except Exception as e:
         send({"type":"done","error":str(e),"scanned":0,"new_count":0,"new_items":[]})
@@ -1510,6 +2437,9 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #run-btn{flex:1;padding:10px;background:#c00;color:#fff;border:none;border-radius:5px;font-size:.85rem;font-weight:700;cursor:pointer;white-space:nowrap}
 #run-btn:hover{background:#e00}
 #run-btn:disabled{background:#444;cursor:not-allowed}
+#baseline-btn{padding:10px 12px;background:#222;color:#aaa;border:1px solid #3a3a3a;border-radius:5px;font-size:.8rem;cursor:pointer;white-space:nowrap}
+#baseline-btn:hover{border-color:#c00;color:#fff}
+#baseline-btn:disabled{opacity:.4;cursor:not-allowed}
 
 /* ── Right panel ── */
 .right{flex:1;display:flex;flex-direction:column;overflow:hidden}
@@ -1556,7 +2486,20 @@ tr.sold-row td a{color:#666}
 .no-res{padding:24px 20px;color:#555;font-size:.85rem}
 
 /* ── Password modal ── */
-
+#pw-modal{display:none;position:fixed;inset:0;z-index:100;align-items:center;justify-content:center}
+#pw-overlay{position:absolute;inset:0;background:rgba(0,0,0,.7)}
+#pw-box{position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:30px 28px;width:340px;z-index:1}
+#pw-box h2{color:#fff;font-size:1.05rem;margin-bottom:6px}
+#pw-box p{color:#777;font-size:.82rem;margin-bottom:18px;line-height:1.5}
+#pw-input{width:100%;padding:9px 12px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#eee;font-size:.95rem;outline:none;margin-bottom:10px}
+#pw-input:focus{border-color:#c00}
+#pw-err{color:#f88;font-size:.8rem;margin-bottom:10px;display:none}
+.pw-btns{display:flex;gap:8px}
+.pw-btns button{flex:1;padding:9px;border-radius:5px;font-size:.88rem;font-weight:600;cursor:pointer;border:none}
+#pw-cancel{background:#2a2a2a;color:#aaa;border:1px solid #3a3a3a!important}
+#pw-cancel:hover{color:#fff}
+#pw-confirm{background:#c00;color:#fff}
+#pw-confirm:hover{background:#e00}
 /* ── CL Search tab ── */
 #cl-panel{flex-direction:row}
 .cl-left{width:220px;min-width:200px;background:#1a1a1a;border-right:1px solid #2e2e2e;display:flex;flex-direction:column;flex-shrink:0}
@@ -1612,6 +2555,35 @@ tr.sold-row td a{color:#666}
 
 <!-- Password modal -->
 <!-- Validate stores modal -->
+<div id="vs-modal" style="display:none;position:fixed;inset:0;z-index:100;align-items:center;justify-content:center">
+  <div style="position:absolute;inset:0;background:rgba(0,0,0,.7)" onclick="cancelValidate()"></div>
+  <div style="position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:30px 28px;width:360px;z-index:1">
+    <h2 style="color:#fff;font-size:1.05rem;margin-bottom:8px">✓ Validate Stores</h2>
+    <p style="color:#777;font-size:.82rem;margin-bottom:18px;line-height:1.6">Clear the invalid-stores blocklist before validating?<br><br>
+    <b style="color:#ccc">Yes (recommended)</b> — re-checks all stores including any previously removed ones.<br><br>
+    <b style="color:#ccc">No</b> — only checks stores currently in your list.</p>
+    <div style="display:flex;gap:8px">
+      <button onclick="cancelValidate()" style="flex:1;padding:9px;border-radius:5px;font-size:.88rem;font-weight:600;cursor:pointer;border:1px solid #3a3a3a;background:#2a2a2a;color:#aaa">Cancel</button>
+      <button onclick="startValidate(false)" style="flex:1;padding:9px;border-radius:5px;font-size:.88rem;font-weight:600;cursor:pointer;border:none;background:#444;color:#eee">No</button>
+      <button onclick="startValidate(true)" style="flex:1;padding:9px;border-radius:5px;font-size:.88rem;font-weight:600;cursor:pointer;border:none;background:#c00;color:#fff">Yes</button>
+    </div>
+  </div>
+</div>
+
+<div id="pw-modal">
+  <div id="pw-overlay" onclick="cancelBaseline()"></div>
+  <div id="pw-box">
+    <h2>🌐 Build Nationwide Baseline</h2>
+    <p>This scan covers ~300 stores and takes 30–60 minutes. Enter the password to continue.</p>
+    <input type="password" id="pw-input" placeholder="Password"
+           onkeydown="if(event.key==='Enter')confirmBaseline()">
+    <div id="pw-err">Incorrect password.</div>
+    <div class="pw-btns">
+      <button id="pw-cancel" onclick="cancelBaseline()">Cancel</button>
+      <button id="pw-confirm" onclick="confirmBaseline()">Continue →</button>
+    </div>
+  </div>
+</div>
 
 <header>
   <h1>🎸 Gear Finder</h1>
@@ -1649,10 +2621,21 @@ tr.sold-row td a{color:#666}
     <div class="left-footer">
       <div id="sel-count">0 stores selected</div>
       <div class="btn-row">
-        <button id="run-btn" onclick="runTracker()">Check for New</button>
+        <button id="run-btn"      onclick="runTracker()" disabled>Check for New</button>
+        <button id="baseline-btn" onclick="runBaseline()" title="Scan every GC store nationwide">🌐 Build Baseline</button>
       </div>
+      <button id="validate-stores-btn" onclick="validateStores()"
+        style="margin-top:8px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:5px;color:#777;font-size:.75rem;cursor:pointer"
+        title="Check all stores and remove any that no longer exist">
+        ✓ Validate Stores
+      </button>
+      <button id="populate-store-btn" onclick="populateStoreData()"
+        style="margin-top:6px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:5px;color:#555;font-size:.75rem;cursor:pointer"
+        title="One-time: tag all cached items with their store (enables instant browse)">
+        ⬇ Populate Store Data
+      </button>
       <button id="reset-btn" onclick="resetData()"
-        style="margin-top:8px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #5a2a2a;border-radius:5px;color:#a05050;font-size:.75rem;cursor:pointer"
+        style="margin-top:6px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #5a2a2a;border-radius:5px;color:#a05050;font-size:.75rem;cursor:pointer"
         title="Delete all cached data and start fresh">
         🗑 Reset All Data
       </button>
@@ -1735,15 +2718,15 @@ tr.sold-row td a{color:#666}
 
 <script>
 let allStores = [], favorites = [], running = false;
-  if (s.is_first_run) {} // auto-handled by loadState
+const BASELINE_PW = 'Beatle909!';
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
-  try { document.getElementById('search').addEventListener('input', filterList); } catch(e) {}
-  try { clRenderCities(); } catch(e) { console.error('clRenderCities error:', e); }
-  try { await loadData(); } catch(e) { console.error('loadData error:', e); }
-  try { await loadState(); } catch(e) { console.error('loadState error:', e); }
-  try { await loadWatchlist(); } catch(e) { console.error('loadWatchlist error:', e); }
+  document.getElementById('search').addEventListener('input', filterList);
+  clRenderCities();
+  await loadData();
+  await loadState();
+  await loadWatchlist();
 });
 
 async function loadData() {
@@ -1753,17 +2736,21 @@ async function loadData() {
   // If store list is empty, rebuild from Algolia automatically
   if (allStores.length === 0) {
     appendLog('Loading store list from Algolia…', 'log-dim');
-    const rr = await fetch('/api/refresh-stores', {method: 'POST'});
-    const dd = await rr.json();
-    if (dd.stores && dd.stores.length) {
-      allStores = dd.stores;
-      appendLog(`✓ ${dd.stores.length} stores loaded.`, 'log-dim');
-    }
+    try {
+      const rr = await fetch('/api/refresh-stores', {method: 'POST'});
+      const dd = await rr.json();
+      if (dd.stores && dd.stores.length) {
+        allStores = dd.stores;
+        appendLog(`✓ ${dd.stores.length} stores loaded.`, 'log-dim');
+      }
+    } catch(e) {}
   }
   renderList();
+  const info = d.info || {};
   const storeLabel = allStores.length + ' stores';
   document.getElementById('hdr-status').textContent = storeLabel + ' available';
-  document.getElementById('s-stores').textContent = storeLabel;
+  document.getElementById('s-stores').textContent = storeLabel +
+    (info.updated ? ' · checked ' + info.updated.slice(0,10) : '');
 }
 
 async function loadState() {
@@ -1774,8 +2761,8 @@ async function loadState() {
   if (s.excel_exists) document.getElementById('s-excel').style.display = 'inline';
   if (s.is_first_run && !window._firstRunTriggered) {
     window._firstRunTriggered = true;
-    appendLog('🚀 First run — loading all store inventory nationwide. This will take a few minutes…', 'log-dim');
-    setTimeout(() => runTracker(), 1500);
+    appendLog('🚀 First run — scanning all stores nationwide. This will take a few minutes…', 'log-dim');
+    setTimeout(() => runTracker(), 2000);
   }
   // Check for updates
   try {
@@ -1864,10 +2851,9 @@ async function toggleFav(e, name, btn) {
 function updateCount() {
   const checked = [...document.querySelectorAll('.store-row input:checked')];
   const n = checked.length;
-  document.getElementById('sel-count').textContent = n > 0
-    ? n + ' store' + (n===1?'':'s') + ' selected'
-    : 'All stores (none selected)';
-  document.getElementById('run-btn').disabled = running;
+  document.getElementById('sel-count').textContent = n + ' store' + (n===1?'':'s') + ' selected';
+  document.getElementById('run-btn').disabled = (n===0 || running);
+  document.getElementById('baseline-btn').disabled = running;
   // Auto-browse cached inventory when stores are selected
   if (n > 0 && !running) browseCache();
   else if (n === 0) {
@@ -1975,15 +2961,39 @@ async function showWatchList() {
 }
 
 
+
 function getSelected() {
   return [...document.querySelectorAll('.store-row input:checked')].map(c => c.value);
 }
 
 
+function runBaseline() {
+  document.getElementById('pw-modal').style.display = 'flex';
+  document.getElementById('pw-input').value = '';
+  document.getElementById('pw-err').style.display = 'none';
+  setTimeout(() => document.getElementById('pw-input').focus(), 50);
+}
+
+function cancelBaseline() {
+  document.getElementById('pw-modal').style.display = 'none';
+}
+
+function confirmBaseline() {
+  const pw = document.getElementById('pw-input').value;
+  if (pw !== BASELINE_PW) {
+    document.getElementById('pw-err').style.display = 'block';
+    document.getElementById('pw-input').select();
+    return;
+  }
+  document.getElementById('pw-modal').style.display = 'none';
+  startRun({stores:[], baseline:true}, true);
+}
+
 // ── Run ───────────────────────────────────────────────────────────────────────
 async function runTracker() {
   const stores = getSelected();
-  await startRun({stores});
+  if (!stores.length) return;
+  await startRun({stores}, false);
 }
 
 async function stopRun() {
@@ -1993,7 +3003,7 @@ async function stopRun() {
   await fetch('/api/stop', {method:'POST'});
 }
 
-async function startRun(payload) {
+async function startRun(payload, isBaseline) {
   running = true; updateCount();
   const stopBtn = document.getElementById('stop-btn');
   stopBtn.style.display = 'inline-block';
@@ -2021,13 +3031,13 @@ async function startRun(payload) {
     if (msg.type === 'done') {
       es.close(); running = false;
       stopBtn.style.display = 'none';
-      updateCount(); loadState(); showResults(msg);
+      updateCount(); loadState(); showResults(msg, isBaseline);
     }
   };
 }
 
 // ── Results ───────────────────────────────────────────────────────────────────
-function showResults(msg) {
+function showResults(msg, isBaseline) {
   const panel = document.getElementById('res-panel');
   panel.style.display = 'block';
 
@@ -2042,11 +3052,11 @@ function showResults(msg) {
   const stoppedNote = msg.stopped ? ' (stopped early)' : '';
   appendLog(`\\n✓ Done${stoppedNote} — ${msg.scanned.toLocaleString()} items scanned, ${n} new.`, 'log-dim');
 
-  if (n === 0 && msg.scanned > 0) {
-    document.getElementById('res-title').textContent = 'Scan Complete';
+  if (isBaseline && n === 0) {
+    document.getElementById('res-title').textContent = 'Baseline Complete';
     document.getElementById('res-badge').textContent = '';
     document.getElementById('res-body').innerHTML =
-      `<div class="no-res">${msg.scanned.toLocaleString()} items scanned${stoppedNote}. No new items found.</div>`;
+      `<div class="no-res">Full inventory baseline saved (${msg.scanned.toLocaleString()} items)${stoppedNote}. Run again any time to see what's new!</div>`;
     ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
     return;
   }
@@ -2115,18 +3125,17 @@ function onCatFilterChange() {
 
 // ── Table rendering & sorting ─────────────────────────────────────────────────
 // col indices: 0=status, 1=name, 2=condition, 3=category, 4=subcategory, 5=price, 6=date, 7=store
-const _SORT_COLS = [null, 'name', 'price', 'condition', 'category', 'subcategory', 'date', 'store', 'brand'];
+const _SORT_COLS = [null, 'name', 'price', 'condition', 'category', 'subcategory', 'date', 'store'];
 
 function renderTable() {
   const data = window._tableData || [];
   let html = `<table id="res-table"><thead><tr>
-    <th data-col="0" style="width:46px"></th>
-    <th data-col="watch" style="width:28px"></th>
+    <th data-col="0"></th>
+    <th data-col="watch" style="width:32px"></th>
     <th data-col="1">Item</th>
-    <th data-col="drop" style="width:70px"></th>
+    <th data-col="drop" style="width:80px"></th>
     <th data-col="2">Price</th>
     <th data-col="3">Condition</th>
-    <th data-col="8">Brand</th>
     <th data-col="4">Category</th>
     <th data-col="5">Subcategory</th>
     <th data-col="6">Date</th>
@@ -2154,7 +3163,6 @@ function renderTable() {
       `<td>${dropCell}</td>` +
       `<td>${item.price||''}</td>` +
       `<td>${esc(item.condition)}</td>` +
-      `<td>${esc(item.brand||'')}</td>` +
       `<td>${esc(item.category)}</td>` +
       `<td>${esc(item.subcategory)}</td>` +
       `<td>${esc(item.date||'')}</td>` +
@@ -2253,6 +3261,94 @@ function filterResults() {
   countEl.textContent = (q || cond || cat || subcat) ? `${visible} of ${rows.length}` : '';
   const clearBtn = document.getElementById('clear-filters-btn');
   if (clearBtn) clearBtn.style.display = (cond || cat || subcat) ? '' : 'none';
+}
+
+// ── Populate store data (one-time migration) ──────────────────────────────────
+async function populateStoreData() {
+  if (running) { appendLog('Stop the current run first.', 'log-err'); return; }
+  const selected = getSelected();
+  const btn = document.getElementById('populate-store-btn');
+  const resp = await fetch('/api/populate-store-data', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({stores: selected})
+  });
+  if (!resp.ok) {
+    const e = await resp.json();
+    appendLog('Error: ' + e.error, 'log-err');
+    return;
+  }
+  running = true; updateCount();
+  btn.textContent = '⏳ Populating…';
+  btn.disabled = true;
+  document.getElementById('stop-btn').style.display = 'inline-block';
+  document.getElementById('stop-btn').disabled = false;
+  document.getElementById('log').innerHTML = '';
+  const label = selected.length ? selected.length + ' store(s)' : 'all stores';
+  appendLog('Tagging cached items for ' + label + ' with store names. You can stop at any time.');
+  const es = new EventSource('/api/progress');
+  es.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'ping') return;
+    if (msg.type === 'progress') { appendLog(msg.msg); return; }
+    if (msg.type === 'done') {
+      es.close(); running = false;
+      document.getElementById('stop-btn').style.display = 'none';
+      btn.textContent = '✓ Store Data Populated';
+      btn.disabled = false;
+      updateCount();
+    }
+  };
+}
+
+// ── Validate Stores ───────────────────────────────────────────────────────────
+function validateStores() {
+  if (running) { appendLog('Stop the current run before validating.', 'log-err'); return; }
+  document.getElementById('vs-modal').style.display = 'flex';
+}
+
+function cancelValidate() {
+  document.getElementById('vs-modal').style.display = 'none';
+}
+
+async function startValidate(clearBlocklist) {
+  document.getElementById('vs-modal').style.display = 'none';
+
+  if (clearBlocklist) {
+    await fetch('/api/clear-blocklist', {method: 'POST'});
+    appendLog('Blocklist cleared — all stores will be re-evaluated.', 'log-dim');
+  }
+
+  const btn = document.getElementById('validate-stores-btn');
+  const resp = await fetch('/api/validate-stores', {method: 'POST'});
+  if (!resp.ok) {
+    const e = await resp.json();
+    appendLog('Validate error: ' + e.error, 'log-err');
+    return;
+  }
+  running = true; updateCount();
+  btn.textContent = '⏳ Validating…';
+  btn.disabled = true;
+  document.getElementById('stop-btn').style.display = 'inline-block';
+  document.getElementById('stop-btn').disabled = false;
+  document.getElementById('stop-btn').textContent = '⏹ Stop';
+  document.getElementById('log').innerHTML = '';
+  appendLog('Checking all stores for 404s, then rebuilding from GC live data…');
+
+  const es = new EventSource('/api/progress');
+  es.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'ping') return;
+    if (msg.type === 'progress') { appendLog(msg.msg); return; }
+    if (msg.type === 'done') {
+      es.close(); running = false;
+      document.getElementById('stop-btn').style.display = 'none';
+      btn.textContent = '✓ Validate Stores';
+      btn.disabled = false;
+      updateCount();
+      loadData();
+    }
+  };
 }
 
 // ── Auto-updater ──────────────────────────────────────────────────────────────
@@ -2639,11 +3735,13 @@ def api_do_update():
     return jsonify({"status": "started"})
 
 
-# Run on both Railway (gunicorn) and local startup
-_load_cat_cache()
-_startup_fetch_stores()
-
 if __name__ == "__main__":
+    _load_cat_cache()
+    _load_cookies()
+    if not STORES_CACHE.exists():
+        print("Building store list…")
+        refresh_store_list()
+
     # Check for updates silently on startup
     try:
         update_available, latest = _check_for_update()
