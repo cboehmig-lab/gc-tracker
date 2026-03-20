@@ -1408,8 +1408,9 @@ def api_browse():
     per_page = min(max(int(data.get("per_page", 50)), 10), 200)
 
     # Sort params  (defaults: date descending = newest first)
-    sort_field = data.get("sort_field", "date")    # name|brand|price|condition|category|subcategory|date|location
-    sort_dir   = data.get("sort_dir", "desc")      # asc | desc
+    sort_field = data.get("sort_field", "date")
+    sort_dir   = data.get("sort_dir", "desc")
+    fav_stores = set(data.get("fav_stores", []))
 
     # Filter params
     fq      = (data.get("filter_q") or "").lower().strip()
@@ -1463,7 +1464,7 @@ def api_browse():
 
     # ── Build full item list for selected stores (lightweight dicts) ──────
     all_items = []
-    brand_set = set(); cond_set = set(); cat_set = set(); subcat_set = set()
+    brand_counts = {}; cond_set = set(); cat_set = set(); subcat_set = set()
     for sku, cached in _cat_cache.items():
         if store_set is not None and cached.get("store") not in store_set:
             continue
@@ -1480,7 +1481,7 @@ def api_browse():
         store      = cached.get("store", "")
 
         # Collect filter options from ALL items (pre-filter)
-        if brand:      brand_set.add(brand)
+        if brand:      brand_counts[brand] = brand_counts.get(brand, 0) + 1
         if condition:  cond_set.add(condition)
         if category:   cat_set.add(category)
         if subcategory: subcat_set.add(subcategory)
@@ -1509,6 +1510,7 @@ def api_browse():
             "isNew":      sku not in seen_ids,
             "watched":    sku in wl,
             "kwMatch":    kw_hit,
+            "isFav":      store in fav_stores if fav_stores else False,
         })
 
     total_unfiltered = len(all_items)
@@ -1549,17 +1551,23 @@ def api_browse():
                 scoped_subcats.add(i["subcategory"])
 
     # ── Sort ──────────────────────────────────────────────────────────────
+    # Priority: NEW+keyword first, then favorites, then rest
     reverse = (sort_dir == "desc")
     if sort_field == "price":
-        filtered.sort(key=lambda x: x.get("price_raw") or 0, reverse=reverse)
-    elif sort_field == "date":
-        # NEW+keyword items sort to the very top, then normal date order
         filtered.sort(key=lambda x: (
-            0 if (x.get("isNew") and x.get("kwMatch")) else 1,
+            0 if (x.get("isNew") and x.get("kwMatch")) else (1 if x.get("isFav") else 2),
+            x.get("price_raw") or 0
+        ), reverse=reverse)
+    elif sort_field == "date":
+        filtered.sort(key=lambda x: (
+            0 if (x.get("isNew") and x.get("kwMatch")) else (1 if x.get("isFav") else 2),
             x.get("date_raw") or ""
         ), reverse=reverse)
     else:
-        filtered.sort(key=lambda x: (x.get(sort_field) or "").lower(), reverse=reverse)
+        filtered.sort(key=lambda x: (
+            0 if (x.get("isNew") and x.get("kwMatch")) else (1 if x.get("isFav") else 2),
+            (x.get(sort_field) or "").lower()
+        ), reverse=reverse)
 
     total_filtered = len(filtered)
     total_pages    = max(1, -(-total_filtered // per_page))  # ceil division
@@ -1576,7 +1584,7 @@ def api_browse():
         "total_pages":      total_pages,
         "no_store_data":    False,
         # Filter option lists (always full set so dropdowns stay populated)
-        "brands":           sorted(brand_set),
+        "brands":           [{"name": b, "count": c} for b, c in sorted(brand_counts.items(), key=lambda x: -x[1])],
         "conditions":       sorted(cond_set),
         "categories":       sorted(cat_set),
         "subcategories":    sorted(scoped_subcats) if f_cat else sorted(subcat_set),
@@ -2697,6 +2705,11 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .cat-sel{padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer}
 .cat-sel:focus{border-color:#c00}
 #watchlist-toggle.wl-active{background:#c00;border-color:#c00;color:#fff}
+.brand-dd-item{display:flex;align-items:center;padding:6px 12px;cursor:pointer;font-size:.82rem;color:#ccc;gap:6px}
+.brand-dd-item:hover{background:#252525}
+.brand-dd-item.active{background:#c00;color:#fff}
+.brand-dd-item .bcount{margin-left:auto;color:#555;font-size:.72rem}
+.brand-dd-item.active .bcount{color:rgba(255,255,255,.7)}
 #res-search-wrap{margin-left:auto;display:flex;align-items:center;gap:6px}
 #res-search{padding:5px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.8rem;width:180px;outline:none}
 #res-search:focus{border-color:#c00}
@@ -2835,7 +2848,7 @@ tr.sold-row td a{color:#666}
   <div id="pw-overlay" onclick="cancelReset()"></div>
   <div id="pw-box">
     <h2>🗑 Reset All Data</h2>
-    <p>This will delete all cached inventory, scan history, and the Excel export. Keywords will be preserved. Enter the password to continue.</p>
+    <p>This will delete all cached inventory, scan history, and the Excel export. Your want list will be preserved. Enter the password to continue.</p>
     <input type="password" id="pw-input" placeholder="Password"
            onkeydown="if(event.key==='Enter')confirmReset()">
     <div id="pw-err">Incorrect password.</div>
@@ -2862,22 +2875,22 @@ tr.sold-row td a{color:#666}
 <div id="kw-modal" style="display:none;position:fixed;inset:0;z-index:100;align-items:center;justify-content:center">
   <div style="position:absolute;inset:0;background:rgba(0,0,0,.7)" onclick="closeKeywords()"></div>
   <div style="position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:24px 24px 20px;width:420px;max-height:80vh;overflow-y:auto;z-index:1">
-    <h2 style="color:#fff;font-size:1.05rem;margin-bottom:4px">🔑 Keyword Alerts</h2>
-    <p style="color:#777;font-size:.82rem;margin-bottom:16px;line-height:1.5">Items matching your keywords are highlighted in the results. New items that also match a keyword sort to the top.<br><br>
+    <h2 style="color:#fff;font-size:1.05rem;margin-bottom:4px">🔑 Want List</h2>
+    <p style="color:#777;font-size:.82rem;margin-bottom:16px;line-height:1.5">Items matching your want list are highlighted in the results. New items that also match sort to the top.<br><br>
       <span style="color:#999">Matching modes:</span><br>
       <span style="color:#4ade80">Thorpy</span> — matches any item containing "Thorpy"<br>
       <span style="color:#4ade80">Paiste, 2002</span> — matches items containing both words<br>
       <span style="color:#4ade80">"Fender Strat"</span> — exact phrase match only
     </p>
     <div style="display:flex;gap:6px;margin-bottom:16px">
-      <input id="kw-input" type="text" placeholder="Add a keyword…"
+      <input id="kw-input" type="text" placeholder="Add an item to your want list…"
              style="flex:1;padding:8px 12px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#eee;font-size:.9rem;outline:none"
              onkeydown="if(event.key==='Enter')addKeyword()">
       <button onclick="addKeyword()" style="padding:8px 16px;background:#0a5c2a;border:1px solid #2d6a2d;border-radius:5px;color:#4ade80;font-size:.85rem;cursor:pointer;white-space:nowrap">+ Add</button>
     </div>
     <div id="kw-list" style="margin-bottom:16px"></div>
     <div style="display:flex;gap:10px;justify-content:space-between;border-top:1px solid #2e2e2e;padding-top:14px">
-      <button onclick="clearAllKeywords()" style="padding:6px 14px;background:#1a1a1a;border:1px solid #5a2a2a;border-radius:5px;color:#a05050;font-size:.78rem;cursor:pointer">Delete All Keywords</button>
+      <button onclick="clearAllKeywords()" style="padding:6px 14px;background:#1a1a1a;border:1px solid #5a2a2a;border-radius:5px;color:#a05050;font-size:.78rem;cursor:pointer">Clear Want List</button>
       <button onclick="closeKeywords()" style="padding:6px 18px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#aaa;font-size:.85rem;cursor:pointer">Done</button>
     </div>
   </div>
@@ -2942,7 +2955,7 @@ tr.sold-row td a{color:#666}
 
   <div class="right">
     <div class="status-bar">
-      <span>Most recent check: <b id="s-last">—</b></span>
+      <span id="s-last-wrap">Last checked for new gear: <b id="s-last">—</b> <button id="check-now-btn" onclick="runTracker()" style="padding:2px 10px;background:#c00;color:#fff;border:none;border-radius:4px;font-size:.72rem;font-weight:700;cursor:pointer;margin-left:4px;display:none">Check Now</button></span>
       <span>Items: <b id="s-known">—</b></span>
       <span>Stores: <b id="s-stores">—</b></span>
       <div id="global-search-wrap">
@@ -2964,11 +2977,19 @@ tr.sold-row td a{color:#666}
         </button>
         <button onclick="openKeywords()"
           class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
-          🔑 Keywords
+          🎯 Want List
         </button>
-        <select id="brand-filter" class="cat-sel" style="display:none" onchange="filterResults()">
-          <option value="">All Brands</option>
-        </select>
+        <div id="brand-dropdown" class="brand-dd" style="display:none;position:relative">
+          <button id="brand-dd-btn" class="cat-sel" onclick="toggleBrandDropdown()" style="cursor:pointer;white-space:nowrap">All Brands ▾</button>
+          <div id="brand-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:260px;max-height:320px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
+            <div style="padding:6px">
+              <input id="brand-dd-search" type="text" placeholder="Search brands…"
+                style="width:100%;padding:6px 10px;background:#252525;border:1px solid #3a3a3a;border-radius:4px;color:#eee;font-size:.82rem;outline:none;box-sizing:border-box"
+                oninput="filterBrandDropdown()" autocomplete="off">
+            </div>
+            <div id="brand-dd-list" style="overflow-y:auto;max-height:260px"></div>
+          </div>
+        </div>
         <select id="cond-filter" class="cat-sel" style="display:none" onchange="filterResults()">
           <option value="">All Conditions</option>
         </select>
@@ -3054,12 +3075,36 @@ async function loadData() {
   }
 }
 
+window._lastRunISO = null;
+let _relTimeTimer = null;
+
+function _timeAgo(iso) {
+  if (!iso) return 'never';
+  const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (diff < 60)   return 'just now';
+  if (diff < 120)  return '1 minute ago';
+  if (diff < 3600) return Math.floor(diff / 60) + ' minutes ago';
+  if (diff < 7200) return '1 hour ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + ' hours ago';
+  if (diff < 172800) return '1 day ago';
+  return Math.floor(diff / 86400) + ' days ago';
+}
+
+function _updateRelativeTime() {
+  document.getElementById('s-last').textContent = _timeAgo(window._lastRunISO);
+  clearInterval(_relTimeTimer);
+  _relTimeTimer = setInterval(() => {
+    document.getElementById('s-last').textContent = _timeAgo(window._lastRunISO);
+  }, 30000); // Update every 30s
+}
+
 async function loadState() {
   const r = await fetch('/api/state');
   const s = await r.json();
-  document.getElementById('s-last').textContent  = s.last_run
-    ? new Date(s.last_run).toLocaleString([], {month:'numeric', day:'numeric', year:'2-digit', hour:'numeric', minute:'2-digit'})
-    : 'Never';
+  window._lastRunISO = s.last_run || null;
+  _updateRelativeTime();
+  // Show Check Now button if stores are selected
+  document.getElementById('check-now-btn').style.display = s.last_run ? 'inline' : 'none';
   document.getElementById('s-known').textContent = s.known_items.toLocaleString();
   if (s.excel_exists) document.getElementById('s-excel').style.display = 'inline';
   if (s.is_first_run) {
@@ -3198,7 +3243,7 @@ let _srvLoading = false;
 function _getBrowseFilters() {
   return {
     filter_q:           document.getElementById('res-search').value.trim(),
-    filter_brand:       document.getElementById('brand-filter').value,
+    filter_brand:       window._selectedBrand || '',
     filter_condition:   document.getElementById('cond-filter').value,
     filter_category:    document.getElementById('cat-filter').value,
     filter_subcategory: document.getElementById('subcat-filter').value,
@@ -3216,6 +3261,7 @@ async function _fetchBrowsePage(page) {
     per_page:   50,
     sort_field: _srvSortField,
     sort_dir:   _srvSortDir,
+    fav_stores: favorites,
     ...filters,
   };
   if (_globalSearchActive) {
@@ -3237,7 +3283,7 @@ async function _fetchBrowsePage(page) {
       document.getElementById('res-badge').textContent = '';
       document.getElementById('res-body').innerHTML =
         '<div class="no-res">Click <b>⬇ Populate Store Data</b> in the left panel to tag your existing inventory with store names. This only needs to run once, then selecting stores will instantly show their inventory.</div>';
-      ['brand-filter','cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+      ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
       return;
     }
     if (!d.items || (!d.items.length && page === 1)) {
@@ -3296,12 +3342,9 @@ async function _fetchBrowsePage(page) {
 }
 
 function _populateFiltersFromServer(brands, conditions, categories, subcategories, currentFilters) {
-  const brandEl = document.getElementById('brand-filter');
-  const savedBrand = currentFilters.filter_brand;
-  brandEl.innerHTML = '<option value="">All Brands</option>';
-  brands.forEach(b => { const o = document.createElement('option'); o.value=o.textContent=b; brandEl.appendChild(o); });
-  brandEl.style.display = brands.length ? '' : 'none';
-  brandEl.value = savedBrand;
+  _setBrandList(brands);
+  window._selectedBrand = currentFilters.filter_brand || '';
+  document.getElementById('brand-dd-btn').textContent = window._selectedBrand || 'All Brands ▾';
 
   const condEl = document.getElementById('cond-filter');
   const savedCond = currentFilters.filter_condition;
@@ -3346,7 +3389,7 @@ function _buildRowHtml(item) {
   const soldBadge = isSold ? ' <span class="tag-sold">Sold</span>' : '';
   return `<tr class="${isSold ? 'sold-row' : ''}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}" data-image-id="${esc(item.image_id)}">` +
     `<td>${item.isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
-    `<td>${item.kwMatch ? '<span class="tag-kw">KEYWORD</span>' : ''}</td>` +
+    `<td>${item.kwMatch ? '<span class="tag-kw">WANT</span>' : ''}</td>` +
     `<td>${watchStar}</td>` +
     `<td>${nameCell}${soldBadge}</td>` +
     `<td>${esc(item.brand)}</td>` +
@@ -3467,7 +3510,7 @@ async function browseCache() {
     window._sortCol = null; window._sortDir = 1;
     document.getElementById('res-search').value = '';
     document.getElementById('res-search-count').textContent = '';
-    document.getElementById('brand-filter').value = '';
+    window._selectedBrand = ''; document.getElementById('brand-dd-btn').textContent = 'All Brands ▾';
     document.getElementById('cond-filter').value = '';
     document.getElementById('cat-filter').value = '';
     document.getElementById('subcat-filter').value = '';
@@ -3542,7 +3585,7 @@ function dismissFirstRun() {
   document.getElementById('first-run-modal').style.display = 'none';
 }
 
-// ── Keywords ─────────────────────────────────────────────────────────────────
+// ── Want List ─────────────────────────────────────────────────────────────────
 window._keywords = [];
 
 async function loadKeywords() {
@@ -3573,7 +3616,7 @@ function closeKeywords() {
 function renderKeywordList() {
   const el = document.getElementById('kw-list');
   if (!window._keywords.length) {
-    el.innerHTML = '<div style="color:#555;font-size:.82rem;padding:8px 0">No keywords yet. Add one above.</div>';
+    el.innerHTML = '<div style="color:#555;font-size:.82rem;padding:8px 0">Your want list is empty. Add an item above.</div>';
     return;
   }
   el.innerHTML = window._keywords.map(kw =>
@@ -3657,7 +3700,7 @@ function globalSearch() {
   // Reset filters
   document.getElementById('res-search').value = '';
   document.getElementById('res-search-count').textContent = '';
-  document.getElementById('brand-filter').value = '';
+  window._selectedBrand = ''; document.getElementById('brand-dd-btn').textContent = 'All Brands ▾';
   document.getElementById('cond-filter').value = '';
   document.getElementById('cat-filter').value = '';
   document.getElementById('subcat-filter').value = '';
@@ -3771,7 +3814,7 @@ function showResults(msg, isBaseline) {
     document.getElementById('res-badge').textContent = '';
     document.getElementById('res-body').innerHTML =
       `<div class="no-res">Full inventory baseline saved (${msg.scanned.toLocaleString()} items)${stoppedNote}. Run again any time to see what's new!</div>`;
-    ['brand-filter','cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+    ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
     return;
   }
 
@@ -3784,7 +3827,7 @@ function showResults(msg, isBaseline) {
 
   if (msg.scanned === 0 && n === 0) {
     document.getElementById('res-body').innerHTML = '<div class="no-res">Nothing found for selected stores.</div>';
-    ['brand-filter','cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+    ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
     return;
   }
 
@@ -3832,13 +3875,13 @@ function populateCategoryFilter() {
   // In server mode, filters are populated by _populateFiltersFromServer — this is for local mode only
   if (_browseMode === 'server') return;
   const data = window._tableData || [];
-  // Brand filter
-  const brands = [...new Set(data.map(i => i.brand).filter(Boolean))].sort();
-  const brandEl = document.getElementById('brand-filter');
-  brandEl.innerHTML = '<option value="">All Brands</option>';
-  brands.forEach(b => { const o = document.createElement('option'); o.value=o.textContent=b; brandEl.appendChild(o); });
-  brandEl.style.display = brands.length ? '' : 'none';
-  brandEl.value = '';
+  // Brand filter — count occurrences and sort by count desc
+  const brandMap = {};
+  data.forEach(i => { if (i.brand) brandMap[i.brand] = (brandMap[i.brand] || 0) + 1; });
+  const brandList = Object.entries(brandMap).sort((a,b) => b[1] - a[1]).map(([name, count]) => ({name, count}));
+  _setBrandList(brandList);
+  window._selectedBrand = '';
+  document.getElementById('brand-dd-btn').textContent = 'All Brands ▾';
   // Condition filter
   const conds = [...new Set(data.map(i => i.condition).filter(Boolean))].sort();
   const condEl = document.getElementById('cond-filter');
@@ -3895,7 +3938,7 @@ function renderTable() {
 
   // Apply filters to get the filtered set
   const q      = document.getElementById('res-search').value.toLowerCase().trim();
-  const brand  = document.getElementById('brand-filter').value;
+  const brand  = window._selectedBrand || '';
   const cond   = document.getElementById('cond-filter').value;
   const cat    = document.getElementById('cat-filter').value;
   const subcat = document.getElementById('subcat-filter').value;
@@ -4112,11 +4155,72 @@ function autoSizeItemColumn() {
   });
 })();
 
+// ── Brand dropdown ───────────────────────────────────────────────────────────
+window._selectedBrand = '';
+window._brandList = []; // [{name, count}]
+
+function toggleBrandDropdown() {
+  const panel = document.getElementById('brand-dd-panel');
+  if (panel.style.display === 'none') {
+    panel.style.display = '';
+    document.getElementById('brand-dd-search').value = '';
+    filterBrandDropdown();
+    document.getElementById('brand-dd-search').focus();
+    // Close on outside click
+    setTimeout(() => document.addEventListener('click', _closeBrandOnOutside, true), 0);
+  } else {
+    _closeBrandDropdown();
+  }
+}
+
+function _closeBrandDropdown() {
+  document.getElementById('brand-dd-panel').style.display = 'none';
+  document.removeEventListener('click', _closeBrandOnOutside, true);
+}
+
+function _closeBrandOnOutside(e) {
+  if (!e.target.closest('#brand-dropdown')) _closeBrandDropdown();
+}
+
+function filterBrandDropdown() {
+  const q = (document.getElementById('brand-dd-search').value || '').toLowerCase();
+  const list = document.getElementById('brand-dd-list');
+  let html = '<div class="brand-dd-item' + (!window._selectedBrand ? ' active' : '') + '" data-brand="">All Brands</div>';
+  window._brandList.forEach(b => {
+    if (q && !b.name.toLowerCase().includes(q)) return;
+    const isActive = window._selectedBrand === b.name;
+    const esc = b.name.replace(/"/g,'&quot;');
+    html += '<div class="brand-dd-item' + (isActive ? ' active' : '') + '" data-brand="' + esc + '">' + esc + '<span class="bcount">' + b.count + '</span></div>';
+  });
+  list.innerHTML = html;
+  // Event delegation for clicks
+  list.onclick = function(e) {
+    const item = e.target.closest('.brand-dd-item');
+    if (!item) return;
+    selectBrand(item.dataset.brand);
+  };
+}
+
+function selectBrand(brand) {
+  window._selectedBrand = brand;
+  document.getElementById('brand-dd-btn').textContent = brand || 'All Brands ▾';
+  _closeBrandDropdown();
+  filterResults();
+}
+
+function _setBrandList(brands) {
+  // brands = [{name, count}, ...] already sorted by count desc from server
+  window._brandList = brands || [];
+  const dd = document.getElementById('brand-dropdown');
+  dd.style.display = brands && brands.length ? '' : 'none';
+}
+
 // ── Results filter ────────────────────────────────────────────────────────────
 let _filterTimer = null;
 
 function clearFilters() {
-  document.getElementById('brand-filter').value = '';
+  window._selectedBrand = '';
+  document.getElementById('brand-dd-btn').textContent = 'All Brands ▾';
   document.getElementById('cond-filter').value = '';
   document.getElementById('cat-filter').value = '';
   const subEl = document.getElementById('subcat-filter');
@@ -4275,7 +4379,9 @@ async function doReset(pw) {
     return;
   }
   appendLog('✓ ' + d.status + (d.deleted.length ? ' Deleted: ' + d.deleted.join(', ') : ''), 'log-dim');
-  document.getElementById('s-last').textContent  = 'Never';
+  window._lastRunISO = null;
+  _updateRelativeTime();
+  document.getElementById('check-now-btn').style.display = 'none';
   document.getElementById('s-known').textContent = '0';
   document.getElementById('s-excel').style.display = 'none';
 }
