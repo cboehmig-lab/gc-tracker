@@ -1421,7 +1421,6 @@ def api_browse():
 
     _load_cat_cache()
     state      = load_state()
-    seen_ids   = set(state.get("seen_ids", []))
     item_dates = state.get("item_dates", {})
     # Watchlist and keywords now come from the client (localStorage)
     wl_ids     = set(data.get("watchlist_ids", []))
@@ -1507,7 +1506,6 @@ def api_browse():
             "date":       _fmt_date(date_raw),
             "date_raw":   date_raw,
             "image_id":   cached.get("image_id", ""),
-            "isNew":      sku not in seen_ids,
             "watched":    sku in wl_ids,
             "kwMatch":    kw_hit,
             "isFav":      store in fav_stores if fav_stores else False,
@@ -1551,21 +1549,22 @@ def api_browse():
                 scoped_subcats.add(i["subcategory"])
 
     # ── Sort ──────────────────────────────────────────────────────────────
-    # Priority: NEW+keyword first, then favorites, then rest
+    # Priority: keyword matches first, then favorites, then rest
+    # (NEW detection is per-user and handled client-side)
     reverse = (sort_dir == "desc")
     if sort_field == "price":
         filtered.sort(key=lambda x: (
-            0 if (x.get("isNew") and x.get("kwMatch")) else (1 if x.get("isFav") else 2),
+            0 if x.get("kwMatch") else (1 if x.get("isFav") else 2),
             x.get("price_raw") or 0
         ), reverse=reverse)
     elif sort_field == "date":
         filtered.sort(key=lambda x: (
-            0 if (x.get("isNew") and x.get("kwMatch")) else (1 if x.get("isFav") else 2),
+            0 if x.get("kwMatch") else (1 if x.get("isFav") else 2),
             x.get("date_raw") or ""
         ), reverse=reverse)
     else:
         filtered.sort(key=lambda x: (
-            0 if (x.get("isNew") and x.get("kwMatch")) else (1 if x.get("isFav") else 2),
+            0 if x.get("kwMatch") else (1 if x.get("isFav") else 2),
             (x.get(sort_field) or "").lower()
         ), reverse=reverse)
 
@@ -1695,12 +1694,12 @@ def api_keywords_post():
 @app.route("/api/state")
 @login_required
 def api_state():
-    s = load_state()
+    _load_cat_cache()
+    total_items = sum(1 for v in _cat_cache.values() if v.get("available", True))
     return jsonify({
-        "last_run":    s.get("last_run"),
-        "known_items": len(s.get("seen_ids", [])),
+        "total_items":  total_items,
         "excel_exists": OUTPUT_FILE.exists(),
-        "is_first_run": not STATE_FILE.exists() or len(s.get("seen_ids", [])) == 0,
+        "is_first_run": total_items == 0,
     })
 
 @app.route("/api/run", methods=["POST"])
@@ -2446,11 +2445,7 @@ def _fill_gaps(selected_stores: list[str]):
 def _run(selected_stores: list[str], baseline: bool):
     def send(msg): _q.put(msg)
     try:
-        state      = load_state()
-        seen_ids   = set(state["seen_ids"])
-        item_dates = dict(state.get("item_dates", {}))
         run_time   = datetime.utcnow().isoformat() + "Z"
-        ts         = datetime.now().strftime("%Y-%m-%d")
 
         stores_to_scan = selected_stores if not baseline else []
         label = "baseline scan (all stores)" if baseline else f"{len(stores_to_scan)} store(s)"
@@ -2576,18 +2571,11 @@ def _run(selected_stores: list[str], baseline: bool):
         if changed:
             save_watchlist(wl)
 
-        # ── Record first-seen dates for new items ─────────────────────────────
-        for p in all_products:
-            if p["id"] not in seen_ids and p["id"] not in item_dates:
-                item_dates[p["id"]] = ts
-
-        new_items = [p for p in all_products if p["id"] not in seen_ids]
-        save_state(list(seen_ids | ids_this_run), run_time, item_dates)
-        if new_items:
-            write_excel(new_items)
+        send({"type":"progress","msg":f"  {len(all_products):,} products scanned."})
+        _save_cat_cache()
 
         def fmt(p):
-            date_src = p.get("date_listed") or _cat_cache.get(p["id"], {}).get("date_listed", "") or item_dates.get(p["id"], "")
+            date_src = p.get("date_listed") or _cat_cache.get(p["id"], {}).get("date_listed", "")
             return {
                 "id":         p["id"],
                 "name":       p["name"],
@@ -2606,20 +2594,19 @@ def _run(selected_stores: list[str], baseline: bool):
                 "image_id":   p.get("image_id") or _cat_cache.get(p["id"], {}).get("image_id", ""),
             }
 
-        new_ids = {p["id"] for p in new_items}
+        # Send all item IDs so client can update its per-user seen_ids
+        all_ids = [p["id"] for p in all_products]
         # For large scans, don't send full item lists via SSE — client will use server-side browse
         large_scan = len(all_products) > 1000
-        new_items_capped = [fmt(p) for p in new_items[:50]] if large_scan else [fmt(p) for p in new_items]
+        items_for_sse = [] if large_scan else [fmt(p) for p in all_products[:500]]
         send({
             "type":       "done",
             "baseline":   baseline,
             "stopped":    _stop_event.is_set(),
             "scanned":    len(all_products),
-            "new_count":  len(new_items),
-            "new_items":  new_items_capped,
-            "all_items":  [] if (baseline or large_scan) else
-                          [fmt(p) for p in all_products if p["id"] not in new_ids],
-            "use_browse": large_scan and not baseline,
+            "all_ids":    all_ids,
+            "items":      items_for_sse,
+            "use_browse": large_scan,
         })
     except Exception as e:
         send({"type":"done","error":str(e),"scanned":0,"new_count":0,"new_items":[]})
@@ -2871,11 +2858,11 @@ tr.sold-row td a{color:#666}
   <div style="position:absolute;inset:0;background:rgba(0,0,0,.7)" onclick="dismissFirstRun()"></div>
   <div style="position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:30px 28px;width:400px;z-index:1">
     <h2 style="color:#fff;font-size:1.05rem;margin-bottom:10px">🎸 Welcome to Gear Tracker</h2>
-    <p style="color:#999;font-size:.85rem;line-height:1.6;margin-bottom:8px">No inventory baseline has been built yet. The baseline captures Guitar Center's full used inventory across ~300 stores so you can track new listings and price changes.</p>
-    <p style="color:#777;font-size:.82rem;margin-bottom:20px">This process takes a few minutes. Would you like to build it now?</p>
+    <p style="color:#999;font-size:.85rem;line-height:1.6;margin-bottom:8px">The inventory database is empty. It will be automatically built overnight, or you can build it now. This captures Guitar Center's full used inventory across ~300 stores.</p>
+    <p style="color:#777;font-size:.82rem;margin-bottom:20px">Building takes a few minutes.</p>
     <div style="display:flex;gap:10px;justify-content:flex-end">
-      <button onclick="dismissFirstRun()" style="padding:8px 18px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#aaa;font-size:.85rem;cursor:pointer">Not Now</button>
-      <button onclick="dismissFirstRun();runBaseline()" style="padding:8px 18px;background:#c00;border:none;border-radius:5px;color:#fff;font-size:.85rem;font-weight:700;cursor:pointer">Build Baseline</button>
+      <button onclick="dismissFirstRun()" style="padding:8px 18px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#aaa;font-size:.85rem;cursor:pointer">Wait for Tonight</button>
+      <button onclick="dismissFirstRun();runBaseline()" style="padding:8px 18px;background:#c00;border:none;border-radius:5px;color:#fff;font-size:.85rem;font-weight:700;cursor:pointer">Build Now</button>
     </div>
   </div>
 </div>
@@ -2886,9 +2873,9 @@ tr.sold-row td a{color:#666}
     <h2 style="color:#fff;font-size:1.05rem;margin-bottom:4px">🔑 Want List</h2>
     <p style="color:#777;font-size:.82rem;margin-bottom:16px;line-height:1.5">Items matching your want list are highlighted in the results. New items that also match sort to the top.<br><br>
       <span style="color:#999">Matching modes:</span><br>
-      <span style="color:#4ade80">Thorpy</span> — matches any item containing "Thorpy"<br>
-      <span style="color:#4ade80">Paiste, 2002</span> — matches items containing both words<br>
-      <span style="color:#4ade80">"Fender Strat"</span> — exact phrase match only
+      <span style="color:#4ade80">Wangcaster</span> — matches any item containing "Wangcaster"<br>
+      <span style="color:#4ade80">Wang, Caster</span> — matches items containing both words<br>
+      <span style="color:#4ade80">"Wang Caster"</span> — exact phrase match only
     </p>
     <div style="display:flex;gap:6px;margin-bottom:16px">
       <input id="kw-input" type="text" placeholder="Add an item to your want list…"
@@ -2941,7 +2928,7 @@ tr.sold-row td a{color:#666}
       <div id="sel-count">0 stores selected</div>
       <div class="btn-row">
         <button id="run-btn"      onclick="runTracker()" disabled>Check for New</button>
-        <button id="baseline-btn" onclick="runBaseline()" title="Scan every GC store nationwide">🌐 Build Baseline</button>
+        <button id="baseline-btn" onclick="runBaseline()" title="Scan every GC store nationwide" style="display:none">🌐 Build Baseline</button>
       </div>
       <button id="validate-stores-btn" onclick="validateStores()"
         style="display:none"
@@ -3118,15 +3105,18 @@ function _updateRelativeTime() {
 }
 
 async function loadState() {
+  // Per-user state from localStorage
+  window._seenIds = new Set(_lsGet('seen_ids', []));
+  window._lastRunISO = _lsGet('last_run', null);
+  _updateRelativeTime();
+  document.getElementById('check-now-btn').style.display = window._lastRunISO ? 'inline' : 'none';
+
+  // Shared state from server
   const r = await fetch('/api/state');
   const s = await r.json();
-  window._lastRunISO = s.last_run || null;
-  _updateRelativeTime();
-  // Show Check Now button if stores are selected
-  document.getElementById('check-now-btn').style.display = s.last_run ? 'inline' : 'none';
-  document.getElementById('s-known').textContent = s.known_items.toLocaleString();
+  document.getElementById('s-known').textContent = s.total_items.toLocaleString();
   if (s.excel_exists) document.getElementById('s-excel').style.display = 'inline';
-  if (s.is_first_run) {
+  if (s.is_first_run && !window._seenIds.size) {
     document.getElementById('first-run-modal').style.display = 'flex';
   }
   // Check for updates
@@ -3409,8 +3399,9 @@ function _buildRowHtml(item) {
     ? `<span class="tag-drop">↓ $${Math.round(item.price_drop)}</span>`
     : '';
   const soldBadge = isSold ? ' <span class="tag-sold">Sold</span>' : '';
+  const isNew = item.isNew || (item.id && window._seenIds && !window._seenIds.has(item.id));
   return `<tr class="${isSold ? 'sold-row' : ''}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}" data-image-id="${esc(item.image_id)}">` +
-    `<td>${item.isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
+    `<td>${isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
     `<td>${item.kwMatch ? '<span class="tag-kw">WANT</span>' : ''}</td>` +
     `<td>${watchStar}</td>` +
     `<td>${nameCell}${soldBadge}</td>` +
@@ -3817,44 +3808,62 @@ function showResults(msg, isBaseline) {
     return;
   }
 
-  const n = msg.new_count;
   const stoppedNote = msg.stopped ? ' (stopped early)' : '';
-  appendLog(`\\n✓ Done${stoppedNote} — ${msg.scanned.toLocaleString()} items scanned, ${n} new.`, 'log-dim');
 
-  if (isBaseline && n === 0) {
+  // Determine what's new for THIS USER by comparing against their localStorage seen_ids
+  const allIds = msg.all_ids || [];
+  const newIdSet = new Set();
+  allIds.forEach(id => { if (!window._seenIds.has(id)) newIdSet.add(id); });
+  const newCount = newIdSet.size;
+
+  appendLog(`\\n✓ Done${stoppedNote} — ${msg.scanned.toLocaleString()} items scanned, ${newCount.toLocaleString()} new for you.`, 'log-dim');
+
+  // Update per-user state in localStorage
+  allIds.forEach(id => window._seenIds.add(id));
+  _lsSet('seen_ids', [...window._seenIds]);
+  window._lastRunISO = new Date().toISOString();
+  _lsSet('last_run', window._lastRunISO);
+  _updateRelativeTime();
+  document.getElementById('check-now-btn').style.display = 'inline';
+
+  // Refresh shared item count from server
+  fetch('/api/state').then(r => r.json()).then(s => {
+    document.getElementById('s-known').textContent = s.total_items.toLocaleString();
+  }).catch(() => {});
+
+  if (isBaseline) {
     document.getElementById('res-title').textContent = 'Baseline Complete';
     document.getElementById('res-badge').textContent = '';
     document.getElementById('res-body').innerHTML =
-      `<div class="no-res">Full inventory baseline saved (${msg.scanned.toLocaleString()} items)${stoppedNote}. Run again any time to see what's new!</div>`;
+      `<div class="no-res">Inventory database built (${msg.scanned.toLocaleString()} items)${stoppedNote}. Check back any time to see what's new!</div>`;
     ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
     return;
   }
 
   document.getElementById('res-search').value = '';
   document.getElementById('res-search-count').textContent = '';
-  const total = n + (msg.all_items ? msg.all_items.length : 0) + (msg.use_browse ? msg.scanned - n : 0);
-  document.getElementById('res-title').textContent = n > 0 ? `${n} New · ${msg.scanned.toLocaleString()} Total` : `${msg.scanned.toLocaleString()} Items (nothing new)`;
-  document.getElementById('res-badge').textContent  = n > 0 ? n + ' NEW' : '';
-  if (n > 0) document.getElementById('s-excel').style.display = 'inline';
+  document.getElementById('res-title').textContent = newCount > 0
+    ? `${newCount.toLocaleString()} New · ${msg.scanned.toLocaleString()} Total`
+    : `${msg.scanned.toLocaleString()} Items (nothing new)`;
+  document.getElementById('res-badge').textContent = newCount > 0 ? newCount + ' NEW' : '';
 
-  if (msg.scanned === 0 && n === 0) {
+  if (msg.scanned === 0) {
     document.getElementById('res-body').innerHTML = '<div class="no-res">Nothing found for selected stores.</div>';
     ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
     return;
   }
 
-  // For large scans, switch to server-side browse instead of rendering all items client-side
+  // For large scans, switch to server-side browse
   if (msg.use_browse) {
     _browseMode = 'server';
     _srvStores = getSelected();
-    if (!_srvStores.length) _srvStores = []; // all-stores scan
+    if (!_srvStores.length) _srvStores = [];
     _srvPage = 1;
     _srvSortField = 'date';
     _srvSortDir = 'desc';
     window._sortCol = null; window._sortDir = 1;
     _watchFilterActive = false;
     document.getElementById('watchlist-toggle').classList.remove('wl-active');
-    // Use all_stores if no specific stores selected (baseline-like full scan)
     if (!_srvStores.length) {
       _globalSearchActive = false;
       _globalSearchQuery = '';
@@ -3863,14 +3872,16 @@ function showResults(msg, isBaseline) {
     return;
   }
 
+  // Small scan: render items client-side, marking isNew per-user
   _browseMode = 'local';
-  window._tableData = [];
-  (msg.new_items || []).forEach(item => window._tableData.push({isNew:true, kwMatch: _itemMatchesKeyword(item), ...item}));
-  (msg.all_items  || []).forEach(item => window._tableData.push({isNew:false, kwMatch: _itemMatchesKeyword(item), ...item}));
-  // Sort: NEW+keyword items first, then by date descending
+  window._tableData = (msg.items || []).map(item => ({
+    ...item,
+    isNew: newIdSet.has(item.id),
+    kwMatch: _itemMatchesKeyword(item),
+  }));
   window._tableData.sort((a, b) => {
-    const aTop = (a.isNew && a.kwMatch) ? 0 : 1;
-    const bTop = (b.isNew && b.kwMatch) ? 0 : 1;
+    const aTop = (a.isNew && a.kwMatch) ? 0 : (a.isNew ? 1 : 2);
+    const bTop = (b.isNew && b.kwMatch) ? 0 : (b.isNew ? 1 : 2);
     if (aTop !== bTop) return aTop - bTop;
     return (b.date_raw || '').localeCompare(a.date_raw || '');
   });
@@ -4388,7 +4399,11 @@ async function doReset(pw) {
     return;
   }
   appendLog('✓ ' + d.status + (d.deleted.length ? ' Deleted: ' + d.deleted.join(', ') : ''), 'log-dim');
+  // Clear per-user tracking state (but keep want list, watchlist, favorites)
+  window._seenIds = new Set();
+  _lsSet('seen_ids', []);
   window._lastRunISO = null;
+  _lsSet('last_run', null);
   _updateRelativeTime();
   document.getElementById('check-now-btn').style.display = 'none';
   document.getElementById('s-known').textContent = '0';
@@ -4778,12 +4793,88 @@ def api_do_update():
     def _run():
         def send(msg): _q.put({"type": "progress", "msg": msg})
         success = _do_update(send)
-        _q.put({"type": "done", "scanned": 0, "new_count": 0,
-                "new_items": [], "baseline": False, "stopped": False,
+        _q.put({"type": "done", "scanned": 0, "all_ids": [],
+                "items": [], "baseline": False, "stopped": False,
                 "update_success": success})
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     return jsonify({"status": "started"})
+
+
+# ── Nightly scheduled scan ────────────────────────────────────────────────────
+
+def _nightly_scan():
+    """Run a full baseline scan to keep the shared inventory cache fresh.
+    Runs in background — does NOT affect any user's seen_ids (those are in localStorage)."""
+    import time as _time
+    while True:
+        try:
+            # Calculate seconds until next 3:00 AM Eastern (UTC-5 / UTC-4 DST)
+            from datetime import datetime, timedelta
+            import calendar
+            now_utc = datetime.utcnow()
+            # 3AM Eastern = 8AM UTC (EST) or 7AM UTC (EDT)
+            # Use 8AM UTC as safe default (3AM EST / 4AM EDT)
+            target_hour_utc = 8
+            target = now_utc.replace(hour=target_hour_utc, minute=0, second=0, microsecond=0)
+            if target <= now_utc:
+                target += timedelta(days=1)
+            wait_secs = (target - now_utc).total_seconds()
+            print(f"  Nightly scan scheduled in {wait_secs/3600:.1f} hours ({target.strftime('%Y-%m-%d %H:%M')} UTC)")
+            _time.sleep(wait_secs)
+
+            # Run the scan if no other scan is in progress
+            if _lock.acquire(blocking=False):
+                try:
+                    print("  🌙 Starting nightly inventory scan…")
+                    _stop_event.clear()
+                    _load_cat_cache()
+
+                    page = 1
+                    total = 0
+                    while page <= 1000:
+                        if _stop_event.is_set():
+                            break
+                        try:
+                            data = fetch_page(None, page)
+                        except Exception:
+                            break
+                        products = parse_products(data, None)
+                        if not products:
+                            break
+                        for p in products:
+                            sku = p["id"]
+                            _cat_cache[sku] = {
+                                "category":    p.get("category", ""),
+                                "subcategory": p.get("subcategory", ""),
+                                "condition":   p.get("condition", ""),
+                                "brand":       p.get("brand", ""),
+                                "name":        p.get("name", ""),
+                                "url":         p.get("url", ""),
+                                "store":       p.get("store", ""),
+                                "location":    p.get("location") or p.get("store", ""),
+                                "price":       p.get("price") or 0,
+                                "available":   True,
+                                "date_listed": p.get("date_listed") or _cat_cache.get(sku, {}).get("date_listed", ""),
+                                "image_id":    p.get("image_id") or _cat_cache.get(sku, {}).get("image_id", ""),
+                            }
+                            total += 1
+                        try:
+                            nb_pages = data.get("results", [{}])[0].get("nbPages", 1)
+                            if page >= nb_pages:
+                                break
+                        except Exception:
+                            break
+                        page += 1
+                    _save_cat_cache()
+                    print(f"  🌙 Nightly scan complete — {total:,} items updated.")
+                finally:
+                    _lock.release()
+            else:
+                print("  🌙 Nightly scan skipped — another scan is in progress.")
+        except Exception as e:
+            print(f"  🌙 Nightly scan error: {e}")
+            _time.sleep(3600)  # Retry in an hour
 
 
 if __name__ == "__main__":
@@ -4792,6 +4883,10 @@ if __name__ == "__main__":
     if not STORES_CACHE.exists():
         print("Building store list…")
         refresh_store_list()
+
+    # Start nightly scan thread
+    _nightly_thread = threading.Thread(target=_nightly_scan, daemon=True)
+    _nightly_thread.start()
 
     # Check for updates silently on startup
     try:
