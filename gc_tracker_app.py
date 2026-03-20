@@ -1773,6 +1773,7 @@ def api_import_data():
     return jsonify({"imported": written, "status": "Import complete — reload the page."})
 
 
+@app.route("/api/cl-search")
 @login_required
 def api_cl_search():
     q = request.args.get("q", "").strip()
@@ -4384,6 +4385,24 @@ async function clSearch() {
       return;
     }
     _clData = d.results || [];
+    // Filter results: all words must match (AND), or exact phrase if quoted
+    const rawQ = q.trim();
+    if (rawQ) {
+      let matchFn;
+      if (rawQ.startsWith('"') && rawQ.endsWith('"') && rawQ.length > 2) {
+        // Exact phrase match
+        const phrase = rawQ.slice(1, -1).toLowerCase();
+        matchFn = item => (item.title || '').toLowerCase().includes(phrase);
+      } else {
+        // All words must be present (AND)
+        const words = rawQ.toLowerCase().split(/\s+/).filter(Boolean);
+        matchFn = item => {
+          const t = (item.title || '').toLowerCase();
+          return words.every(w => t.includes(w));
+        };
+      }
+      _clData = _clData.filter(matchFn);
+    }
     status.textContent = '';
     clRenderResults();
   } catch(e) {
@@ -4420,11 +4439,13 @@ function clRenderResults() {
   hdr.style.display = 'flex';
 
   const cols = ['title','price','location','date','relevance'];
-  const labels = ['Item','Price','Location','Date'];
+  const labels = ['','Item','Price','Location','Date'];
   let html = '<table><thead><tr>';
   labels.forEach((l, i) => {
-    const cls = _clSortCol === i ? (_clSortDir === 1 ? 'sort-asc' : 'sort-desc') : '';
-    html += '<th class="' + cls + '" onclick="clSort(' + i + ')">' + l + '</th>';
+    if (i === 0) { html += '<th style="width:30px"></th>'; return; }
+    const sortIdx = i - 1;
+    const cls = _clSortCol === sortIdx ? (_clSortDir === 1 ? 'sort-asc' : 'sort-desc') : '';
+    html += '<th class="' + cls + '" onclick="clSort(' + sortIdx + ')">' + l + '</th>';
   });
   html += '</tr></thead><tbody>';
 
@@ -4475,10 +4496,14 @@ function clRenderResults() {
   final.forEach(r => {
     const isFav = isFavResult(r);
     const star  = isFav ? '<span class="cl-fav-star">★</span>' : '';
+    const clId  = 'cl:' + (r.url || r.title || '');
+    const isWatched = (window._watchlist || {})[clId];
+    const watchStar = `<button class="watch-btn ${isWatched ? 'active' : ''}" onclick="clToggleWatch('${clId.replace(/'/g,"\\'")}','${(r.title||'').replace(/'/g,"\\'")}','${(r.url||'').replace(/'/g,"\\'")}','${(r.price||'').replace(/'/g,"\\'")}','${(r.location||'').replace(/'/g,"\\'")}',this)" title="${isWatched ? 'Remove from' : 'Add to'} watch list">${isWatched ? '★' : '☆'}</button>`;
     const title = r.url
       ? star + '<a href="' + r.url + '" target="_blank" rel="noopener">' + (r.title || '(no title)') + '</a>'
       : star + (r.title || '(no title)');
     html += '<tr class="' + (isFav ? 'cl-fav-result' : '') + '" data-city="' + (r.cityId||'') + '">' +
+            '<td style="text-align:center">' + watchStar + '</td>' +
             '<td title="' + (r.title||'').replace(/"/g,'&quot;') + '">' + title + '</td>' +
             '<td>' + (r.price||'') + '</td>' +
             '<td>' + (r.location||'') + '</td>' +
@@ -4491,7 +4516,6 @@ function clRenderResults() {
 function clSort(col) {
   const isRelevance = cols && cols[col] === 'relevance';
   if (isRelevance && _clSortCol === col) {
-    // Second click on Relevance = back to default (fav+relevance, no active sort)
     _clSortCol = null; _clSortDir = 1;
   } else if (_clSortCol === col) {
     _clSortDir *= -1;
@@ -4499,6 +4523,21 @@ function clSort(col) {
     _clSortCol = col; _clSortDir = 1;
   }
   clRenderResults();
+}
+
+async function clToggleWatch(id, name, url, price, location, btn) {
+  const isWatched = !!(window._watchlist[id]);
+  const action = isWatched ? 'remove' : 'add';
+  const r = await fetch('/api/watchlist', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({id, name, url, store: location, action})
+  });
+  const d = await r.json();
+  window._watchlist = d.watchlist || {};
+  btn.classList.toggle('active', !isWatched);
+  btn.textContent = isWatched ? '☆' : '★';
+  btn.title = isWatched ? 'Add to watch list' : 'Remove from watch list';
 }
 </script>
 </body>
