@@ -1897,22 +1897,34 @@ def _cl_parse_html(html: str, city_id: str) -> list[dict]:
 
 def _cl_search(query: str, cities: list = None) -> list[dict]:
     """Search Craigslist musical instruments across US cities."""
+    import time as _time
     results   = []
     seen_urls = set()
     search_cities = cities if cities else _CL_CITIES
 
     def _search_city(city_id):
         try:
+            # Each thread gets its own session to avoid thread-safety issues
+            s = http.Session()
+            s.headers.update({
+                "User-Agent": random.choice(_USER_AGENTS),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+            })
+            # Small random delay to avoid hammering CL simultaneously
+            _time.sleep(random.uniform(0.05, 0.3))
             url = (f"https://{city_id}.craigslist.org/search/msa"
                    f"?query={http.utils.quote(query)}&sort=date")
-            r = _http.get(url, timeout=12)
+            r = s.get(url, timeout=12)
             if r.status_code == 200:
                 return _cl_parse_html(r.text, city_id)
         except Exception:
             pass
         return []
 
-    with ThreadPoolExecutor(max_workers=20) as pool:
+    with ThreadPoolExecutor(max_workers=10) as pool:
         futures = {pool.submit(_search_city, c): c for c in search_cities}
         for future in as_completed(futures):
             for item in future.result():
@@ -4399,7 +4411,18 @@ async function clSearch() {
   try {
     const cities = selected.length ? selected.join(',') : '';
     const r = await fetch('/api/cl-search?q=' + encodeURIComponent(q) + (cities ? '&cities=' + encodeURIComponent(cities) : ''));
-    const d = await r.json();
+    if (!r.ok) {
+      const text = await r.text();
+      document.getElementById('cl-body').innerHTML = '<div class="cl-empty" style="color:#f88">Search failed (HTTP ' + r.status + '). Try selecting fewer cities.</div>';
+      return;
+    }
+    let d;
+    try {
+      d = await r.json();
+    } catch(parseErr) {
+      document.getElementById('cl-body').innerHTML = '<div class="cl-empty" style="color:#f88">Search failed — server returned an invalid response. This can happen if the request timed out. Try selecting fewer cities.</div>';
+      return;
+    }
     if (d.error) {
       document.getElementById('cl-body').innerHTML = '<div class="cl-empty" style="color:#f88">' + d.error + '</div>';
       return;
