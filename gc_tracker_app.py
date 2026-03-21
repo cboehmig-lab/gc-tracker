@@ -4586,6 +4586,7 @@ function clRenderCities(selectAll) {
     const cb  = document.createElement('input');
     cb.type = 'checkbox'; cb.id = cbId; cb.value = c.id;
     if (selectAll) cb.checked = true;
+    cb.addEventListener('change', clFilterResults);
     const lbl = document.createElement('label');
     lbl.htmlFor = cbId; lbl.textContent = c.label;
     const btn = document.createElement('button');
@@ -4628,9 +4629,11 @@ function clToggleFav(id, btn) {
 
 function clSelectAll() {
   document.querySelectorAll('#cl-city-list input[type=checkbox]').forEach(cb => cb.checked = true);
+  clFilterResults();
 }
 function clClearAll() {
   document.querySelectorAll('#cl-city-list input[type=checkbox]').forEach(cb => cb.checked = false);
+  clFilterResults();
 }
 
 function clGetSelected() {
@@ -4700,17 +4703,19 @@ async function clSearch() {
 
 function clFilterResults() {
   const q = (document.getElementById('cl-res-search').value || '').toLowerCase();
+  const selectedCities = new Set(clGetSelected());
   const rows = document.querySelectorAll('#cl-body tbody tr');
   let visible = 0;
   rows.forEach(row => {
     const textMatch = !q || row.textContent.toLowerCase().includes(q);
     const favMatch = !_clFavsOnly || _clFavs.includes(row.dataset.city || '');
-    const show = textMatch && favMatch;
+    const cityMatch = selectedCities.size === 0 || selectedCities.has(row.dataset.city || '');
+    const show = textMatch && favMatch && cityMatch;
     row.style.display = show ? '' : 'none';
     if (show) visible++;
   });
   document.getElementById('cl-count').textContent =
-    (q || _clFavsOnly) ? (visible + ' of ' + _clData.length + ' listings') : (_clData.length + ' listings');
+    (q || _clFavsOnly || selectedCities.size < _clData.length) ? (visible + ' of ' + _clData.length + ' listings') : (_clData.length + ' listings');
 }
 
 function clRenderResults() {
