@@ -1570,11 +1570,14 @@ def api_browse():
             return 1 if x.get("kwMatch") else (2 if x.get("isFav") else 3)
 
     if sort_field == "price":
-        filtered.sort(key=lambda x: (_sort_tier(x), x.get("price_raw") or 0), reverse=reverse)
+        filtered.sort(key=lambda x: x.get("price_raw") or 0, reverse=reverse)
+        filtered.sort(key=lambda x: _sort_tier(x))  # Stable sort: tier always ascending
     elif sort_field == "date":
-        filtered.sort(key=lambda x: (_sort_tier(x), x.get("date_raw") or ""), reverse=reverse)
+        filtered.sort(key=lambda x: x.get("date_raw") or "", reverse=reverse)
+        filtered.sort(key=lambda x: _sort_tier(x))
     else:
-        filtered.sort(key=lambda x: (_sort_tier(x), (x.get(sort_field) or "").lower()), reverse=reverse)
+        filtered.sort(key=lambda x: (x.get(sort_field) or "").lower(), reverse=reverse)
+        filtered.sort(key=lambda x: _sort_tier(x))
 
     total_filtered = len(filtered)
     total_pages    = max(1, -(-total_filtered // per_page))  # ceil division
