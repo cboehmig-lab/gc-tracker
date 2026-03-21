@@ -1427,6 +1427,7 @@ def api_browse():
     # Watchlist and keywords now come from the client (localStorage)
     wl_ids     = set(data.get("watchlist_ids", []))
     keywords   = data.get("keywords", [])
+    new_ids    = set(data.get("new_ids", []))
     store_set  = set(stores) if not search_all else None
 
     # ── Keyword matching helper ───────────────────────────────────────────
@@ -1509,6 +1510,7 @@ def api_browse():
             "date_raw":   date_raw,
             "image_id":   cached.get("image_id", ""),
             "watched":    sku in wl_ids,
+            "isNew":      sku in new_ids,
             "kwMatch":    kw_hit,
             "isFav":      store in fav_stores if fav_stores else False,
         })
@@ -1558,10 +1560,14 @@ def api_browse():
     # - normal browse: keyword matches first, then favorites, then rest
     reverse = (sort_dir == "desc")
     def _sort_tier(x):
+        # NEW items always at the very top
+        is_new = x.get("isNew")
+        if is_new:
+            return 0
         if force_fav_sort:
-            return 0 if x.get("isFav") else (1 if x.get("kwMatch") else 2)
+            return 1 if x.get("isFav") else (2 if x.get("kwMatch") else 3)
         else:
-            return 0 if x.get("kwMatch") else (1 if x.get("isFav") else 2)
+            return 1 if x.get("kwMatch") else (2 if x.get("isFav") else 3)
 
     if sort_field == "price":
         filtered.sort(key=lambda x: (_sort_tier(x), x.get("price_raw") or 0), reverse=reverse)
@@ -3296,6 +3302,7 @@ async function _fetchBrowsePage(page) {
     fav_stores: favorites,
     keywords:   window._keywords || [],
     watchlist_ids: Object.keys(window._watchlist || {}),
+    new_ids:    [...(window._newIds || [])],
     ...filters,
   };
   if (_globalSearchActive) {
@@ -3339,6 +3346,7 @@ async function _fetchBrowsePage(page) {
 
     // Update header
     const hasFilters = filters.filter_q || filters.filter_brand || filters.filter_condition || filters.filter_category || filters.filter_subcategory || filters.filter_watched;
+    const newCount = window._newIds ? window._newIds.size : 0;
     if (_wantListSearchActive) {
       document.getElementById('res-title').textContent = _srvTotalCount > 0
         ? `${_srvTotalCount.toLocaleString()} Want List matches nationwide`
@@ -3350,6 +3358,9 @@ async function _fetchBrowsePage(page) {
       document.getElementById('res-title').textContent = hasFilters
         ? `${_srvTotalCount.toLocaleString()} of ${_srvTotalUnfiltered.toLocaleString()} results for "${_globalSearchQuery}"`
         : label;
+    } else if (newCount > 0 && !hasFilters) {
+      document.getElementById('res-title').textContent = `${newCount.toLocaleString()} New · ${_srvTotalUnfiltered.toLocaleString()} Total`;
+      document.getElementById('res-badge').textContent = newCount + ' NEW';
     } else if (hasFilters) {
       document.getElementById('res-title').textContent = `${_srvTotalCount.toLocaleString()} of ${_srvTotalUnfiltered.toLocaleString()} Items`;
     } else {
