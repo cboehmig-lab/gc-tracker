@@ -2821,7 +2821,7 @@ tr.fav-row td:last-child{color:#4ade80}
 #cl-body td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0}
 #cl-body td:nth-child(1){width:30px;min-width:30px;max-width:30px;text-align:center;overflow:visible}
 #cl-body td:nth-child(2){width:50%;max-width:none;text-align:left}
-#cl-body td:nth-child(3){width:90px}
+#cl-body td:nth-child(3){width:90px;text-align:left}
 #cl-body td:nth-child(4){width:140px}
 #cl-body td:nth-child(5){width:90px}
 #cl-body tr:hover td{background:#161616}
@@ -4611,6 +4611,7 @@ function clToggleFavs() {
   document.getElementById('cl-favs-btn').classList.toggle('active', _clFavsOnly);
   document.getElementById('cl-city-search').value = '';
   clRenderCities();
+  clFilterResults();  // Also filter results to show only favorites
 }
 
 function clToggleFav(id, btn) {
@@ -4702,12 +4703,14 @@ function clFilterResults() {
   const rows = document.querySelectorAll('#cl-body tbody tr');
   let visible = 0;
   rows.forEach(row => {
-    const show = !q || row.textContent.toLowerCase().includes(q);
+    const textMatch = !q || row.textContent.toLowerCase().includes(q);
+    const favMatch = !_clFavsOnly || _clFavs.includes(row.dataset.city || '');
+    const show = textMatch && favMatch;
     row.style.display = show ? '' : 'none';
     if (show) visible++;
   });
   document.getElementById('cl-count').textContent =
-    q ? (visible + ' of ' + _clData.length + ' listings') : (_clData.length + ' listings');
+    (q || _clFavsOnly) ? (visible + ' of ' + _clData.length + ' listings') : (_clData.length + ' listings');
 }
 
 function clRenderResults() {
