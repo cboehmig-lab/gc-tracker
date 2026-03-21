@@ -2451,13 +2451,14 @@ def _run(selected_stores: list[str], baseline: bool):
         run_time   = datetime.utcnow().isoformat() + "Z"
 
         stores_to_scan = selected_stores if not baseline else []
-        label = "baseline scan (all stores)" if baseline else f"{len(stores_to_scan)} store(s)"
+        nationwide = baseline or len(stores_to_scan) == 0
+        label = "nationwide scan" if nationwide else f"{len(stores_to_scan)} store(s)"
         send({"type":"progress","msg":f"Starting {label}…"})
 
         all_products, ids_this_run = [], set()
 
-        if baseline:
-            # ── Baseline: query ALL used inventory at once (no store filter) ──────
+        if nationwide:
+            # ── Nationwide: query ALL used inventory at once (no store filter) ──────
             send({"type":"progress","msg":"Fetching all used inventory nationwide via API…"})
             page = 1
             while page <= 1000:
@@ -2911,7 +2912,7 @@ tr.fav-row td:last-child{color:#4ade80}
 
 <div class="app-tabs">
   <button class="app-tab gc-tab active" onclick="switchTab('gc')">🎸 GC Used Inventory</button>
-  <button class="app-tab cl-tab" onclick="switchTab('cl')">🟣 CL National Search</button>
+  <button class="app-tab cl-tab" onclick="switchTab('cl')">🟣 CL National Musical Instruments Search</button>
 </div>
 
 <!-- ══ GC PANEL ══ -->
@@ -3071,7 +3072,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   window._keywords = _lsGet('keywords', []);
   window._seenIds = new Set(_lsGet('seen_ids', []));
   window._newIds = new Set(_lsGet('new_ids', []));  // Items flagged NEW from last Check for New
-  clRenderCities();
+  clRenderCities(true);  // Select all cities on initial load
   await loadData();
   await loadState();
 });
@@ -4555,7 +4556,7 @@ function clSaveFavs() {
   try { localStorage.setItem('cl_favs', JSON.stringify(_clFavs)); } catch(e) {}
 }
 
-function clRenderCities() {
+function clRenderCities(selectAll) {
   const q   = (document.getElementById('cl-city-search').value || '').toLowerCase();
   const list = document.getElementById('cl-city-list');
   const cities = _clFavsOnly
@@ -4570,6 +4571,7 @@ function clRenderCities() {
     const cbId = 'cl_cb_' + c.id;
     const cb  = document.createElement('input');
     cb.type = 'checkbox'; cb.id = cbId; cb.value = c.id;
+    if (selectAll) cb.checked = true;
     const lbl = document.createElement('label');
     lbl.htmlFor = cbId; lbl.textContent = c.label;
     const btn = document.createElement('button');
