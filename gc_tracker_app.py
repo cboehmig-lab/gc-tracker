@@ -1414,7 +1414,7 @@ def api_browse():
     # Filter params
     fq      = (data.get("filter_q") or "").lower().strip()
     f_brand = data.get("filter_brand") or ""
-    f_conds = data.get("filter_conditions") or []  # Now an array for multi-select
+    f_cond  = data.get("filter_condition") or ""
     f_cat   = data.get("filter_category") or ""
     f_sub   = data.get("filter_subcategory") or ""
     f_watched = bool(data.get("filter_watched"))
@@ -1540,9 +1540,8 @@ def api_browse():
         filtered = [i for i in filtered if i["watched"]]
     if f_brand:
         filtered = [i for i in filtered if i["brand"] == f_brand]
-    if f_conds:
-        cond_set_filter = set(f_conds)
-        filtered = [i for i in filtered if i["condition"] in cond_set_filter]
+    if f_cond:
+        filtered = [i for i in filtered if i["condition"] == f_cond]
     if f_cat:
         filtered = [i for i in filtered if i["category"] == f_cat]
     if f_sub:
@@ -2610,7 +2609,7 @@ def _run(selected_stores: list[str], baseline: bool):
                 "image_id":   p.get("image_id") or _cat_cache.get(p["id"], {}).get("image_id", ""),
             }
 
-        # Send all item IDs so client can compare against previous snapshot
+        # Send all item IDs so client can update its per-user seen_ids
         all_ids = [p["id"] for p in all_products]
         # For large scans, don't send full item lists via SSE — client will use server-side browse
         large_scan = len(all_products) > 1000
@@ -2721,11 +2720,6 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .brand-dd-item.active{background:#c00;color:#fff}
 .brand-dd-item .bcount{margin-left:auto;color:#555;font-size:.72rem}
 .brand-dd-item.active .bcount{color:rgba(255,255,255,.7)}
-.cond-dd-item{display:flex;align-items:center;padding:6px 12px;cursor:pointer;font-size:.82rem;color:#ccc;gap:8px}
-.cond-dd-item:hover{background:#252525}
-.cond-dd-item.active{color:#fff}
-.cond-dd-check{width:14px;height:14px;border:1px solid #555;border-radius:3px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;font-size:.7rem}
-.cond-dd-item.active .cond-dd-check{background:#c00;border-color:#c00;color:#fff}
 #res-search-wrap{margin-left:auto;display:flex;align-items:center;gap:6px}
 #res-search{padding:5px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.8rem;width:180px;outline:none}
 #res-search:focus{border-color:#c00}
@@ -2740,18 +2734,11 @@ td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowra
 td:nth-child(1){width:42px;text-align:center}
 td:nth-child(2){width:52px;text-align:center}
 td:nth-child(3){width:30px;text-align:center}
-td:nth-child(4){width:22%}
-td:nth-child(5),td:nth-child(6),td:nth-child(7),td:nth-child(8),td:nth-child(9),td:nth-child(10),td:nth-child(11),td:nth-child(12){width:calc((78% - 124px) / 8)}
-th:nth-child(1){width:42px}
-th:nth-child(2){width:52px}
-th:nth-child(3){width:30px}
-th:nth-child(4){width:22%}
-th:nth-child(5),th:nth-child(6),th:nth-child(7),th:nth-child(8),th:nth-child(9),th:nth-child(10),th:nth-child(11),th:nth-child(12){width:calc((78% - 124px) / 8)}
+td:nth-child(4){width:26%}
+td:nth-child(7){width:56px}
 tr:hover td{background:#161616}
 td a{color:#6ab0f5;text-decoration:none}
 td a:hover{text-decoration:underline}
-td a.brand-link{color:#ccc;cursor:pointer}
-td a.brand-link:hover{color:#ff6666;text-decoration:underline}
 .tag{background:#c00;color:#fff;font-size:.65rem;font-weight:700;padding:1px 5px;border-radius:3px}
 .tag-kw{background:#0a5c2a;color:#4ade80;font-size:.65rem;font-weight:700;padding:1px 5px;border-radius:3px;border:1px solid #2d6a2d}
 .tag-drop{background:#1a3a1a;color:#4ade80;font-size:.62rem;font-weight:700;padding:2px 5px;border-radius:3px;border:1px solid #2d6a2d;white-space:nowrap}
@@ -2887,10 +2874,10 @@ tr.fav-row td:last-child{color:#4ade80}
   <div style="position:absolute;inset:0;background:rgba(0,0,0,.7)" onclick="dismissFirstRun()"></div>
   <div style="position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:30px 28px;width:400px;z-index:1">
     <h2 style="color:#fff;font-size:1.05rem;margin-bottom:10px">🎸 Welcome to Gear Tracker</h2>
-    <p style="color:#999;font-size:.85rem;line-height:1.6;margin-bottom:8px">The inventory database is empty. Click below to build it now. This captures Guitar Center's full used inventory across ~300 stores.</p>
+    <p style="color:#999;font-size:.85rem;line-height:1.6;margin-bottom:8px">The inventory database is empty. It will be automatically built overnight, or you can build it now. This captures Guitar Center's full used inventory across ~300 stores.</p>
     <p style="color:#777;font-size:.82rem;margin-bottom:20px">Building takes a few minutes.</p>
     <div style="display:flex;gap:10px;justify-content:flex-end">
-      <button onclick="dismissFirstRun()" style="padding:8px 18px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#aaa;font-size:.85rem;cursor:pointer">Later</button>
+      <button onclick="dismissFirstRun()" style="padding:8px 18px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#aaa;font-size:.85rem;cursor:pointer">Wait for Tonight</button>
       <button onclick="dismissFirstRun();runBaseline()" style="padding:8px 18px;background:#c00;border:none;border-radius:5px;color:#fff;font-size:.85rem;font-weight:700;cursor:pointer">Build Now</button>
     </div>
   </div>
@@ -3015,11 +3002,9 @@ tr.fav-row td:last-child{color:#4ade80}
             <div id="brand-dd-list" style="overflow-y:auto;max-height:260px"></div>
           </div>
         </div>
-        <div id="cond-dropdown" class="cond-dd" style="display:none;position:relative">
-          <button id="cond-dd-btn" class="cat-sel" onclick="toggleCondDropdown()" style="cursor:pointer;white-space:nowrap">All Conditions ▾</button>
-          <div id="cond-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:220px;max-height:300px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:4px 0">
-          </div>
-        </div>
+        <select id="cond-filter" class="cat-sel" style="display:none" onchange="filterResults()">
+          <option value="">All Conditions</option>
+        </select>
         <select id="cat-filter" class="cat-sel" style="display:none" onchange="onCatFilterChange()">
           <option value="">All Categories</option>
         </select>
@@ -3094,7 +3079,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   favorites = _lsGet('favorites', []);
   window._watchlist = _lsGet('watchlist', {});
   window._keywords = _lsGet('keywords', []);
-  window._prevSnapshot = new Set(_lsGet('prev_snapshot', []));  // Previous scan's full ID set
+  window._seenIds = new Set(_lsGet('seen_ids', []));
   window._newIds = new Set(_lsGet('new_ids', []));  // Items flagged NEW from last Check for New
   clRenderCities(true);  // Select all cities on initial load
   await loadData();
@@ -3148,12 +3133,20 @@ async function loadState() {
   document.getElementById('s-known').textContent = s.total_items.toLocaleString();
   if (s.excel_exists) document.getElementById('s-excel').style.display = 'inline';
 
-  // Display is based on user's own last_run only (no nightly scan)
+  // Use server's last_scan if it's more recent than user's last_run
+  // (e.g. nightly scan ran while user was away)
+  if (s.last_scan) {
+    const serverTime = new Date(s.last_scan).getTime();
+    const userTime = window._lastRunISO ? new Date(window._lastRunISO).getTime() : 0;
+    if (serverTime > userTime) {
+      window._lastRunISO = s.last_scan;
+    }
+  }
 
   _updateRelativeTime();
   document.getElementById('check-now-btn').style.display = 'inline';
 
-  if (s.is_first_run && !window._prevSnapshot.size) {
+  if (s.is_first_run && !window._seenIds.size) {
     document.getElementById('first-run-modal').style.display = 'flex';
   }
   // Check for updates
@@ -3292,7 +3285,7 @@ function _getBrowseFilters() {
   return {
     filter_q:           document.getElementById('res-search').value.trim(),
     filter_brand:       window._selectedBrand || '',
-    filter_conditions:  window._selectedConds || [],
+    filter_condition:   document.getElementById('cond-filter').value,
     filter_category:    document.getElementById('cat-filter').value,
     filter_subcategory: document.getElementById('subcat-filter').value,
     filter_watched:     _watchFilterActive,
@@ -3338,7 +3331,7 @@ async function _fetchBrowsePage(page) {
       document.getElementById('res-badge').textContent = '';
       document.getElementById('res-body').innerHTML =
         '<div class="no-res">Click <b>⬇ Populate Store Data</b> in the left panel to tag your existing inventory with store names. This only needs to run once, then selecting stores will instantly show their inventory.</div>';
-      ['cond-dropdown','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+      ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
       return;
     }
     if (!d.items || (!d.items.length && page === 1)) {
@@ -3355,7 +3348,7 @@ async function _fetchBrowsePage(page) {
     _srvTotalPages     = d.total_pages;
 
     // Update header
-    const hasFilters = filters.filter_q || filters.filter_brand || (filters.filter_conditions && filters.filter_conditions.length) || filters.filter_category || filters.filter_subcategory || filters.filter_watched;
+    const hasFilters = filters.filter_q || filters.filter_brand || filters.filter_condition || filters.filter_category || filters.filter_subcategory || filters.filter_watched;
     const newCount = window._newIds ? window._newIds.size : 0;
     if (_wantListSearchActive) {
       document.getElementById('res-title').textContent = _srvTotalCount > 0
@@ -3388,7 +3381,7 @@ async function _fetchBrowsePage(page) {
       countEl.textContent = '';
     }
     const clearBtn = document.getElementById('clear-filters-btn');
-    if (clearBtn) clearBtn.style.display = (filters.filter_brand || (filters.filter_conditions && filters.filter_conditions.length) || filters.filter_category || filters.filter_subcategory) ? '' : 'none';
+    if (clearBtn) clearBtn.style.display = (filters.filter_brand || filters.filter_condition || filters.filter_category || filters.filter_subcategory) ? '' : 'none';
 
     // Populate filter dropdowns from server-provided options
     _populateFiltersFromServer(d.brands || [], d.conditions || [], d.categories || [], d.subcategories || [], filters);
@@ -3409,11 +3402,12 @@ function _populateFiltersFromServer(brands, conditions, categories, subcategorie
   window._selectedBrand = currentFilters.filter_brand || '';
   document.getElementById('brand-dd-btn').textContent = window._selectedBrand || 'All Brands ▾';
 
-  _setCondList(conditions);
-  // Preserve selected conditions across page loads
-  const savedConds = currentFilters.filter_conditions || [];
-  window._selectedConds = savedConds.filter(c => conditions.includes(c));
-  _updateCondBtn();
+  const condEl = document.getElementById('cond-filter');
+  const savedCond = currentFilters.filter_condition;
+  condEl.innerHTML = '<option value="">All Conditions</option>';
+  conditions.forEach(c => { const o = document.createElement('option'); o.value=o.textContent=c; condEl.appendChild(o); });
+  condEl.style.display = conditions.length ? '' : 'none';
+  condEl.value = savedCond;
 
   const catEl = document.getElementById('cat-filter');
   const savedCat = currentFilters.filter_category;
@@ -3456,7 +3450,7 @@ function _buildRowHtml(item) {
     `<td>${item.kwMatch ? '<span class="tag-kw">WANT</span>' : ''}</td>` +
     `<td>${watchStar}</td>` +
     `<td>${nameCell}${soldBadge}</td>` +
-    `<td>${item.brand ? '<a href="#" class="brand-link" onclick="event.preventDefault();selectBrand(\'' + esc(item.brand).replace(/'/g,"\\'") + '\')">' + esc(item.brand) + '</a>' : ''}</td>` +
+    `<td>${esc(item.brand)}</td>` +
     `<td>${item.price||''}</td>` +
     `<td>${dropCell}</td>` +
     `<td>${esc(item.condition)}</td>` +
@@ -3576,7 +3570,7 @@ async function browseCache() {
     document.getElementById('res-search').value = '';
     document.getElementById('res-search-count').textContent = '';
     window._selectedBrand = ''; document.getElementById('brand-dd-btn').textContent = 'All Brands ▾';
-    window._selectedConds = []; _updateCondBtn();
+    document.getElementById('cond-filter').value = '';
     document.getElementById('cat-filter').value = '';
     document.getElementById('subcat-filter').value = '';
     document.getElementById('subcat-filter').style.display = 'none';
@@ -3738,7 +3732,7 @@ function globalSearch() {
   document.getElementById('res-search').value = '';
   document.getElementById('res-search-count').textContent = '';
   window._selectedBrand = ''; document.getElementById('brand-dd-btn').textContent = 'All Brands ▾';
-  window._selectedConds = []; _updateCondBtn();
+  document.getElementById('cond-filter').value = '';
   document.getElementById('cat-filter').value = '';
   document.getElementById('subcat-filter').value = '';
   document.getElementById('subcat-filter').style.display = 'none';
@@ -3785,7 +3779,7 @@ function searchWantList() {
   document.getElementById('res-search').value = '';
   document.getElementById('res-search-count').textContent = '';
   window._selectedBrand = ''; document.getElementById('brand-dd-btn').textContent = 'All Brands ▾';
-  window._selectedConds = []; _updateCondBtn();
+  document.getElementById('cond-filter').value = '';
   document.getElementById('cat-filter').value = '';
   document.getElementById('subcat-filter').value = '';
   document.getElementById('subcat-filter').style.display = 'none';
@@ -3824,7 +3818,7 @@ function confirmReset() {
 
 // ── Run ───────────────────────────────────────────────────────────────────────
 async function runTracker() {
-  // Always scan nationwide so snapshot comparison is accurate
+  // Always scan nationwide so seen_ids stays complete
   await startRun({stores:[], baseline:false}, false);
 }
 
@@ -3902,23 +3896,22 @@ function showResults(msg, isBaseline) {
 
   const stoppedNote = msg.stopped ? ' (stopped early)' : '';
 
-  // Determine what's new by comparing current scan against previous snapshot
+  // Determine what's new for THIS USER by comparing against their localStorage seen_ids
   const allIds = msg.all_ids || [];
-  const currentIdSet = new Set(allIds);
-  const isFirstRun = window._prevSnapshot.size === 0;
+  const isFirstRun = window._seenIds.size === 0;
   const newIdSet = new Set();
   if (!isFirstRun) {
-    // Normal run: items in current scan but NOT in previous snapshot are new
-    allIds.forEach(id => { if (!window._prevSnapshot.has(id)) newIdSet.add(id); });
+    // Normal run: items not in seen_ids are new
+    allIds.forEach(id => { if (!window._seenIds.has(id)) newIdSet.add(id); });
   }
-  // else: first run — everything gets seeded as the baseline snapshot, nothing is "new"
+  // else: first run — everything gets seeded as "seen", nothing is "new"
   const newCount = newIdSet.size;
 
   appendLog(`\\n✓ Done${stoppedNote} — ${msg.scanned.toLocaleString()} items scanned, ${isFirstRun ? 'initial database built' : newCount.toLocaleString() + ' new for you'}.`, 'log-dim');
 
-  // Update per-user state in localStorage — REPLACE snapshot with current scan's IDs
-  window._prevSnapshot = currentIdSet;
-  _lsSet('prev_snapshot', [...currentIdSet]);
+  // Update per-user state in localStorage
+  allIds.forEach(id => window._seenIds.add(id));
+  _lsSet('seen_ids', [...window._seenIds]);
   // Save the NEW ids so they persist across page loads until next Check for New
   window._newIds = newIdSet;
   _lsSet('new_ids', [...newIdSet]);
@@ -3937,7 +3930,7 @@ function showResults(msg, isBaseline) {
     document.getElementById('res-badge').textContent = '';
     document.getElementById('res-body').innerHTML =
       `<div class="no-res">Inventory database built (${msg.scanned.toLocaleString()} items)${stoppedNote}. Check back any time to see what's new!</div>`;
-    ['cond-dropdown','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+    ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
     return;
   }
 
@@ -3950,7 +3943,7 @@ function showResults(msg, isBaseline) {
 
   if (msg.scanned === 0) {
     document.getElementById('res-body').innerHTML = '<div class="no-res">Nothing found for selected stores.</div>';
-    ['cond-dropdown','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+    ['cond-filter','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
     return;
   }
 
@@ -4003,11 +3996,13 @@ function populateCategoryFilter() {
   _setBrandList(brandList);
   window._selectedBrand = '';
   document.getElementById('brand-dd-btn').textContent = 'All Brands ▾';
-  // Condition filter (multi-select)
+  // Condition filter
   const conds = [...new Set(data.map(i => i.condition).filter(Boolean))].sort();
-  _setCondList(conds);
-  window._selectedConds = [];
-  _updateCondBtn();
+  const condEl = document.getElementById('cond-filter');
+  condEl.innerHTML = '<option value="">All Conditions</option>';
+  conds.forEach(c => { const o = document.createElement('option'); o.value=o.textContent=c; condEl.appendChild(o); });
+  condEl.style.display = conds.length ? '' : 'none';
+  condEl.value = '';
   // Category filter
   const cats = [...new Set(data.map(i => i.category).filter(Boolean))].sort();
   const catEl = document.getElementById('cat-filter');
@@ -4058,7 +4053,7 @@ function renderTable() {
   // Apply filters to get the filtered set
   const q      = document.getElementById('res-search').value.toLowerCase().trim();
   const brand  = window._selectedBrand || '';
-  const condArr = window._selectedConds || [];
+  const cond   = document.getElementById('cond-filter').value;
   const cat    = document.getElementById('cat-filter').value;
   const subcat = document.getElementById('subcat-filter').value;
 
@@ -4075,7 +4070,7 @@ function renderTable() {
       }
     }
     return (!brand  || (item.brand || '') === brand) &&
-           (!condArr.length || condArr.includes(item.condition || '')) &&
+           (!cond   || (item.condition || '') === cond) &&
            (!cat    || (item.category  || '') === cat) &&
            (!subcat || (item.subcategory || '') === subcat);
   });
@@ -4334,85 +4329,13 @@ function _setBrandList(brands) {
   dd.style.display = brands && brands.length ? '' : 'none';
 }
 
-// ── Condition multi-select dropdown ──────────────────────────────────────────
-window._selectedConds = [];  // Array of selected condition strings
-window._condList = [];       // Available conditions from server
-
-function toggleCondDropdown() {
-  const panel = document.getElementById('cond-dd-panel');
-  if (panel.style.display === 'none') {
-    panel.style.display = '';
-    _renderCondList();
-    setTimeout(() => document.addEventListener('click', _closeCondOnOutside, true), 0);
-  } else {
-    _closeCondDropdown();
-  }
-}
-
-function _closeCondDropdown() {
-  document.getElementById('cond-dd-panel').style.display = 'none';
-  document.removeEventListener('click', _closeCondOnOutside, true);
-}
-
-function _closeCondOnOutside(e) {
-  if (!e.target.closest('#cond-dropdown')) _closeCondDropdown();
-}
-
-function _renderCondList() {
-  const panel = document.getElementById('cond-dd-panel');
-  let html = '';
-  window._condList.forEach(c => {
-    const isActive = window._selectedConds.includes(c);
-    const esc = c.replace(/"/g,'&quot;');
-    html += '<div class="cond-dd-item' + (isActive ? ' active' : '') + '" data-cond="' + esc + '">'
-         + '<span class="cond-dd-check">' + (isActive ? '✓' : '') + '</span>'
-         + esc + '</div>';
-  });
-  panel.innerHTML = html;
-  panel.onclick = function(e) {
-    const item = e.target.closest('.cond-dd-item');
-    if (!item) return;
-    _toggleCond(item.dataset.cond);
-  };
-}
-
-function _toggleCond(cond) {
-  const idx = window._selectedConds.indexOf(cond);
-  if (idx >= 0) {
-    window._selectedConds.splice(idx, 1);
-  } else {
-    window._selectedConds.push(cond);
-  }
-  _updateCondBtn();
-  _renderCondList();
-  filterResults();
-}
-
-function _updateCondBtn() {
-  const btn = document.getElementById('cond-dd-btn');
-  if (window._selectedConds.length === 0) {
-    btn.textContent = 'All Conditions ▾';
-  } else if (window._selectedConds.length === 1) {
-    btn.textContent = window._selectedConds[0] + ' ▾';
-  } else {
-    btn.textContent = window._selectedConds.length + ' Conditions ▾';
-  }
-}
-
-function _setCondList(conditions) {
-  window._condList = conditions || [];
-  const dd = document.getElementById('cond-dropdown');
-  dd.style.display = conditions && conditions.length ? '' : 'none';
-}
-
 // ── Results filter ────────────────────────────────────────────────────────────
 let _filterTimer = null;
 
 function clearFilters() {
   window._selectedBrand = '';
   document.getElementById('brand-dd-btn').textContent = 'All Brands ▾';
-  window._selectedConds = [];
-  _updateCondBtn();
+  document.getElementById('cond-filter').value = '';
   document.getElementById('cat-filter').value = '';
   const subEl = document.getElementById('subcat-filter');
   subEl.value = '';
@@ -4571,10 +4494,8 @@ async function doReset(pw) {
   }
   appendLog('✓ ' + d.status + (d.deleted.length ? ' Deleted: ' + d.deleted.join(', ') : ''), 'log-dim');
   // Clear per-user tracking state (but keep want list, watchlist, favorites)
-  window._prevSnapshot = new Set();
-  _lsSet('prev_snapshot', []);
-  window._newIds = new Set();
-  _lsSet('new_ids', []);
+  window._seenIds = new Set();
+  _lsSet('seen_ids', []);
   window._lastRunISO = null;
   _lsSet('last_run', null);
   _updateRelativeTime();
@@ -5069,7 +4990,9 @@ if __name__ == "__main__":
         print("Building store list…")
         refresh_store_list()
 
-    # Nightly scan removed — "Check for New" is manual only
+    # Start nightly scan thread
+    _nightly_thread = threading.Thread(target=_nightly_scan, daemon=True)
+    _nightly_thread.start()
 
     # Check for updates silently on startup
     try:
