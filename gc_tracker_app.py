@@ -2463,52 +2463,87 @@ def _run(selected_stores: list[str], baseline: bool):
         all_products, ids_this_run = [], set()
 
         if nationwide:
-            # ── Nationwide: query ALL used inventory at once (no store filter) ──────
+            # ── Nationwide: query ALL used inventory via parallel page fetches ────
+            PARALLEL_WORKERS = 15  # concurrent API requests
             send({"type":"progress","msg":"Fetching all used inventory nationwide via API…"})
-            page = 1
-            while page <= 1000:
-                if _stop_event.is_set():
-                    send({"type":"progress","msg":"⏹ Stopped by user."})
-                    break
-                try:
-                    data = fetch_page(None, page)
-                except Exception as e:
-                    send({"type":"progress","msg":f"  API error on page {page}: {e}"})
-                    break
-                products = parse_products(data, None)
-                if not products:
-                    break
-                for p in products:
+            # First fetch page 1 to learn total pages
+            try:
+                data1 = fetch_page(None, 1)
+            except Exception as e:
+                send({"type":"progress","msg":f"  API error on page 1: {e}"})
+                data1 = None
+            if data1:
+                products1 = parse_products(data1, None)
+                for p in products1:
                     if p["id"] not in ids_this_run:
                         all_products.append(p)
                         ids_this_run.add(p["id"])
-                # Check total pages
                 try:
-                    nb_pages = data.get("results", [{}])[0].get("nbPages", 1)
-                    nb_hits  = data.get("results", [{}])[0].get("nbHits", 0)
-                    if page == 1:
-                        send({"type":"progress","msg":f"  {nb_hits:,} items across {nb_pages} pages"})
+                    nb_pages = data1.get("results", [{}])[0].get("nbPages", 1)
+                    nb_hits  = data1.get("results", [{}])[0].get("nbHits", 0)
+                    send({"type":"progress","msg":f"  {nb_hits:,} items across {nb_pages} pages — fetching {PARALLEL_WORKERS} pages at a time…"})
                 except Exception:
                     nb_pages = 1
-                if page >= nb_pages:
-                    break
-                if page % 10 == 0:
-                    send({"type":"progress","msg":f"  page {page}/{nb_pages}… ({len(all_products):,} items so far)"})
-                page += 1
-            send({"type":"progress","msg":f"  Fetched {len(all_products):,} items total."})
-        else:
-            # ── Normal scan: query selected stores ───────────────────────────────
-            for i, store in enumerate(stores_to_scan, 1):
+                # Fetch remaining pages in parallel batches
+                remaining = list(range(2, min(nb_pages + 1, 1001)))
+                def _fetch_one_page(pg):
+                    if _stop_event.is_set():
+                        return pg, None, None
+                    try:
+                        d = fetch_page(None, pg)
+                        return pg, d, None
+                    except Exception as exc:
+                        return pg, None, exc
+                batch_idx = 0
+                while batch_idx < len(remaining) and not _stop_event.is_set():
+                    batch = remaining[batch_idx:batch_idx + PARALLEL_WORKERS]
+                    batch_idx += len(batch)
+                    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
+                        futures = {pool.submit(_fetch_one_page, pg): pg for pg in batch}
+                        for fut in as_completed(futures):
+                            pg, data, err = fut.result()
+                            if err:
+                                send({"type":"progress","msg":f"  API error on page {pg}: {err}"})
+                                continue
+                            if data is None:
+                                continue
+                            products = parse_products(data, None)
+                            for p in products:
+                                if p["id"] not in ids_this_run:
+                                    all_products.append(p)
+                                    ids_this_run.add(p["id"])
+                    # Progress update after each batch
+                    pages_done = min(batch_idx + 1, nb_pages)
+                    send({"type":"progress","msg":f"  page {pages_done}/{nb_pages}… ({len(all_products):,} items so far)"})
                 if _stop_event.is_set():
                     send({"type":"progress","msg":"⏹ Stopped by user."})
-                    break
-                send({"type":"progress","msg":f"\n[{i}/{len(stores_to_scan)}] {store}"})
+            send({"type":"progress","msg":f"  Fetched {len(all_products):,} items total."})
+        else:
+            # ── Normal scan: query selected stores in parallel ────────────────
+            STORE_WORKERS = 10
+            send({"type":"progress","msg":f"Scanning {len(stores_to_scan)} stores ({STORE_WORKERS} at a time)…"})
+            completed = [0]
+            lock = threading.Lock()
+            def _scan_one_store(store):
+                if _stop_event.is_set():
+                    return store, [], set()
                 _rotate_ua()
                 products, ids = scrape_store(store, send, _stop_event)
-                for p in products:
-                    if p["id"] not in ids_this_run:
-                        all_products.append(p)
-                ids_this_run |= ids
+                with lock:
+                    completed[0] += 1
+                    send({"type":"progress","msg":f"  [{completed[0]}/{len(stores_to_scan)}] {store} — {len(products)} items"})
+                return store, products, ids
+            with ThreadPoolExecutor(max_workers=STORE_WORKERS) as pool:
+                futures = {pool.submit(_scan_one_store, s): s for s in stores_to_scan}
+                for fut in as_completed(futures):
+                    if _stop_event.is_set():
+                        send({"type":"progress","msg":"⏹ Stopped by user."})
+                        break
+                    store, products, ids = fut.result()
+                    for p in products:
+                        if p["id"] not in ids_this_run:
+                            all_products.append(p)
+                    ids_this_run |= ids
 
         # ── Apply data from Algolia API to products, tracking price drops ────────
         # Categories, condition, brand all come from the API now — no page scraping needed.
