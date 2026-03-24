@@ -1411,12 +1411,12 @@ def api_browse():
     sort_dir   = data.get("sort_dir", "desc")
     fav_stores = set(data.get("fav_stores", []))
 
-    # Filter params
-    fq      = (data.get("filter_q") or "").lower().strip()
-    f_brand = data.get("filter_brand") or ""
-    f_conds = data.get("filter_conditions") or []  # Now an array for multi-select
-    f_cat   = data.get("filter_category") or ""
-    f_sub   = data.get("filter_subcategory") or ""
+    # Filter params — all dropdowns are multi-select arrays
+    fq       = (data.get("filter_q") or "").lower().strip()
+    f_brands = data.get("filter_brands") or []
+    f_conds  = data.get("filter_conditions") or []
+    f_cats   = data.get("filter_categories") or []
+    f_subs   = data.get("filter_subcategories") or []
     f_watched = bool(data.get("filter_watched"))
     f_want_only = bool(data.get("filter_want_list_only"))
     force_fav_sort = bool(data.get("force_fav_sort"))
@@ -1538,41 +1538,36 @@ def api_browse():
         filtered = [i for i in filtered if i["kwMatch"]]
     if f_watched:
         filtered = [i for i in filtered if i["watched"]]
-    if f_brand:
-        filtered = [i for i in filtered if i["brand"] == f_brand]
+    if f_brands:
+        brand_set_filter = set(f_brands)
+        filtered = [i for i in filtered if i["brand"] in brand_set_filter]
     if f_conds:
         cond_set_filter = set(f_conds)
         filtered = [i for i in filtered if i["condition"] in cond_set_filter]
-    if f_cat:
-        filtered = [i for i in filtered if i["category"] == f_cat]
-    if f_sub:
-        filtered = [i for i in filtered if i["subcategory"] == f_sub]
+    if f_cats:
+        cat_set_filter = set(f_cats)
+        filtered = [i for i in filtered if i["category"] in cat_set_filter]
+    if f_subs:
+        sub_set_filter = set(f_subs)
+        filtered = [i for i in filtered if i["subcategory"] in sub_set_filter]
 
     # Subcategory options scoped to current category filter
     scoped_subcats = set()
-    if f_cat:
+    if f_cats:
+        cat_set_scope = set(f_cats)
         for i in all_items:
-            if i["category"] == f_cat and i["subcategory"]:
+            if i["category"] in cat_set_scope and i["subcategory"]:
                 scoped_subcats.add(i["subcategory"])
 
     # ── Sort ──────────────────────────────────────────────────────────────
-    # Priority tiers for sorting:
-    # - force_fav_sort (global searches): favorites ALWAYS on top, then keyword matches, then rest
-    # - normal browse: keyword matches first, then favorites, then rest
+    # Only NEW items float to top; everything else sorted purely by user's column
     reverse = (sort_dir == "desc")
     def _sort_tier(x):
-        # NEW items always at the very top
-        is_new = x.get("isNew")
-        if is_new:
-            return 0
-        if force_fav_sort:
-            return 1 if x.get("isFav") else (2 if x.get("kwMatch") else 3)
-        else:
-            return 1 if x.get("kwMatch") else (2 if x.get("isFav") else 3)
+        return 0 if x.get("isNew") else 1
 
     if sort_field == "price":
         filtered.sort(key=lambda x: x.get("price_raw") or 0, reverse=reverse)
-        filtered.sort(key=lambda x: _sort_tier(x))  # Stable sort: tier always ascending
+        filtered.sort(key=lambda x: _sort_tier(x))
     elif sort_field == "date":
         filtered.sort(key=lambda x: x.get("date_raw") or "", reverse=reverse)
         filtered.sort(key=lambda x: _sort_tier(x))
@@ -2742,16 +2737,16 @@ th:hover{color:#ccc}
 th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
 th.sort-desc::after{content:" ▼";color:#c00;font-size:.6rem}
 td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-td:nth-child(1){width:42px;text-align:center}
-td:nth-child(2){width:52px;text-align:center}
+td:nth-child(1){width:52px;text-align:center;overflow:visible}
+td:nth-child(2){width:62px;text-align:center;overflow:visible}
 td:nth-child(3){width:30px;text-align:center}
 td:nth-child(4){width:22%}
-td:nth-child(5),td:nth-child(6),td:nth-child(7),td:nth-child(8),td:nth-child(9),td:nth-child(10),td:nth-child(11),td:nth-child(12){width:calc((78% - 124px) / 8)}
-th:nth-child(1){width:42px}
-th:nth-child(2){width:52px}
+td:nth-child(5),td:nth-child(6),td:nth-child(7),td:nth-child(8),td:nth-child(9),td:nth-child(10),td:nth-child(11),td:nth-child(12){width:calc((78% - 144px) / 8)}
+th:nth-child(1){width:52px}
+th:nth-child(2){width:62px}
 th:nth-child(3){width:30px}
 th:nth-child(4){width:22%}
-th:nth-child(5),th:nth-child(6),th:nth-child(7),th:nth-child(8),th:nth-child(9),th:nth-child(10),th:nth-child(11),th:nth-child(12){width:calc((78% - 124px) / 8)}
+th:nth-child(5),th:nth-child(6),th:nth-child(7),th:nth-child(8),th:nth-child(9),th:nth-child(10),th:nth-child(11),th:nth-child(12){width:calc((78% - 144px) / 8)}
 tr:hover td{background:#161616}
 td a{color:#6ab0f5;text-decoration:none}
 td a:hover{text-decoration:underline}
@@ -2994,6 +2989,7 @@ tr.fav-row td:last-child{color:#4ade80}
         <button id="global-search-clear" onclick="clearGlobalSearch()" title="Clear search results" style="display:none">✕</button>
       </div>
       <span id="s-excel" style="display:none"><a style="color:#6ab0f5" href="/download/excel">Download Excel ↗</a></span>
+      <span id="s-want-match" style="display:none;color:#4caf50;font-weight:600;font-size:.82rem;cursor:pointer" onclick="searchWantList()" title="Click to view want list matches"></span>
     </div>
     <div id="log"><span class="log-dim">Ready — select stores and click Run, or build a full baseline.</span></div>
     <div class="results" id="res-panel" style="display:none">
@@ -3025,12 +3021,16 @@ tr.fav-row td:last-child{color:#4ade80}
           <div id="cond-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:220px;max-height:300px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:4px 0">
           </div>
         </div>
-        <select id="cat-filter" class="cat-sel" style="display:none" onchange="onCatFilterChange()">
-          <option value="">All Categories</option>
-        </select>
-        <select id="subcat-filter" class="cat-sel" style="display:none" onchange="filterResults()">
-          <option value="">All Subcategories</option>
-        </select>
+        <div id="cat-dropdown" class="cond-dd" style="display:none;position:relative">
+          <button id="cat-dd-btn" class="cat-sel" onclick="toggleCatDropdown()" style="cursor:pointer;white-space:nowrap">All Categories ▾</button>
+          <div id="cat-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:240px;max-height:300px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:4px 0">
+          </div>
+        </div>
+        <div id="subcat-dropdown" class="cond-dd" style="display:none;position:relative">
+          <button id="subcat-dd-btn" class="cat-sel" onclick="toggleSubcatDropdown()" style="cursor:pointer;white-space:nowrap">All Subcategories ▾</button>
+          <div id="subcat-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:240px;max-height:300px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:4px 0">
+          </div>
+        </div>
         <button id="clear-filters-btn" onclick="clearFilters()"
           style="display:none;padding:5px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #c00;color:#f88;font-size:.78rem;cursor:pointer;white-space:nowrap">
           ✕ Clear Filters
@@ -3098,6 +3098,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Load personal data from localStorage
   favorites = _lsGet('favorites', []);
   window._watchlist = _lsGet('watchlist', {});
+  window._clWatchlist = _lsGet('cl_watchlist', {});
+  // Migrate any cl: prefixed items from shared watchlist to separate CL watchlist
+  Object.keys(window._watchlist).forEach(k => {
+    if (k.startsWith('cl:')) {
+      if (!window._clWatchlist[k]) window._clWatchlist[k] = window._watchlist[k];
+      delete window._watchlist[k];
+    }
+  });
+  _lsSet('watchlist', window._watchlist);
+  _lsSet('cl_watchlist', window._clWatchlist);
   window._keywords = _lsGet('keywords', []);
   window._prevSnapshot = new Set(_lsGet('prev_snapshot', []));  // Previous scan's full ID set
   window._newIds = new Set(_lsGet('new_ids', []));  // Items flagged NEW from last Check for New
@@ -3295,12 +3305,12 @@ let _srvLoading = false;
 
 function _getBrowseFilters() {
   return {
-    filter_q:           document.getElementById('res-search').value.trim(),
-    filter_brand:       window._selectedBrand || '',
-    filter_conditions:  window._selectedConds || [],
-    filter_category:    document.getElementById('cat-filter').value,
-    filter_subcategory: document.getElementById('subcat-filter').value,
-    filter_watched:     _watchFilterActive,
+    filter_q:              document.getElementById('res-search').value.trim(),
+    filter_brands:         window._selectedBrands || [],
+    filter_conditions:     window._selectedConds || [],
+    filter_categories:     window._selectedCats || [],
+    filter_subcategories:  window._selectedSubs || [],
+    filter_watched:        _watchFilterActive,
   };
 }
 
@@ -3317,13 +3327,13 @@ async function _fetchBrowsePage(page) {
     fav_stores: favorites,
     keywords:   window._keywords || [],
     watchlist_ids: Object.keys(window._watchlist || {}),
-    new_ids:    [...(window._newIds || [])],
+    new_ids:    window._newIds instanceof Set ? [...window._newIds] : (window._newIds || []),
     ...filters,
   };
   if (_globalSearchActive) {
     body.all_stores = true;
     body.filter_q = _globalSearchQuery;
-    body.force_fav_sort = true;  // Global searches: favorites always on top
+    // force_fav_sort removed — sorting is now purely by user's column choice
     if (_wantListSearchActive) {
       body.filter_want_list_only = true;
     }
@@ -3343,7 +3353,7 @@ async function _fetchBrowsePage(page) {
       document.getElementById('res-badge').textContent = '';
       document.getElementById('res-body').innerHTML =
         '<div class="no-res">Click <b>⬇ Populate Store Data</b> in the left panel to tag your existing inventory with store names. This only needs to run once, then selecting stores will instantly show their inventory.</div>';
-      ['cond-dropdown','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+      ['cond-dropdown','cat-dropdown','subcat-dropdown'].forEach(id => document.getElementById(id).style.display = 'none');
       return;
     }
     if (!d.items || (!d.items.length && page === 1)) {
@@ -3360,7 +3370,7 @@ async function _fetchBrowsePage(page) {
     _srvTotalPages     = d.total_pages;
 
     // Update header
-    const hasFilters = filters.filter_q || filters.filter_brand || (filters.filter_conditions && filters.filter_conditions.length) || filters.filter_category || filters.filter_subcategory || filters.filter_watched;
+    const hasFilters = filters.filter_q || (filters.filter_brands && filters.filter_brands.length) || (filters.filter_conditions && filters.filter_conditions.length) || (filters.filter_categories && filters.filter_categories.length) || (filters.filter_subcategories && filters.filter_subcategories.length) || filters.filter_watched;
     const newCount = window._newIds ? window._newIds.size : 0;
     if (_wantListSearchActive) {
       document.getElementById('res-title').textContent = _srvTotalCount > 0
@@ -3393,7 +3403,7 @@ async function _fetchBrowsePage(page) {
       countEl.textContent = '';
     }
     const clearBtn = document.getElementById('clear-filters-btn');
-    if (clearBtn) clearBtn.style.display = (filters.filter_brand || (filters.filter_conditions && filters.filter_conditions.length) || filters.filter_category || filters.filter_subcategory) ? '' : 'none';
+    if (clearBtn) clearBtn.style.display = ((filters.filter_brands && filters.filter_brands.length) || (filters.filter_conditions && filters.filter_conditions.length) || (filters.filter_categories && filters.filter_categories.length) || (filters.filter_subcategories && filters.filter_subcategories.length)) ? '' : 'none';
 
     // Populate filter dropdowns from server-provided options
     _populateFiltersFromServer(d.brands || [], d.conditions || [], d.categories || [], d.subcategories || [], filters);
@@ -3411,32 +3421,29 @@ async function _fetchBrowsePage(page) {
 
 function _populateFiltersFromServer(brands, conditions, categories, subcategories, currentFilters) {
   _setBrandList(brands);
-  window._selectedBrand = currentFilters.filter_brand || '';
-  document.getElementById('brand-dd-btn').textContent = window._selectedBrand || 'All Brands ▾';
+  const savedBrands = currentFilters.filter_brands || [];
+  window._selectedBrands = savedBrands.filter(b => brands.some(br => br.name === b));
+  _updateBrandBtn();
 
   _setCondList(conditions);
-  // Preserve selected conditions across page loads
   const savedConds = currentFilters.filter_conditions || [];
   window._selectedConds = savedConds.filter(c => conditions.includes(c));
   _updateCondBtn();
 
-  const catEl = document.getElementById('cat-filter');
-  const savedCat = currentFilters.filter_category;
-  catEl.innerHTML = '<option value="">All Categories</option>';
-  categories.forEach(c => { const o = document.createElement('option'); o.value=o.textContent=c; catEl.appendChild(o); });
-  catEl.style.display = categories.length ? '' : 'none';
-  catEl.value = savedCat;
+  _setCatList(categories);
+  const savedCats = currentFilters.filter_categories || [];
+  window._selectedCats = savedCats.filter(c => categories.includes(c));
+  _updateCatBtn();
 
-  const subEl = document.getElementById('subcat-filter');
-  const savedSub = currentFilters.filter_subcategory;
-  if (subcategories.length && savedCat) {
-    subEl.innerHTML = '<option value="">All Subcategories</option>';
-    subcategories.forEach(s => { const o = document.createElement('option'); o.value=o.textContent=s; subEl.appendChild(o); });
-    subEl.style.display = '';
+  if (subcategories.length && window._selectedCats.length) {
+    _setSubList(subcategories);
+    const savedSubs = currentFilters.filter_subcategories || [];
+    window._selectedSubs = savedSubs.filter(s => subcategories.includes(s));
   } else {
-    subEl.style.display = 'none';
+    _setSubList([]);
+    window._selectedSubs = [];
   }
-  subEl.value = savedSub;
+  _updateSubcatBtn();
 }
 
 function _buildRowHtml(item) {
@@ -3593,11 +3600,10 @@ async function browseCache() {
     window._sortCol = null; window._sortDir = 1;
     document.getElementById('res-search').value = '';
     document.getElementById('res-search-count').textContent = '';
-    window._selectedBrand = ''; document.getElementById('brand-dd-btn').textContent = 'All Brands ▾';
+    window._selectedBrands = []; _updateBrandBtn();
     window._selectedConds = []; _updateCondBtn();
-    document.getElementById('cat-filter').value = '';
-    document.getElementById('subcat-filter').value = '';
-    document.getElementById('subcat-filter').style.display = 'none';
+    window._selectedCats = []; _updateCatBtn();
+    window._selectedSubs = []; _updateSubcatBtn(); _setSubList([]);
     _watchFilterActive = false;
     document.getElementById('watchlist-toggle').classList.remove('wl-active');
     await _fetchBrowsePage(1);
@@ -3606,6 +3612,7 @@ async function browseCache() {
 
 // ── Watch list ────────────────────────────────────────────────────────────
 window._watchlist = {};
+window._clWatchlist = {};
 
 // loadWatchlist no longer needed — loaded from localStorage in init
 
@@ -3755,11 +3762,10 @@ function globalSearch() {
   // Reset filters
   document.getElementById('res-search').value = '';
   document.getElementById('res-search-count').textContent = '';
-  window._selectedBrand = ''; document.getElementById('brand-dd-btn').textContent = 'All Brands ▾';
+  window._selectedBrands = []; _updateBrandBtn();
   window._selectedConds = []; _updateCondBtn();
-  document.getElementById('cat-filter').value = '';
-  document.getElementById('subcat-filter').value = '';
-  document.getElementById('subcat-filter').style.display = 'none';
+  window._selectedCats = []; _updateCatBtn();
+  window._selectedSubs = []; _updateSubcatBtn(); _setSubList([]);
   _watchFilterActive = false;
   document.getElementById('watchlist-toggle').classList.remove('wl-active');
   // Show the clear button
@@ -3802,11 +3808,10 @@ function searchWantList() {
   window._sortCol = null; window._sortDir = 1;
   document.getElementById('res-search').value = '';
   document.getElementById('res-search-count').textContent = '';
-  window._selectedBrand = ''; document.getElementById('brand-dd-btn').textContent = 'All Brands ▾';
+  window._selectedBrands = []; _updateBrandBtn();
   window._selectedConds = []; _updateCondBtn();
-  document.getElementById('cat-filter').value = '';
-  document.getElementById('subcat-filter').value = '';
-  document.getElementById('subcat-filter').style.display = 'none';
+  window._selectedCats = []; _updateCatBtn();
+  window._selectedSubs = []; _updateSubcatBtn(); _setSubList([]);
   _watchFilterActive = false;
   document.getElementById('watchlist-toggle').classList.remove('wl-active');
   document.getElementById('global-search-clear').style.display = '';
@@ -3945,6 +3950,27 @@ function showResults(msg, isBaseline) {
   _updateRelativeTime();
   document.getElementById('check-now-btn').style.display = 'inline';
 
+  // Check if any new items match the want list and show notification
+  const wantMatchEl = document.getElementById('s-want-match');
+  if (newCount > 0 && window._keywords && window._keywords.length) {
+    // We need item details to check want list — fetch from server cache
+    fetch('/api/browse', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({page:1, per_page:1000, all_stores:true, new_ids:[...newIdSet], keywords:window._keywords, filter_want_list_only:true})
+    }).then(r => r.json()).then(d => {
+      const wantNewCount = d.total_count || 0;
+      if (wantNewCount > 0) {
+        wantMatchEl.textContent = '🎯 ' + wantNewCount + ' new want list match' + (wantNewCount > 1 ? 'es' : '') + '!';
+        wantMatchEl.style.display = '';
+      } else {
+        wantMatchEl.style.display = 'none';
+      }
+    }).catch(() => { wantMatchEl.style.display = 'none'; });
+  } else {
+    wantMatchEl.style.display = 'none';
+  }
+
   // Refresh shared item count from server
   fetch('/api/state').then(r => r.json()).then(s => {
     document.getElementById('s-known').textContent = s.total_items.toLocaleString();
@@ -3955,7 +3981,7 @@ function showResults(msg, isBaseline) {
     document.getElementById('res-badge').textContent = '';
     document.getElementById('res-body').innerHTML =
       `<div class="no-res">Inventory database built (${msg.scanned.toLocaleString()} items)${stoppedNote}. Check back any time to see what's new!</div>`;
-    ['cond-dropdown','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+    ['cond-dropdown','cat-dropdown','subcat-dropdown'].forEach(id => document.getElementById(id).style.display = 'none');
     return;
   }
 
@@ -3968,7 +3994,7 @@ function showResults(msg, isBaseline) {
 
   if (msg.scanned === 0) {
     document.getElementById('res-body').innerHTML = '<div class="no-res">Nothing found for selected stores.</div>';
-    ['cond-dropdown','cat-filter','subcat-filter'].forEach(id => document.getElementById(id).style.display = 'none');
+    ['cond-dropdown','cat-dropdown','subcat-dropdown'].forEach(id => document.getElementById(id).style.display = 'none');
     return;
   }
 
@@ -3999,9 +4025,10 @@ function showResults(msg, isBaseline) {
     kwMatch: _itemMatchesKeyword(item),
   }));
   window._tableData.sort((a, b) => {
-    const aTop = (a.isNew && a.kwMatch) ? 0 : (a.isNew ? 1 : 2);
-    const bTop = (b.isNew && b.kwMatch) ? 0 : (b.isNew ? 1 : 2);
-    if (aTop !== bTop) return aTop - bTop;
+    // Only NEW items float to top; everything else by date desc
+    const aNew = a.isNew ? 0 : 1;
+    const bNew = b.isNew ? 0 : 1;
+    if (aNew !== bNew) return aNew - bNew;
     return (b.date_raw || '').localeCompare(a.date_raw || '');
   });
   window._sortCol = null; window._sortDir = 1; window._localPage = 1;
@@ -4019,45 +4046,44 @@ function populateCategoryFilter() {
   data.forEach(i => { if (i.brand) brandMap[i.brand] = (brandMap[i.brand] || 0) + 1; });
   const brandList = Object.entries(brandMap).sort((a,b) => b[1] - a[1]).map(([name, count]) => ({name, count}));
   _setBrandList(brandList);
-  window._selectedBrand = '';
-  document.getElementById('brand-dd-btn').textContent = 'All Brands ▾';
+  window._selectedBrands = [];
+  _updateBrandBtn();
   // Condition filter (multi-select)
   const conds = [...new Set(data.map(i => i.condition).filter(Boolean))].sort();
   _setCondList(conds);
   window._selectedConds = [];
   _updateCondBtn();
-  // Category filter
+  // Category filter (multi-select)
   const cats = [...new Set(data.map(i => i.category).filter(Boolean))].sort();
-  const catEl = document.getElementById('cat-filter');
-  catEl.innerHTML = '<option value="">All Categories</option>';
-  cats.forEach(c => { const o = document.createElement('option'); o.value=o.textContent=c; catEl.appendChild(o); });
-  catEl.style.display = cats.length ? '' : 'none';
-  catEl.value = '';
-  document.getElementById('subcat-filter').style.display = 'none';
+  _setCatList(cats);
+  window._selectedCats = [];
+  _updateCatBtn();
+  // Subcategory filter (multi-select) — start hidden
+  window._selectedSubs = [];
+  _updateSubcatBtn();
+  _setSubList([]);
 }
 
 function onCatFilterChange() {
   if (_browseMode === 'server') {
     // In server mode, changing category resets subcategory and fetches page 1
-    document.getElementById('subcat-filter').value = '';
+    window._selectedSubs = []; _updateSubcatBtn();
     _srvPage = 1;
     _fetchBrowsePage(1);
     return;
   }
-  const cat   = document.getElementById('cat-filter').value;
-  const data  = window._tableData || [];
+  const catArr = window._selectedCats || [];
+  const data   = window._tableData || [];
   const subcats = [...new Set(
-    data.filter(i => !cat || i.category === cat).map(i => i.subcategory).filter(Boolean)
+    data.filter(i => !catArr.length || catArr.includes(i.category || '')).map(i => i.subcategory).filter(Boolean)
   )].sort();
-  const subEl = document.getElementById('subcat-filter');
-  if (subcats.length && cat) {
-    subEl.innerHTML = '<option value="">All Subcategories</option>';
-    subcats.forEach(s => { const o = document.createElement('option'); o.value=o.textContent=s; subEl.appendChild(o); });
-    subEl.style.display = '';
+  if (subcats.length && catArr.length) {
+    _setSubList(subcats);
   } else {
-    subEl.style.display = 'none';
+    _setSubList([]);
   }
-  subEl.value = '';
+  window._selectedSubs = [];
+  _updateSubcatBtn();
   filterResults();
 }
 
@@ -4074,11 +4100,11 @@ function renderTable() {
   const allData = window._tableData || [];
 
   // Apply filters to get the filtered set
-  const q      = document.getElementById('res-search').value.toLowerCase().trim();
-  const brand  = window._selectedBrand || '';
-  const condArr = window._selectedConds || [];
-  const cat    = document.getElementById('cat-filter').value;
-  const subcat = document.getElementById('subcat-filter').value;
+  const q        = document.getElementById('res-search').value.toLowerCase().trim();
+  const brandArr = window._selectedBrands || [];
+  const condArr  = window._selectedConds || [];
+  const catArr   = window._selectedCats || [];
+  const subArr   = window._selectedSubs || [];
 
   const filtered = allData.filter(item => {
     if (_watchFilterActive && !(window._watchlist || {})[item.id || '']) return false;
@@ -4092,10 +4118,10 @@ function renderTable() {
         if (!words.every(w => text.includes(w))) return false;
       }
     }
-    return (!brand  || (item.brand || '') === brand) &&
-           (!condArr.length || condArr.includes(item.condition || '')) &&
-           (!cat    || (item.category  || '') === cat) &&
-           (!subcat || (item.subcategory || '') === subcat);
+    return (!brandArr.length || brandArr.includes(item.brand || '')) &&
+           (!condArr.length  || condArr.includes(item.condition || '')) &&
+           (!catArr.length   || catArr.includes(item.category || '')) &&
+           (!subArr.length   || subArr.includes(item.subcategory || ''));
   });
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
@@ -4124,13 +4150,13 @@ function renderTable() {
 
   // Update filter count display
   const countEl = document.getElementById('res-search-count');
-  if (q || brand || cond || cat || subcat) {
+  if (q || brandArr.length || condArr.length || catArr.length || subArr.length) {
     countEl.textContent = `${filtered.length} of ${allData.length}`;
   } else {
     countEl.textContent = '';
   }
   const clearBtn = document.getElementById('clear-filters-btn');
-  if (clearBtn) clearBtn.style.display = (brand || cond || cat || subcat) ? '' : 'none';
+  if (clearBtn) clearBtn.style.display = (brandArr.length || condArr.length || catArr.length || subArr.length) ? '' : 'none';
 
   if (window._sortCol !== null) {
     const th = document.querySelector(`#res-table th[data-col="${window._sortCol}"]`);
@@ -4292,18 +4318,17 @@ function autoSizeItemColumn() {
   });
 })();
 
-// ── Brand dropdown ───────────────────────────────────────────────────────────
-window._selectedBrand = '';
-window._brandList = []; // [{name, count}]
+// ── Brand multi-select dropdown (with search) ───────────────────────────────
+window._selectedBrands = [];
+window._brandList = [];
 
 function toggleBrandDropdown() {
   const panel = document.getElementById('brand-dd-panel');
   if (panel.style.display === 'none') {
     panel.style.display = '';
     document.getElementById('brand-dd-search').value = '';
-    filterBrandDropdown();
+    _renderBrandList();
     document.getElementById('brand-dd-search').focus();
-    // Close on outside click
     setTimeout(() => document.addEventListener('click', _closeBrandOnOutside, true), 0);
   } else {
     _closeBrandDropdown();
@@ -4319,43 +4344,64 @@ function _closeBrandOnOutside(e) {
   if (!e.target.closest('#brand-dropdown')) _closeBrandDropdown();
 }
 
-function filterBrandDropdown() {
+function filterBrandDropdown() { _renderBrandList(); }
+
+function _renderBrandList() {
   const q = (document.getElementById('brand-dd-search').value || '').toLowerCase();
   const list = document.getElementById('brand-dd-list');
-  let html = '<div class="brand-dd-item' + (!window._selectedBrand ? ' active' : '') + '" data-brand="">All Brands</div>';
+  let html = '';
   window._brandList.forEach(b => {
     if (q && !b.name.toLowerCase().includes(q)) return;
-    const isActive = window._selectedBrand === b.name;
+    const isActive = window._selectedBrands.includes(b.name);
     const esc = b.name.replace(/"/g,'&quot;');
-    html += '<div class="brand-dd-item' + (isActive ? ' active' : '') + '" data-brand="' + esc + '">' + esc + '<span class="bcount">' + b.count + '</span></div>';
+    html += '<div class="brand-dd-item' + (isActive ? ' active' : '') + '" data-brand="' + esc + '">'
+         + '<span class="cond-dd-check">' + (isActive ? '✓' : '') + '</span>'
+         + esc + '<span class="bcount">' + b.count + '</span></div>';
   });
   list.innerHTML = html;
-  // Event delegation for clicks
   list.onclick = function(e) {
     const item = e.target.closest('.brand-dd-item');
     if (!item) return;
-    selectBrand(item.dataset.brand);
+    _toggleBrand(item.dataset.brand);
   };
 }
 
-function selectBrand(brand) {
-  // Toggle off if clicking the same brand again
-  window._selectedBrand = (brand === window._selectedBrand) ? '' : brand;
-  document.getElementById('brand-dd-btn').textContent = window._selectedBrand || 'All Brands ▾';
-  _closeBrandDropdown();
+function _toggleBrand(brand) {
+  const idx = window._selectedBrands.indexOf(brand);
+  if (idx >= 0) window._selectedBrands.splice(idx, 1);
+  else window._selectedBrands.push(brand);
+  _updateBrandBtn();
+  _renderBrandList();
   filterResults();
 }
 
+function selectBrand(brand) {
+  // Called from table brand-link clicks — toggle behavior
+  const idx = window._selectedBrands.indexOf(brand);
+  if (idx >= 0) {
+    window._selectedBrands.splice(idx, 1);
+  } else {
+    window._selectedBrands = [brand];  // Set to just this brand
+  }
+  _updateBrandBtn();
+  filterResults();
+}
+
+function _updateBrandBtn() {
+  const btn = document.getElementById('brand-dd-btn');
+  if (window._selectedBrands.length === 0) btn.textContent = 'All Brands ▾';
+  else if (window._selectedBrands.length === 1) btn.textContent = window._selectedBrands[0] + ' ▾';
+  else btn.textContent = window._selectedBrands.length + ' Brands ▾';
+}
+
 function _setBrandList(brands) {
-  // brands = [{name, count}, ...] already sorted by count desc from server
   window._brandList = brands || [];
-  const dd = document.getElementById('brand-dropdown');
-  dd.style.display = brands && brands.length ? '' : 'none';
+  document.getElementById('brand-dropdown').style.display = brands && brands.length ? '' : 'none';
 }
 
 // ── Condition multi-select dropdown ──────────────────────────────────────────
-window._selectedConds = [];  // Array of selected condition strings
-window._condList = [];       // Available conditions from server
+window._selectedConds = [];
+window._condList = [];
 
 function toggleCondDropdown() {
   const panel = document.getElementById('cond-dd-panel');
@@ -4424,18 +4470,123 @@ function _setCondList(conditions) {
   dd.style.display = conditions && conditions.length ? '' : 'none';
 }
 
+// ── Category multi-select dropdown ───────────────────────────────────────────
+window._selectedCats = [];
+window._catList = [];
+
+function toggleCatDropdown() {
+  const panel = document.getElementById('cat-dd-panel');
+  if (panel.style.display === 'none') {
+    panel.style.display = '';
+    _renderCatList();
+    setTimeout(() => document.addEventListener('click', _closeCatOnOutside, true), 0);
+  } else { _closeCatDropdown(); }
+}
+function _closeCatDropdown() {
+  document.getElementById('cat-dd-panel').style.display = 'none';
+  document.removeEventListener('click', _closeCatOnOutside, true);
+}
+function _closeCatOnOutside(e) { if (!e.target.closest('#cat-dropdown')) _closeCatDropdown(); }
+
+function _renderCatList() {
+  const panel = document.getElementById('cat-dd-panel');
+  let html = '';
+  window._catList.forEach(c => {
+    const isActive = window._selectedCats.includes(c);
+    const esc = c.replace(/"/g,'&quot;');
+    html += '<div class="cond-dd-item' + (isActive ? ' active' : '') + '" data-val="' + esc + '">'
+         + '<span class="cond-dd-check">' + (isActive ? '✓' : '') + '</span>' + esc + '</div>';
+  });
+  panel.innerHTML = html;
+  panel.onclick = function(e) {
+    const item = e.target.closest('.cond-dd-item');
+    if (!item) return;
+    _toggleCat(item.dataset.val);
+  };
+}
+function _toggleCat(cat) {
+  const idx = window._selectedCats.indexOf(cat);
+  if (idx >= 0) window._selectedCats.splice(idx, 1);
+  else window._selectedCats.push(cat);
+  _updateCatBtn();
+  _renderCatList();
+  // When categories change, reset subcategories
+  window._selectedSubs = [];
+  _updateSubcatBtn();
+  filterResults();
+}
+function _updateCatBtn() {
+  const btn = document.getElementById('cat-dd-btn');
+  if (window._selectedCats.length === 0) btn.textContent = 'All Categories ▾';
+  else if (window._selectedCats.length === 1) btn.textContent = window._selectedCats[0] + ' ▾';
+  else btn.textContent = window._selectedCats.length + ' Categories ▾';
+}
+function _setCatList(categories) {
+  window._catList = categories || [];
+  document.getElementById('cat-dropdown').style.display = categories && categories.length ? '' : 'none';
+}
+
+// ── Subcategory multi-select dropdown ────────────────────────────────────────
+window._selectedSubs = [];
+window._subList = [];
+
+function toggleSubcatDropdown() {
+  const panel = document.getElementById('subcat-dd-panel');
+  if (panel.style.display === 'none') {
+    panel.style.display = '';
+    _renderSubList();
+    setTimeout(() => document.addEventListener('click', _closeSubOnOutside, true), 0);
+  } else { _closeSubDropdown(); }
+}
+function _closeSubDropdown() {
+  document.getElementById('subcat-dd-panel').style.display = 'none';
+  document.removeEventListener('click', _closeSubOnOutside, true);
+}
+function _closeSubOnOutside(e) { if (!e.target.closest('#subcat-dropdown')) _closeSubDropdown(); }
+
+function _renderSubList() {
+  const panel = document.getElementById('subcat-dd-panel');
+  let html = '';
+  window._subList.forEach(s => {
+    const isActive = window._selectedSubs.includes(s);
+    const esc = s.replace(/"/g,'&quot;');
+    html += '<div class="cond-dd-item' + (isActive ? ' active' : '') + '" data-val="' + esc + '">'
+         + '<span class="cond-dd-check">' + (isActive ? '✓' : '') + '</span>' + esc + '</div>';
+  });
+  panel.innerHTML = html;
+  panel.onclick = function(e) {
+    const item = e.target.closest('.cond-dd-item');
+    if (!item) return;
+    _toggleSub(item.dataset.val);
+  };
+}
+function _toggleSub(sub) {
+  const idx = window._selectedSubs.indexOf(sub);
+  if (idx >= 0) window._selectedSubs.splice(idx, 1);
+  else window._selectedSubs.push(sub);
+  _updateSubcatBtn();
+  _renderSubList();
+  filterResults();
+}
+function _updateSubcatBtn() {
+  const btn = document.getElementById('subcat-dd-btn');
+  if (window._selectedSubs.length === 0) btn.textContent = 'All Subcategories ▾';
+  else if (window._selectedSubs.length === 1) btn.textContent = window._selectedSubs[0] + ' ▾';
+  else btn.textContent = window._selectedSubs.length + ' Subcategories ▾';
+}
+function _setSubList(subcategories) {
+  window._subList = subcategories || [];
+  document.getElementById('subcat-dropdown').style.display = subcategories && subcategories.length ? '' : 'none';
+}
+
 // ── Results filter ────────────────────────────────────────────────────────────
 let _filterTimer = null;
 
 function clearFilters() {
-  window._selectedBrand = '';
-  document.getElementById('brand-dd-btn').textContent = 'All Brands ▾';
-  window._selectedConds = [];
-  _updateCondBtn();
-  document.getElementById('cat-filter').value = '';
-  const subEl = document.getElementById('subcat-filter');
-  subEl.value = '';
-  subEl.style.display = 'none';
+  window._selectedBrands = []; _updateBrandBtn();
+  window._selectedConds = []; _updateCondBtn();
+  window._selectedCats = []; _updateCatBtn();
+  window._selectedSubs = []; _updateSubcatBtn(); _setSubList([]);
   document.getElementById('clear-filters-btn').style.display = 'none';
   // Also turn off watch filter if active
   if (_watchFilterActive) {
@@ -4816,6 +4967,21 @@ function clFilterResults() {
     (q || _clFavsOnly || selectedCities.size < _clData.length) ? (visible + ' of ' + _clData.length + ' listings') : (_clData.length + ' listings');
 }
 
+function _clMatchesWantList(title) {
+  if (!window._keywords || !window._keywords.length) return false;
+  const text = (title || '').toLowerCase();
+  return window._keywords.some(kw => {
+    kw = kw.trim();
+    if (kw.startsWith('"') && kw.endsWith('"') && kw.length > 2) {
+      return text.includes(kw.slice(1, -1).toLowerCase());
+    } else if (kw.includes(',')) {
+      return kw.split(',').map(t => t.trim().toLowerCase()).filter(Boolean).every(t => text.includes(t));
+    } else {
+      return text.includes(kw.toLowerCase());
+    }
+  });
+}
+
 function clRenderResults() {
   const hdr  = document.getElementById('cl-results-hdr');
   const body = document.getElementById('cl-body');
@@ -4829,11 +4995,12 @@ function clRenderResults() {
   hdr.style.display = 'flex';
 
   const cols = ['title','price','location','date','relevance'];
-  const labels = ['','Item','Price','Location','Date'];
+  const labels = ['','Want','Item','Price','Location','Date'];
   let html = '<table><thead><tr>';
   labels.forEach((l, i) => {
     if (i === 0) { html += '<th style="width:30px"></th>'; return; }
-    const sortIdx = i - 1;
+    if (i === 1) { html += '<th style="width:62px;text-align:center">Want</th>'; return; }
+    const sortIdx = i - 2;
     const cls = _clSortCol === sortIdx ? (_clSortDir === 1 ? 'sort-asc' : 'sort-desc') : '';
     html += '<th class="' + cls + '" onclick="clSort(' + sortIdx + ')">' + l + '</th>';
   });
@@ -4887,13 +5054,15 @@ function clRenderResults() {
     const isFav = isFavResult(r);
     const star  = isFav ? '<span class="cl-fav-star">★</span>' : '';
     const clId  = 'cl:' + (r.url || r.title || '');
-    const isWatched = (window._watchlist || {})[clId];
+    const isWatched = (window._clWatchlist || {})[clId];
     const watchStar = `<button class="watch-btn ${isWatched ? 'active' : ''}" onclick="clToggleWatch('${clId.replace(/'/g,"\\'")}','${(r.title||'').replace(/'/g,"\\'")}','${(r.url||'').replace(/'/g,"\\'")}','${(r.price||'').replace(/'/g,"\\'")}','${(r.location||'').replace(/'/g,"\\'")}',this)" title="${isWatched ? 'Remove from' : 'Add to'} watch list">${isWatched ? '★' : '☆'}</button>`;
+    const wantMatch = _clMatchesWantList(r.title || '');
     const title = r.url
       ? star + '<a href="' + r.url + '" target="_blank" rel="noopener">' + (r.title || '(no title)') + '</a>'
       : star + (r.title || '(no title)');
     html += '<tr class="' + (isFav ? 'cl-fav-result' : '') + '" data-city="' + (r.cityId||'') + '" data-cl-image="' + (r.image||'').replace(/"/g,'&quot;') + '">' +
             '<td style="text-align:center">' + watchStar + '</td>' +
+            '<td style="text-align:center">' + (wantMatch ? '<span class="tag-kw">WANT</span>' : '') + '</td>' +
             '<td title="' + (r.title||'').replace(/"/g,'&quot;') + '">' + title + '</td>' +
             '<td>' + (r.price||'') + '</td>' +
             '<td>' + (r.location||'') + '</td>' +
@@ -4916,16 +5085,16 @@ function clSort(col) {
 }
 
 function clToggleWatch(id, name, url, price, location, btn) {
-  const isWatched = !!(window._watchlist[id]);
+  const isWatched = !!(window._clWatchlist[id]);
   if (isWatched) {
-    delete window._watchlist[id];
+    delete window._clWatchlist[id];
   } else {
-    window._watchlist[id] = {
+    window._clWatchlist[id] = {
       name: name, url: url, store: location, price: price,
       date_added: new Date().toISOString().slice(0,10),
     };
   }
-  _lsSet('watchlist', window._watchlist);
+  _lsSet('cl_watchlist', window._clWatchlist);
   btn.classList.toggle('active', !isWatched);
   btn.textContent = isWatched ? '☆' : '★';
   btn.title = isWatched ? 'Add to watch list' : 'Remove from watch list';
