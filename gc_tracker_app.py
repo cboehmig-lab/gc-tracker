@@ -3223,14 +3223,20 @@ function renderList(preserveChecked) {
   const checked = preserveChecked || _getCheckedStores();
   const el = document.getElementById('store-list');
   const q  = document.getElementById('search').value.toLowerCase();
-  let stores = favsOnly ? favorites : allStores;
+  // In favorites mode with a search query, show ALL matching stores so users can find and add new favorites
+  let stores = (favsOnly && !q) ? favorites : allStores;
 
-  if (favsOnly && !stores.length) {
-    el.innerHTML = '<div class="empty-msg">No favorites yet.<br>Click ★ next to any store to add it.</div>';
+  if (favsOnly && !q && !favorites.length) {
+    el.innerHTML = '<div class="empty-msg">No favorites yet.<br>Click ★ next to any store to add it,<br>or type in the search box to find stores.</div>';
     updateCount(); return;
   }
 
-  const filtered = q ? stores.filter(s => s.toLowerCase().includes(q)) : stores;
+  let filtered = q ? stores.filter(s => s.toLowerCase().includes(q)) : stores;
+  // In favorites mode with a search, put favorited stores first
+  if (favsOnly && q) {
+    const favSet = new Set(favorites);
+    filtered.sort((a, b) => (favSet.has(b) ? 1 : 0) - (favSet.has(a) ? 1 : 0));
+  }
   el.innerHTML = '';
   filtered.forEach(name => {
     const isFav = favorites.includes(name);
