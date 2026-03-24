@@ -2551,19 +2551,24 @@ def _run(selected_stores: list[str], baseline: bool):
             p["price_drop"]  = price_drop
         _save_cat_cache()
 
-        # ── Mark sold items (not found in this scan for scanned stores) ──────────
-        if not baseline and not _stop_event.is_set():
-            # Only mark items as sold if we scanned ALL their store's pages
+        # ── Mark sold items (not found in this scan) ────────────────────────────
+        if not _stop_event.is_set():
             scanned_store_set = set(stores_to_scan)
+            wl = load_watchlist()
+            wl_changed = False
             for sku, cached in _cat_cache.items():
-                if cached.get("store") in scanned_store_set and sku not in ids_this_run:
+                if sku in ids_this_run:
+                    continue
+                # Nationwide scan: any item not found is gone
+                # Store scan: only mark items from scanned stores
+                if nationwide or cached.get("store") in scanned_store_set:
                     if cached.get("available", True):
                         cached["available"] = False
-                        # Flag in watchlist as sold
-                        wl = load_watchlist()
                         if sku in wl:
                             wl[sku]["sold"] = True
-                            save_watchlist(wl)
+                            wl_changed = True
+            if wl_changed:
+                save_watchlist(wl)
             _save_cat_cache()
 
         # ── Update watchlist with latest data ─────────────────────────────────
@@ -4334,8 +4339,9 @@ function filterBrandDropdown() {
 }
 
 function selectBrand(brand) {
-  window._selectedBrand = brand;
-  document.getElementById('brand-dd-btn').textContent = brand || 'All Brands ▾';
+  // Toggle off if clicking the same brand again
+  window._selectedBrand = (brand === window._selectedBrand) ? '' : brand;
+  document.getElementById('brand-dd-btn').textContent = window._selectedBrand || 'All Brands ▾';
   _closeBrandDropdown();
   filterResults();
 }
