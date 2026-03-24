@@ -1591,9 +1591,9 @@ def api_browse():
         "no_store_data":    False,
         # Filter option lists (always full set so dropdowns stay populated)
         "brands":           [{"name": b, "count": c} for b, c in sorted(brand_counts.items(), key=lambda x: -x[1])],
-        "conditions":       sorted(cond_set),
+        "conditions":       sorted(cond_set, key=lambda c: {"Excellent":0,"Great":1,"Good":2,"Fair":3,"Poor":4}.get(c, 5)),
         "categories":       sorted(cat_set),
-        "subcategories":    sorted(scoped_subcats) if f_cat else sorted(subcat_set),
+        "subcategories":    sorted(scoped_subcats) if f_cats else sorted(subcat_set),
     })
 
 
@@ -2833,10 +2833,11 @@ tr.fav-row td:last-child{color:#4ade80}
 #cl-body th.sort-desc::after{content:" ▼";color:#a5b4fc;font-size:.6rem}
 #cl-body td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0}
 #cl-body td:nth-child(1){width:30px;min-width:30px;max-width:30px;text-align:center;overflow:visible}
-#cl-body td:nth-child(2){width:50%;max-width:none;text-align:left}
-#cl-body td:nth-child(3){width:90px;text-align:left}
-#cl-body td:nth-child(4){width:140px}
-#cl-body td:nth-child(5){width:90px}
+#cl-body td:nth-child(2){width:52px;min-width:52px;max-width:52px;text-align:center;overflow:visible}
+#cl-body td:nth-child(3){width:50%;max-width:none;text-align:left}
+#cl-body td:nth-child(4){width:90px;text-align:left}
+#cl-body td:nth-child(5){width:140px}
+#cl-body td:nth-child(6){width:90px}
 #cl-body tr:hover td{background:#161616}
 #cl-body tr.cl-fav-result td{background:#1a1f35}
 #cl-body tr.cl-fav-result:hover td{background:#252b45}
@@ -3384,7 +3385,7 @@ async function _fetchBrowsePage(page) {
         ? `${_srvTotalCount.toLocaleString()} of ${_srvTotalUnfiltered.toLocaleString()} results for "${_globalSearchQuery}"`
         : label;
     } else if (newCount > 0 && !hasFilters) {
-      document.getElementById('res-title').textContent = `${newCount.toLocaleString()} New · ${_srvTotalUnfiltered.toLocaleString()} Total`;
+      document.getElementById('res-title').textContent = `${_srvTotalUnfiltered.toLocaleString()} Items`;
       document.getElementById('res-badge').textContent = newCount + ' NEW';
     } else if (hasFilters) {
       document.getElementById('res-title').textContent = `${_srvTotalCount.toLocaleString()} of ${_srvTotalUnfiltered.toLocaleString()} Items`;
@@ -3987,9 +3988,7 @@ function showResults(msg, isBaseline) {
 
   document.getElementById('res-search').value = '';
   document.getElementById('res-search-count').textContent = '';
-  document.getElementById('res-title').textContent = newCount > 0
-    ? `${newCount.toLocaleString()} New · ${msg.scanned.toLocaleString()} Total`
-    : `${msg.scanned.toLocaleString()} Items (nothing new)`;
+  document.getElementById('res-title').textContent = `${msg.scanned.toLocaleString()} Items${newCount > 0 ? '' : ' (nothing new)'}`;
   document.getElementById('res-badge').textContent = newCount > 0 ? newCount + ' NEW' : '';
 
   if (msg.scanned === 0) {
@@ -4048,8 +4047,9 @@ function populateCategoryFilter() {
   _setBrandList(brandList);
   window._selectedBrands = [];
   _updateBrandBtn();
-  // Condition filter (multi-select)
-  const conds = [...new Set(data.map(i => i.condition).filter(Boolean))].sort();
+  // Condition filter (multi-select) — ordered best to worst
+  const _condOrder = {Excellent:0,Great:1,Good:2,Fair:3,Poor:4};
+  const conds = [...new Set(data.map(i => i.condition).filter(Boolean))].sort((a,b) => (_condOrder[a]??9) - (_condOrder[b]??9));
   _setCondList(conds);
   window._selectedConds = [];
   _updateCondBtn();
