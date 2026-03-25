@@ -2892,32 +2892,29 @@ tr.fav-row td:last-child{color:#4ade80}
    ══════════════════════════════════════════════════════════════════════════════ */
 @media(max-width:820px){
 
-  /* ── Base font bump: one size up across the board ── */
+  /* ── Base font bump ── */
   body{font-size:1rem;overflow:hidden}
 
-  /* ── Mobile sidebar toggle button ── */
-  .mobile-sidebar-toggle{display:flex;align-items:center;gap:8px;padding:13px 16px;background:#1a1a1a;border:none;border-bottom:1px solid #2e2e2e;cursor:pointer;font-size:.95rem;color:#ccc;font-weight:600;width:100%;text-align:left;flex-shrink:0}
+  /* ── Mobile sidebar toggle button — compact ── */
+  .mobile-sidebar-toggle{display:flex;align-items:center;gap:8px;padding:9px 14px;background:#1a1a1a;border:none;border-bottom:1px solid #2e2e2e;cursor:pointer;font-size:.88rem;color:#ccc;font-weight:600;width:100%;text-align:left;flex-shrink:0}
   .mobile-sidebar-toggle:hover{background:#222}
   .mobile-sidebar-toggle:active{background:#252525}
-  .mobile-sidebar-toggle .toggle-arrow{transition:transform .2s;font-size:.7rem;color:#888}
+  .mobile-sidebar-toggle .toggle-arrow{transition:transform .2s;font-size:.65rem;color:#888}
   .mobile-sidebar-toggle .toggle-arrow.open{transform:rotate(90deg)}
-  .mobile-sidebar-toggle .toggle-count{margin-left:auto;font-size:.8rem;color:#888;font-weight:400}
+  .mobile-sidebar-toggle .toggle-count{margin-left:auto;font-size:.75rem;color:#888;font-weight:400}
 
-  /* ── Header ── */
-  header{padding:12px 16px;gap:10px;flex-wrap:wrap}
-  header h1{font-size:1.1rem}
-  #hdr-status{font-size:.82rem;margin-left:auto;min-width:0;text-overflow:ellipsis;overflow:hidden;white-space:nowrap}
-  #stop-btn{font-size:.85rem;padding:8px 14px}
+  /* ── Header: HIDDEN on mobile to save space (stop btn still works via JS) ── */
+  header{display:none!important}
 
-  /* ── Tabs ── */
+  /* ── Tabs: compact ── */
   .app-tabs{overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
   .app-tabs::-webkit-scrollbar{display:none}
-  .app-tab{padding:12px 16px;font-size:.88rem;white-space:nowrap;flex-shrink:0}
+  .app-tab{padding:10px 14px;font-size:.84rem;white-space:nowrap;flex-shrink:0}
 
   /* ── GC Layout: stack vertically ── */
-  /* CRITICAL: only ONE scroll container per panel to fix sticky header bleed-through.
-     .layout and .app-panel must NOT scroll — only .results and #cl-body scroll. */
-  .layout{flex-direction:column;overflow:visible}
+  /* CRITICAL: proper flex height chain so #res-body / #cl-body can scroll.
+     Every ancestor must constrain height: flex:1 + min-height:0 + overflow:hidden */
+  .layout{flex-direction:column;overflow:hidden;flex:1;min-height:0}
   .app-panel.active{display:flex;flex-direction:column;overflow:hidden}
 
   /* ── GC Left sidebar: collapsible on mobile ── */
@@ -2928,38 +2925,42 @@ tr.fav-row td:last-child{color:#4ade80}
   #store-list{max-height:220px;overflow-y:auto}
   .store-row{padding:10px 14px;gap:10px}
   .store-row label{font-size:.95rem}
-  .left-footer{padding:12px 14px}
-  #sel-count{font-size:.85rem}
-  #reset-btn{font-size:.8rem}
+  .left-footer{padding:10px 12px}
+  #sel-count{font-size:.82rem}
+  #reset-btn{font-size:.78rem}
 
   /* ── GC Right panel: flex column, results is the ONLY scroller ── */
   .right{overflow:hidden;flex:1;min-height:0;display:flex;flex-direction:column}
 
-  /* ── Status bar: stack vertically ── */
-  .status-bar{flex-direction:column;gap:8px;padding:10px 14px;align-items:flex-start;font-size:.88rem;flex-shrink:0}
+  /* ── Status bar: single compact row ── */
+  .status-bar{flex-direction:row;flex-wrap:wrap;gap:6px 14px;padding:6px 12px;align-items:center;font-size:.78rem;flex-shrink:0}
   .status-bar b{color:#ccc}
-  #global-search-wrap{margin-left:0;width:100%}
-  #global-search{width:100%;flex:1;font-size:.88rem;padding:8px 12px}
-  #global-search-btn{font-size:.82rem;padding:6px 10px}
-  #global-search-clear{font-size:.82rem;padding:6px 10px}
+  /* Hide Items and Stores counts on mobile */
+  .status-bar > span:nth-child(2),
+  .status-bar > span:nth-child(3){display:none}
+  #global-search-wrap{margin-left:auto;flex:1;min-width:0}
+  #global-search{width:100%;font-size:.82rem;padding:6px 10px}
+  #global-search-btn{font-size:.78rem;padding:4px 8px}
+  #global-search-clear{font-size:.78rem;padding:4px 8px}
+  #s-want-match{font-size:.78rem!important}
 
   /* ── Hide Download Excel on mobile ── */
   #s-excel{display:none!important}
 
-  /* ── Log ── */
-  #log{padding:8px 14px;height:auto;min-height:40px;max-height:64px;font-size:.82rem;line-height:1.6;flex-shrink:0}
+  /* ── Log: minimal ── */
+  #log{padding:4px 12px;height:auto;min-height:28px;max-height:40px;font-size:.75rem;line-height:1.5;flex-shrink:0}
 
-  /* ── Results header / filter toolbar: NOT sticky on mobile, scrolls with content ── */
-  .results-hdr{padding:10px 12px;gap:8px;flex-wrap:wrap;align-items:center;position:relative;top:auto;z-index:auto;flex-shrink:0}
+  /* ── Results header / filter toolbar: compact ── */
+  .results-hdr{padding:6px 10px;gap:5px;flex-wrap:wrap;align-items:center;position:relative;top:auto;z-index:auto;flex-shrink:0;border-bottom:1px solid #2e2e2e}
   .results-hdr > *{flex-shrink:0}
-  #res-title{font-size:.95rem}
-  .badge{font-size:.78rem;padding:3px 9px}
+  #res-title{font-size:.88rem}
+  .badge{font-size:.72rem;padding:2px 7px}
   #res-search-wrap{margin-left:0;width:100%;order:99}
-  #res-search{width:100%;flex:1;font-size:.88rem;padding:8px 12px}
-  #res-search-count{font-size:.82rem}
-  .cat-sel{font-size:.84rem;padding:8px 12px}
-  #search-wl-link{font-size:.84rem}
-  #clear-filters-btn{font-size:.84rem}
+  #res-search{width:100%;flex:1;font-size:.84rem;padding:6px 10px}
+  #res-search-count{font-size:.78rem}
+  .cat-sel{font-size:.78rem;padding:6px 10px}
+  #search-wl-link{font-size:.78rem}
+  #clear-filters-btn{font-size:.78rem}
 
   /* ── Filter dropdown panels: full-width overlay on mobile ── */
   #brand-dropdown,#cond-dropdown,#cat-dropdown,#subcat-dropdown{position:static}
@@ -2972,8 +2973,8 @@ tr.fav-row td:last-child{color:#4ade80}
   .results{overflow:hidden;flex:1;min-height:0;display:flex;flex-direction:column}
   #res-body{overflow:auto;-webkit-overflow-scrolling:touch;flex:1;min-height:0}
   table{min-width:920px;table-layout:auto;border-collapse:separate;border-spacing:0}
-  th{background:#161616;font-size:.8rem;padding:10px 10px;position:sticky;top:0;z-index:10;border-bottom:2px solid #2e2e2e}
-  td{padding:10px 10px;font-size:.88rem;border-bottom:1px solid #1e1e1e}
+  th{background:#161616;font-size:.78rem;padding:8px 8px;position:sticky;top:0;z-index:10;border-bottom:2px solid #2e2e2e}
+  td{padding:8px 8px;font-size:.86rem;border-bottom:1px solid #1e1e1e}
   td:nth-child(1){width:42px}
   td:nth-child(2){width:52px}
   td:nth-child(3){width:30px}
@@ -3008,23 +3009,23 @@ tr.fav-row td:last-child{color:#4ade80}
 
   /* ── CL Right: flex column, only #cl-body scrolls ── */
   .cl-right{flex:1;overflow:hidden;min-height:0;display:flex;flex-direction:column}
-  .cl-search-bar{padding:12px 14px;gap:10px;flex-wrap:wrap;flex-shrink:0}
-  #cl-query{width:100%;flex:1 1 100%;font-size:1rem;padding:10px 14px}
-  #cl-search-btn{flex:1;font-size:.92rem;padding:10px 20px}
-  #cl-status{width:100%;text-align:center;font-size:.88rem}
+  .cl-search-bar{padding:8px 12px;gap:8px;flex-wrap:wrap;flex-shrink:0}
+  #cl-query{width:100%;flex:1 1 100%;font-size:.92rem;padding:8px 12px}
+  #cl-search-btn{flex:1;font-size:.88rem;padding:8px 16px}
+  #cl-status{width:100%;text-align:center;font-size:.82rem}
 
   /* ── CL Table: #cl-body is the sole scroller ── */
   #cl-body{overflow:auto;-webkit-overflow-scrolling:touch;flex:1;min-height:0}
   #cl-body table{min-width:600px;table-layout:auto;border-collapse:separate;border-spacing:0}
-  #cl-body th{font-size:.8rem;padding:10px 10px;background:#161616;position:sticky;top:0;z-index:10;border-bottom:2px solid #2e2e2e}
-  #cl-body td{padding:10px 10px;font-size:.88rem;border-bottom:1px solid #1e1e1e}
+  #cl-body th{font-size:.78rem;padding:8px 8px;background:#161616;position:sticky;top:0;z-index:10;border-bottom:2px solid #2e2e2e}
+  #cl-body td{padding:8px 8px;font-size:.86rem;border-bottom:1px solid #1e1e1e}
   #cl-body td:nth-child(3){white-space:normal;min-width:200px}
 
   /* ── CL results header ── */
-  .cl-results-hdr{flex-wrap:wrap;gap:8px;padding:10px 14px;flex-shrink:0}
-  #cl-count{font-size:.92rem}
-  #cl-res-search{width:100%;margin-left:0;font-size:.88rem;padding:8px 12px}
-  #cl-search-wl-link{font-size:.84rem}
+  .cl-results-hdr{flex-wrap:wrap;gap:6px;padding:6px 12px;flex-shrink:0}
+  #cl-count{font-size:.85rem}
+  #cl-res-search{width:100%;margin-left:0;font-size:.82rem;padding:6px 10px}
+  #cl-search-wl-link{font-size:.78rem}
 
   /* ── Modals: full-width on mobile ── */
   #pw-box{width:calc(100% - 32px)!important;max-width:380px}
