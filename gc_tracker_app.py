@@ -2969,8 +2969,10 @@ tr.fav-row td:last-child{color:#4ade80}
   .brand-dd-item .bcount{font-size:.8rem}
   .cond-dd-item{padding:10px 14px;font-size:.9rem}
 
-  /* ── GC Table: .results is a flex column; only #res-body scrolls ── */
-  .results{overflow:hidden;flex:1;min-height:0;display:flex;flex-direction:column}
+  /* ── GC Table: .results is a flex column; only #res-body scrolls.
+     JS sets display:block via inline style — override to flex when visible ── */
+  #res-panel:not([style*="none"]){display:flex!important;flex-direction:column!important}
+  .results{overflow:hidden;flex:1;min-height:0}
   #res-body{overflow:auto;-webkit-overflow-scrolling:touch;flex:1;min-height:0}
   table{min-width:920px;table-layout:auto;border-collapse:separate;border-spacing:0}
   th{background:#161616;font-size:.78rem;padding:8px 8px;position:sticky;top:0;z-index:10;border-bottom:2px solid #2e2e2e}
@@ -3033,9 +3035,8 @@ tr.fav-row td:last-child{color:#4ade80}
   #first-run-modal > div:nth-child(2){width:calc(100% - 32px)!important;max-width:400px}
   #vs-modal > div:nth-child(2){width:calc(100% - 32px)!important;max-width:380px}
 
-  /* ── Image tooltip: centered at bottom on mobile ── */
-  #img-tooltip{top:auto!important;bottom:12px!important;left:50%!important;transform:translateX(-50%)}
-  #img-tooltip img{width:200px;height:200px}
+  /* ── Image tooltip: disabled on mobile ── */
+  #img-tooltip{display:none!important}
 
   /* ── Touch-friendly sizing ── */
   input[type=checkbox]{width:20px;height:20px}
@@ -4553,6 +4554,7 @@ function autoSizeItemColumn() {
   const HOVER_DELAY = 400; // ms before showing thumbnail
 
   document.addEventListener('mouseenter', function(e) {
+    if (_isMobile()) return;  // No hover thumbnails on mobile
     // GC results
     const gcLink = e.target.closest('#res-body a');
     // CL results
