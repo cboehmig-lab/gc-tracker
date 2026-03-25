@@ -2750,7 +2750,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .badge{background:#c00;color:#fff;font-size:.7rem;font-weight:700;padding:2px 7px;border-radius:10px}
 .cat-sel{padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer}
 .cat-sel:focus{border-color:#c00}
-#watchlist-toggle.wl-active{background:#c00;border-color:#c00;color:#fff}
+#watchlist-toggle.wl-active,#cl-watchlist-toggle.wl-active{background:#c00;border-color:#c00;color:#fff}
 .brand-dd-item{display:flex;align-items:center;padding:6px 12px;cursor:pointer;font-size:.82rem;color:#ccc;gap:6px}
 .brand-dd-item:hover{background:#252525}
 .brand-dd-item.active{background:#c00;color:#fff}
@@ -3106,6 +3106,16 @@ tr.fav-row td:last-child{color:#4ade80}
         onkeydown="if(event.key==='Enter') clSearch()">
       <span id="cl-status"></span>
       <button id="cl-search-btn" onclick="clSearch()">Search</button>
+    </div>
+    <div class="cl-results-hdr" id="cl-toolbar" style="display:flex">
+      <button id="cl-watchlist-toggle" onclick="clToggleWatchFilter()"
+        class="cat-sel" style="border-color:#3a3a3a;color:#aaa;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
+        ★ Watch List
+      </button>
+      <button onclick="openKeywords()"
+        class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
+        🎯 Want List
+      </button>
     </div>
     <div class="cl-results-hdr" id="cl-results-hdr" style="display:none">
       <span id="cl-count"></span>
@@ -3722,7 +3732,11 @@ function openKeywords() {
 
 function closeKeywords() {
   document.getElementById('kw-modal').style.display = 'none';
-  if (_browseMode === 'server') {
+  // Refresh whichever tab is active
+  const clActive = document.querySelector('.cl-tab.active');
+  if (clActive && _clData.length) {
+    clRenderResults();  // Re-render CL results with updated want list
+  } else if (_browseMode === 'server') {
     _fetchBrowsePage(_srvPage);
   } else {
     renderTable();
@@ -5001,12 +5015,13 @@ function clFilterResults() {
     const textMatch = !q || row.textContent.toLowerCase().includes(q);
     const favMatch = !_clFavsOnly || _clFavs.includes(row.dataset.city || '');
     const cityMatch = selectedCities.size === 0 || selectedCities.has(row.dataset.city || '');
-    const show = textMatch && favMatch && cityMatch;
+    const watchMatch = !_clWatchFilterActive || !!(window._clWatchlist || {})[row.dataset.clId || ''];
+    const show = textMatch && favMatch && cityMatch && watchMatch;
     row.style.display = show ? '' : 'none';
     if (show) visible++;
   });
   document.getElementById('cl-count').textContent =
-    (q || _clFavsOnly || selectedCities.size < _clData.length) ? (visible + ' of ' + _clData.length + ' listings') : (_clData.length + ' listings');
+    (q || _clFavsOnly || _clWatchFilterActive || selectedCities.size < _clData.length) ? (visible + ' of ' + _clData.length + ' listings') : (_clData.length + ' listings');
 }
 
 function _clMatchesWantList(title) {
@@ -5102,7 +5117,7 @@ function clRenderResults() {
     const title = r.url
       ? star + '<a href="' + r.url + '" target="_blank" rel="noopener">' + (r.title || '(no title)') + '</a>'
       : star + (r.title || '(no title)');
-    html += '<tr class="' + (isFav ? 'cl-fav-result' : '') + '" data-city="' + (r.cityId||'') + '" data-cl-image="' + (r.image||'').replace(/"/g,'&quot;') + '">' +
+    html += '<tr class="' + (isFav ? 'cl-fav-result' : '') + '" data-city="' + (r.cityId||'') + '" data-cl-id="' + clId.replace(/"/g,'&quot;') + '" data-cl-image="' + (r.image||'').replace(/"/g,'&quot;') + '">' +
             '<td style="text-align:center">' + watchStar + '</td>' +
             '<td style="text-align:center">' + (wantMatch ? '<span class="tag-kw">WANT</span>' : '') + '</td>' +
             '<td title="' + (r.title||'').replace(/"/g,'&quot;') + '">' + title + '</td>' +
@@ -5124,6 +5139,14 @@ function clSort(col) {
     _clSortCol = col; _clSortDir = 1;
   }
   clRenderResults();
+}
+
+let _clWatchFilterActive = false;
+function clToggleWatchFilter() {
+  _clWatchFilterActive = !_clWatchFilterActive;
+  const btn = document.getElementById('cl-watchlist-toggle');
+  btn.classList.toggle('wl-active', _clWatchFilterActive);
+  clFilterResults();
 }
 
 function clToggleWatch(id, name, url, price, location, btn) {
