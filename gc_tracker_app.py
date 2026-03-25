@@ -2892,106 +2892,139 @@ tr.fav-row td:last-child{color:#4ade80}
    ══════════════════════════════════════════════════════════════════════════════ */
 @media(max-width:820px){
 
+  /* ── Base font bump: one size up across the board ── */
+  body{font-size:1rem;overflow:hidden}
+
   /* ── Mobile sidebar toggle button ── */
-  .mobile-sidebar-toggle{display:flex;align-items:center;gap:8px;padding:11px 16px;background:#1a1a1a;border:none;border-bottom:1px solid #2e2e2e;cursor:pointer;font-size:.85rem;color:#ccc;font-weight:600;width:100%;text-align:left;flex-shrink:0}
+  .mobile-sidebar-toggle{display:flex;align-items:center;gap:8px;padding:13px 16px;background:#1a1a1a;border:none;border-bottom:1px solid #2e2e2e;cursor:pointer;font-size:.95rem;color:#ccc;font-weight:600;width:100%;text-align:left;flex-shrink:0}
   .mobile-sidebar-toggle:hover{background:#222}
   .mobile-sidebar-toggle:active{background:#252525}
-  .mobile-sidebar-toggle .toggle-arrow{transition:transform .2s;font-size:.65rem;color:#666}
+  .mobile-sidebar-toggle .toggle-arrow{transition:transform .2s;font-size:.7rem;color:#888}
   .mobile-sidebar-toggle .toggle-arrow.open{transform:rotate(90deg)}
-  .mobile-sidebar-toggle .toggle-count{margin-left:auto;font-size:.72rem;color:#666;font-weight:400}
+  .mobile-sidebar-toggle .toggle-count{margin-left:auto;font-size:.8rem;color:#888;font-weight:400}
 
   /* ── Header ── */
-  header{padding:10px 14px;gap:8px;flex-wrap:wrap}
-  header h1{font-size:1rem}
-  #hdr-status{font-size:.72rem;margin-left:auto;min-width:0;text-overflow:ellipsis;overflow:hidden;white-space:nowrap}
-  #stop-btn{font-size:.75rem;padding:6px 10px}
+  header{padding:12px 16px;gap:10px;flex-wrap:wrap}
+  header h1{font-size:1.1rem}
+  #hdr-status{font-size:.82rem;margin-left:auto;min-width:0;text-overflow:ellipsis;overflow:hidden;white-space:nowrap}
+  #stop-btn{font-size:.85rem;padding:8px 14px}
 
-  /* ── Tabs: shorter labels on mobile ── */
+  /* ── Tabs ── */
   .app-tabs{overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
   .app-tabs::-webkit-scrollbar{display:none}
-  .app-tab{padding:10px 14px;font-size:.78rem;white-space:nowrap;flex-shrink:0}
+  .app-tab{padding:12px 16px;font-size:.88rem;white-space:nowrap;flex-shrink:0}
 
   /* ── GC Layout: stack vertically ── */
-  .layout{flex-direction:column;overflow-y:auto;overflow-x:hidden}
+  /* CRITICAL: only ONE scroll container per panel to fix sticky header bleed-through.
+     .layout and .app-panel must NOT scroll — only .results and #cl-body scroll. */
+  .layout{flex-direction:column;overflow:visible}
+  .app-panel.active{display:flex;flex-direction:column;overflow:hidden}
 
   /* ── GC Left sidebar: collapsible on mobile ── */
   .left{width:100%;min-width:0;max-height:none;border-right:none;border-bottom:1px solid #2e2e2e;overflow:hidden;flex-shrink:0}
   .left.collapsed .search-wrap,
   .left.collapsed #store-list,
   .left.collapsed .left-footer{display:none}
-  #store-list{max-height:200px;overflow-y:auto}
-  .store-row{padding:8px 12px}
-  .store-row label{font-size:.9rem}
-  .left-footer{padding:10px 12px}
-  #reset-btn{font-size:.72rem}
+  #store-list{max-height:220px;overflow-y:auto}
+  .store-row{padding:10px 14px;gap:10px}
+  .store-row label{font-size:.95rem}
+  .left-footer{padding:12px 14px}
+  #sel-count{font-size:.85rem}
+  #reset-btn{font-size:.8rem}
 
-  /* ── GC Right panel ── */
-  .right{overflow:visible;flex:1;min-height:0;display:flex;flex-direction:column}
+  /* ── GC Right panel: flex column, results is the ONLY scroller ── */
+  .right{overflow:hidden;flex:1;min-height:0;display:flex;flex-direction:column}
 
   /* ── Status bar: stack vertically ── */
-  .status-bar{flex-direction:column;gap:6px;padding:8px 12px;align-items:flex-start}
+  .status-bar{flex-direction:column;gap:8px;padding:10px 14px;align-items:flex-start;font-size:.88rem;flex-shrink:0}
+  .status-bar b{color:#ccc}
   #global-search-wrap{margin-left:0;width:100%}
-  #global-search{width:100%;flex:1}
+  #global-search{width:100%;flex:1;font-size:.88rem;padding:8px 12px}
+  #global-search-btn{font-size:.82rem;padding:6px 10px}
+  #global-search-clear{font-size:.82rem;padding:6px 10px}
+
+  /* ── Hide Download Excel on mobile ── */
+  #s-excel{display:none!important}
 
   /* ── Log ── */
-  #log{padding:6px 12px;height:auto;min-height:36px;max-height:60px;font-size:.72rem}
+  #log{padding:8px 14px;height:auto;min-height:40px;max-height:64px;font-size:.82rem;line-height:1.6;flex-shrink:0}
 
-  /* ── Results header / filter toolbar: wrap on mobile ── */
-  .results-hdr{padding:8px 10px;gap:6px;flex-wrap:wrap;align-items:center}
+  /* ── Results header / filter toolbar: NOT sticky on mobile, scrolls with content ── */
+  .results-hdr{padding:10px 12px;gap:8px;flex-wrap:wrap;align-items:center;position:relative;top:auto;z-index:auto;flex-shrink:0}
   .results-hdr > *{flex-shrink:0}
+  #res-title{font-size:.95rem}
+  .badge{font-size:.78rem;padding:3px 9px}
   #res-search-wrap{margin-left:0;width:100%;order:99}
-  #res-search{width:100%;flex:1}
-  .cat-sel{font-size:.74rem;padding:6px 10px}
+  #res-search{width:100%;flex:1;font-size:.88rem;padding:8px 12px}
+  #res-search-count{font-size:.82rem}
+  .cat-sel{font-size:.84rem;padding:8px 12px}
+  #search-wl-link{font-size:.84rem}
+  #clear-filters-btn{font-size:.84rem}
 
   /* ── Filter dropdown panels: full-width overlay on mobile ── */
   #brand-dropdown,#cond-dropdown,#cat-dropdown,#subcat-dropdown{position:static}
-  #brand-dd-panel,#cond-dd-panel,#cat-dd-panel,#subcat-dd-panel{position:fixed!important;left:8px!important;right:8px!important;top:auto!important;bottom:8px!important;width:auto!important;max-height:50vh!important;z-index:200!important;border-radius:10px!important;margin-top:0!important}
+  #brand-dd-panel,#cond-dd-panel,#cat-dd-panel,#subcat-dd-panel{position:fixed!important;left:8px!important;right:8px!important;top:auto!important;bottom:8px!important;width:auto!important;max-height:50vh!important;z-index:200!important;border-radius:12px!important;margin-top:0!important}
+  .brand-dd-item{padding:10px 14px;font-size:.9rem}
+  .brand-dd-item .bcount{font-size:.8rem}
+  .cond-dd-item{padding:10px 14px;font-size:.9rem}
 
-  /* ── GC Table: horizontal scroll with min-width ── */
-  .results{overflow:auto;-webkit-overflow-scrolling:touch;flex:1}
-  table{min-width:900px;table-layout:auto}
-  th,td{padding:8px 8px;font-size:.78rem}
-  td:nth-child(1){width:40px}
-  td:nth-child(2){width:50px}
-  td:nth-child(3){width:28px}
-  td:nth-child(4){width:auto;min-width:180px;white-space:normal}
-  td:nth-child(5),td:nth-child(6),td:nth-child(7),td:nth-child(8),td:nth-child(9),td:nth-child(10),td:nth-child(11),td:nth-child(12){width:auto;min-width:80px}
-  th:nth-child(1){width:40px}
-  th:nth-child(2){width:50px}
-  th:nth-child(3){width:28px}
-  th:nth-child(4){width:auto;min-width:180px}
-  th:nth-child(5),th:nth-child(6),th:nth-child(7),th:nth-child(8),th:nth-child(9),th:nth-child(10),th:nth-child(11),th:nth-child(12){width:auto;min-width:80px}
+  /* ── GC Table: .results is a flex column; only #res-body scrolls ── */
+  .results{overflow:hidden;flex:1;min-height:0;display:flex;flex-direction:column}
+  #res-body{overflow:auto;-webkit-overflow-scrolling:touch;flex:1;min-height:0}
+  table{min-width:920px;table-layout:auto;border-collapse:separate;border-spacing:0}
+  th{background:#161616;font-size:.8rem;padding:10px 10px;position:sticky;top:0;z-index:10;border-bottom:2px solid #2e2e2e}
+  td{padding:10px 10px;font-size:.88rem;border-bottom:1px solid #1e1e1e}
+  td:nth-child(1){width:42px}
+  td:nth-child(2){width:52px}
+  td:nth-child(3){width:30px}
+  td:nth-child(4){width:auto;min-width:200px;white-space:normal}
+  td:nth-child(5),td:nth-child(6),td:nth-child(7),td:nth-child(8),td:nth-child(9),td:nth-child(10),td:nth-child(11),td:nth-child(12){width:auto;min-width:85px}
+  th:nth-child(1){width:42px}
+  th:nth-child(2){width:52px}
+  th:nth-child(3){width:30px}
+  th:nth-child(4){width:auto;min-width:200px}
+  th:nth-child(5),th:nth-child(6),th:nth-child(7),th:nth-child(8),th:nth-child(9),th:nth-child(10),th:nth-child(11),th:nth-child(12){width:auto;min-width:85px}
+  .tag{font-size:.72rem;padding:2px 6px}
+  .tag-kw{font-size:.72rem;padding:2px 6px}
+  .tag-drop{font-size:.7rem;padding:3px 6px}
+  .tag-sold{font-size:.7rem;padding:3px 6px}
+  td a{font-size:.88rem}
+  .brand-link{font-size:.88rem}
+  .no-res{font-size:.92rem;padding:28px 20px}
 
   /* ── Paginator ── */
-  .paginator{padding:10px 8px;gap:1px;flex-wrap:wrap;justify-content:center}
-  .paginator button{min-width:28px;height:28px;font-size:.72rem}
-  .paginator .pg-info{font-size:.7rem;margin-right:6px;width:100%;text-align:center;margin-bottom:4px}
+  .paginator{padding:12px 10px;gap:2px;flex-wrap:wrap;justify-content:center}
+  .paginator button{min-width:32px;height:32px;font-size:.82rem}
+  .paginator .pg-info{font-size:.8rem;margin-right:8px;width:100%;text-align:center;margin-bottom:6px}
 
   /* ── CL Layout: stack vertically ── */
-  #cl-panel{flex-direction:column}
+  #cl-panel{flex-direction:column;overflow:hidden}
   .cl-left{width:100%;min-width:0;border-right:none;border-bottom:1px solid #2e2e2e;overflow:hidden;flex-shrink:0}
   .cl-left.collapsed .search-wrap,
   .cl-left.collapsed #cl-city-list{display:none}
-  #cl-city-list{max-height:200px;overflow-y:auto}
-  .cl-city-row{padding:8px 12px}
-  .cl-city-row label{font-size:.9rem}
+  #cl-city-list{max-height:220px;overflow-y:auto}
+  .cl-city-row{padding:10px 14px;gap:10px}
+  .cl-city-row label{font-size:.95rem}
 
-  /* ── CL Right ── */
-  .cl-right{flex:1;overflow:auto}
-  .cl-search-bar{padding:10px 12px;gap:8px;flex-wrap:wrap}
-  #cl-query{width:100%;flex:1 1 100%}
-  #cl-search-btn{flex:1}
-  #cl-status{width:100%;text-align:center}
+  /* ── CL Right: flex column, only #cl-body scrolls ── */
+  .cl-right{flex:1;overflow:hidden;min-height:0;display:flex;flex-direction:column}
+  .cl-search-bar{padding:12px 14px;gap:10px;flex-wrap:wrap;flex-shrink:0}
+  #cl-query{width:100%;flex:1 1 100%;font-size:1rem;padding:10px 14px}
+  #cl-search-btn{flex:1;font-size:.92rem;padding:10px 20px}
+  #cl-status{width:100%;text-align:center;font-size:.88rem}
 
-  /* ── CL Table: horizontal scroll ── */
-  #cl-body{overflow:auto;-webkit-overflow-scrolling:touch}
-  #cl-body table{min-width:580px;table-layout:auto}
-  #cl-body th,#cl-body td{padding:8px 8px;font-size:.78rem}
-  #cl-body td:nth-child(3){white-space:normal;min-width:180px}
+  /* ── CL Table: #cl-body is the sole scroller ── */
+  #cl-body{overflow:auto;-webkit-overflow-scrolling:touch;flex:1;min-height:0}
+  #cl-body table{min-width:600px;table-layout:auto;border-collapse:separate;border-spacing:0}
+  #cl-body th{font-size:.8rem;padding:10px 10px;background:#161616;position:sticky;top:0;z-index:10;border-bottom:2px solid #2e2e2e}
+  #cl-body td{padding:10px 10px;font-size:.88rem;border-bottom:1px solid #1e1e1e}
+  #cl-body td:nth-child(3){white-space:normal;min-width:200px}
 
   /* ── CL results header ── */
-  .cl-results-hdr{flex-wrap:wrap;gap:6px;padding:8px 12px}
-  #cl-res-search{width:100%;margin-left:0}
+  .cl-results-hdr{flex-wrap:wrap;gap:8px;padding:10px 14px;flex-shrink:0}
+  #cl-count{font-size:.92rem}
+  #cl-res-search{width:100%;margin-left:0;font-size:.88rem;padding:8px 12px}
+  #cl-search-wl-link{font-size:.84rem}
 
   /* ── Modals: full-width on mobile ── */
   #pw-box{width:calc(100% - 32px)!important;max-width:380px}
@@ -3001,31 +3034,33 @@ tr.fav-row td:last-child{color:#4ade80}
 
   /* ── Image tooltip: centered at bottom on mobile ── */
   #img-tooltip{top:auto!important;bottom:12px!important;left:50%!important;transform:translateX(-50%)}
-  #img-tooltip img{width:180px;height:180px}
+  #img-tooltip img{width:200px;height:200px}
 
   /* ── Touch-friendly sizing ── */
-  input[type=checkbox]{width:18px;height:18px}
-  .sel-btn,.cl-sel-btn{padding:8px;font-size:.78rem;min-height:36px}
-  #run-btn,#baseline-btn{min-height:44px;font-size:.88rem}
-  .watch-btn,.fav-btn,.cl-fav-btn{font-size:1.15rem;padding:4px 6px;min-width:34px;min-height:34px;display:inline-flex;align-items:center;justify-content:center}
+  input[type=checkbox]{width:20px;height:20px}
+  #search{font-size:.95rem;padding:9px 12px}
+  #cl-city-search{font-size:.95rem;padding:9px 12px}
+  .sel-btn,.cl-sel-btn{padding:9px 8px;font-size:.84rem;min-height:38px}
+  #run-btn,#baseline-btn{min-height:46px;font-size:.92rem}
+  .watch-btn,.fav-btn,.cl-fav-btn{font-size:1.2rem;padding:4px 6px;min-width:36px;min-height:36px;display:inline-flex;align-items:center;justify-content:center}
   button,a{-webkit-tap-highlight-color:transparent}
 
-  /* ── Prevent body overflow ── */
-  body{overflow:hidden}
-  .app-panel.active{overflow-y:auto;overflow-x:hidden}
+  /* ── Alternating row stripes for readability ── */
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  #cl-body tr:nth-child(even) td{background:rgba(255,255,255,.02)}
 }
 
 /* ── Extra small screens (phones in portrait) ── */
 @media(max-width:480px){
-  header{padding:8px 10px}
-  header h1{font-size:.88rem}
-  .app-tab{padding:9px 10px;font-size:.72rem}
-  .status-bar{font-size:.7rem}
-  table{min-width:780px}
-  #cl-body table{min-width:520px}
-  .results-hdr{gap:4px;padding:6px 8px}
-  .cat-sel{font-size:.7rem;padding:5px 8px}
-  .paginator button{min-width:24px;height:26px;font-size:.68rem}
+  header{padding:10px 12px}
+  header h1{font-size:1rem}
+  .app-tab{padding:10px 12px;font-size:.82rem}
+  .status-bar{font-size:.82rem}
+  table{min-width:800px}
+  #cl-body table{min-width:540px}
+  .results-hdr{gap:6px;padding:8px 10px}
+  .cat-sel{font-size:.8rem;padding:7px 10px}
+  .paginator button{min-width:28px;height:30px;font-size:.78rem}
 }
 </style>
 </head>
