@@ -2883,6 +2883,150 @@ tr.fav-row td:last-child{color:#4ade80}
 #cl-body td a:hover{text-decoration:underline}
 .cl-empty{padding:32px;color:#555;font-size:.9rem;text-align:center}
 .cl-fav-star{color:#f5c518;margin-right:4px;font-size:.8rem}
+
+/* ── Mobile toggle buttons (hidden on desktop) ── */
+.mobile-sidebar-toggle{display:none}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   MOBILE RESPONSIVE — all changes scoped inside @media so desktop is untouched
+   ══════════════════════════════════════════════════════════════════════════════ */
+@media(max-width:820px){
+
+  /* ── Mobile sidebar toggle button ── */
+  .mobile-sidebar-toggle{display:flex;align-items:center;gap:8px;padding:11px 16px;background:#1a1a1a;border:none;border-bottom:1px solid #2e2e2e;cursor:pointer;font-size:.85rem;color:#ccc;font-weight:600;width:100%;text-align:left;flex-shrink:0}
+  .mobile-sidebar-toggle:hover{background:#222}
+  .mobile-sidebar-toggle:active{background:#252525}
+  .mobile-sidebar-toggle .toggle-arrow{transition:transform .2s;font-size:.65rem;color:#666}
+  .mobile-sidebar-toggle .toggle-arrow.open{transform:rotate(90deg)}
+  .mobile-sidebar-toggle .toggle-count{margin-left:auto;font-size:.72rem;color:#666;font-weight:400}
+
+  /* ── Header ── */
+  header{padding:10px 14px;gap:8px;flex-wrap:wrap}
+  header h1{font-size:1rem}
+  #hdr-status{font-size:.72rem;margin-left:auto;min-width:0;text-overflow:ellipsis;overflow:hidden;white-space:nowrap}
+  #stop-btn{font-size:.75rem;padding:6px 10px}
+
+  /* ── Tabs: shorter labels on mobile ── */
+  .app-tabs{overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+  .app-tabs::-webkit-scrollbar{display:none}
+  .app-tab{padding:10px 14px;font-size:.78rem;white-space:nowrap;flex-shrink:0}
+
+  /* ── GC Layout: stack vertically ── */
+  .layout{flex-direction:column;overflow-y:auto;overflow-x:hidden}
+
+  /* ── GC Left sidebar: collapsible on mobile ── */
+  .left{width:100%;min-width:0;max-height:none;border-right:none;border-bottom:1px solid #2e2e2e;overflow:hidden;flex-shrink:0}
+  .left.collapsed .search-wrap,
+  .left.collapsed #store-list,
+  .left.collapsed .left-footer{display:none}
+  #store-list{max-height:200px;overflow-y:auto}
+  .store-row{padding:8px 12px}
+  .store-row label{font-size:.9rem}
+  .left-footer{padding:10px 12px}
+  #reset-btn{font-size:.72rem}
+
+  /* ── GC Right panel ── */
+  .right{overflow:visible;flex:1;min-height:0;display:flex;flex-direction:column}
+
+  /* ── Status bar: stack vertically ── */
+  .status-bar{flex-direction:column;gap:6px;padding:8px 12px;align-items:flex-start}
+  #global-search-wrap{margin-left:0;width:100%}
+  #global-search{width:100%;flex:1}
+
+  /* ── Log ── */
+  #log{padding:6px 12px;height:auto;min-height:36px;max-height:60px;font-size:.72rem}
+
+  /* ── Results header / filter toolbar: wrap on mobile ── */
+  .results-hdr{padding:8px 10px;gap:6px;flex-wrap:wrap;align-items:center}
+  .results-hdr > *{flex-shrink:0}
+  #res-search-wrap{margin-left:0;width:100%;order:99}
+  #res-search{width:100%;flex:1}
+  .cat-sel{font-size:.74rem;padding:6px 10px}
+
+  /* ── Filter dropdown panels: full-width overlay on mobile ── */
+  #brand-dropdown,#cond-dropdown,#cat-dropdown,#subcat-dropdown{position:static}
+  #brand-dd-panel,#cond-dd-panel,#cat-dd-panel,#subcat-dd-panel{position:fixed!important;left:8px!important;right:8px!important;top:auto!important;bottom:8px!important;width:auto!important;max-height:50vh!important;z-index:200!important;border-radius:10px!important;margin-top:0!important}
+
+  /* ── GC Table: horizontal scroll with min-width ── */
+  .results{overflow:auto;-webkit-overflow-scrolling:touch;flex:1}
+  table{min-width:900px;table-layout:auto}
+  th,td{padding:8px 8px;font-size:.78rem}
+  td:nth-child(1){width:40px}
+  td:nth-child(2){width:50px}
+  td:nth-child(3){width:28px}
+  td:nth-child(4){width:auto;min-width:180px;white-space:normal}
+  td:nth-child(5),td:nth-child(6),td:nth-child(7),td:nth-child(8),td:nth-child(9),td:nth-child(10),td:nth-child(11),td:nth-child(12){width:auto;min-width:80px}
+  th:nth-child(1){width:40px}
+  th:nth-child(2){width:50px}
+  th:nth-child(3){width:28px}
+  th:nth-child(4){width:auto;min-width:180px}
+  th:nth-child(5),th:nth-child(6),th:nth-child(7),th:nth-child(8),th:nth-child(9),th:nth-child(10),th:nth-child(11),th:nth-child(12){width:auto;min-width:80px}
+
+  /* ── Paginator ── */
+  .paginator{padding:10px 8px;gap:1px;flex-wrap:wrap;justify-content:center}
+  .paginator button{min-width:28px;height:28px;font-size:.72rem}
+  .paginator .pg-info{font-size:.7rem;margin-right:6px;width:100%;text-align:center;margin-bottom:4px}
+
+  /* ── CL Layout: stack vertically ── */
+  #cl-panel{flex-direction:column}
+  .cl-left{width:100%;min-width:0;border-right:none;border-bottom:1px solid #2e2e2e;overflow:hidden;flex-shrink:0}
+  .cl-left.collapsed .search-wrap,
+  .cl-left.collapsed #cl-city-list{display:none}
+  #cl-city-list{max-height:200px;overflow-y:auto}
+  .cl-city-row{padding:8px 12px}
+  .cl-city-row label{font-size:.9rem}
+
+  /* ── CL Right ── */
+  .cl-right{flex:1;overflow:auto}
+  .cl-search-bar{padding:10px 12px;gap:8px;flex-wrap:wrap}
+  #cl-query{width:100%;flex:1 1 100%}
+  #cl-search-btn{flex:1}
+  #cl-status{width:100%;text-align:center}
+
+  /* ── CL Table: horizontal scroll ── */
+  #cl-body{overflow:auto;-webkit-overflow-scrolling:touch}
+  #cl-body table{min-width:580px;table-layout:auto}
+  #cl-body th,#cl-body td{padding:8px 8px;font-size:.78rem}
+  #cl-body td:nth-child(3){white-space:normal;min-width:180px}
+
+  /* ── CL results header ── */
+  .cl-results-hdr{flex-wrap:wrap;gap:6px;padding:8px 12px}
+  #cl-res-search{width:100%;margin-left:0}
+
+  /* ── Modals: full-width on mobile ── */
+  #pw-box{width:calc(100% - 32px)!important;max-width:380px}
+  #kw-modal > div:last-child{width:calc(100% - 32px)!important;max-width:420px}
+  #first-run-modal > div:nth-child(2){width:calc(100% - 32px)!important;max-width:400px}
+  #vs-modal > div:nth-child(2){width:calc(100% - 32px)!important;max-width:380px}
+
+  /* ── Image tooltip: centered at bottom on mobile ── */
+  #img-tooltip{top:auto!important;bottom:12px!important;left:50%!important;transform:translateX(-50%)}
+  #img-tooltip img{width:180px;height:180px}
+
+  /* ── Touch-friendly sizing ── */
+  input[type=checkbox]{width:18px;height:18px}
+  .sel-btn,.cl-sel-btn{padding:8px;font-size:.78rem;min-height:36px}
+  #run-btn,#baseline-btn{min-height:44px;font-size:.88rem}
+  .watch-btn,.fav-btn,.cl-fav-btn{font-size:1.15rem;padding:4px 6px;min-width:34px;min-height:34px;display:inline-flex;align-items:center;justify-content:center}
+  button,a{-webkit-tap-highlight-color:transparent}
+
+  /* ── Prevent body overflow ── */
+  body{overflow:hidden}
+  .app-panel.active{overflow-y:auto;overflow-x:hidden}
+}
+
+/* ── Extra small screens (phones in portrait) ── */
+@media(max-width:480px){
+  header{padding:8px 10px}
+  header h1{font-size:.88rem}
+  .app-tab{padding:9px 10px;font-size:.72rem}
+  .status-bar{font-size:.7rem}
+  table{min-width:780px}
+  #cl-body table{min-width:520px}
+  .results-hdr{gap:4px;padding:6px 8px}
+  .cat-sel{font-size:.7rem;padding:5px 8px}
+  .paginator button{min-width:24px;height:26px;font-size:.68rem}
+}
 </style>
 </head>
 <body>
@@ -2980,7 +3124,12 @@ tr.fav-row td:last-child{color:#4ade80}
 <div class="app-panel active" id="gc-panel">
 <div class="layout">
 
-  <div class="left">
+  <div class="left" id="gc-left">
+    <button class="mobile-sidebar-toggle" id="gc-sidebar-toggle" onclick="toggleMobileSidebar('gc')">
+      <span class="toggle-arrow" id="gc-toggle-arrow">▶</span>
+      Stores
+      <span class="toggle-count" id="gc-toggle-count"></span>
+    </button>
     <div class="search-wrap" id="search-wrap">
       <input id="search" type="text" placeholder="Filter by location name…" autocomplete="off">
       <div class="sel-btns">
@@ -3090,7 +3239,12 @@ tr.fav-row td:last-child{color:#4ade80}
 <div class="app-panel" id="cl-panel">
 
   <!-- Left sidebar: city list -->
-  <div class="cl-left">
+  <div class="cl-left" id="cl-left">
+    <button class="mobile-sidebar-toggle" id="cl-sidebar-toggle" onclick="toggleMobileSidebar('cl')">
+      <span class="toggle-arrow" id="cl-toggle-arrow">▶</span>
+      Cities
+      <span class="toggle-count" id="cl-toggle-count"></span>
+    </button>
     <div class="search-wrap cl-left">
       <input id="cl-city-search" type="text" placeholder="Search cities…" autocomplete="off" oninput="clFilterCities()">
       <div class="cl-sel-btns">
@@ -3132,6 +3286,46 @@ tr.fav-row td:last-child{color:#4ade80}
 
 <script>
 let allStores = [], favorites = [], running = false;
+
+// ── Mobile sidebar toggle ────────────────────────────────────────────────────
+function _isMobile() { return window.innerWidth <= 820; }
+
+function toggleMobileSidebar(which) {
+  const panel = document.getElementById(which === 'gc' ? 'gc-left' : 'cl-left');
+  const arrow = document.getElementById(which + '-toggle-arrow');
+  const isCollapsed = panel.classList.toggle('collapsed');
+  arrow.classList.toggle('open', !isCollapsed);
+}
+
+function _updateMobileToggleCounts() {
+  const gcCount = document.getElementById('gc-toggle-count');
+  if (gcCount) {
+    const n = document.querySelectorAll('.store-row input:checked').length;
+    gcCount.textContent = n > 0 ? n + ' selected' : '';
+  }
+  const clCount = document.getElementById('cl-toggle-count');
+  if (clCount) {
+    const n = document.querySelectorAll('.cl-city-row input:checked').length;
+    clCount.textContent = n > 0 ? n + ' selected' : '';
+  }
+}
+
+// Auto-collapse sidebars on mobile on page load
+document.addEventListener('DOMContentLoaded', () => {
+  if (_isMobile()) {
+    document.getElementById('gc-left').classList.add('collapsed');
+    document.getElementById('cl-left').classList.add('collapsed');
+  }
+});
+// Re-check on resize (e.g. rotating phone)
+window.addEventListener('resize', () => {
+  const gcLeft = document.getElementById('gc-left');
+  const clLeft = document.getElementById('cl-left');
+  if (!_isMobile()) {
+    gcLeft.classList.remove('collapsed');
+    clLeft.classList.remove('collapsed');
+  }
+});
 
 // ── localStorage helpers ─────────────────────────────────────────────────────
 function _lsGet(key, fallback) {
@@ -3332,6 +3526,7 @@ function updateCount() {
   document.getElementById('sel-count').textContent = n + ' store' + (n===1?'':'s') + ' selected';
   document.getElementById('run-btn').disabled = (n===0 || running);
   document.getElementById('baseline-btn').disabled = running;
+  _updateMobileToggleCounts();
   // Auto-browse cached inventory when stores are selected
   if (n > 0 && !running && !_globalSearchActive) browseCache();
   else if (n === 0 && !_globalSearchActive) {
@@ -4891,7 +5086,7 @@ function clRenderCities(selectAll) {
     const cb  = document.createElement('input');
     cb.type = 'checkbox'; cb.id = cbId; cb.value = c.id;
     if (selectAll) cb.checked = true;
-    cb.addEventListener('change', clFilterResults);
+    cb.addEventListener('change', function() { _updateMobileToggleCounts(); clFilterResults(); });
     const lbl = document.createElement('label');
     lbl.htmlFor = cbId; lbl.textContent = c.label;
     const btn = document.createElement('button');
@@ -4934,10 +5129,12 @@ function clToggleFav(id, btn) {
 
 function clSelectAll() {
   document.querySelectorAll('#cl-city-list input[type=checkbox]').forEach(cb => cb.checked = true);
+  _updateMobileToggleCounts();
   clFilterResults();
 }
 function clClearAll() {
   document.querySelectorAll('#cl-city-list input[type=checkbox]').forEach(cb => cb.checked = false);
+  _updateMobileToggleCounts();
   clFilterResults();
 }
 
