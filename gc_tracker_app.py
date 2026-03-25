@@ -3430,11 +3430,12 @@ async function _fetchBrowsePage(page) {
       document.getElementById('res-badge').textContent = newCount + ' NEW';
     } else if (hasFilters) {
       document.getElementById('res-title').textContent = `${_srvTotalCount.toLocaleString()} of ${_srvTotalUnfiltered.toLocaleString()} Items`;
+      document.getElementById('res-badge').textContent = '';
     } else {
       document.getElementById('res-title').textContent = _srvTotalCount > 0
         ? `${_srvTotalCount.toLocaleString()} Items` : 'No Items Found';
+      document.getElementById('res-badge').textContent = '';
     }
-    document.getElementById('res-badge').textContent = '';
     document.getElementById('res-panel').style.display = 'block';
 
     // Update filter count
