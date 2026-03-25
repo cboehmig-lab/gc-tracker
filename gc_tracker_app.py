@@ -3653,9 +3653,7 @@ async function browseCache() {
     _resetWantListLink();
     _srvStores = stores;
     _srvPage = 1;
-    _srvSortField = 'date';
-    _srvSortDir = 'desc';
-    window._sortCol = null; window._sortDir = 1;
+    // Preserve current sort — don't reset _srvSortField/_srvSortDir/window._sortCol
     document.getElementById('res-search').value = '';
     document.getElementById('res-search-count').textContent = '';
     window._selectedBrands = []; _updateBrandBtn();
