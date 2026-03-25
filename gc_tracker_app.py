@@ -1516,6 +1516,7 @@ def api_browse():
         })
 
     total_unfiltered = len(all_items)
+    new_count_unfiltered = sum(1 for i in all_items if i.get("isNew"))
 
     # ── Apply filters ─────────────────────────────────────────────────────
     filtered = all_items
@@ -1560,20 +1561,21 @@ def api_browse():
                 scoped_subcats.add(i["subcategory"])
 
     # ── Sort ──────────────────────────────────────────────────────────────
-    # Only NEW items float to top; everything else sorted purely by user's column
+    # NEW items float to top ONLY on default sort (no explicit column click)
+    # When user explicitly clicks a sort column, sort purely by that column
     reverse = (sort_dir == "desc")
-    def _sort_tier(x):
-        return 0 if x.get("isNew") else 1
+    user_sorted = bool(data.get("user_sorted"))
 
     if sort_field == "price":
         filtered.sort(key=lambda x: x.get("price_raw") or 0, reverse=reverse)
-        filtered.sort(key=lambda x: _sort_tier(x))
     elif sort_field == "date":
         filtered.sort(key=lambda x: x.get("date_raw") or "", reverse=reverse)
-        filtered.sort(key=lambda x: _sort_tier(x))
     else:
         filtered.sort(key=lambda x: (x.get(sort_field) or "").lower(), reverse=reverse)
-        filtered.sort(key=lambda x: _sort_tier(x))
+
+    # Only apply NEW-on-top tier for the default (non-user-clicked) sort
+    if not user_sorted:
+        filtered.sort(key=lambda x: 0 if x.get("isNew") else 1)
 
     total_filtered = len(filtered)
     total_pages    = max(1, -(-total_filtered // per_page))  # ceil division
@@ -1588,6 +1590,7 @@ def api_browse():
         "total_count":      total_filtered,
         "total_unfiltered": total_unfiltered,
         "total_pages":      total_pages,
+        "new_count":        new_count_unfiltered,
         "no_store_data":    False,
         # Filter option lists (always full set so dropdowns stay populated)
         "brands":           [{"name": b, "count": c} for b, c in sorted(brand_counts.items(), key=lambda x: -x[1])],
@@ -3107,7 +3110,7 @@ tr.fav-row td:last-child{color:#4ade80}
       <span id="cl-status"></span>
       <button id="cl-search-btn" onclick="clSearch()">Search</button>
     </div>
-    <div class="cl-results-hdr" id="cl-toolbar" style="display:flex">
+    <div class="cl-results-hdr" id="cl-toolbar" style="display:flex;align-items:center;gap:8px">
       <button id="cl-watchlist-toggle" onclick="clToggleWatchFilter()"
         class="cat-sel" style="border-color:#3a3a3a;color:#aaa;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
         ★ Watch List
@@ -3116,6 +3119,7 @@ tr.fav-row td:last-child{color:#4ade80}
         class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
         🎯 Want List
       </button>
+      <a id="cl-search-wl-link" onclick="clSearchWantList()" style="color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;text-decoration:none;margin-left:2px" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Search Want List</a>
     </div>
     <div class="cl-results-hdr" id="cl-results-hdr" style="display:none">
       <span id="cl-count"></span>
@@ -3376,6 +3380,7 @@ async function _fetchBrowsePage(page) {
     per_page:   50,
     sort_field: _srvSortField,
     sort_dir:   _srvSortDir,
+    user_sorted: window._sortCol !== null,
     fav_stores: favorites,
     keywords:   window._keywords || [],
     watchlist_ids: Object.keys(window._watchlist || {}),
@@ -3423,7 +3428,7 @@ async function _fetchBrowsePage(page) {
 
     // Update header
     const hasFilters = filters.filter_q || (filters.filter_brands && filters.filter_brands.length) || (filters.filter_conditions && filters.filter_conditions.length) || (filters.filter_categories && filters.filter_categories.length) || (filters.filter_subcategories && filters.filter_subcategories.length) || filters.filter_watched;
-    const newCount = window._newIds ? window._newIds.size : 0;
+    const newCount = d.new_count || 0;
     if (_wantListSearchActive) {
       document.getElementById('res-title').textContent = _srvTotalCount > 0
         ? `${_srvTotalCount.toLocaleString()} Want List matches nationwide`
@@ -3735,7 +3740,8 @@ function closeKeywords() {
   // Refresh whichever tab is active
   const clActive = document.querySelector('.cl-tab.active');
   if (clActive && _clData.length) {
-    clRenderResults();  // Re-render CL results with updated want list
+    clRenderResults();
+    if (_clWantListFilterActive) clFilterResults();
   } else if (_browseMode === 'server') {
     _fetchBrowsePage(_srvPage);
   } else {
@@ -4270,10 +4276,6 @@ function sortTable(colIdx) {
       return (av - bv) * dir;
     }
     if (field === 'date') {
-      // NEW+keyword items sort to top, then chronological
-      const aTop = (a.isNew && a.kwMatch) ? 0 : 1;
-      const bTop = (b.isNew && b.kwMatch) ? 0 : 1;
-      if (aTop !== bTop) return (aTop - bTop);
       av = a['date_raw'] || '';
       bv = b['date_raw'] || '';
       return av.toString().localeCompare(bv.toString()) * dir;
@@ -5016,12 +5018,13 @@ function clFilterResults() {
     const favMatch = !_clFavsOnly || _clFavs.includes(row.dataset.city || '');
     const cityMatch = selectedCities.size === 0 || selectedCities.has(row.dataset.city || '');
     const watchMatch = !_clWatchFilterActive || !!(window._clWatchlist || {})[row.dataset.clId || ''];
-    const show = textMatch && favMatch && cityMatch && watchMatch;
+    const wantMatch = !_clWantListFilterActive || _clMatchesWantList(row.querySelector('td:nth-child(3)') ? row.querySelector('td:nth-child(3)').textContent : '');
+    const show = textMatch && favMatch && cityMatch && watchMatch && wantMatch;
     row.style.display = show ? '' : 'none';
     if (show) visible++;
   });
   document.getElementById('cl-count').textContent =
-    (q || _clFavsOnly || _clWatchFilterActive || selectedCities.size < _clData.length) ? (visible + ' of ' + _clData.length + ' listings') : (_clData.length + ' listings');
+    (q || _clFavsOnly || _clWatchFilterActive || _clWantListFilterActive || selectedCities.size < _clData.length) ? (visible + ' of ' + _clData.length + ' listings') : (_clData.length + ' listings');
 }
 
 function _clMatchesWantList(title) {
@@ -5142,6 +5145,26 @@ function clSort(col) {
 }
 
 let _clWatchFilterActive = false;
+let _clWantListFilterActive = false;
+
+function clSearchWantList() {
+  if (_clWantListFilterActive) {
+    _clWantListFilterActive = false;
+    document.getElementById('cl-search-wl-link').textContent = 'Search Want List';
+    document.getElementById('cl-search-wl-link').style.color = '#4ade80';
+    clFilterResults();
+    return;
+  }
+  if (!window._keywords || !window._keywords.length) {
+    openKeywords();
+    return;
+  }
+  _clWantListFilterActive = true;
+  document.getElementById('cl-search-wl-link').textContent = 'Clear Want List Search';
+  document.getElementById('cl-search-wl-link').style.color = '#f88';
+  clFilterResults();
+}
+
 function clToggleWatchFilter() {
   _clWatchFilterActive = !_clWatchFilterActive;
   const btn = document.getElementById('cl-watchlist-toggle');
