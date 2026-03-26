@@ -1574,14 +1574,22 @@ def api_browse():
         filtered.sort(key=lambda x: (x.get(sort_field) or "").lower(), reverse=reverse)
 
     # Only apply NEW-on-top tier for the default (non-user-clicked) sort
+    # Three tiers: new+want-list match → new only → everything else
     if not user_sorted:
-        filtered.sort(key=lambda x: 0 if x.get("isNew") else 1)
+        def _priority(x):
+            if x.get("isNew") and x.get("kwMatch"): return 0
+            if x.get("isNew"):                       return 1
+            return 2
+        filtered.sort(key=_priority)
 
     total_filtered = len(filtered)
     total_pages    = max(1, -(-total_filtered // per_page))  # ceil division
     page           = min(page, total_pages)
     start          = (page - 1) * per_page
     page_items     = filtered[start:start + per_page]
+
+    # Count items that are both want-list matches AND new (for the status notification)
+    new_want_count = sum(1 for i in filtered if i.get("isNew") and i.get("kwMatch"))
 
     return jsonify({
         "items":            page_items,
@@ -1591,6 +1599,7 @@ def api_browse():
         "total_unfiltered": total_unfiltered,
         "total_pages":      total_pages,
         "new_count":        new_count_unfiltered,
+        "new_want_count":   new_want_count,
         "no_store_data":    False,
         # Filter option lists (always full set so dropdowns stay populated)
         "brands":           [{"name": b, "count": c} for b, c in sorted(brand_counts.items(), key=lambda x: -x[1])],
@@ -4291,7 +4300,7 @@ function showResults(msg, isBaseline) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({page:1, per_page:1000, all_stores:true, new_ids:[...newIdSet], keywords:window._keywords, filter_want_list_only:true})
     }).then(r => r.json()).then(d => {
-      const wantNewCount = d.total_count || 0;
+      const wantNewCount = d.new_want_count ?? d.total_count ?? 0;
       if (wantNewCount > 0) {
         wantMatchEl.textContent = '🎯 ' + wantNewCount + ' new want list match' + (wantNewCount > 1 ? 'es' : '') + '!';
         wantMatchEl.style.display = '';
