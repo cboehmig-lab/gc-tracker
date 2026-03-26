@@ -2941,10 +2941,10 @@ tr.fav-row td:last-child{color:#4ade80}
   /* Hide Items and Stores counts on mobile */
   .status-bar > span:nth-child(2),
   .status-bar > span:nth-child(3){display:none}
-  #global-search-wrap{margin-left:auto;flex:1;min-width:0}
-  #global-search{width:100%;font-size:.82rem;padding:6px 10px}
-  #global-search-btn{font-size:.78rem;padding:4px 8px}
-  #global-search-clear{font-size:.78rem;padding:4px 8px}
+  #global-search-wrap{margin-left:0;flex:1 1 100%;min-width:0;display:flex;align-items:center;gap:4px}
+  #global-search{flex:1;min-width:0;font-size:.82rem;padding:6px 10px}
+  #global-search-btn{font-size:.78rem;padding:4px 8px;flex-shrink:0}
+  #global-search-clear{font-size:.78rem;padding:4px 8px;flex-shrink:0}
   #s-want-match{font-size:.78rem!important}
 
   /* ── Hide Download Excel on mobile ── */
