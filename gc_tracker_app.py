@@ -2886,6 +2886,9 @@ tr.fav-row td:last-child{color:#4ade80}
 .mobile-sidebar-toggle{display:none}
 .mobile-filter-toggle{display:none}
 .filter-active-dot{display:none}
+/* On desktop the filter-collapsible wrapper is invisible to layout so its
+   children flow directly in the parent flex row (same as before the wrapper existed) */
+.filter-collapsible{display:contents}
 
 /* ══════════════════════════════════════════════════════════════════════════════
    MOBILE RESPONSIVE — all changes scoped inside @media so desktop is untouched
@@ -3277,7 +3280,7 @@ tr.fav-row td:last-child{color:#4ade80}
           ✕ Clear Filters
         </button>
         <div id="res-search-wrap">
-          <input id="res-search" type="text" placeholder="Filter results…" oninput="filterResults()" autocomplete="off">
+          <input id="res-search" type="text" placeholder="Search results by keyword…" oninput="filterResults()" autocomplete="off">
           <span id="res-search-count"></span>
         </div>
         </div>
