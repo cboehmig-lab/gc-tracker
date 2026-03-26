@@ -2788,8 +2788,6 @@ th:nth-child(5),th:nth-child(6),th:nth-child(7),th:nth-child(8),th:nth-child(9),
 tr:hover td{background:#161616}
 td a{color:#6ab0f5;text-decoration:none}
 td a:hover{text-decoration:underline}
-.brand-link{color:#ccc;cursor:pointer}
-.brand-link:hover{color:#ff6666;text-decoration:underline}
 .tag{background:#c00;color:#fff;font-size:.65rem;font-weight:700;padding:1px 5px;border-radius:3px}
 .tag-kw{background:#0a5c2a;color:#4ade80;font-size:.65rem;font-weight:700;padding:1px 5px;border-radius:3px;border:1px solid #2d6a2d}
 .tag-drop{background:#1a3a1a;color:#4ade80;font-size:.62rem;font-weight:700;padding:2px 5px;border-radius:3px;border:1px solid #2d6a2d;white-space:nowrap}
@@ -2886,6 +2884,8 @@ tr.fav-row td:last-child{color:#4ade80}
 
 /* ── Mobile toggle buttons (hidden on desktop) ── */
 .mobile-sidebar-toggle{display:none}
+.mobile-filter-toggle{display:none}
+.filter-active-dot{display:none}
 
 /* ══════════════════════════════════════════════════════════════════════════════
    MOBILE RESPONSIVE — all changes scoped inside @media so desktop is untouched
@@ -2955,12 +2955,24 @@ tr.fav-row td:last-child{color:#4ade80}
   .results-hdr > *{flex-shrink:0}
   #res-title{font-size:.88rem}
   .badge{font-size:.72rem;padding:2px 7px}
-  #res-search-wrap{margin-left:0;width:100%;order:99}
+  #res-search-wrap{margin-left:0;width:100%}
   #res-search{width:100%;flex:1;font-size:.84rem;padding:6px 10px}
   #res-search-count{font-size:.78rem}
   .cat-sel{font-size:.78rem;padding:6px 10px}
   #search-wl-link{font-size:.78rem}
   #clear-filters-btn{font-size:.78rem}
+
+  /* ── Mobile filter toggle button ── */
+  .mobile-filter-toggle{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;background:#1e1e1e;border:1px solid #3a3a3a;border-radius:4px;cursor:pointer;font-size:.78rem;color:#aaa;font-weight:600;margin-left:auto;white-space:nowrap}
+  .mobile-filter-toggle:active{background:#252525}
+  .mobile-filter-toggle .toggle-arrow{transition:transform .2s;font-size:.6rem;color:#666}
+  .mobile-filter-toggle .toggle-arrow.open{transform:rotate(90deg)}
+  .filter-active-dot{display:none;width:6px;height:6px;background:#c00;border-radius:50%;flex-shrink:0}
+  .filter-active-dot.visible{display:inline-block}
+
+  /* ── Collapsible filter body ── */
+  .filter-collapsible{display:flex;flex-wrap:wrap;gap:5px;width:100%;align-items:center}
+  .filter-collapsible.collapsed{display:none}
 
   /* ── Filter dropdown panels: full-width overlay on mobile ── */
   #brand-dropdown,#cond-dropdown,#cat-dropdown,#subcat-dropdown{position:static}
@@ -2992,7 +3004,6 @@ tr.fav-row td:last-child{color:#4ade80}
   .tag-drop{font-size:.7rem;padding:3px 6px}
   .tag-sold{font-size:.7rem;padding:3px 6px}
   td a{font-size:.88rem}
-  .brand-link{font-size:.88rem}
   .no-res{font-size:.92rem;padding:28px 20px}
 
   /* ── Paginator ── */
@@ -3221,6 +3232,11 @@ tr.fav-row td:last-child{color:#4ade80}
       <div class="results-hdr">
         <span id="res-title">New Items</span>
         <span class="badge" id="res-badge"></span>
+        <button class="mobile-filter-toggle" id="gc-filter-toggle" onclick="toggleMobileFilters('gc')">
+          <span class="toggle-arrow" id="gc-filter-arrow">▶</span> Filters
+          <span class="filter-active-dot" id="gc-filter-dot"></span>
+        </button>
+        <div id="gc-filter-collapsible" class="filter-collapsible">
         <button id="watchlist-toggle" onclick="toggleWatchFilter()"
           class="cat-sel" style="border-color:#3a3a3a;color:#aaa;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
           ★ Watch List
@@ -3263,6 +3279,7 @@ tr.fav-row td:last-child{color:#4ade80}
         <div id="res-search-wrap">
           <input id="res-search" type="text" placeholder="Filter results…" oninput="filterResults()" autocomplete="off">
           <span id="res-search-count"></span>
+        </div>
         </div>
       </div>
       <div id="res-body"></div>
@@ -3347,20 +3364,46 @@ function _updateMobileToggleCounts() {
   }
 }
 
-// Auto-collapse sidebars on mobile on page load
+// ── Mobile filter toggle ─────────────────────────────────────────────────────
+function toggleMobileFilters(which) {
+  const body = document.getElementById(which + '-filter-collapsible');
+  const arrow = document.getElementById(which + '-filter-arrow');
+  if (!body) return;
+  const isCollapsed = body.classList.toggle('collapsed');
+  arrow.classList.toggle('open', !isCollapsed);
+}
+
+function _updateFilterDot() {
+  // Show a red dot on the Filters toggle when any filter is active
+  const dot = document.getElementById('gc-filter-dot');
+  if (!dot) return;
+  const hasFilters = (window._selectedBrands && window._selectedBrands.length) ||
+    (window._selectedConds && window._selectedConds.length) ||
+    (window._selectedCats && window._selectedCats.length) ||
+    (window._selectedSubs && window._selectedSubs.length) ||
+    _watchFilterActive ||
+    (document.getElementById('res-search').value.trim().length > 0);
+  dot.classList.toggle('visible', !!hasFilters);
+}
+
+// Auto-collapse sidebars and filters on mobile on page load
 document.addEventListener('DOMContentLoaded', () => {
   if (_isMobile()) {
     document.getElementById('gc-left').classList.add('collapsed');
     document.getElementById('cl-left').classList.add('collapsed');
+    const gcFilters = document.getElementById('gc-filter-collapsible');
+    if (gcFilters) gcFilters.classList.add('collapsed');
   }
 });
 // Re-check on resize (e.g. rotating phone)
 window.addEventListener('resize', () => {
   const gcLeft = document.getElementById('gc-left');
   const clLeft = document.getElementById('cl-left');
+  const gcFilters = document.getElementById('gc-filter-collapsible');
   if (!_isMobile()) {
     gcLeft.classList.remove('collapsed');
     clLeft.classList.remove('collapsed');
+    if (gcFilters) gcFilters.classList.remove('collapsed');
   }
 });
 
@@ -3701,8 +3744,8 @@ async function _fetchBrowsePage(page) {
     // Render table + paginator
     _renderServerTable(d.items);
 
-    // Scroll results to top on page change
-    document.querySelector('.results')?.scrollTo(0, 0);
+    // Scroll results to top on page change (use #res-body on mobile where .results is overflow:hidden)
+    (document.getElementById('res-body') || document.querySelector('.results'))?.scrollTo(0, 0);
 
   } finally {
     _srvLoading = false;
@@ -3753,13 +3796,14 @@ function _buildRowHtml(item) {
   const soldBadge = isSold ? ' <span class="tag-sold">Sold</span>' : '';
   const isNew = item.isNew || (item.id && window._newIds && window._newIds.has(item.id));
   const rowClass = [isSold ? 'sold-row' : '', item.isFav ? 'fav-row' : ''].filter(Boolean).join(' ');
+  const brandCell = `<td>${item.brand ? esc(item.brand) : ''}</td>`;
+  const priceCell = `<td>${item.price||''}</td>`;
   return `<tr class="${rowClass}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}" data-image-id="${esc(item.image_id)}">` +
     `<td>${isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
     `<td>${item.kwMatch ? '<span class="tag-kw">WANT</span>' : ''}</td>` +
     `<td>${watchStar}</td>` +
     `<td>${nameCell}${soldBadge}</td>` +
-    `<td>${item.brand ? '<span class="brand-link" title="Filter by brand">' + esc(item.brand) + '</span>' : ''}</td>` +
-    `<td>${item.price||''}</td>` +
+    (_isMobile() ? priceCell + brandCell : brandCell + priceCell) +
     `<td>${dropCell}</td>` +
     `<td>${esc(item.condition)}</td>` +
     `<td>${esc(item.category)}</td>` +
@@ -3826,14 +3870,18 @@ function _getPaginatorRange(current, total) {
 }
 
 function _renderServerTable(items) {
+  const mob = _isMobile();
   let html = `<table id="res-table"><thead><tr>
     <th data-col="0"></th>
     <th data-col="kw"></th>
     <th data-col="watch"></th>
-    <th data-col="1">Item</th>
-    <th data-col="2">Brand</th>
-    <th data-col="3">Price</th>
-    <th data-col="drop"></th>
+    <th data-col="1">Item</th>` +
+    (mob
+      ? `<th data-col="3">Price</th>
+    <th data-col="2">Brand</th>`
+      : `<th data-col="2">Brand</th>
+    <th data-col="3">Price</th>`) +
+    `<th data-col="drop"></th>
     <th data-col="4">Condition</th>
     <th data-col="5">Category</th>
     <th data-col="6">Subcategory</th>
@@ -3856,19 +3904,6 @@ function _renderServerTable(items) {
     th.addEventListener('click', () => sortTable(colIdx));
   });
   autoSizeItemColumn();
-
-  // Brand-click delegation: clicking a brand name filters to that brand
-  const tbody = document.querySelector('#res-table tbody');
-  if (tbody) {
-    tbody.addEventListener('click', function(e) {
-      const span = e.target.closest('.brand-link');
-      if (!span) return;
-      const tr = span.closest('tr');
-      if (!tr) return;
-      const brand = tr.dataset.brand;
-      if (brand) selectBrand(brand);
-    });
-  }
 }
 
 async function browseCache() {
@@ -3927,6 +3962,7 @@ function toggleWatchFilter() {
   _watchFilterActive = !_watchFilterActive;
   const btn = document.getElementById('watchlist-toggle');
   btn.classList.toggle('wl-active', _watchFilterActive);
+  _updateFilterDot();
 
   if (_browseMode === 'server') {
     _srvPage = 1;
@@ -4473,7 +4509,7 @@ function goToPage(page) {
   // Local mode
   window._localPage = page;
   renderTable();
-  document.querySelector('.results')?.scrollTo(0, 0);
+  (document.getElementById('res-body') || document.querySelector('.results'))?.scrollTo(0, 0);
 }
 
 function sortTable(colIdx) {
@@ -4886,6 +4922,7 @@ function clearFilters() {
 }
 
 function filterResults() {
+  _updateFilterDot();
   if (_browseMode === 'server') {
     // Debounce text input, fire immediately for dropdowns
     clearTimeout(_filterTimer);
