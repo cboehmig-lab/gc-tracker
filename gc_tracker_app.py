@@ -1896,8 +1896,12 @@ def _cl_parse_html(html: str, city_id: str) -> list[dict]:
             name   = item.get("name", "")
             if not name:
                 continue
-            # Match URL by position
-            url = post_urls_ordered[i] if i < len(post_urls_ordered) else ""
+            # Prefer URL directly from JSON-LD (ListItem.url or item.url/sameAs)
+            # — these are authoritative and immune to index-mismatch bugs.
+            # Fall back to position-based extraction only when JSON-LD omits the URL.
+            url = (entry.get("url") or item.get("url") or item.get("sameAs") or "").strip()
+            if not url and i < len(post_urls_ordered):
+                url = post_urls_ordered[i]
             if not url:
                 continue
             offers = item.get("offers", {})
@@ -2787,19 +2791,19 @@ td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowra
 td:nth-child(1){width:52px;text-align:center;overflow:visible}
 td:nth-child(2){width:62px;text-align:center;overflow:visible}
 td:nth-child(3){width:30px;text-align:center}
-td:nth-child(4){width:22%}
-td:nth-child(5),td:nth-child(6),td:nth-child(7),td:nth-child(8),td:nth-child(9),td:nth-child(10),td:nth-child(11),td:nth-child(12){width:calc((78% - 144px) / 8)}
+td:nth-child(4){width:12%}
+td:nth-child(5),td:nth-child(6),td:nth-child(7),td:nth-child(8),td:nth-child(9),td:nth-child(10),td:nth-child(11){width:calc((88% - 144px) / 7)}
 th:nth-child(1){width:52px}
 th:nth-child(2){width:62px}
 th:nth-child(3){width:30px}
-th:nth-child(4){width:22%}
-th:nth-child(5),th:nth-child(6),th:nth-child(7),th:nth-child(8),th:nth-child(9),th:nth-child(10),th:nth-child(11),th:nth-child(12){width:calc((78% - 144px) / 8)}
+th:nth-child(4){width:12%}
+th:nth-child(5),th:nth-child(6),th:nth-child(7),th:nth-child(8),th:nth-child(9),th:nth-child(10),th:nth-child(11){width:calc((88% - 144px) / 7)}
 tr:hover td{background:#161616}
 td a{color:#6ab0f5;text-decoration:none}
 td a:hover{text-decoration:underline}
 .tag{background:#c00;color:#fff;font-size:.65rem;font-weight:700;padding:1px 5px;border-radius:3px}
 .tag-kw{background:#0a5c2a;color:#4ade80;font-size:.65rem;font-weight:700;padding:1px 5px;border-radius:3px;border:1px solid #2d6a2d}
-.tag-drop{background:#1a3a1a;color:#4ade80;font-size:.62rem;font-weight:700;padding:2px 5px;border-radius:3px;border:1px solid #2d6a2d;white-space:nowrap}
+.price-drop-val{color:#4ade80;cursor:default}
 .tag-sold{background:#3a1a1a;color:#f87171;font-size:.62rem;font-weight:700;padding:2px 5px;border-radius:3px;border:1px solid #6a2d2d}
 .watch-btn{background:none;border:none;cursor:pointer;color:#444;font-size:1rem;line-height:1;padding:0 2px;transition:color .15s;flex-shrink:0}
 .watch-btn:hover{color:#f5c518}
@@ -3013,7 +3017,6 @@ tr.fav-row td:last-child{color:#4ade80}
   th:nth-child(5),th:nth-child(6),th:nth-child(7),th:nth-child(8),th:nth-child(9),th:nth-child(10),th:nth-child(11),th:nth-child(12){width:auto;min-width:85px}
   .tag{font-size:.72rem;padding:2px 6px}
   .tag-kw{font-size:.72rem;padding:2px 6px}
-  .tag-drop{font-size:.7rem;padding:3px 6px}
   .tag-sold{font-size:.7rem;padding:3px 6px}
   td a{font-size:.88rem}
   .no-res{font-size:.92rem;padding:28px 20px}
@@ -3445,7 +3448,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   _lsSet('watchlist', window._watchlist);
   _lsSet('cl_watchlist', window._clWatchlist);
   window._keywords = _lsGet('keywords', []);
-  window._prevSnapshot = new Set(_lsGet('prev_snapshot', []));  // Previous scan's full ID set
+  window._prevSnapshot     = new Set(_lsGet('prev_snapshot', []));      // Most recent scan's full ID set
+  window._prevPrevSnapshot = new Set(_lsGet('prev_prev_snapshot', [])); // Second-most-recent scan
   window._newIds = new Set(_lsGet('new_ids', []));  // Items flagged NEW from last Check for New
   clRenderCities(true);  // Select all cities on initial load
   await loadData();
@@ -3802,21 +3806,20 @@ function _buildRowHtml(item) {
   const watchStar = item.id
     ? `<button class="watch-btn ${isWatched ? 'active' : ''}" onclick="toggleWatch('${(item.id||'').replace(/'/g,"\\'")}',this)" title="${isWatched ? 'Remove from' : 'Add to'} watch list">${isWatched ? '★' : '☆'}</button>`
     : '';
-  const dropCell = item.price_drop > 0
-    ? `<span class="tag-drop">↓ $${Math.round(item.price_drop)}</span>`
-    : '';
   const soldBadge = isSold ? ' <span class="tag-sold">Sold</span>' : '';
   const isNew = item.isNew || (item.id && window._newIds && window._newIds.has(item.id));
   const rowClass = [isSold ? 'sold-row' : '', item.isFav ? 'fav-row' : ''].filter(Boolean).join(' ');
   const brandCell = `<td>${item.brand ? esc(item.brand) : ''}</td>`;
-  const priceCell = `<td>${item.price||''}</td>`;
+  const hasDrop = item.price_drop > 0;
+  const priceCell = hasDrop
+    ? `<td><span class="price-drop-val" title="Price drop! Down $${Math.round(item.price_drop)}">↓ ${item.price||''}</span></td>`
+    : `<td>${item.price||''}</td>`;
   return `<tr class="${rowClass}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}" data-image-id="${esc(item.image_id)}">` +
     `<td>${isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
     `<td>${item.kwMatch ? '<span class="tag-kw">WANT</span>' : ''}</td>` +
     `<td>${watchStar}</td>` +
     `<td>${nameCell}${soldBadge}</td>` +
     (_isMobile() ? priceCell + brandCell : brandCell + priceCell) +
-    `<td>${dropCell}</td>` +
     `<td>${esc(item.condition)}</td>` +
     `<td>${esc(item.category)}</td>` +
     `<td>${esc(item.subcategory)}</td>` +
@@ -3893,8 +3896,7 @@ function _renderServerTable(items) {
     <th data-col="2">Brand</th>`
       : `<th data-col="2">Brand</th>
     <th data-col="3">Price</th>`) +
-    `<th data-col="drop"></th>
-    <th data-col="4">Condition</th>
+    `<th data-col="4">Condition</th>
     <th data-col="5">Category</th>
     <th data-col="6">Subcategory</th>
     <th data-col="7">Date Listed</th>
@@ -4266,21 +4268,27 @@ function showResults(msg, isBaseline) {
 
   const stoppedNote = msg.stopped ? ' (stopped early)' : '';
 
-  // Determine what's new by comparing current scan against previous snapshot
+  // Determine what's new by comparing current scan against the last TWO snapshots.
+  // Run 1: everything is baseline, nothing flagged new.
+  // Run 2: new = not in run 1.
+  // Run 3+: new = not in run 1 OR run 2 (must be absent from both recent scans to be truly new).
   const allIds = msg.all_ids || [];
   const currentIdSet = new Set(allIds);
   const isFirstRun = window._prevSnapshot.size === 0;
   const newIdSet = new Set();
   if (!isFirstRun) {
-    // Normal run: items in current scan but NOT in previous snapshot are new
-    allIds.forEach(id => { if (!window._prevSnapshot.has(id)) newIdSet.add(id); });
+    // Union of last two snapshots = everything "already seen"
+    const alreadySeen = new Set([...window._prevSnapshot, ...window._prevPrevSnapshot]);
+    allIds.forEach(id => { if (!alreadySeen.has(id)) newIdSet.add(id); });
   }
-  // else: first run — everything gets seeded as the baseline snapshot, nothing is "new"
+  // else: first run — seed the baseline snapshot, nothing is "new"
   const newCount = newIdSet.size;
 
   appendLog(`\\n✓ Done${stoppedNote} — ${msg.scanned.toLocaleString()} items scanned, ${isFirstRun ? 'initial database built' : newCount.toLocaleString() + ' new for you'}.`, 'log-dim');
 
-  // Update per-user state in localStorage — REPLACE snapshot with current scan's IDs
+  // Shift snapshots: prev → prev_prev, current → prev
+  window._prevPrevSnapshot = window._prevSnapshot;
+  _lsSet('prev_prev_snapshot', [...window._prevSnapshot]);
   window._prevSnapshot = currentIdSet;
   _lsSet('prev_snapshot', [...currentIdSet]);
   // Save the NEW ids so they persist across page loads until next Check for New
