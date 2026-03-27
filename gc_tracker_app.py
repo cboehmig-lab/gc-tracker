@@ -3454,9 +3454,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   _lsSet('watchlist', window._watchlist);
   _lsSet('cl_watchlist', window._clWatchlist);
   window._keywords = _lsGet('keywords', []);
-  window._prevSnapshot     = new Set(_lsGet('prev_snapshot', []));      // Most recent scan's full ID set
-  window._prevPrevSnapshot = new Set(_lsGet('prev_prev_snapshot', [])); // Second-most-recent scan
-  window._newIds = new Set(_lsGet('new_ids', []));  // Items flagged NEW from last Check for New
+  window._prevSnapshot = new Set(_lsGet('prev_snapshot', []));  // Previous scan's full ID set
+  window._newIds = new Set(_lsGet('new_ids', []));               // Items flagged NEW from last Check for New
   clRenderCities(true);  // Select all cities on initial load
   await loadData();
   await loadState();
@@ -3651,6 +3650,8 @@ let _srvStores = [];
 let _srvPage = 1;
 let _srvSortField = 'date';
 let _srvSortDir = 'desc';
+window._sortCol = null;   // null (not undefined) so user_sorted=false on fresh load
+window._sortDir = 1;
 let _srvTotalCount = 0;
 let _srvTotalUnfiltered = 0;
 let _srvTotalPages = 1;
@@ -4274,27 +4275,22 @@ function showResults(msg, isBaseline) {
 
   const stoppedNote = msg.stopped ? ' (stopped early)' : '';
 
-  // Determine what's new by comparing current scan against the last TWO snapshots.
+  // Determine what's new by comparing current scan against the previous snapshot.
   // Run 1: everything is baseline, nothing flagged new.
-  // Run 2: new = not in run 1.
-  // Run 3+: new = not in run 1 OR run 2 (must be absent from both recent scans to be truly new).
+  // Run 2+: new = items in current scan that were NOT in the previous snapshot.
   const allIds = msg.all_ids || [];
   const currentIdSet = new Set(allIds);
   const isFirstRun = window._prevSnapshot.size === 0;
   const newIdSet = new Set();
   if (!isFirstRun) {
-    // Union of last two snapshots = everything "already seen"
-    const alreadySeen = new Set([...window._prevSnapshot, ...window._prevPrevSnapshot]);
-    allIds.forEach(id => { if (!alreadySeen.has(id)) newIdSet.add(id); });
+    allIds.forEach(id => { if (!window._prevSnapshot.has(id)) newIdSet.add(id); });
   }
   // else: first run — seed the baseline snapshot, nothing is "new"
   const newCount = newIdSet.size;
 
   appendLog(`\\n✓ Done${stoppedNote} — ${msg.scanned.toLocaleString()} items scanned, ${isFirstRun ? 'initial database built' : newCount.toLocaleString() + ' new for you'}.`, 'log-dim');
 
-  // Shift snapshots: prev → prev_prev, current → prev
-  window._prevPrevSnapshot = window._prevSnapshot;
-  _lsSet('prev_prev_snapshot', [...window._prevSnapshot]);
+  // Update snapshot: replace with current scan's IDs
   window._prevSnapshot = currentIdSet;
   _lsSet('prev_snapshot', [...currentIdSet]);
   // Save the NEW ids so they persist across page loads until next Check for New
@@ -4342,7 +4338,7 @@ function showResults(msg, isBaseline) {
 
   document.getElementById('res-search').value = '';
   document.getElementById('res-search-count').textContent = '';
-  document.getElementById('res-title').textContent = `${msg.scanned.toLocaleString()} Items${newCount > 0 ? '' : ' (nothing new)'}`;
+  document.getElementById('res-title').textContent = `${msg.scanned.toLocaleString()} Items`;
   document.getElementById('res-badge').textContent = newCount > 0 ? newCount + ' NEW' : '';
 
   if (msg.scanned === 0) {
@@ -5093,10 +5089,8 @@ async function doReset(pw) {
   }
   appendLog('✓ ' + d.status + (d.deleted.length ? ' Deleted: ' + d.deleted.join(', ') : ''), 'log-dim');
   // Clear per-user tracking state (but keep want list, watchlist, favorites)
-  window._prevSnapshot     = new Set();
-  window._prevPrevSnapshot = new Set();
+  window._prevSnapshot = new Set();
   _lsSet('prev_snapshot', []);
-  _lsSet('prev_prev_snapshot', []);
   window._newIds = new Set();
   _lsSet('new_ids', []);
   window._lastRunISO = null;
