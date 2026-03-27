@@ -2814,7 +2814,7 @@ tr.fav-row td:last-child{color:#4ade80}
 .no-res{padding:24px 20px;color:#555;font-size:.85rem}
 
 /* ── Paginator ── */
-.paginator{display:flex;align-items:center;justify-content:center;gap:2px;padding:14px 16px;border-top:1px solid #1e1e1e;user-select:none}
+.paginator{display:flex;align-items:center;justify-content:center;gap:2px;padding:14px 16px;border-top:1px solid #1e1e1e;user-select:none;position:sticky;bottom:0;background:#111;z-index:5}
 .paginator .pg-info{font-size:.75rem;color:#555;margin-right:12px;white-space:nowrap}
 .paginator button{background:none;border:1px solid transparent;color:#888;font-size:.78rem;min-width:32px;height:30px;border-radius:5px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;transition:all .15s;font-weight:500}
 .paginator button:hover:not(:disabled):not(.pg-active){background:#1e1e1e;border-color:#333;color:#ddd}
@@ -5087,14 +5087,16 @@ async function doReset(pw) {
   }
   appendLog('✓ ' + d.status + (d.deleted.length ? ' Deleted: ' + d.deleted.join(', ') : ''), 'log-dim');
   // Clear per-user tracking state (but keep want list, watchlist, favorites)
-  window._prevSnapshot = new Set();
+  window._prevSnapshot     = new Set();
+  window._prevPrevSnapshot = new Set();
   _lsSet('prev_snapshot', []);
+  _lsSet('prev_prev_snapshot', []);
   window._newIds = new Set();
   _lsSet('new_ids', []);
   window._lastRunISO = null;
   _lsSet('last_run', null);
   _updateRelativeTime();
-  document.getElementById('check-now-btn').style.display = 'none';
+  document.getElementById('check-now-btn').style.display = 'inline'; // Show so user can kick off a new scan
   document.getElementById('s-known').textContent = '0';
   document.getElementById('s-excel').style.display = 'none';
 }
