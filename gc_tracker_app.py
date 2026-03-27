@@ -356,6 +356,25 @@ def _fmt_date(d: str) -> str:
         return d
 
 
+def _djb2(s: str) -> str:
+    """Fast non-cryptographic hash — used for item fingerprinting."""
+    h = 5381
+    for c in s:
+        h = ((h << 5) + h + ord(c)) & 0xFFFFFFFF
+    return format(h, '08x')
+
+
+def _item_fp(p: dict) -> str:
+    """Compact fingerprint for a product: name+price+condition+store.
+    Used to detect re-indexed items (same physical item, new objectID).
+    Returns an 8-char hex hash."""
+    name  = (p.get("name")      or "")[:30].lower().strip()
+    price = (p.get("price")     or "")
+    cond  = (p.get("condition") or "")[:10].lower()
+    store = (p.get("store") or p.get("location") or "")[:15].lower()
+    return _djb2(f"{name}|{price}|{cond}|{store}")
+
+
 def _clean_name(name: str) -> str:
     """Strip redundant 'Used ' prefix from item names."""
     name = name.strip()
@@ -2661,8 +2680,9 @@ def _run(selected_stores: list[str], baseline: bool):
                 "image_id":   p.get("image_id") or _cat_cache.get(p["id"], {}).get("image_id", ""),
             }
 
-        # Send all item IDs so client can compare against previous snapshot
+        # Send all item IDs + fingerprints so client can detect new vs re-indexed
         all_ids = [p["id"] for p in all_products]
+        all_fp  = [_item_fp(p) for p in all_products]  # 8-char hash per item (~700KB for 87k items)
         # For large scans, don't send full item lists via SSE — client will use server-side browse
         large_scan = len(all_products) > 1000
         items_for_sse = [] if large_scan else [fmt(p) for p in all_products[:500]]
@@ -2672,6 +2692,7 @@ def _run(selected_stores: list[str], baseline: bool):
             "stopped":    _stop_event.is_set(),
             "scanned":    len(all_products),
             "all_ids":    all_ids,
+            "all_fp":     all_fp,
             "items":      items_for_sse,
             "use_browse": large_scan,
         })
@@ -3435,6 +3456,13 @@ function _lsGet(key, fallback) {
 }
 function _lsSet(key, val) {
   try { localStorage.setItem('gt_' + key, JSON.stringify(val)); } catch(e) {}
+}
+
+// djb2 hash — must match Python's _djb2() for fingerprint comparison
+function _djb2(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = (((h << 5) + h) + s.charCodeAt(i)) >>> 0;
+  return h.toString(16).padStart(8, '0');
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
@@ -4277,22 +4305,33 @@ function showResults(msg, isBaseline) {
 
   // Determine what's new by comparing current scan against the previous snapshot.
   // Run 1: everything is baseline, nothing flagged new.
-  // Run 2+: new = items in current scan that were NOT in the previous snapshot.
+  // Run 2+: new = items whose ID is new AND whose name+price+condition+store fingerprint
+  //         did NOT exist in the previous scan (filters out GC re-indexing false positives).
   const allIds = msg.all_ids || [];
-  const currentIdSet = new Set(allIds);
-  const isFirstRun = window._prevSnapshot.size === 0;
-  const newIdSet = new Set();
+  const allFp  = msg.all_fp  || [];   // parallel array of 8-char hex fingerprints
+  const currentIdSet  = new Set(allIds);
+  const currentFpSet  = new Set(allFp);            // fingerprints in this scan
+  const prevFpSet     = new Set(_lsGet('prev_fp_set', []));  // fingerprints from last scan
+  const isFirstRun    = window._prevSnapshot.size === 0;
+  const newIdSet      = new Set();
   if (!isFirstRun) {
-    allIds.forEach(id => { if (!window._prevSnapshot.has(id)) newIdSet.add(id); });
+    allIds.forEach((id, i) => {
+      if (!window._prevSnapshot.has(id)) {
+        // Secondary check: if same fingerprint existed before → item was just re-indexed, not new
+        const fp = allFp[i];
+        if (!fp || !prevFpSet.has(fp)) newIdSet.add(id);
+      }
+    });
   }
   // else: first run — seed the baseline snapshot, nothing is "new"
   const newCount = newIdSet.size;
 
   appendLog(`\\n✓ Done${stoppedNote} — ${msg.scanned.toLocaleString()} items scanned, ${isFirstRun ? 'initial database built' : newCount.toLocaleString() + ' new for you'}.`, 'log-dim');
 
-  // Update snapshot: replace with current scan's IDs
+  // Update snapshots for next scan
   window._prevSnapshot = currentIdSet;
   _lsSet('prev_snapshot', [...currentIdSet]);
+  _lsSet('prev_fp_set', allFp);          // store fingerprints for next scan's de-dup check
   // Save the NEW ids so they persist across page loads until next Check for New
   window._newIds = newIdSet;
   _lsSet('new_ids', [...newIdSet]);
@@ -5091,6 +5130,7 @@ async function doReset(pw) {
   // Clear per-user tracking state (but keep want list, watchlist, favorites)
   window._prevSnapshot = new Set();
   _lsSet('prev_snapshot', []);
+  _lsSet('prev_fp_set', []);
   window._newIds = new Set();
   _lsSet('new_ids', []);
   window._lastRunISO = null;
