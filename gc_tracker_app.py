@@ -651,10 +651,11 @@ def parse_products(data, store_name: str = None) -> list[dict]:
                 else:
                     category, subcategory = "", ""
                 # Date listed from creationDate (millisecond timestamp)
+                # Preserve full ISO datetime for accurate new-item detection
                 creation_ts = hit.get("creationDate") or 0
                 try:
                     from datetime import datetime as _dt
-                    date_str = _dt.utcfromtimestamp(float(creation_ts) / 1000).strftime("%Y-%m-%d") if creation_ts else ""
+                    date_str = _dt.utcfromtimestamp(float(creation_ts) / 1000).strftime("%Y-%m-%dT%H:%M:%SZ") if creation_ts else ""
                 except Exception:
                     date_str = ""
                 # Location: storeName gives "Austin, TX" format
@@ -1371,13 +1372,15 @@ def logout():
 @app.route("/api/reset", methods=["POST"])
 @login_required
 def api_reset():
-    """Delete state, category cache, and Excel file to start fresh."""
+    """Delete inventory state and cache to start fresh.
+    Preserves favorites, watchlist, and want list."""
     data = request.json or {}
     reset_pw = "Beatle909!"
     if data.get("password") != reset_pw:
         return jsonify({"error": "Incorrect password."}), 403
     deleted = []
     for f in [STATE_FILE, CAT_CACHE_FILE, OUTPUT_FILE,
+              DATA_DIR / "gc_last_scan.txt",
               DATA_DIR / "gc_invalid_stores.json",
               DATA_DIR / "gc_condition_diag.json",
               DATA_DIR / "gc_debug_listing.html"]:
@@ -2775,9 +2778,22 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = ""):
                 "image_id":   p.get("image_id") or _cat_cache.get(p["id"], {}).get("image_id", ""),
             }
 
-        # Send all item IDs + fingerprints so client can detect new vs re-indexed
-        all_ids = [p["id"] for p in all_products]
-        all_fp  = [_item_fp(p) for p in all_products]  # 8-char hash per item (~700KB for 87k items)
+        # ── Server-side new-item detection (date-based) ─────────────────────
+        # An item is "new" if its date_listed (full ISO datetime from Algolia's
+        # creationDate) is more recent than the previous scan's timestamp.
+        # This replaces the fingerprint-based approach which was unreliable due
+        # to Algolia re-indexing items with new objectIDs.
+        last_scan_file = DATA_DIR / "gc_last_scan.txt"
+        prev_scan_time = last_scan_file.read_text().strip() if last_scan_file.exists() else ""
+        new_ids_list = []
+        if prev_scan_time and not baseline:
+            for p in all_products:
+                dl = p.get("date_listed") or _cat_cache.get(p["id"], {}).get("date_listed", "")
+                # Both are ISO strings (YYYY-MM-DDTHH:MM:SSZ) — string compare works
+                if dl and dl > prev_scan_time:
+                    new_ids_list.append(p["id"])
+        send({"type":"progress","msg":f"  {len(new_ids_list):,} new items since last scan."})
+
         # For large scans, don't send full item lists via SSE — client will use server-side browse
         large_scan = len(all_products) > 1000
         items_for_sse = [] if large_scan else [fmt(p) for p in all_products[:500]]
@@ -2786,8 +2802,8 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = ""):
             "baseline":   baseline,
             "stopped":    _stop_event.is_set(),
             "scanned":    len(all_products),
-            "all_ids":    all_ids,
-            "all_fp":     all_fp,
+            "new_ids":    new_ids_list,
+            "scan_time":  run_time,
             "items":      items_for_sse,
             "use_browse": large_scan,
         })
@@ -3239,7 +3255,7 @@ tr.fav-row td:last-child{color:#4ade80}
 <div id="pw-modal">
   <div id="pw-overlay" onclick="cancelReset()"></div>
   <div id="pw-box">
-    <h2>🗑 Reset All Data</h2>
+    <h2>🗑 Reset All Inventory</h2>
     <p>This will delete all cached inventory, scan history, and the Excel export. Your want list will be preserved. Enter the password to continue.</p>
     <input type="password" id="pw-input" placeholder="Password"
            onkeydown="if(event.key==='Enter')confirmReset()">
@@ -3345,7 +3361,7 @@ tr.fav-row td:last-child{color:#4ade80}
       <button id="reset-btn" onclick="resetData()"
         style="margin-top:6px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #5a2a2a;border-radius:5px;color:#a05050;font-size:.75rem;cursor:pointer"
         title="Delete all cached data and start fresh">
-        🗑 Reset All Data
+        🗑 Reset All Inventory
       </button>
     </div>
   </div>
@@ -3568,8 +3584,8 @@ function _lsSet(key, val) {
   }
 }
 function _lsSetVerified(key, val) {
-  // Write AND verify — critical for large arrays like prev_fp_set and prev_snapshot
-  // where a silent failure causes thousands of false "new" items
+  // Write AND verify — critical for large data
+  // where a silent failure could cause data loss
   _lsSet(key, val);
   try {
     const readback = localStorage.getItem('gt_' + key);
@@ -3608,8 +3624,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   _lsSet('watchlist', window._watchlist);
   _lsSet('cl_watchlist', window._clWatchlist);
   window._keywords = _lsGet('keywords', []);
-  window._prevSnapshot = new Set(_lsGet('prev_snapshot', []));  // Previous scan's full ID set
   window._newIds = new Set(_lsGet('new_ids', []));               // Items flagged NEW from last Check for New
+  // Clean up legacy localStorage keys from fingerprint-based detection (no longer used)
+  try { localStorage.removeItem('gt_prev_snapshot'); localStorage.removeItem('gt_prev_fp_set'); } catch(e) {}
   clRenderCities(true);  // Select all cities on initial load
   await loadData();
   await loadState();
@@ -3667,7 +3684,7 @@ async function loadState() {
   _updateRelativeTime();
   document.getElementById('check-now-btn').style.display = 'inline';
 
-  if (s.is_first_run && !window._prevSnapshot.size) {
+  if (s.is_first_run && !_lsGet('last_run', null)) {
     document.getElementById('first-run-modal').style.display = 'flex';
   }
   // Check for updates
@@ -4432,44 +4449,20 @@ function showResults(msg, isBaseline) {
 
   const stoppedNote = msg.stopped ? ' (stopped early)' : '';
 
-  // Determine what's new by comparing current scan against the previous snapshot.
-  // Run 1: everything is baseline, nothing flagged new.
-  // Run 2+: new = items whose ID is new AND whose name+price fingerprint
-  //         did NOT exist in the previous scan (filters out GC re-indexing false positives).
-  const allIds = msg.all_ids || [];
-  const allFp  = msg.all_fp  || [];   // parallel array of 8-char hex fingerprints
-  const currentIdSet  = new Set(allIds);
-  // Deduplicate fingerprints for storage (saves ~40-60% space in localStorage)
-  const currentFpArr  = [...new Set(allFp)];
-  const prevFpSet     = new Set(_lsGet('prev_fp_set', []));  // fingerprints from last scan
-  const isFirstRun    = window._prevSnapshot.size === 0;
-  const newIdSet      = new Set();
-  if (!isFirstRun) {
-    allIds.forEach((id, i) => {
-      if (!window._prevSnapshot.has(id)) {
-        // Secondary check: if same fingerprint existed before → item was just re-indexed, not new
-        const fp = allFp[i];
-        if (!fp || !prevFpSet.has(fp)) newIdSet.add(id);
-      }
-    });
-  }
-  // else: first run — seed the baseline snapshot, nothing is "new"
+  // New-item detection is now date-based and computed server-side.
+  // The server compares each item's date_listed (full ISO datetime from Algolia's
+  // creationDate) against the timestamp of the previous scan. Items listed after
+  // the last scan are "new". This is immune to GC re-indexing issues.
+  const newIdSet = new Set(msg.new_ids || []);
+  const isFirstRun = msg.baseline;
   const newCount = newIdSet.size;
 
   appendLog(`\\n✓ Done${stoppedNote} — ${msg.scanned.toLocaleString()} items scanned, ${isFirstRun ? 'initial database built' : newCount.toLocaleString() + ' new for you'}.`, 'log-dim');
 
-  // Update snapshots for next scan — use verified writes to detect localStorage overflow
-  window._prevSnapshot = currentIdSet;
-  const snapOk = _lsSetVerified('prev_snapshot', [...currentIdSet]);
-  // Store deduplicated fingerprints (unique set, not full 87K array with dupes)
-  const fpOk   = _lsSetVerified('prev_fp_set', currentFpArr);
-  if (!snapOk || !fpOk) {
-    appendLog('⚠ Warning: snapshot data may not have saved properly (localStorage full?). Next scan may show extra "new" items.', 'log-err');
-  }
   // Save the NEW ids so they persist across page loads until next Check for New
   window._newIds = newIdSet;
   _lsSet('new_ids', [...newIdSet]);
-  window._lastRunISO = new Date().toISOString();
+  window._lastRunISO = msg.scan_time || new Date().toISOString();
   _lsSet('last_run', window._lastRunISO);
   _updateRelativeTime();
   document.getElementById('check-now-btn').style.display = 'inline';
@@ -5261,14 +5254,13 @@ async function doReset(pw) {
     return;
   }
   appendLog('✓ ' + d.status + (d.deleted.length ? ' Deleted: ' + d.deleted.join(', ') : ''), 'log-dim');
-  // Clear per-user tracking state (but keep want list, watchlist, favorites)
-  window._prevSnapshot = new Set();
-  _lsSet('prev_snapshot', []);
-  _lsSet('prev_fp_set', []);
+  // Clear per-user inventory tracking state (preserves favorites, watchlist, want list)
   window._newIds = new Set();
   _lsSet('new_ids', []);
   window._lastRunISO = null;
   _lsSet('last_run', null);
+  // Clean up any legacy keys
+  try { localStorage.removeItem('gt_prev_snapshot'); localStorage.removeItem('gt_prev_fp_set'); } catch(e) {}
   _updateRelativeTime();
   document.getElementById('check-now-btn').style.display = 'inline'; // Show so user can kick off a new scan
   document.getElementById('s-known').textContent = '0';
@@ -5717,7 +5709,7 @@ def api_do_update():
     def _run():
         def send(msg): _q.put({"type": "progress", "msg": msg})
         success = _do_update(send)
-        _q.put({"type": "done", "scanned": 0, "all_ids": [],
+        _q.put({"type": "done", "scanned": 0, "new_ids": [],
                 "items": [], "baseline": False, "stopped": False,
                 "update_success": success})
     t = threading.Thread(target=_run, daemon=True)
