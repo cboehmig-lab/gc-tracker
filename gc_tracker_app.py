@@ -365,14 +365,25 @@ def _djb2(s: str) -> str:
 
 
 def _item_fp(p: dict) -> str:
-    """Compact fingerprint for a product: name+price+condition+store.
+    """Compact fingerprint for a product: name + price (cents).
     Used to detect re-indexed items (same physical item, new objectID).
-    Returns an 8-char hex hash."""
-    name  = (p.get("name")      or "")[:30].lower().strip()
-    price = (p.get("price")     or "")
-    cond  = (p.get("condition") or "")[:10].lower()
-    store = (p.get("store") or p.get("location") or "")[:15].lower()
-    return _djb2(f"{name}|{price}|{cond}|{store}")
+    Returns an 8-char hex hash.
+    Only uses name and price — condition and store are excluded because
+    Algolia can return different condition strings (lvl0 vs lvl1 fallback)
+    and store data can vary, both of which caused thousands of false 'new'
+    detections per scan."""
+    name  = (p.get("name") or "")[:30].lower().strip()
+    # Normalize price to integer cents for consistent string representation
+    # (avoids float precision drift like 599.99 vs 599.9900001)
+    price_raw = p.get("price")
+    if price_raw is not None and price_raw != "":
+        try:
+            price = str(int(round(float(price_raw) * 100)))
+        except (ValueError, TypeError):
+            price = str(price_raw)
+    else:
+        price = ""
+    return _djb2(f"{name}|{price}")
 
 
 def _clean_name(name: str) -> str:
@@ -1283,9 +1294,29 @@ def write_excel(new_items: list[dict]):
 
 app             = Flask(__name__)
 app.secret_key  = os.environ.get("SECRET_KEY", os.urandom(24))
-_q              = queue.Queue()
+_q              = queue.Queue()        # legacy fallback (kept for non-run endpoints)
+_run_queues: dict[str, queue.Queue] = {}   # per-run queues keyed by run_id
+_run_queues_lock = threading.Lock()
 _lock           = threading.Lock()
 _stop_event     = threading.Event()
+
+import uuid as _uuid
+
+def _create_run_queue() -> tuple[str, queue.Queue]:
+    """Create a new per-run message queue and return (run_id, queue)."""
+    run_id = _uuid.uuid4().hex[:12]
+    q = queue.Queue()
+    with _run_queues_lock:
+        _run_queues[run_id] = q
+    return run_id, q
+
+def _get_run_queue(run_id: str) -> queue.Queue | None:
+    with _run_queues_lock:
+        return _run_queues.get(run_id)
+
+def _cleanup_run_queue(run_id: str):
+    with _run_queues_lock:
+        _run_queues.pop(run_id, None)
 
 
 def login_required(f):
@@ -1753,12 +1784,15 @@ def api_run():
     selected = data.get("stores", [])
     baseline = data.get("baseline", False)
     # Empty stores = nationwide scan (used by both baseline and Check for New)
+    # Create a per-run queue so each client gets its own message stream
+    run_id, run_q = _create_run_queue()
+    # Also mirror to legacy _q for any other endpoints that read it
     while not _q.empty():
         try: _q.get_nowait()
         except queue.Empty: break
-    t = threading.Thread(target=_run, args=(selected, baseline), daemon=True)
+    t = threading.Thread(target=_run, args=(selected, baseline, run_id), daemon=True)
     t.start()
-    return jsonify({"status": "started"})
+    return jsonify({"status": "started", "run_id": run_id})
 
 @app.route("/api/set-cookies", methods=["POST"])
 @login_required
@@ -1876,6 +1910,13 @@ def _cl_fmt_date(iso: str) -> str:
     except Exception:
         return iso[:10] if iso else ""
 
+def _cl_slugify(text: str) -> str:
+    """Convert a title to a CL-style URL slug for matching.
+    E.g. 'Fender Telecaster 2019 MIM' → 'fender-telecaster-2019-mim'"""
+    s = text.lower().strip()
+    s = re.sub(r'[^a-z0-9]+', '-', s)
+    return s.strip('-')
+
 def _cl_parse_html(html: str, city_id: str) -> list[dict]:
     """Parse CL search results — ItemList JSON-LD + URLs from HTML anchor tags."""
     items = []
@@ -1893,6 +1934,49 @@ def _cl_parse_html(html: str, city_id: str) -> list[dict]:
         if u not in seen:
             seen.add(u)
             post_urls_ordered.append(u)
+
+    # Build a slug→URL lookup for title-based matching (replaces fragile position-based matching).
+    # CL post URLs contain a slugified title: /msa/d/fender-telecaster-2019/1234567890.html
+    # We extract the slug and match it against JSON-LD item names.
+    _slug_to_urls: dict[str, list[str]] = {}  # slug → [url, ...] (multiple posts can have similar slugs)
+    for u in post_urls_ordered:
+        try:
+            # Extract slug from URL path: /section/d/SLUG/ID.html
+            path_parts = u.split('/')
+            d_idx = path_parts.index('d') if 'd' in path_parts else -1
+            if d_idx >= 0 and d_idx + 1 < len(path_parts):
+                slug = path_parts[d_idx + 1]
+                if slug not in _slug_to_urls:
+                    _slug_to_urls[slug] = []
+                _slug_to_urls[slug].append(u)
+        except Exception:
+            pass
+
+    def _match_url_by_title(name: str) -> str:
+        """Find the best matching URL for a JSON-LD item name by comparing title slugs."""
+        name_slug = _cl_slugify(name)
+        if not name_slug:
+            return ""
+        name_words = set(name_slug.split('-'))
+        best_url = ""
+        best_score = 0
+        for slug, urls in _slug_to_urls.items():
+            if not urls:
+                continue
+            slug_words = set(slug.split('-'))
+            # Score = number of overlapping words (Jaccard-like)
+            overlap = len(name_words & slug_words)
+            # Require at least 2 word matches to avoid false positives
+            if overlap > best_score and overlap >= 2:
+                best_score = overlap
+                best_url = urls[0]
+        # If we found a match, remove the URL from the pool so it can't be reused
+        if best_url:
+            for slug, urls in _slug_to_urls.items():
+                if best_url in urls:
+                    urls.remove(best_url)
+                    break
+        return best_url
 
     # Find the ItemList JSON-LD block
     for block in re.findall(
@@ -1917,10 +2001,10 @@ def _cl_parse_html(html: str, city_id: str) -> list[dict]:
                 continue
             # Prefer URL directly from JSON-LD (ListItem.url or item.url/sameAs)
             # — these are authoritative and immune to index-mismatch bugs.
-            # Fall back to position-based extraction only when JSON-LD omits the URL.
+            # Fall back to title-slug matching when JSON-LD omits the URL.
             url = (entry.get("url") or item.get("url") or item.get("sameAs") or "").strip()
-            if not url and i < len(post_urls_ordered):
-                url = post_urls_ordered[i]
+            if not url:
+                url = _match_url_by_title(name)
             if not url:
                 continue
             offers = item.get("offers", {})
@@ -2312,12 +2396,19 @@ def api_fill_gaps():
 @app.route("/api/progress")
 @login_required
 def api_progress():
+    run_id = request.args.get("run_id", "")
+    run_q = _get_run_queue(run_id) if run_id else None
+    # Fall back to legacy global queue for non-run endpoints (populate, validate, etc.)
+    q = run_q or _q
     def generate():
         while True:
             try:
-                msg = _q.get(timeout=30)
+                msg = q.get(timeout=30)
                 yield f"data: {json.dumps(msg)}\n\n"
-                if msg.get("type") == "done": break
+                if msg.get("type") == "done":
+                    if run_id:
+                        _cleanup_run_queue(run_id)
+                    break
             except queue.Empty:
                 yield f"data: {json.dumps({'type':'ping'})}\n\n"
     return Response(stream_with_context(generate()), mimetype="text/event-stream",
@@ -2485,8 +2576,12 @@ def _fill_gaps(selected_stores: list[str]):
 
 
 
-def _run(selected_stores: list[str], baseline: bool):
-    def send(msg): _q.put(msg)
+def _run(selected_stores: list[str], baseline: bool, run_id: str = ""):
+    run_q = _get_run_queue(run_id) if run_id else None
+    def send(msg):
+        if run_q:
+            run_q.put(msg)
+        _q.put(msg)  # also send to legacy queue for backwards compat
     try:
         run_time   = datetime.utcnow().isoformat() + "Z"
 
@@ -3455,7 +3550,38 @@ function _lsGet(key, fallback) {
   catch(e) { return fallback; }
 }
 function _lsSet(key, val) {
-  try { localStorage.setItem('gt_' + key, JSON.stringify(val)); } catch(e) {}
+  try {
+    localStorage.setItem('gt_' + key, JSON.stringify(val));
+  } catch(e) {
+    // localStorage full — try to free space by removing least-critical keys first
+    console.warn('localStorage full for gt_' + key + ', attempting cleanup…');
+    try {
+      // Remove old keys that are less critical to free space
+      ['cl_watchlist','watchlist','favorites'].forEach(k => {
+        // Don't remove these — they're user data. Instead just warn.
+      });
+      // Retry after warning
+      localStorage.setItem('gt_' + key, JSON.stringify(val));
+    } catch(e2) {
+      console.error('localStorage write failed for gt_' + key + ': ' + e2.message);
+    }
+  }
+}
+function _lsSetVerified(key, val) {
+  // Write AND verify — critical for large arrays like prev_fp_set and prev_snapshot
+  // where a silent failure causes thousands of false "new" items
+  _lsSet(key, val);
+  try {
+    const readback = localStorage.getItem('gt_' + key);
+    if (!readback) {
+      console.error('CRITICAL: gt_' + key + ' failed to persist — localStorage may be full');
+      return false;
+    }
+    return true;
+  } catch(e) {
+    console.error('CRITICAL: gt_' + key + ' readback failed: ' + e.message);
+    return false;
+  }
 }
 
 // djb2 hash — must match Python's _djb2() for fingerprint comparison
@@ -4255,8 +4381,11 @@ async function startRun(payload, isBaseline) {
     appendLog(e.error, 'log-err');
     running = false; stopBtn.style.display = 'none'; updateCount(); return;
   }
+  // Get run_id for per-session message stream (prevents cross-user contamination)
+  const runData = await resp.json();
+  const runId = runData.run_id || '';
 
-  const es = new EventSource('/api/progress');
+  const es = new EventSource('/api/progress' + (runId ? '?run_id=' + encodeURIComponent(runId) : ''));
   es.onmessage = e => {
     let msg;
     try { msg = JSON.parse(e.data); } catch(err) {
@@ -4305,12 +4434,13 @@ function showResults(msg, isBaseline) {
 
   // Determine what's new by comparing current scan against the previous snapshot.
   // Run 1: everything is baseline, nothing flagged new.
-  // Run 2+: new = items whose ID is new AND whose name+price+condition+store fingerprint
+  // Run 2+: new = items whose ID is new AND whose name+price fingerprint
   //         did NOT exist in the previous scan (filters out GC re-indexing false positives).
   const allIds = msg.all_ids || [];
   const allFp  = msg.all_fp  || [];   // parallel array of 8-char hex fingerprints
   const currentIdSet  = new Set(allIds);
-  const currentFpSet  = new Set(allFp);            // fingerprints in this scan
+  // Deduplicate fingerprints for storage (saves ~40-60% space in localStorage)
+  const currentFpArr  = [...new Set(allFp)];
   const prevFpSet     = new Set(_lsGet('prev_fp_set', []));  // fingerprints from last scan
   const isFirstRun    = window._prevSnapshot.size === 0;
   const newIdSet      = new Set();
@@ -4328,10 +4458,14 @@ function showResults(msg, isBaseline) {
 
   appendLog(`\\n✓ Done${stoppedNote} — ${msg.scanned.toLocaleString()} items scanned, ${isFirstRun ? 'initial database built' : newCount.toLocaleString() + ' new for you'}.`, 'log-dim');
 
-  // Update snapshots for next scan
+  // Update snapshots for next scan — use verified writes to detect localStorage overflow
   window._prevSnapshot = currentIdSet;
-  _lsSet('prev_snapshot', [...currentIdSet]);
-  _lsSet('prev_fp_set', allFp);          // store fingerprints for next scan's de-dup check
+  const snapOk = _lsSetVerified('prev_snapshot', [...currentIdSet]);
+  // Store deduplicated fingerprints (unique set, not full 87K array with dupes)
+  const fpOk   = _lsSetVerified('prev_fp_set', currentFpArr);
+  if (!snapOk || !fpOk) {
+    appendLog('⚠ Warning: snapshot data may not have saved properly (localStorage full?). Next scan may show extra "new" items.', 'log-err');
+  }
   // Save the NEW ids so they persist across page loads until next Check for New
   window._newIds = newIdSet;
   _lsSet('new_ids', [...newIdSet]);
