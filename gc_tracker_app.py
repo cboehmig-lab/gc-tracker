@@ -2755,8 +2755,11 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = ""):
 
         send({"type":"progress","msg":f"  {len(all_products):,} products scanned."})
         _save_cat_cache()
-        # Record scan completion time
-        (DATA_DIR / "gc_last_scan.txt").write_text(run_time)
+        # Read PREVIOUS scan time BEFORE overwriting with this scan's time
+        last_scan_file = DATA_DIR / "gc_last_scan.txt"
+        prev_scan_time = last_scan_file.read_text().strip() if last_scan_file.exists() else ""
+        # Now record this scan's completion time
+        last_scan_file.write_text(run_time)
 
         def fmt(p):
             date_src = p.get("date_listed") or _cat_cache.get(p["id"], {}).get("date_listed", "")
@@ -2781,10 +2784,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = ""):
         # ── Server-side new-item detection (date-based) ─────────────────────
         # An item is "new" if its date_listed (full ISO datetime from Algolia's
         # creationDate) is more recent than the previous scan's timestamp.
-        # This replaces the fingerprint-based approach which was unreliable due
-        # to Algolia re-indexing items with new objectIDs.
-        last_scan_file = DATA_DIR / "gc_last_scan.txt"
-        prev_scan_time = last_scan_file.read_text().strip() if last_scan_file.exists() else ""
+        # prev_scan_time was read BEFORE we overwrote gc_last_scan.txt above.
         new_ids_list = []
         if prev_scan_time and not baseline:
             for p in all_products:
@@ -5512,7 +5512,7 @@ function clRenderResults() {
   document.getElementById('cl-res-search').value = '';
   hdr.style.display = 'flex';
 
-  const cols = ['title','price','location','date','relevance'];
+  const cols = _clCols;
   const labels = ['','Want','Item','Price','Location','Date'];
   let html = '<table><thead><tr>';
   labels.forEach((l, i) => {
@@ -5590,8 +5590,9 @@ function clRenderResults() {
   body.innerHTML = html;
 }
 
+const _clCols = ['title','price','location','date','relevance'];
 function clSort(col) {
-  const isRelevance = cols && cols[col] === 'relevance';
+  const isRelevance = _clCols[col] === 'relevance';
   if (isRelevance && _clSortCol === col) {
     _clSortCol = null; _clSortDir = 1;
   } else if (_clSortCol === col) {
@@ -5605,7 +5606,7 @@ function clSort(col) {
 let _clWatchFilterActive = false;
 let _clWantListFilterActive = false;
 
-function clSearchWantList() {
+async function clSearchWantList() {
   if (_clWantListFilterActive) {
     _clWantListFilterActive = false;
     document.getElementById('cl-search-wl-link').textContent = 'Search Want List';
@@ -5617,10 +5618,51 @@ function clSearchWantList() {
     openKeywords();
     return;
   }
-  _clWantListFilterActive = true;
-  document.getElementById('cl-search-wl-link').textContent = 'Clear Want List Search';
-  document.getElementById('cl-search-wl-link').style.color = '#f88';
-  clFilterResults();
+  // Actually search CL for each want list keyword across all cities
+  const btn = document.getElementById('cl-search-wl-link');
+  const status = document.getElementById('cl-status');
+  btn.textContent = 'Searching…';
+  btn.style.color = '#ffbb33';
+  status.textContent = 'Searching want list across all markets…';
+  document.getElementById('cl-results-hdr').style.display = 'none';
+  document.getElementById('cl-body').innerHTML = '<div class="cl-empty">Searching want list…</div>';
+  try {
+    const allResults = [];
+    const seenKeys = new Set();
+    for (const kw of window._keywords) {
+      // Strip quotes from keyword for search
+      let q = kw.trim();
+      if (q.startsWith('"') && q.endsWith('"') && q.length > 2) q = q.slice(1, -1);
+      if (!q) continue;
+      try {
+        const r = await fetch('/api/cl-search?q=' + encodeURIComponent(q));
+        if (r.ok) {
+          const d = await r.json();
+          const results = d.results || [];
+          for (const item of results) {
+            const key = (item.title || '').toLowerCase().trim() + '|' + (item.price || '') + '|' + (item.cityId || '');
+            if (!seenKeys.has(key)) {
+              seenKeys.add(key);
+              allResults.push(item);
+            }
+          }
+        }
+      } catch(e) { /* skip failed keyword */ }
+      status.textContent = 'Searched "' + q + '"… (' + allResults.length + ' results so far)';
+    }
+    _clData = allResults;
+    _clData.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    _clWantListFilterActive = true;
+    btn.textContent = 'Clear Want List Search';
+    btn.style.color = '#f88';
+    status.textContent = '';
+    clRenderResults();
+  } catch(e) {
+    document.getElementById('cl-body').innerHTML = '<div class="cl-empty" style="color:#f88">Want list search failed: ' + e.message + '</div>';
+    btn.textContent = 'Search Want List';
+    btn.style.color = '#4ade80';
+    status.textContent = '';
+  }
 }
 
 function clToggleWatchFilter() {
