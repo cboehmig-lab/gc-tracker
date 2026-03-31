@@ -2698,16 +2698,13 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = ""):
                             all_products.append(p)
                     ids_this_run |= ids
 
-        # ── Snapshot cache IDs BEFORE updating ────────────────────────────────
-        # Used for new-item detection: any ID not already in cache is genuinely new.
-        pre_scan_ids = set(_cat_cache.keys())
+        # (cache-ID snapshot removed — NEW detection now uses startDate timestamps)
 
         # ── Apply data from Algolia API to products, tracking price drops ────────
         # Categories, condition, brand all come from the API now — no page scraping needed.
         for p in all_products:
             sku    = p["id"]
             cached = _cat_cache.get(sku, {})
-            is_new_to_cache = sku not in pre_scan_ids
             cat    = p.get("category") or cached.get("category", "")
             subcat = p.get("subcategory") or cached.get("subcategory", "")
             condition = p.get("condition") or cached.get("condition", "")
@@ -2731,7 +2728,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = ""):
                 "date_listed":       p.get("date_listed") or cached.get("date_listed", ""),
                 "image_id":          p.get("image_id") or cached.get("image_id", ""),
                 # first_seen: when our system first encountered this item
-                "first_seen":        run_time if is_new_to_cache else cached.get("first_seen", run_time),
+                "first_seen":        cached.get("first_seen", run_time),
             }
             p["category"]    = cat
             p["subcategory"] = subcat
@@ -2808,15 +2805,15 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = ""):
                 "image_id":   p.get("image_id") or _cat_cache.get(p["id"], {}).get("image_id", ""),
             }
 
-        # ── Server-side new-item detection (cache-based) ─────────────────────
-        # An item is "new" if its ID was NOT in the cache before this scan started.
-        # pre_scan_ids was captured before we updated _cat_cache above.
-        # This is immune to timestamp mismatches between GC's startDate and
-        # our scan time — if the ID didn't exist in our system before, it's new.
+        # ── Server-side new-item detection (startDate-based) ─────────────────
+        # An item is "new" if its startDate (storefront publish date) is more
+        # recent than the timestamp of the PREVIOUS scan.  This is immune to
+        # Algolia pagination/replication variance that plagued cache-ID detection.
         new_ids_list = []
-        if not baseline and pre_scan_ids:
+        if not baseline and prev_scan_time:
             for p in all_products:
-                if p["id"] not in pre_scan_ids:
+                item_date = p.get("date_listed") or _cat_cache.get(p["id"], {}).get("date_listed", "")
+                if item_date and item_date > prev_scan_time:
                     new_ids_list.append(p["id"])
         send({"type":"progress","msg":f"  {len(new_ids_list):,} new items since last scan."})
 
