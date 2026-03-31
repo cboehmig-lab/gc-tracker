@@ -651,12 +651,19 @@ def parse_products(data, store_name: str = None) -> list[dict]:
                         subcategory = lvl1_full.split(">")[-1].strip() if ">" in lvl1_full else ""
                 else:
                     category, subcategory = "", ""
-                # Date listed from creationDate (millisecond timestamp)
-                # Preserve full ISO datetime for accurate new-item detection
+                # Date listed from startDate (seconds timestamp) — when
+                # the item was published to the storefront.  Falls back to
+                # creationDate (milliseconds) if startDate is missing.
+                start_ts   = hit.get("startDate") or 0
                 creation_ts = hit.get("creationDate") or 0
                 try:
                     from datetime import datetime as _dt
-                    date_str = _dt.utcfromtimestamp(float(creation_ts) / 1000).strftime("%Y-%m-%dT%H:%M:%SZ") if creation_ts else ""
+                    if start_ts:
+                        date_str = _dt.utcfromtimestamp(float(start_ts)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    elif creation_ts:
+                        date_str = _dt.utcfromtimestamp(float(creation_ts) / 1000).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    else:
+                        date_str = ""
                 except Exception:
                     date_str = ""
                 # Location: storeName gives "Austin, TX" format
@@ -2804,7 +2811,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = ""):
         # ── Server-side new-item detection (cache-based) ─────────────────────
         # An item is "new" if its ID was NOT in the cache before this scan started.
         # pre_scan_ids was captured before we updated _cat_cache above.
-        # This is immune to timestamp mismatches between GC's creationDate and
+        # This is immune to timestamp mismatches between GC's startDate and
         # our scan time — if the ID didn't exist in our system before, it's new.
         new_ids_list = []
         if not baseline and pre_scan_ids:
@@ -4471,7 +4478,7 @@ function showResults(msg, isBaseline) {
 
   // New-item detection is now date-based and computed server-side.
   // The server compares each item's date_listed (full ISO datetime from Algolia's
-  // creationDate) against the timestamp of the previous scan. Items listed after
+  // startDate — the storefront publish date) against the previous scan. Items listed after
   // the last scan are "new". This is immune to GC re-indexing issues.
   const newIdSet = new Set(msg.new_ids || []);
   const isFirstRun = msg.baseline;
