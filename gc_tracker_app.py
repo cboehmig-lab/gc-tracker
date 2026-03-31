@@ -47,6 +47,7 @@ FAVORITES_FILE = DATA_DIR / "gc_favorites.json"
 CAT_CACHE_FILE = DATA_DIR / "gc_category_cache.json"
 WATCHLIST_FILE = DATA_DIR / "gc_watchlist.json"
 KEYWORDS_FILE  = DATA_DIR / "gc_keywords.json"
+NEW_IDS_FILE   = DATA_DIR / "gc_new_ids.json"
 
 PORT        = int(os.environ.get("PORT", 5050))
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
