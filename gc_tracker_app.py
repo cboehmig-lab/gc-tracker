@@ -47,7 +47,7 @@ FAVORITES_FILE = DATA_DIR / "gc_favorites.json"
 CAT_CACHE_FILE = DATA_DIR / "gc_category_cache.json"
 WATCHLIST_FILE = DATA_DIR / "gc_watchlist.json"
 KEYWORDS_FILE  = DATA_DIR / "gc_keywords.json"
-NEW_IDS_FILE   = DATA_DIR / "gc_new_ids.json"
+
 
 PORT        = int(os.environ.get("PORT", 5050))
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
@@ -1465,6 +1465,9 @@ def api_browse():
     sort_dir   = data.get("sort_dir", "desc")
     fav_stores = set(data.get("fav_stores", []))
 
+    # Per-user filtering: only show items first_seen ≤ this user's last scan time
+    user_last_scan = (data.get("user_last_scan") or "").strip()
+
     # Filter params — all dropdowns are multi-select arrays
     fq       = (data.get("filter_q") or "").lower().strip()
     f_brands = data.get("filter_brands") or []
@@ -1526,6 +1529,12 @@ def api_browse():
             continue
         if not cached.get("available", True):
             continue
+        # Per-user filtering: skip items this user hasn't "seen" yet
+        # (first_seen is after their last local scan)
+        if user_last_scan:
+            first_seen = cached.get("first_seen", "")
+            if first_seen and first_seen > user_last_scan:
+                continue
         price_raw  = cached.get("price", 0) or 0
         name       = cached.get("name", "")
         brand      = cached.get("brand", "")
@@ -1872,8 +1881,9 @@ def api_cl_search():
     if not q:
         return jsonify({"error": "No search term provided."})
     cities = [c.strip() for c in cities_param.split(",") if c.strip()] if cities_param else []
+    title_only = request.args.get("title_only", "").lower() in ("1", "true", "yes")
     try:
-        results = _cl_search(q, cities or None)
+        results = _cl_search(q, cities or None, title_only=title_only)
         return jsonify({"results": results, "count": len(results)})
     except Exception as e:
         return jsonify({"error": str(e)})
@@ -2040,8 +2050,9 @@ def _cl_parse_html(html: str, city_id: str) -> list[dict]:
     return items
 
 
-def _cl_search(query: str, cities: list = None) -> list[dict]:
-    """Search Craigslist musical instruments across US cities."""
+def _cl_search(query: str, cities: list = None, title_only: bool = False) -> list[dict]:
+    """Search Craigslist musical instruments across US cities.
+    If title_only=True, adds srchType=T to restrict matches to listing titles."""
     import time as _time
     results   = []
     seen_urls = set()
@@ -2060,8 +2071,9 @@ def _cl_search(query: str, cities: list = None) -> list[dict]:
             })
             # Small random delay to avoid hammering CL simultaneously
             _time.sleep(random.uniform(0.05, 0.3))
+            srch_param = "&srchType=T" if title_only else ""
             url = (f"https://{city_id}.craigslist.org/search/msa"
-                   f"?query={http.utils.quote(query)}&sort=date")
+                   f"?query={http.utils.quote(query)}&sort=date{srch_param}")
             r = s.get(url, timeout=12)
             if r.status_code == 200:
                 return _cl_parse_html(r.text, city_id)
@@ -2679,11 +2691,16 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = ""):
                             all_products.append(p)
                     ids_this_run |= ids
 
+        # ── Snapshot cache IDs BEFORE updating ────────────────────────────────
+        # Used for new-item detection: any ID not already in cache is genuinely new.
+        pre_scan_ids = set(_cat_cache.keys())
+
         # ── Apply data from Algolia API to products, tracking price drops ────────
         # Categories, condition, brand all come from the API now — no page scraping needed.
         for p in all_products:
             sku    = p["id"]
             cached = _cat_cache.get(sku, {})
+            is_new_to_cache = sku not in pre_scan_ids
             cat    = p.get("category") or cached.get("category", "")
             subcat = p.get("subcategory") or cached.get("subcategory", "")
             condition = p.get("condition") or cached.get("condition", "")
@@ -2706,6 +2723,8 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = ""):
                 "available":         True,
                 "date_listed":       p.get("date_listed") or cached.get("date_listed", ""),
                 "image_id":          p.get("image_id") or cached.get("image_id", ""),
+                # first_seen: when our system first encountered this item
+                "first_seen":        run_time if is_new_to_cache else cached.get("first_seen", run_time),
             }
             p["category"]    = cat
             p["subcategory"] = subcat
@@ -2782,16 +2801,15 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = ""):
                 "image_id":   p.get("image_id") or _cat_cache.get(p["id"], {}).get("image_id", ""),
             }
 
-        # ── Server-side new-item detection (date-based) ─────────────────────
-        # An item is "new" if its date_listed (full ISO datetime from Algolia's
-        # creationDate) is more recent than the previous scan's timestamp.
-        # prev_scan_time was read BEFORE we overwrote gc_last_scan.txt above.
+        # ── Server-side new-item detection (cache-based) ─────────────────────
+        # An item is "new" if its ID was NOT in the cache before this scan started.
+        # pre_scan_ids was captured before we updated _cat_cache above.
+        # This is immune to timestamp mismatches between GC's creationDate and
+        # our scan time — if the ID didn't exist in our system before, it's new.
         new_ids_list = []
-        if prev_scan_time and not baseline:
+        if not baseline and pre_scan_ids:
             for p in all_products:
-                dl = p.get("date_listed") or _cat_cache.get(p["id"], {}).get("date_listed", "")
-                # Both are ISO strings (YYYY-MM-DDTHH:MM:SSZ) — string compare works
-                if dl and dl > prev_scan_time:
+                if p["id"] not in pre_scan_ids:
                     new_ids_list.append(p["id"])
         send({"type":"progress","msg":f"  {len(new_ids_list):,} new items since last scan."})
 
@@ -3855,6 +3873,7 @@ async function _fetchBrowsePage(page) {
     keywords:   window._keywords || [],
     watchlist_ids: Object.keys(window._watchlist || {}),
     new_ids:    window._newIds instanceof Set ? [...window._newIds] : (window._newIds || []),
+    user_last_scan: window._lastRunISO || '',
     ...filters,
   };
   if (_globalSearchActive) {
@@ -5636,7 +5655,7 @@ async function clSearchWantList() {
       if (q.startsWith('"') && q.endsWith('"') && q.length > 2) q = q.slice(1, -1);
       if (!q) continue;
       try {
-        const r = await fetch('/api/cl-search?q=' + encodeURIComponent(q));
+        const r = await fetch('/api/cl-search?q=' + encodeURIComponent(q) + '&title_only=1');
         if (r.ok) {
           const d = await r.json();
           const results = d.results || [];
