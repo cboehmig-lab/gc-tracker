@@ -2976,6 +2976,46 @@ tr.fav-row td:last-child{color:#4ade80}
   .cat-sel{font-size:.8rem;padding:7px 10px}
   .paginator button{min-width:28px;height:30px;font-size:.78rem}
 }
+
+/* ── Mobile card & list views (only active on mobile) ── */
+.view-toggle-btn{display:none}
+@media(max-width:820px){
+  .view-toggle-btn{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;background:#1e1e1e;border:1px solid #3a3a3a;border-radius:4px;cursor:pointer;font-size:.78rem;color:#aaa;font-weight:600;white-space:nowrap;flex-shrink:0}
+  .view-toggle-btn:active{background:#252525}
+  .view-toggle-btn.active{border-color:#c00;color:#ff6666}
+
+  /* ── Card grid ── */
+  .card-grid{display:flex;flex-direction:column;gap:0}
+  .item-card{display:flex;align-items:stretch;gap:0;padding:10px 12px;border-bottom:1px solid #1e1e1e;background:#111;cursor:default;-webkit-tap-highlight-color:transparent}
+  .item-card:active{background:#1a1a1a}
+  .item-card.is-new{border-left:3px solid #c00}
+  .item-card.is-want{border-left:3px solid #2d6a2d}
+  .item-card.is-new.is-want{border-left:3px solid #c00}
+  .card-thumb-wrap{width:72px;height:72px;flex-shrink:0;margin-right:12px;border-radius:6px;overflow:hidden;background:#1a1a1a;display:flex;align-items:center;justify-content:center}
+  .card-thumb{width:72px;height:72px;object-fit:contain;border-radius:6px;background:#1a1a1a}
+  .card-thumb-placeholder{width:72px;height:72px;display:flex;align-items:center;justify-content:center;font-size:1.6rem;color:#333;background:#1a1a1a;border-radius:6px}
+  .card-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+  .card-badges{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:1px}
+  .card-name{font-size:.9rem;font-weight:600;color:#eee;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .card-name a{color:#eee;text-decoration:none}
+  .card-name a:active{color:#7bbff7}
+  .card-price{font-size:.95rem;font-weight:700;color:#fff}
+  .card-meta{font-size:.75rem;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .card-actions{display:flex;align-items:center;justify-content:flex-end;margin-top:2px}
+  .card-watch-btn{background:none;border:none;cursor:pointer;color:#444;font-size:1.2rem;padding:4px;min-width:36px;min-height:36px;display:inline-flex;align-items:center;justify-content:center}
+  .card-watch-btn.active{color:#f5c518}
+
+  /* ── Compact list view ── */
+  .compact-list{display:flex;flex-direction:column;gap:0}
+  .compact-row{display:flex;align-items:center;padding:10px 12px;border-bottom:1px solid #1a1a1a;gap:8px}
+  .compact-row.is-new{border-left:3px solid #c00}
+  .compact-row-left{flex:1;min-width:0;display:flex;align-items:center;gap:6px}
+  .compact-row-name{font-size:.84rem;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .compact-row-name a{color:#ddd;text-decoration:none}
+  .compact-row-price{font-size:.88rem;font-weight:700;color:#fff;white-space:nowrap;flex-shrink:0}
+  .compact-row-watch{background:none;border:none;cursor:pointer;color:#444;font-size:1rem;padding:2px 6px;min-height:36px;display:inline-flex;align-items:center}
+  .compact-row-watch.active{color:#f5c518}
+}
 </style>
 </head>
 <body>
@@ -3181,6 +3221,9 @@ tr.fav-row td:last-child{color:#4ade80}
           <input id="res-search" type="text" placeholder="Search results by keyword…" oninput="filterResults()" autocomplete="off">
           <span id="res-search-count"></span>
         </div>
+        <button id="view-toggle-btn" class="view-toggle-btn" onclick="toggleMobileView()" title="Toggle view">
+          <span id="view-toggle-icon">☰</span> <span id="view-toggle-label">List</span>
+        </button>
         </div>
       </div>
       <div id="res-body"></div>
@@ -3676,6 +3719,9 @@ async function _fetchBrowsePage(page) {
     // Populate filter dropdowns from server-provided options
     _populateFiltersFromServer(d.brands || [], d.conditions || [], d.categories || [], d.subcategories || [], filters);
 
+    // Cache items for mobile view toggle re-render
+    window._lastBrowseItems = d.items;
+
     // Render table + paginator
     _renderServerTable(d.items);
 
@@ -3805,17 +3851,27 @@ function _getPaginatorRange(current, total) {
 
 function _renderServerTable(items) {
   const mob = _isMobile();
+
+  // On mobile, dispatch to card or compact-list renderer
+  if (mob) {
+    _updateViewToggleBtn();
+    const view = localStorage.getItem('gt_mobile_view') || 'cards';
+    if (view === 'list') {
+      _renderMobileList(items);
+    } else {
+      _renderMobileCards(items);
+    }
+    return;
+  }
+
   let html = `<table id="res-table"><thead><tr>
     <th data-col="0"></th>
     <th data-col="kw"></th>
     <th data-col="watch"></th>
-    <th data-col="1">Item</th>` +
-    (mob
-      ? `<th data-col="3">Price</th>
-    <th data-col="2">Brand</th>`
-      : `<th data-col="2">Brand</th>
-    <th data-col="3">Price</th>`) +
-    `<th data-col="4">Condition</th>
+    <th data-col="1">Item</th>
+    <th data-col="2">Brand</th>
+    <th data-col="3">Price</th>
+    <th data-col="4">Condition</th>
     <th data-col="5">Category</th>
     <th data-col="6">Subcategory</th>
     <th data-col="7">Date Listed</th>
@@ -3837,6 +3893,122 @@ function _renderServerTable(items) {
     th.addEventListener('click', () => sortTable(colIdx));
   });
   autoSizeItemColumn();
+}
+
+// ── Mobile view toggle ────────────────────────────────────────────────────────
+function _updateViewToggleBtn() {
+  const view = localStorage.getItem('gt_mobile_view') || 'cards';
+  const btn  = document.getElementById('view-toggle-btn');
+  const icon = document.getElementById('view-toggle-icon');
+  const lbl  = document.getElementById('view-toggle-label');
+  if (!btn) return;
+  if (view === 'list') {
+    icon.textContent = '⊞';
+    lbl.textContent  = 'Cards';
+    btn.classList.add('active');
+  } else {
+    icon.textContent = '☰';
+    lbl.textContent  = 'List';
+    btn.classList.remove('active');
+  }
+}
+
+function toggleMobileView() {
+  const cur  = localStorage.getItem('gt_mobile_view') || 'cards';
+  const next = cur === 'cards' ? 'list' : 'cards';
+  localStorage.setItem('gt_mobile_view', next);
+  // Re-render with same items already fetched
+  if (window._lastBrowseItems) {
+    _updateViewToggleBtn();
+    if (next === 'list') {
+      _renderMobileList(window._lastBrowseItems);
+    } else {
+      _renderMobileCards(window._lastBrowseItems);
+    }
+  }
+}
+
+// ── Mobile card renderer ──────────────────────────────────────────────────────
+function _renderMobileCards(items) {
+  const esc = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  let html = '<div class="card-grid">';
+  items.forEach(item => {
+    const isNew    = item.isNew  ? ' is-new'  : '';
+    const isWant   = item.kwMatch ? ' is-want' : '';
+    const isSold   = item.sold   ? ' is-sold'  : '';
+    const watched  = window._watchlist && window._watchlist[item.id];
+    const watchCls = watched ? ' wl-on' : '';
+
+    const imgId = item.image_id || '';
+    const imgUrl = imgId
+      ? `https://media.guitarcenter.com/is/image/MMGS7/${imgId}-00-200x200.jpg`
+      : '';
+
+    const newBadge  = item.isNew   ? '<span class="tag-new">NEW</span>'  : '';
+    const wantBadge = item.kwMatch  ? '<span class="tag-kw">WANT</span>'  : '';
+    const soldBadge = item.sold     ? '<span class="tag-sold">SOLD</span>' : '';
+
+    const price   = item.price != null ? '$' + Number(item.price).toLocaleString() : '—';
+    const store   = esc(item.store_name || item.store || '');
+    const loc     = esc(item.location   || '');
+    const cond    = esc(item.condition  || '');
+    const name    = esc(item.name       || '');
+    const url     = item.url || '#';
+
+    html += `<div class="item-card${isNew}${isWant}${isSold}">`;
+
+    // Thumbnail
+    html += '<div class="card-thumb-wrap">';
+    if (imgUrl) {
+      html += `<a href="${url}" target="_blank" rel="noopener"><img class="card-thumb" src="${imgUrl}" alt="" loading="lazy" onerror="this.style.display='none'"></a>`;
+    } else {
+      html += '<div class="card-thumb" style="background:#1a1a1a;display:flex;align-items:center;justify-content:center;color:#444;font-size:.7rem">No img</div>';
+    }
+    html += '</div>';
+
+    // Body
+    html += '<div class="card-body">';
+    html += `<div class="card-badges">${newBadge}${wantBadge}${soldBadge}</div>`;
+    html += `<div class="card-name"><a href="${url}" target="_blank" rel="noopener">${name}</a></div>`;
+    html += `<div class="card-price">${price}</div>`;
+    html += `<div class="card-meta">${store}${loc ? ' · ' + loc : ''}${cond ? ' · ' + cond : ''}</div>`;
+    html += `<div class="card-actions">`;
+    html += `<button class="card-watch-btn${watchCls}" onclick="toggleWatch('${item.id}',this)" data-id="${item.id}">${watched ? '★' : '☆'}</button>`;
+    html += `</div>`;
+    html += '</div>'; // card-body
+
+    html += '</div>'; // item-card
+  });
+  html += '</div>';
+  html += _buildPaginatorHtml(_srvPage, _srvTotalPages, _srvTotalCount, 50);
+  document.getElementById('res-body').innerHTML = html;
+}
+
+// ── Mobile compact list renderer ─────────────────────────────────────────────
+function _renderMobileList(items) {
+  const esc = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  let html = '<div class="compact-list">';
+  items.forEach(item => {
+    const isNew    = item.isNew   ? ' is-new'  : '';
+    const isWant   = item.kwMatch  ? ' is-want' : '';
+    const watched  = window._watchlist && window._watchlist[item.id];
+    const watchCls = watched ? ' wl-on' : '';
+    const newBadge = item.isNew ? '<span class="tag-new" style="font-size:.6rem;padding:1px 4px;margin-right:4px">NEW</span>' : '';
+    const price    = item.price != null ? '$' + Number(item.price).toLocaleString() : '—';
+    const url      = item.url || '#';
+    const name     = esc(item.name || '');
+
+    html += `<div class="compact-row${isNew}${isWant}">`;
+    html += `<div class="compact-row-left">`;
+    html += `<span class="compact-row-name">${newBadge}<a href="${url}" target="_blank" rel="noopener">${name}</a></span>`;
+    html += `</div>`;
+    html += `<span class="compact-row-price">${price}</span>`;
+    html += `<button class="compact-row-watch${watchCls}" onclick="toggleWatch('${item.id}',this)" data-id="${item.id}">${watched ? '★' : '☆'}</button>`;
+    html += `</div>`;
+  });
+  html += '</div>';
+  html += _buildPaginatorHtml(_srvPage, _srvTotalPages, _srvTotalCount, 50);
+  document.getElementById('res-body').innerHTML = html;
 }
 
 async function browseCache() {
@@ -3877,16 +4049,26 @@ function toggleWatch(id, btn) {
   if (isWatched) {
     delete window._watchlist[id];
   } else {
+    // Try table row first, fall back to cached browse items (mobile card/list view)
     const row = btn.closest('tr');
-    window._watchlist[id] = {
-      name:  row ? row.dataset.name : '',
-      store: row ? row.dataset.store : '',
-      location: row ? row.dataset.location : '',
-      date_added: new Date().toISOString().slice(0,10),
-    };
+    let name = '', store = '', location = '';
+    if (row) {
+      name     = row.dataset.name     || '';
+      store    = row.dataset.store    || '';
+      location = row.dataset.location || '';
+    } else {
+      const item = (window._lastBrowseItems || []).find(i => i.id === id);
+      if (item) {
+        name     = item.name          || '';
+        store    = item.store_name    || item.store || '';
+        location = item.location      || '';
+      }
+    }
+    window._watchlist[id] = { name, store, location, date_added: new Date().toISOString().slice(0,10) };
   }
   _lsSet('watchlist', window._watchlist);
   btn.classList.toggle('active', !isWatched);
+  btn.classList.toggle('wl-on',  !isWatched);
   btn.textContent = isWatched ? '☆' : '★';
   btn.title = isWatched ? 'Add to watch list' : 'Remove from watch list';
 }
