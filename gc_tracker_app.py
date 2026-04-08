@@ -2327,7 +2327,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             run_q.put(msg)
         _q.put(msg)  # also send to legacy queue for backwards compat
     try:
-        run_time   = datetime.utcnow().isoformat() + "Z"
+        run_time   = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
         stores_to_scan = selected_stores if not baseline else []
         nationwide = baseline or len(stores_to_scan) == 0
@@ -2528,23 +2528,17 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                 "image_id":   p.get("image_id") or _cat_cache.get(p["id"], {}).get("image_id", ""),
             }
 
-        # ── Per-device new-item detection (hybrid) ────────────────────────────
-        # prev_scan_time = this device's last run (from localStorage), so each
-        # browser/phone gets its own independent NEW window.
-        # An item is "new" if EITHER:
-        #   1) Its startDate is after this device's last scan, OR
-        #   2) It's brand-new to our cache AND listed within the past 96 hours
-        #      (catches items where GC backdates startDate on newly-listed gear).
-        from datetime import timedelta as _td
-        _96h_ago = (datetime.utcnow() - _td(hours=96)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # ── Per-device new-item detection ─────────────────────────────────────
+        # An item is NEW if and only if its date_listed (Algolia startDate, UTC)
+        # is more recent than this device's previous "Check for New" run.
+        # prev_scan_time comes from the device's localStorage so each browser/
+        # phone has its own independent window. Both timestamps are in the same
+        # format (YYYY-MM-DDTHH:MM:SSZ) so plain string comparison is accurate.
         new_ids_list = []
         if not baseline and prev_scan_time:
             for p in all_products:
-                item_date  = p.get("date_listed") or _cat_cache.get(p["id"], {}).get("date_listed", "")
-                first_seen = _cat_cache.get(p["id"], {}).get("first_seen", "")
-                date_based = item_date and item_date > prev_scan_time
-                cache_new  = first_seen == run_time and item_date and item_date >= _96h_ago
-                if date_based or cache_new:
+                item_date = p.get("date_listed") or _cat_cache.get(p["id"], {}).get("date_listed", "")
+                if item_date and item_date > prev_scan_time:
                     new_ids_list.append(p["id"])
         send({"type":"progress","msg":f"  {len(new_ids_list):,} new items since last scan."})
 
