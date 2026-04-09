@@ -1023,6 +1023,44 @@ _stop_event     = threading.Event()
 
 import uuid as _uuid
 
+# ── Device access tracking ─────────────────────────────────────────────────────
+_DEVICE_LOG       = DATA_DIR / "gc_device_log.jsonl"
+_device_log_lock  = threading.Lock()
+_seen_today: set  = set()   # (device_id, date) pairs already written today
+
+def _log_device(device_id: str):
+    """Append one line to gc_device_log.jsonl the first time a device is seen each day."""
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    key   = (device_id, today)
+    if key in _seen_today:
+        return
+    _seen_today.add(key)
+    entry = json.dumps({
+        "date":       today,
+        "time":       datetime.utcnow().strftime("%H:%M:%SZ"),
+        "device_id":  device_id,
+        "ua":         request.headers.get("User-Agent", "")[:120],
+        "ip":         request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip(),
+    })
+    with _device_log_lock:
+        with open(_DEVICE_LOG, "a") as f:
+            f.write(entry + "\n")
+
+@app.after_request
+def _track_device(response):
+    """Set a long-lived device cookie and log first visit of each day."""
+    # Only track page/API hits we care about (skip SSE streams & static)
+    if request.path.startswith("/api/progress"):
+        return response
+    device_id = request.cookies.get("gt_device_id")
+    if not device_id:
+        device_id = str(_uuid.uuid4())
+        # 2-year cookie — survives browser restarts
+        response.set_cookie("gt_device_id", device_id,
+                            max_age=60*60*24*730, httponly=True, samesite="Lax")
+    _log_device(device_id)
+    return response
+
 def _create_run_queue() -> tuple[str, queue.Queue]:
     """Create a new per-run message queue and return (run_id, queue)."""
     run_id = _uuid.uuid4().hex[:12]
@@ -3093,7 +3131,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.0</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.01</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -4329,8 +4367,13 @@ async function startRun(payload, isBaseline) {
   });
   if (!resp.ok) {
     const e = await resp.json();
-    appendLog(e.error, 'log-err');
-    running = false; stopBtn.style.display = 'none'; updateCount(); return;
+    running = false; stopBtn.style.display = 'none'; updateCount();
+    if (resp.status === 409) {
+      appendLog('⏳ Another scan is already in progress — try again in a moment.', 'log-dim');
+    } else {
+      appendLog('Error: ' + (e.error || resp.statusText), 'log-err');
+    }
+    return;
   }
   // Get run_id for per-session message stream (prevents cross-user contamination)
   const runData = await resp.json();
@@ -5655,7 +5698,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.01"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
