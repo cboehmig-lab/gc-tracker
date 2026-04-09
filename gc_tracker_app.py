@@ -3424,6 +3424,10 @@ async function loadData() {
   const storeLabel = info.count ? info.count : allStores.length;
   document.getElementById('hdr-status').textContent = storeLabel + ' stores available';
   document.getElementById('s-stores').textContent = storeLabel;
+  // Reveal sidebar action buttons now that stores are loaded
+  document.getElementById('run-btn').style.display = '';
+  document.getElementById('baseline-btn').style.display = '';
+  document.getElementById('validate-stores-btn').style.display = '';
   if (allStores.length === 0) {
     appendLog('💡 No stores loaded — click "✓ Validate Stores" to build the store list from GC live data.', 'log-dim');
   }
@@ -3948,7 +3952,7 @@ function _renderMobileCards(items) {
     const wantBadge = item.kwMatch  ? '<span class="tag-kw">WANT</span>'  : '';
     const soldBadge = item.sold     ? '<span class="tag-sold">SOLD</span>' : '';
 
-    const price   = item.price != null ? '$' + Number(item.price).toLocaleString() : '—';
+    const price   = item.price || '—';
     const store   = esc(item.store_name || item.store || '');
     const loc     = esc(item.location   || '');
     const cond    = esc(item.condition  || '');
@@ -3994,7 +3998,7 @@ function _renderMobileList(items) {
     const watched  = window._watchlist && window._watchlist[item.id];
     const watchCls = watched ? ' wl-on' : '';
     const newBadge = item.isNew ? '<span class="tag-new" style="font-size:.6rem;padding:1px 4px;margin-right:4px">NEW</span>' : '';
-    const price    = item.price != null ? '$' + Number(item.price).toLocaleString() : '—';
+    const price    = item.price || '—';
     const url      = item.url || '#';
     const name     = esc(item.name || '');
 
