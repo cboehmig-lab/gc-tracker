@@ -2980,7 +2980,7 @@ tr.fav-row td:last-child{color:#4ade80}
 /* ── Mobile card & list views (only active on mobile) ── */
 .view-toggle-btn{display:none}
 @media(max-width:820px){
-  .view-toggle-btn{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;background:#1e1e1e;border:1px solid #3a3a3a;border-radius:4px;cursor:pointer;font-size:.78rem;color:#aaa;font-weight:600;white-space:nowrap;flex-shrink:0}
+  .view-toggle-btn{display:inline-flex;align-items:center;justify-content:center;width:26px;height:22px;padding:0;background:#1e1e1e;border:1px solid #3a3a3a;border-radius:4px;cursor:pointer;font-size:.9rem;color:#aaa;line-height:1;vertical-align:middle;margin-left:2px;flex-shrink:0}
   .view-toggle-btn:active{background:#252525}
   .view-toggle-btn.active{border-color:#c00;color:#ff6666}
 
@@ -3156,7 +3156,7 @@ tr.fav-row td:last-child{color:#4ade80}
 
   <div class="right">
     <div class="status-bar">
-      <span id="s-last-wrap">Last checked for new gear: <b id="s-last">—</b> <button id="check-now-btn" onclick="runTracker()" style="padding:2px 10px;background:#c00;color:#fff;border:none;border-radius:4px;font-size:.72rem;font-weight:700;cursor:pointer;margin-left:4px;display:none">Check Now</button></span>
+      <span id="s-last-wrap">Last checked for new gear: <b id="s-last">—</b> <button id="check-now-btn" onclick="runTracker()" style="padding:2px 10px;background:#c00;color:#fff;border:none;border-radius:4px;font-size:.72rem;font-weight:700;cursor:pointer;margin-left:4px;display:none">Check Now</button> <button id="view-toggle-btn" class="view-toggle-btn" onclick="toggleMobileView()" title="Switch card / list view"><span id="view-toggle-icon">⊞</span></button></span>
       <span>Items: <b id="s-known">—</b></span>
       <span>Stores: <b id="s-stores">—</b></span>
       <div id="global-search-wrap">
@@ -3218,12 +3218,10 @@ tr.fav-row td:last-child{color:#4ade80}
           ✕ Clear Filters
         </button>
         <div id="res-search-wrap">
-          <input id="res-search" type="text" placeholder="Search results by keyword…" oninput="filterResults()" autocomplete="off">
+          <input id="res-search" type="text" placeholder="Search results by keyword…" oninput="filterResults();_updateResSearchClear()" autocomplete="off">
+          <button id="res-search-clear" onclick="clearResSearch()" title="Clear search" style="display:none;background:none;border:none;color:#888;font-size:.85rem;cursor:pointer;padding:0 4px;line-height:1">✕</button>
           <span id="res-search-count"></span>
         </div>
-        <button id="view-toggle-btn" class="view-toggle-btn" onclick="toggleMobileView()" title="Toggle view">
-          <span id="view-toggle-icon">☰</span> <span id="view-toggle-label">List</span>
-        </button>
         </div>
       </div>
       <div id="res-body"></div>
@@ -3904,15 +3902,16 @@ function _updateViewToggleBtn() {
   const view = localStorage.getItem('gt_mobile_view') || 'cards';
   const btn  = document.getElementById('view-toggle-btn');
   const icon = document.getElementById('view-toggle-icon');
-  const lbl  = document.getElementById('view-toggle-label');
   if (!btn) return;
+  // ⊞ = grid/card view icon, ☰ = list view icon
+  // Show the icon for the OTHER view (what you'll switch TO)
   if (view === 'list') {
-    icon.textContent = '⊞';
-    lbl.textContent  = 'Cards';
+    icon.textContent = '⊞';   // tap to go back to cards
+    btn.title = 'Switch to card view';
     btn.classList.add('active');
   } else {
-    icon.textContent = '☰';
-    lbl.textContent  = 'List';
+    icon.textContent = '☰';   // tap to go to compact list
+    btn.title = 'Switch to compact list view';
     btn.classList.remove('active');
   }
 }
@@ -3948,8 +3947,8 @@ function _renderMobileCards(items) {
       ? `https://media.guitarcenter.com/is/image/MMGS7/${imgId}-00-200x200.jpg`
       : '';
 
-    const newBadge  = item.isNew   ? '<span class="tag-new">NEW</span>'  : '';
-    const wantBadge = item.kwMatch  ? '<span class="tag-kw">WANT</span>'  : '';
+    const newBadge  = item.isNew   ? '<span class="tag">NEW</span>'   : '';
+    const wantBadge = item.kwMatch  ? '<span class="tag-kw">WANT</span>' : '';
     const soldBadge = item.sold     ? '<span class="tag-sold">SOLD</span>' : '';
 
     const price   = item.price || '—';
@@ -3997,7 +3996,7 @@ function _renderMobileList(items) {
     const isWant   = item.kwMatch  ? ' is-want' : '';
     const watched  = window._watchlist && window._watchlist[item.id];
     const watchCls = watched ? ' wl-on' : '';
-    const newBadge = item.isNew ? '<span class="tag-new" style="font-size:.6rem;padding:1px 4px;margin-right:4px">NEW</span>' : '';
+    const newBadge = item.isNew ? '<span class="tag">NEW</span>' : '';
     const price    = item.price || '—';
     const url      = item.url || '#';
     const name     = esc(item.name || '');
@@ -4227,13 +4226,17 @@ function clearGlobalSearch() {
   document.getElementById('global-search').value = '';
   document.getElementById('global-search-clear').style.display = 'none';
   _resetWantListLink();
-  // Go back to whatever stores are selected
+  // Go back to whatever stores are selected — bypass browseCache debounce
+  // and force-clear any stuck loading flag so the fetch always fires
   const stores = getSelected();
-  if (stores.length) {
-    browseCache();
-  } else {
+  if (!stores.length) {
     document.getElementById('res-panel').style.display = 'none';
+    return;
   }
+  _srvStores = stores;
+  _srvPage = 1;
+  _srvLoading = false;
+  _fetchBrowsePage(1);
 }
 
 function searchWantList() {
@@ -5032,12 +5035,37 @@ function clearFilters() {
   window._selectedCats = []; _updateCatBtn();
   window._selectedSubs = []; _updateSubcatBtn(); _setSubList([]);
   document.getElementById('clear-filters-btn').style.display = 'none';
+  // Clear keyword search box too
+  const resSearch = document.getElementById('res-search');
+  if (resSearch) { resSearch.value = ''; }
+  document.getElementById('res-search-count').textContent = '';
+  _updateResSearchClear();
   // Also turn off watch filter if active
   if (_watchFilterActive) {
     _watchFilterActive = false;
     document.getElementById('watchlist-toggle').classList.remove('wl-active');
   }
-  filterResults();
+  // Bypass debounce — force-clear loading flag and re-fetch immediately
+  _srvLoading = false;
+  _srvPage = 1;
+  _fetchBrowsePage(1);
+}
+
+function _updateResSearchClear() {
+  const btn = document.getElementById('res-search-clear');
+  if (!btn) return;
+  const val = (document.getElementById('res-search').value || '').trim();
+  btn.style.display = val ? '' : 'none';
+}
+
+function clearResSearch() {
+  const el = document.getElementById('res-search');
+  if (el) el.value = '';
+  document.getElementById('res-search-count').textContent = '';
+  _updateResSearchClear();
+  _srvLoading = false;
+  _srvPage = 1;
+  _fetchBrowsePage(1);
 }
 
 function filterResults() {
