@@ -1043,8 +1043,8 @@ def _cleanup_run_queue(run_id: str):
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if APP_PASSWORD and not session.get("logged_in"):
-            return redirect("/login")
+        # Site access is open — no login required.
+        # Individual sensitive endpoints (e.g. /api/reset) enforce their own password.
         return f(*args, **kwargs)
     return decorated
 
