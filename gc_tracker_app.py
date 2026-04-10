@@ -1127,6 +1127,91 @@ def logout():
     session.clear()
     return redirect("/login")
 
+@app.route("/admin/devices")
+def admin_devices():
+    """Password-protected device access summary page."""
+    pw = request.args.get("pw", "")
+    admin_pw = os.environ.get("RESET_PASSWORD", "Beatle909!")
+    if pw != admin_pw:
+        return Response(
+            '<html><body style="background:#111;color:#eee;font-family:monospace;padding:40px">'
+            '<h2>🔒 Access denied</h2>'
+            '<form><input name="pw" type="password" placeholder="Password" autofocus '
+            'style="padding:8px;background:#222;border:1px solid #444;color:#eee;border-radius:4px">'
+            '<button type="submit" style="padding:8px 16px;background:#c00;color:#fff;border:none;'
+            'border-radius:4px;cursor:pointer;margin-left:8px">Enter</button></form>'
+            '</body></html>', 401, {"Content-Type": "text/html"}
+        )
+
+    # Parse log
+    entries = []
+    if _DEVICE_LOG.exists():
+        for line in _DEVICE_LOG.read_text().splitlines():
+            line = line.strip()
+            if line:
+                try: entries.append(json.loads(line))
+                except: pass
+
+    # Aggregate
+    from collections import defaultdict
+    unique_devices  = {e["device_id"] for e in entries}
+    by_device       = defaultdict(list)
+    by_date         = defaultdict(set)
+    for e in entries:
+        by_device[e["device_id"]].append(e)
+        by_date[e["date"]].add(e["device_id"])
+
+    rows = []
+    for did, evts in sorted(by_device.items(), key=lambda x: x[1][-1]["date"], reverse=True):
+        last  = evts[-1]
+        first = evts[0]
+        ua    = last.get("ua", "")
+        # Guess platform
+        if "iPhone" in ua or "iPad" in ua:    platform = "📱 iOS"
+        elif "Android" in ua:                  platform = "📱 Android"
+        elif "Macintosh" in ua:                platform = "💻 Mac"
+        elif "Windows" in ua:                  platform = "🖥 Windows"
+        elif "Linux" in ua:                    platform = "🖥 Linux"
+        else:                                  platform = "❓ Unknown"
+        rows.append({
+            "id":       did[:8] + "…",
+            "platform": platform,
+            "first":    first["date"],
+            "last":     last["date"] + " " + last["time"],
+            "days":     len(evts),
+            "ip":       last.get("ip", ""),
+        })
+
+    # Daily active table
+    daily = sorted(by_date.items(), reverse=True)[:30]
+
+    html  = ['<!DOCTYPE html><html><head><meta charset="UTF-8">']
+    html += ['<title>Device Log</title>']
+    html += ['<style>body{background:#111;color:#ddd;font-family:monospace;padding:24px;font-size:.88rem}']
+    html += ['h1{color:#fff;margin-bottom:4px}h2{color:#aaa;font-size:1rem;margin:24px 0 8px}']
+    html += ['table{border-collapse:collapse;width:100%;max-width:900px}']
+    html += ['th{background:#1e1e1e;padding:8px 12px;text-align:left;border-bottom:2px solid #333;color:#aaa}']
+    html += ['td{padding:6px 12px;border-bottom:1px solid #222}tr:hover td{background:#1a1a1a}']
+    html += ['</style></head><body>']
+    html += [f'<h1>📊 Device Tracker</h1>']
+    html += [f'<p style="color:#666">{len(unique_devices)} unique devices &nbsp;·&nbsp; {len(entries)} total day-visits &nbsp;·&nbsp; {len(entries) and entries[-1]["date"]} last activity</p>']
+
+    html += ['<h2>All Devices</h2><table>']
+    html += ['<tr><th>ID</th><th>Platform</th><th>First seen</th><th>Last seen</th><th>Days active</th><th>IP</th></tr>']
+    for r in rows:
+        html += [f'<tr><td>{r["id"]}</td><td>{r["platform"]}</td><td>{r["first"]}</td>'
+                 f'<td>{r["last"]}</td><td>{r["days"]}</td><td>{r["ip"]}</td></tr>']
+    html += ['</table>']
+
+    html += ['<h2>Daily Active Devices (last 30 days)</h2><table>']
+    html += ['<tr><th>Date</th><th>Unique devices</th></tr>']
+    for date, devs in daily:
+        html += [f'<tr><td>{date}</td><td>{len(devs)}</td></tr>']
+    html += ['</table></body></html>']
+
+    return Response("".join(html), content_type="text/html")
+
+
 @app.route("/api/reset", methods=["POST"])
 @login_required
 def api_reset():
@@ -2654,13 +2739,6 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 
 .left-footer{padding:12px;border-top:1px solid #2e2e2e;flex-shrink:0;background:#1a1a1a;position:relative;z-index:2}
 #sel-count{font-size:.78rem;color:#666;margin-bottom:8px}
-.btn-row{display:flex;gap:8px}
-#run-btn{flex:1;padding:10px;background:linear-gradient(180deg,#d00,#a00);color:#fff;border:none;border-radius:6px;font-size:.85rem;font-weight:700;cursor:pointer;white-space:nowrap;box-shadow:0 2px 8px rgba(180,0,0,.4);transition:background .15s,box-shadow .15s}
-#run-btn:hover{background:linear-gradient(180deg,#e00,#b00);box-shadow:0 3px 12px rgba(200,0,0,.5)}
-#run-btn:disabled{background:#333;box-shadow:none;cursor:not-allowed}
-#baseline-btn{padding:10px 12px;background:#222;color:#aaa;border:1px solid #3a3a3a;border-radius:5px;font-size:.8rem;cursor:pointer;white-space:nowrap}
-#baseline-btn:hover{border-color:#c00;color:#fff}
-#baseline-btn:disabled{opacity:.4;cursor:not-allowed}
 
 /* ── Right panel ── */
 .right{flex:1;display:flex;flex-direction:column;overflow:hidden;position:relative;z-index:1}
@@ -2993,7 +3071,6 @@ tr.fav-row td:last-child{color:#4ade80}
   #search{font-size:.95rem;padding:9px 12px}
   #cl-city-search{font-size:.95rem;padding:9px 12px}
   .sel-btn,.cl-sel-btn{padding:9px 8px;font-size:.84rem;min-height:38px}
-  #run-btn,#baseline-btn{min-height:46px;font-size:.92rem}
   .watch-btn,.fav-btn,.cl-fav-btn{font-size:1.2rem;padding:4px 6px;min-width:36px;min-height:36px;display:inline-flex;align-items:center;justify-content:center}
   button,a{-webkit-tap-highlight-color:transparent}
 
@@ -3101,7 +3178,7 @@ tr.fav-row td:last-child{color:#4ade80}
     <p style="color:#777;font-size:.82rem;margin-bottom:20px">Building takes a few minutes.</p>
     <div style="display:flex;gap:10px;justify-content:flex-end">
       <button onclick="dismissFirstRun()" style="padding:8px 18px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#aaa;font-size:.85rem;cursor:pointer">Later</button>
-      <button onclick="dismissFirstRun();runBaseline()" style="padding:8px 18px;background:#c00;border:none;border-radius:5px;color:#fff;font-size:.85rem;font-weight:700;cursor:pointer">Build Now</button>
+      <button onclick="dismissFirstRun();runTracker()" style="padding:8px 18px;background:#c00;border:none;border-radius:5px;color:#fff;font-size:.85rem;font-weight:700;cursor:pointer">Scan Now</button>
     </div>
   </div>
 </div>
@@ -3131,7 +3208,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.0.1</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.0.2</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -3170,10 +3247,6 @@ tr.fav-row td:last-child{color:#4ade80}
 
     <div class="left-footer">
       <div id="sel-count">0 stores selected</div>
-      <div class="btn-row">
-        <button id="run-btn" onclick="runTracker()" disabled style="display:none">Check for New</button>
-        <button id="baseline-btn" onclick="runBaseline()" title="Scan every GC store nationwide" style="display:none">🌐 Build Baseline</button>
-      </div>
       <button id="validate-stores-btn" onclick="validateStores()"
         style="display:none"
         title="Check all stores and remove any that no longer exist">
@@ -3461,8 +3534,6 @@ async function loadData() {
   document.getElementById('hdr-status').textContent = storeLabel + ' stores available';
   document.getElementById('s-stores').textContent = storeLabel;
   // Reveal sidebar action buttons now that stores are loaded
-  document.getElementById('run-btn').style.display = '';
-  document.getElementById('baseline-btn').style.display = '';
   document.getElementById('validate-stores-btn').style.display = '';
   if (allStores.length === 0) {
     appendLog('💡 No stores loaded — click "✓ Validate Stores" to build the store list from GC live data.', 'log-dim');
@@ -3619,8 +3690,6 @@ function updateCount() {
   const checked = [...document.querySelectorAll('.store-row input:checked')];
   const n = checked.length;
   document.getElementById('sel-count').textContent = n + ' store' + (n===1?'':'s') + ' selected';
-  document.getElementById('run-btn').disabled = (n===0 || running);
-  document.getElementById('baseline-btn').disabled = running;
   _updateMobileToggleCounts();
   // Auto-browse cached inventory when stores are selected
   if (n > 0 && !running && !_globalSearchActive) browseCache();
@@ -4075,6 +4144,7 @@ async function browseCache() {
     window._selectedSubs = []; _updateSubcatBtn(); _setSubList([]);
     _watchFilterActive = false;
     document.getElementById('watchlist-toggle').classList.remove('wl-active');
+    _srvLoading = false;  // Cancel any in-flight request so store changes always land
     await _fetchBrowsePage(1);
   }, 300);
 }
@@ -4313,10 +4383,6 @@ function searchWantList() {
 function _resetWantListLink() {
   document.getElementById('search-wl-link').textContent = 'Search Want List';
   document.getElementById('search-wl-link').style.color = '#4ade80';
-}
-
-function runBaseline() {
-  startRun({stores:[], baseline:true}, true);
 }
 
 function cancelReset() {
@@ -5698,7 +5764,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
