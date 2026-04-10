@@ -45,8 +45,9 @@ OUTPUT_FILE    = DATA_DIR / "gc_new_inventory.xlsx"
 STORES_CACHE   = DATA_DIR / "gc_stores_cache.json"
 FAVORITES_FILE = DATA_DIR / "gc_favorites.json"
 CAT_CACHE_FILE = DATA_DIR / "gc_category_cache.json"
-WATCHLIST_FILE = DATA_DIR / "gc_watchlist.json"
-KEYWORDS_FILE  = DATA_DIR / "gc_keywords.json"
+WATCHLIST_FILE   = DATA_DIR / "gc_watchlist.json"
+KEYWORDS_FILE    = DATA_DIR / "gc_keywords.json"
+STORE_COORDS_FILE = DATA_DIR / "gc_store_coords.json"
 
 
 PORT        = int(os.environ.get("PORT", 5050))
@@ -143,25 +144,122 @@ def _fetch_state_stores(state: str) -> list[str]:
     """Fetch store city names for a single state from stores.guitarcenter.com.
     Only extracts names from confirmed store-page URLs matching /{state}/{city}/{id},
     which is the only reliable signal — headings and link text pick up nav garbage."""
+    return [name for name, _ in _fetch_state_stores_with_state(state)]
+
+
+def _fetch_state_stores_with_state(state: str) -> list[tuple]:
+    """Like _fetch_state_stores but returns (name, state_abbr) tuples."""
     try:
         r = _http.get(f"https://stores.guitarcenter.com/{state}/", timeout=10)
         if r.status_code != 200:
             return []
         html = r.text
         # Only trust URLs in the form /state/city-slug/numeric-id
-        # These uniquely identify actual store pages; nav links never match this pattern.
         slug_to_name = {}
         for slug in re.findall(
             rf'href="/{re.escape(state)}/([a-z][a-z0-9\-]+)/(\d+)(?:/[^"]*)?"',
             html
         ):
             city_slug, store_id = slug
-            # Convert slug to display name: "south-austin" → "South Austin"
             name = " ".join(w.capitalize() for w in city_slug.split("-"))
             slug_to_name[city_slug] = name
-        return list(slug_to_name.values())
+        return [(name, state.upper()) for name in slug_to_name.values()]
     except Exception:
         return []
+
+
+def _build_store_coords(send_progress=None):
+    """Geocode all known stores via Nominatim (openstreetmap).
+    Scrapes state pages to get state context for each store name, then
+    queries Nominatim at 1 req/sec (per ToS). Writes gc_store_coords.json.
+    Returns dict of {store_name: {"lat": float, "lng": float}}."""
+    def _send(msg):
+        if send_progress:
+            send_progress(msg)
+
+    _send("Step 1: Collecting stores with state context…")
+
+    # Re-scrape state pages in parallel to get (name, state) pairs
+    name_to_state: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_fetch_state_stores_with_state, st): st for st in _US_STATES}
+        for future in as_completed(futures):
+            try:
+                for name, state in future.result():
+                    if name not in name_to_state:
+                        name_to_state[name] = state
+            except Exception:
+                pass
+
+    # Also include any stores we know about but may not have found via state pages
+    known_stores = get_store_list()
+    for s in known_stores:
+        if s not in name_to_state:
+            name_to_state[s] = ""  # unknown state
+
+    stores_to_geocode = sorted(name_to_state.keys())
+    total = len(stores_to_geocode)
+    _send(f"  Found {total} stores to geocode.")
+
+    # Load existing coords so we can skip already-geocoded stores
+    existing: dict = {}
+    if STORE_COORDS_FILE.exists():
+        try:
+            existing = json.loads(STORE_COORDS_FILE.read_text())
+        except Exception:
+            pass
+
+    coords: dict = dict(existing)
+    skipped = 0
+    failed: list[str] = []
+
+    _send("Step 2: Geocoding via Nominatim (1 req/sec)…")
+
+    nominatim_headers = {
+        "User-Agent": "GCTracker/2.1 (personal inventory tool; contact: admin@example.com)",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    for i, store in enumerate(stores_to_geocode, 1):
+        if store in existing:
+            skipped += 1
+            continue
+
+        state = name_to_state.get(store, "")
+        query = f"Guitar Center {store}"
+        if state:
+            query += f" {state}"
+
+        try:
+            url = (
+                "https://nominatim.openstreetmap.org/search"
+                f"?q={http.utils.quote(query)}&format=json&limit=1&countrycodes=us"
+            )
+            r = _http.get(url, headers=nominatim_headers, timeout=10)
+            if r.status_code == 200:
+                results = r.json()
+                if results:
+                    coords[store] = {
+                        "lat": float(results[0]["lat"]),
+                        "lng": float(results[0]["lon"]),
+                    }
+                else:
+                    failed.append(store)
+            else:
+                failed.append(store)
+        except Exception:
+            failed.append(store)
+
+        if i % 25 == 0 or i == total - skipped:
+            _send(f"  [{i}/{total}] geocoded…")
+
+        time.sleep(1.0)  # Nominatim rate limit: 1 req/sec
+
+    STORE_COORDS_FILE.write_text(json.dumps(coords, indent=2))
+    _send(f"\n✓ Done — {len(coords)} stores geocoded, {skipped} skipped (cached), {len(failed)} failed.")
+    if failed:
+        _send(f"  Failed: {', '.join(failed[:20])}{'…' if len(failed)>20 else ''}")
+    return coords
 
 
 def _extract_stores_from_used_page(html: str) -> list[str]:
@@ -2241,6 +2339,47 @@ def api_validate_stores():
     t.start()
     return jsonify({"status": "started"})
 
+@app.route("/api/store-coords")
+@login_required
+def api_store_coords():
+    """Return cached store coordinates JSON (built by /api/build-store-coords)."""
+    if STORE_COORDS_FILE.exists():
+        try:
+            return jsonify(json.loads(STORE_COORDS_FILE.read_text()))
+        except Exception:
+            pass
+    return jsonify({})
+
+@app.route("/api/build-store-coords", methods=["POST"])
+@login_required
+def api_build_store_coords():
+    """Trigger a one-time geocoding run to build gc_store_coords.json.
+    Uses the existing SSE stream — progress shows up in the log panel."""
+    if not _lock.acquire(blocking=False):
+        return jsonify({"error": "A run is already in progress."}), 409
+    _stop_event.clear()
+    while not _q.empty():
+        try: _q.get_nowait()
+        except queue.Empty: break
+
+    def _run():
+        try:
+            def _send(msg):
+                _q.put({"type": "progress", "msg": msg})
+            _build_store_coords(_send)
+            _q.put({"type": "done", "baseline": False, "stopped": False,
+                    "new_ids": [], "items": []})
+        except Exception as e:
+            _q.put({"type": "progress", "msg": f"Error: {e}"})
+            _q.put({"type": "done", "baseline": False, "stopped": True,
+                    "new_ids": [], "items": []})
+        finally:
+            try: _lock.release()
+            except Exception: pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"status": "started"})
+
 @app.route("/api/fill-gaps", methods=["POST"])
 @login_required
 def api_fill_gaps():
@@ -2731,9 +2870,19 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .store-row input[type=checkbox]{accent-color:#c00;flex-shrink:0;cursor:pointer}
 .store-row label{flex:1;font-size:.855rem;cursor:pointer}
 .store-row.hidden{display:none}
+.store-dist{font-size:.72rem;color:#555;flex-shrink:0;min-width:44px;text-align:right}
 .fav-btn{background:none;border:none;cursor:pointer;font-size:1rem;line-height:1;padding:0 4px;color:#444;flex-shrink:0;transition:color .15s}
 .fav-btn.active{color:#f5c518}
 .fav-btn:hover{color:#f5c518}
+
+/* ── ZIP sort row ── */
+.zip-sort-row{display:flex;align-items:center;gap:6px;margin-top:7px}
+#zip-input{flex:1;padding:5px 9px;border-radius:5px;background:#252525;border:1px solid #3a3a3a;color:#eee;font-size:.82rem;outline:none}
+#zip-input:focus{border-color:#555;box-shadow:0 0 0 2px rgba(255,255,255,.05)}
+#zip-input::placeholder{color:#555}
+#zip-sort-btn{padding:5px 9px;background:#222;border:1px solid #3a3a3a;border-radius:5px;color:#888;font-size:.78rem;cursor:pointer;white-space:nowrap;transition:all .15s}
+#zip-sort-btn.active{background:#1a2a1a;border-color:#3a6a3a;color:#7bc97b}
+#zip-sort-btn:hover{border-color:#555;color:#bbb}
 
 .empty-msg{padding:24px 16px;color:#555;font-size:.85rem;text-align:center}
 
@@ -3208,7 +3357,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.0.2</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.1.0</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -3241,6 +3390,13 @@ tr.fav-row td:last-child{color:#4ade80}
         <button class="sel-btn" onclick="selectAll()">Select All</button>
         <button class="sel-btn" onclick="clearAll()">Clear All</button>
       </div>
+      <div class="zip-sort-row">
+        <input id="zip-input" type="text" maxlength="5" placeholder="ZIP code…"
+          autocomplete="postal-code" inputmode="numeric"
+          oninput="this.value=this.value.replace(/\D/g,'')"
+          onkeydown="if(event.key==='Enter')applyZipSort()">
+        <button id="zip-sort-btn" onclick="toggleZipSort()" title="Sort stores by distance from ZIP">📍 ZIP sort</button>
+      </div>
     </div>
 
     <div id="store-list"></div>
@@ -3256,6 +3412,11 @@ tr.fav-row td:last-child{color:#4ade80}
         style="display:none"
         title="One-time: tag all cached items with their store (enables instant browse)">
         ⬇ Populate Store Data
+      </button>
+      <button id="build-coords-btn" onclick="buildStoreCoords()"
+        style="display:none"
+        title="One-time: geocode all stores so ZIP sort works (~5 min)">
+        📍 Build ZIP Coords
       </button>
       <button id="reset-btn" onclick="resetData()"
         style="margin-top:6px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #5a2a2a;border-radius:5px;color:#a05050;font-size:.75rem;cursor:pointer"
@@ -3535,9 +3696,12 @@ async function loadData() {
   document.getElementById('s-stores').textContent = storeLabel;
   // Reveal sidebar action buttons now that stores are loaded
   document.getElementById('validate-stores-btn').style.display = '';
+  document.getElementById('build-coords-btn').style.display = '';
   if (allStores.length === 0) {
     appendLog('💡 No stores loaded — click "✓ Validate Stores" to build the store list from GC live data.', 'log-dim');
   }
+  // Load store coords and apply ZIP sort if a saved ZIP exists
+  _loadStoreCoords();
 }
 
 window._lastRunISO = null;
@@ -3597,6 +3761,127 @@ async function loadState() {
 
 // ── Refresh store list ────────────────────────────────────────────────────────
 
+// ── ZIP sort ──────────────────────────────────────────────────────────────────
+window._storeCoords  = {};   // {storeName: {lat, lng}}
+window._zipSortMode  = false;
+window._userLat      = null;
+window._userLng      = null;
+
+function _haversine(lat1, lng1, lat2, lng2) {
+  const R    = 3958.8;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a    = Math.sin(dLat/2)**2 +
+               Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLng/2)**2;
+  return Math.round(R * 2 * Math.asin(Math.sqrt(a)));
+}
+
+function _storeDistance(name) {
+  if (!window._userLat || !window._userLng) return Infinity;
+  const c = window._storeCoords[name];
+  if (!c) return Infinity;
+  return _haversine(window._userLat, window._userLng, c.lat, c.lng);
+}
+
+async function _loadStoreCoords() {
+  try {
+    const r = await fetch('/api/store-coords');
+    window._storeCoords = await r.json();
+  } catch(e) {}
+  // Restore saved ZIP
+  const savedZip = _lsGet('gc_zip', '');
+  if (savedZip) {
+    document.getElementById('zip-input').value = savedZip;
+    // If ZIP sort was active last session, re-apply silently
+    if (_lsGet('gc_zip_sort', false)) {
+      await _geocodeZip(savedZip, /*silent=*/true);
+    }
+  }
+}
+
+async function _geocodeZip(zip, silent=false) {
+  if (!zip || zip.length < 5) return false;
+  try {
+    const r = await fetch(`https://api.zippopotam.us/us/${zip}`);
+    if (!r.ok) { if (!silent) appendLog('❌ ZIP not found: ' + zip, 'log-err'); return false; }
+    const d = await r.json();
+    const place = d.places && d.places[0];
+    if (!place) { if (!silent) appendLog('❌ No location for ZIP ' + zip, 'log-err'); return false; }
+    window._userLat = parseFloat(place.latitude);
+    window._userLng = parseFloat(place.longitude);
+    _lsSet('gc_zip', zip);
+    return true;
+  } catch(e) {
+    if (!silent) appendLog('❌ ZIP lookup failed — check connection.', 'log-err');
+    return false;
+  }
+}
+
+async function applyZipSort() {
+  const zip = document.getElementById('zip-input').value.trim();
+  if (!zip || zip.length < 5) return;
+  const ok = await _geocodeZip(zip);
+  if (!ok) return;
+  window._zipSortMode = true;
+  _lsSet('gc_zip_sort', true);
+  document.getElementById('zip-sort-btn').classList.add('active');
+  document.getElementById('zip-sort-btn').textContent = '📍 Nearest first';
+  renderList();
+}
+
+function toggleZipSort() {
+  if (window._zipSortMode) {
+    // Turn off — go back to A-Z
+    window._zipSortMode = false;
+    _lsSet('gc_zip_sort', false);
+    document.getElementById('zip-sort-btn').classList.remove('active');
+    document.getElementById('zip-sort-btn').textContent = '📍 ZIP sort';
+    renderList();
+  } else {
+    applyZipSort();
+  }
+}
+
+async function buildStoreCoords() {
+  const btn = document.getElementById('build-coords-btn');
+  const coordCount = Object.keys(window._storeCoords).length;
+  if (coordCount > 0) {
+    const msg = `${coordCount} stores already geocoded. Re-run will skip cached stores and only add new ones.\n\nContinue?`;
+    if (!confirm(msg)) return;
+  }
+  if (running) { appendLog('Stop the current run first.', 'log-err'); return; }
+  btn.textContent = '⏳ Geocoding…';
+  btn.disabled = true;
+  running = true;
+  document.getElementById('res-panel').style.display = 'none';
+  document.getElementById('log').innerHTML = '';
+  const resp = await fetch('/api/build-store-coords', {method:'POST'});
+  if (!resp.ok) {
+    const e = await resp.json().catch(()=>({}));
+    appendLog('Error: ' + (e.error || resp.statusText), 'log-err');
+    btn.textContent = '📍 Build ZIP Coords';
+    btn.disabled = false;
+    running = false;
+    return;
+  }
+  appendLog('📍 Building store coordinates — ~5 min. Progress below. Do not close the page.', 'log-dim');
+  const es = new EventSource('/api/progress');
+  es.onmessage = async e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'ping') return;
+    if (msg.type === 'progress') { appendLog(msg.msg); return; }
+    if (msg.type === 'done') {
+      es.close(); running = false;
+      btn.textContent = '✓ ZIP Coords Built';
+      btn.disabled = false;
+      // Reload coords so ZIP sort works immediately
+      await _loadStoreCoords();
+      appendLog('✓ Store coordinates ready — enter a ZIP code and click 📍 ZIP sort.', 'log-dim');
+      updateCount();
+    }
+  };
+}
+
 // ── Mode switching ────────────────────────────────────────────────────────────
 let favsOnly = false;
 
@@ -3641,14 +3926,20 @@ function renderList(preserveChecked) {
   }
 
   let filtered = q ? stores.filter(s => s.toLowerCase().includes(q)) : stores;
-  // In favorites mode with a search, put favorited stores first
-  if (favsOnly && q) {
+
+  // Sort: ZIP mode → nearest first; favorites mode with search → favs first; else A-Z (allStores already sorted)
+  if (window._zipSortMode && window._userLat) {
+    filtered = [...filtered].sort((a, b) => _storeDistance(a) - _storeDistance(b));
+  } else if (favsOnly && q) {
     const favSet = new Set(favorites);
     filtered.sort((a, b) => (favSet.has(b) ? 1 : 0) - (favSet.has(a) ? 1 : 0));
   }
+
   el.innerHTML = '';
   filtered.forEach(name => {
     const isFav = favorites.includes(name);
+    const dist  = (window._zipSortMode && window._userLat) ? _storeDistance(name) : null;
+    const distLabel = dist !== null && dist !== Infinity ? dist + ' mi' : (window._zipSortMode ? '?' : '');
     const div   = document.createElement('div');
     div.className = 'store-row';
     div.dataset.name = name;
@@ -3657,6 +3948,7 @@ function renderList(preserveChecked) {
     div.innerHTML =
       `<input type="checkbox" id="${id}" value="${name}" ${isChecked ? 'checked' : ''}>` +
       `<label for="${id}">${name}</label>` +
+      (distLabel ? `<span class="store-dist">${distLabel}</span>` : '') +
       `<button class="fav-btn ${isFav?'active':''}" title="${isFav?'Remove from':'Add to'} favorites"
         onclick="toggleFav(event,'${name.replace(/'/g,"\\'")}',this)">★</button>`;
     div.querySelector('input').addEventListener('change', updateCount);
@@ -5764,7 +6056,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.0.2"
+APP_VERSION = "2.1.0"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
