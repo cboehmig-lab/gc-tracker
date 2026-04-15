@@ -3016,7 +3016,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 
 .results{flex:1;overflow-y:auto}
 .results-hdr{padding:8px 16px;font-size:.88rem;font-weight:600;color:#ccc;background:#111;position:sticky;top:0;z-index:1;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;gap:8px;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,.5)}
-.badge{background:#c00;color:#fff;font-size:.7rem;font-weight:700;padding:2px 7px;border-radius:10px}
+.badge{background:#c00;color:#fff;font-size:.7rem;font-weight:700;padding:2px 7px;border-radius:10px}.badge:empty{display:none}
 .cat-sel{padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer}
 .cat-sel:focus{border-color:#c00}
 #watchlist-toggle.wl-active,#cl-watchlist-toggle.wl-active{background:#c00;border-color:#c00;color:#fff}
@@ -3465,7 +3465,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.1.8</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.1.9</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -3552,7 +3552,7 @@ tr.fav-row td:last-child{color:#4ade80}
     <div class="results" id="res-panel" style="display:none">
       <div class="results-hdr">
         <span id="res-title">New Items</span>
-        <span class="badge" id="res-badge"></span>
+        <span class="badge" id="res-badge" style="display:none!important"></span>
         <button class="mobile-filter-toggle" id="gc-filter-toggle" onclick="toggleMobileFilters('gc')">
           <span class="toggle-arrow" id="gc-filter-arrow">▶</span> Filters
           <span class="filter-active-dot" id="gc-filter-dot"></span>
@@ -3566,8 +3566,8 @@ tr.fav-row td:last-child{color:#4ade80}
           class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
           🎯 Want List
         </button>
-        <span id="wl-count-badge" style="display:none;color:#4caf50;font-size:.78rem;font-weight:normal;white-space:nowrap;margin-left:2px"></span>
-        <a id="search-wl-link" onclick="searchWantList()" style="color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;text-decoration:none;margin-left:4px" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Filter to Want List</a>
+        <span id="wl-count-badge" onclick="searchWantList()" style="display:none;color:#4caf50;font-size:.78rem;font-weight:700;white-space:nowrap;margin-left:2px;cursor:pointer;text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'"></span>
+        <a id="search-wl-link" onclick="searchWantList()" style="display:none;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Filter to Want List</a>
         <div id="brand-dropdown" class="brand-dd" style="display:none;position:relative">
           <button id="brand-dd-btn" class="cat-sel" onclick="toggleBrandDropdown()" style="cursor:pointer;white-space:nowrap">All Brands ▾</button>
           <div id="brand-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:260px;max-height:320px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
@@ -4726,15 +4726,19 @@ function renderKeywordList() {
     el.innerHTML = '<div style="color:#555;font-size:.82rem;padding:8px 0">Your want list is empty. Add an item above.</div>';
     return;
   }
-  // Use index-based removal so any keyword (including ones with quotes) works safely
-  el.innerHTML = window._keywords.map((kw, i) =>
-    `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #222">
-      <span class="tag-kw" style="font-size:.75rem">${kw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span>
-      <span style="flex:1"></span>
-      <button onclick="removeKeywordAt(${i})"
-        style="background:none;border:none;color:#666;font-size:.85rem;cursor:pointer;padding:2px 6px" title="Remove">&#10005;</button>
-    </div>`
-  ).join('');
+  // Sort alphabetically (case-insensitive), preserving original indices for safe removal
+  const sorted = window._keywords
+    .map((kw, i) => ({kw, i}))
+    .sort((a, b) => a.kw.toLowerCase().localeCompare(b.kw.toLowerCase()));
+  el.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:7px;padding:10px 0">` +
+    sorted.map(({kw, i}) => {
+      const safe = kw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return `<span style="display:inline-flex;align-items:center;gap:5px;background:#0a5c2a;color:#4ade80;border:1px solid #2d6a2d;border-radius:14px;padding:4px 7px 4px 11px;font-size:.78rem;font-weight:600;white-space:nowrap">` +
+        `${safe}` +
+        `<button onclick="removeKeywordAt(${i})" style="background:none;border:none;color:#4ade80;opacity:.6;font-size:.75rem;cursor:pointer;padding:0 0 0 2px;line-height:1" title="Remove" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.6">&#10005;</button>` +
+        `</span>`;
+    }).join('') +
+  `</div>`;
 }
 
 function addKeyword() {
@@ -6291,7 +6295,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.1.8"
+APP_VERSION = "2.1.9"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
