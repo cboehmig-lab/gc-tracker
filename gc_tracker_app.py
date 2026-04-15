@@ -3465,7 +3465,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.1.7</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.1.8</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -3566,7 +3566,8 @@ tr.fav-row td:last-child{color:#4ade80}
           class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
           🎯 Want List
         </button>
-        <a id="search-wl-link" onclick="searchWantList()" style="color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;text-decoration:none;margin-left:2px" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Search Want List</a>
+        <span id="wl-count-badge" style="display:none;color:#4caf50;font-size:.78rem;font-weight:normal;white-space:nowrap;margin-left:2px"></span>
+        <a id="search-wl-link" onclick="searchWantList()" style="color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;text-decoration:none;margin-left:4px" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Filter to Want List</a>
         <div id="brand-dropdown" class="brand-dd" style="display:none;position:relative">
           <button id="brand-dd-btn" class="cat-sel" onclick="toggleBrandDropdown()" style="cursor:pointer;white-space:nowrap">All Brands ▾</button>
           <div id="brand-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:260px;max-height:320px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
@@ -4264,10 +4265,9 @@ async function _fetchBrowsePage(page) {
         ? `${_srvTotalCount.toLocaleString()} Want List matches nationwide`
         : 'No Want List matches found';
     } else if (_watchFilterActive) {
-      const _wlCount = _srvTotalCount;
-      document.getElementById('res-title').innerHTML =
-        `Want List <span style="color:#aaa;font-weight:normal">(${_wlCount.toLocaleString()} item${_wlCount !== 1 ? 's' : ''} found)</span>` +
-        `<button onclick="searchWantList()" style="background:none;border:1px solid #555;color:#7cb8f0;font-size:.75rem;padding:2px 9px;border-radius:10px;cursor:pointer;vertical-align:middle;margin-left:8px">Search Want List Now</button>`;
+      document.getElementById('res-title').textContent = _srvTotalCount > 0
+        ? `Want List — ${_srvTotalCount.toLocaleString()} item${_srvTotalCount !== 1 ? 's' : ''} found`
+        : 'Want List — no matches in selected stores';
       document.getElementById('res-badge').textContent = '';
     } else if (_globalSearchActive) {
       const label = _srvTotalCount > 0
@@ -4310,6 +4310,11 @@ async function _fetchBrowsePage(page) {
 
     // Scroll results to top on page change (use #res-body on mobile where .results is overflow:hidden)
     (document.getElementById('res-body') || document.querySelector('.results'))?.scrollTo(0, 0);
+
+    // Update want list count badge in toolbar (only when not already filtering by want list)
+    if (page === 1 && !_watchFilterActive && !_wantListSearchActive) {
+      _updateWantListCount();
+    }
 
   } finally {
     _srvLoading = false;
@@ -4863,8 +4868,38 @@ function searchWantList() {
 }
 
 function _resetWantListLink() {
-  document.getElementById('search-wl-link').textContent = 'Search Want List';
+  document.getElementById('search-wl-link').textContent = 'Filter to Want List';
   document.getElementById('search-wl-link').style.color = '#4ade80';
+}
+
+// Show how many want list items are available in the currently selected stores
+let _wlCountTimer = null;
+function _updateWantListCount() {
+  const badge = document.getElementById('wl-count-badge');
+  if (!badge) return;
+  if (!window._keywords || !window._keywords.length || !_srvStores || !_srvStores.length) {
+    badge.style.display = 'none';
+    return;
+  }
+  clearTimeout(_wlCountTimer);
+  _wlCountTimer = setTimeout(() => {
+    fetch('/api/browse', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        page: 1, per_page: 1, stores: _srvStores,
+        keywords: window._keywords, filter_want_list_only: true, new_ids: []
+      })
+    }).then(r => r.json()).then(d => {
+      const n = d.total_count || 0;
+      if (n > 0) {
+        badge.textContent = n.toLocaleString() + ' want list item' + (n !== 1 ? 's' : '') + ' available';
+        badge.style.display = 'inline';
+      } else {
+        badge.style.display = 'none';
+      }
+    }).catch(() => { badge.style.display = 'none'; });
+  }, 400);
 }
 
 function cancelReset() {
@@ -6256,7 +6291,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.1.7"
+APP_VERSION = "2.1.8"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
