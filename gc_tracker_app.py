@@ -3365,7 +3365,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.1.4</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.1.5</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -4615,11 +4615,12 @@ function renderKeywordList() {
     el.innerHTML = '<div style="color:#555;font-size:.82rem;padding:8px 0">Your want list is empty. Add an item above.</div>';
     return;
   }
-  el.innerHTML = window._keywords.map(kw =>
+  // Use index-based removal so any keyword (including ones with quotes) works safely
+  el.innerHTML = window._keywords.map((kw, i) =>
     `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #222">
-      <span class="tag-kw" style="font-size:.75rem">${kw.replace(/</g,'&lt;')}</span>
+      <span class="tag-kw" style="font-size:.75rem">${kw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span>
       <span style="flex:1"></span>
-      <button onclick="removeKeyword('${kw.replace(/'/g,"\\'")}')"
+      <button onclick="removeKeywordAt(${i})"
         style="background:none;border:none;color:#666;font-size:.85rem;cursor:pointer;padding:2px 6px" title="Remove">&#10005;</button>
     </div>`
   ).join('');
@@ -4641,6 +4642,13 @@ function addKeyword() {
 
 function removeKeyword(word) {
   window._keywords = window._keywords.filter(k => k.toLowerCase() !== word.toLowerCase());
+  _lsSet('keywords', window._keywords);
+  renderKeywordList();
+}
+
+function removeKeywordAt(i) {
+  // Index-based removal — safe for keywords containing any characters (quotes, etc.)
+  window._keywords.splice(i, 1);
   _lsSet('keywords', window._keywords);
   renderKeywordList();
 }
@@ -4860,19 +4868,26 @@ function showResults(msg, isBaseline) {
 
   const stoppedNote = msg.stopped ? ' (stopped early)' : '';
 
-  // New-item detection is now date-based and computed server-side.
-  // The server compares each item's date_listed (full ISO datetime from Algolia's
-  // startDate — the storefront publish date) against the previous scan. Items listed after
-  // the last scan are "new". This is immune to GC re-indexing issues.
+  // New-item detection is date-based, computed server-side.
+  // The server compares each item's date_listed (Algolia startDate) against this device's
+  // previous scan time. Items listed after that scan are "new".
   const newIdSet = new Set(msg.new_ids || []);
   const isFirstRun = msg.baseline;
-  const newCount = newIdSet.size;
+  const freshNewCount = newIdSet.size;
 
-  appendLog(`\\n✓ Done${stoppedNote} — ${msg.scanned.toLocaleString()} items scanned, ${isFirstRun ? 'initial database built' : newCount.toLocaleString() + ' new for you'}.`, 'log-dim');
+  // If this scan found new items, replace the NEW set. If it found 0, PRESERVE the
+  // existing set — running a second scan quickly shouldn't erase NEW tags from the first.
+  // Items leave the NEW list only when a subsequent scan finds something genuinely newer.
+  if (!isFirstRun && freshNewCount > 0) {
+    window._newIds = newIdSet;
+    _lsSet('new_ids', [...newIdSet]);
+  }
+  // (If freshNewCount === 0, window._newIds retains whatever was loaded at startup)
+  const displayNewCount = freshNewCount > 0 ? freshNewCount : (window._newIds ? window._newIds.size : 0);
+  const carryNote = (freshNewCount === 0 && displayNewCount > 0) ? ` (${displayNewCount} still marked NEW from previous scan)` : '';
 
-  // Save the NEW ids so they persist across page loads until next Check for New
-  window._newIds = newIdSet;
-  _lsSet('new_ids', [...newIdSet]);
+  appendLog(`\\n✓ Done${stoppedNote} — ${msg.scanned.toLocaleString()} items scanned, ${isFirstRun ? 'initial database built' : freshNewCount.toLocaleString() + ' new this scan' + carryNote}.`, 'log-dim');
+
   window._lastRunISO = msg.scan_time || new Date().toISOString();
   _lsSet('last_run', window._lastRunISO);
   _updateRelativeTime();
@@ -4880,7 +4895,7 @@ function showResults(msg, isBaseline) {
 
   // Check if any new items match the want list and show notification
   const wantMatchEl = document.getElementById('s-want-match');
-  if (newCount > 0 && window._keywords && window._keywords.length) {
+  if (freshNewCount > 0 && window._keywords && window._keywords.length) {
     // We need item details to check want list — fetch from server cache
     fetch('/api/browse', {
       method: 'POST',
@@ -4916,7 +4931,7 @@ function showResults(msg, isBaseline) {
   document.getElementById('res-search').value = '';
   document.getElementById('res-search-count').textContent = '';
   document.getElementById('res-title').textContent = `${msg.scanned.toLocaleString()} Items`;
-  document.getElementById('res-badge').textContent = newCount > 0 ? newCount + ' NEW' : '';
+  document.getElementById('res-badge').textContent = displayNewCount > 0 ? displayNewCount + ' NEW' : '';
 
   if (msg.scanned === 0) {
     document.getElementById('res-body').innerHTML = '<div class="no-res">Nothing found for selected stores.</div>';
@@ -4945,10 +4960,12 @@ function showResults(msg, isBaseline) {
   }
 
   // Small scan: render items client-side, marking isNew per-user
+  // Use the accumulated window._newIds (which may carry over from prior scan if this one found 0)
   _browseMode = 'local';
+  const effectiveNewIds = window._newIds instanceof Set ? window._newIds : new Set();
   window._tableData = (msg.items || []).map(item => ({
     ...item,
-    isNew: newIdSet.has(item.id),
+    isNew: effectiveNewIds.has(item.id),
     kwMatch: _itemMatchesKeyword(item),
   }));
   window._tableData.sort((a, b) => {
@@ -6133,7 +6150,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.1.4"
+APP_VERSION = "2.1.5"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
