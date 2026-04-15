@@ -215,10 +215,15 @@ def _build_store_coords(send_progress=None):
 
     _send("Step 2: Geocoding via Nominatim (1 req/sec)…")
 
-    nominatim_headers = {
-        "User-Agent": "GCTracker/2.1 (personal inventory tool; contact: admin@example.com)",
+    # Use a fresh session with clean API headers — NOT the shared _http session
+    # which carries browser-impersonation headers (Sec-Fetch-*, Accept: text/html)
+    # that cause Nominatim to reject requests.
+    nom_session = http.Session()
+    nom_session.headers.update({
+        "User-Agent": "GCTracker/2.1 (personal tool; non-commercial)",
+        "Accept": "application/json",
         "Accept-Language": "en-US,en;q=0.9",
-    }
+    })
 
     for i, store in enumerate(stores_to_geocode, 1):
         if store in existing:
@@ -235,7 +240,7 @@ def _build_store_coords(send_progress=None):
                 "https://nominatim.openstreetmap.org/search"
                 f"?q={http.utils.quote(query)}&format=json&limit=1&countrycodes=us"
             )
-            r = _http.get(url, headers=nominatim_headers, timeout=10)
+            r = nom_session.get(url, timeout=10)
             if r.status_code == 200:
                 results = r.json()
                 if results:
@@ -246,12 +251,15 @@ def _build_store_coords(send_progress=None):
                 else:
                     failed.append(store)
             else:
-                failed.append(store)
-        except Exception:
-            failed.append(store)
+                failed.append(f"{store}(HTTP {r.status_code})")
+        except Exception as e:
+            failed.append(f"{store}({type(e).__name__})")
 
-        if i % 25 == 0 or i == total - skipped:
-            _send(f"  [{i}/{total}] geocoded…")
+        if i % 25 == 0:
+            geocoded_so_far = len(coords) - len(existing)
+            _send(f"  [{i}/{total}] {geocoded_so_far} geocoded so far…")
+            # Save incrementally so progress isn't lost if interrupted
+            STORE_COORDS_FILE.write_text(json.dumps(coords, indent=2))
 
         time.sleep(1.0)  # Nominatim rate limit: 1 req/sec
 
@@ -3357,7 +3365,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.1.0</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.1.4</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -3391,11 +3399,11 @@ tr.fav-row td:last-child{color:#4ade80}
         <button class="sel-btn" onclick="clearAll()">Clear All</button>
       </div>
       <div class="zip-sort-row">
+        <button id="zip-sort-btn" onclick="toggleZipSort()" title="Sort stores by distance from ZIP">📍 ZIP sort</button>
         <input id="zip-input" type="text" maxlength="5" placeholder="ZIP code…"
           autocomplete="postal-code" inputmode="numeric"
           oninput="this.value=this.value.replace(/\D/g,'')"
           onkeydown="if(event.key==='Enter')applyZipSort()">
-        <button id="zip-sort-btn" onclick="toggleZipSort()" title="Sort stores by distance from ZIP">📍 ZIP sort</button>
       </div>
     </div>
 
@@ -3783,18 +3791,86 @@ function _storeDistance(name) {
   return _haversine(window._userLat, window._userLng, c.lat, c.lng);
 }
 
+function _setZipStatus(msg, active) {
+  const inp = document.getElementById('zip-input');
+  const btn = document.getElementById('zip-sort-btn');
+  if (msg) {
+    inp.placeholder = msg;
+    inp.disabled = active;
+    btn.disabled = active;
+  } else {
+    inp.placeholder = 'ZIP code…';
+    inp.disabled = false;
+    btn.disabled = false;
+  }
+}
+
 async function _loadStoreCoords() {
   try {
     const r = await fetch('/api/store-coords');
     window._storeCoords = await r.json();
   } catch(e) {}
-  // Restore saved ZIP
+
+  // If coords are empty, auto-build in the background
+  if (Object.keys(window._storeCoords).length === 0) {
+    _setZipStatus('Building ZIP database… please wait', true);
+    try {
+      const resp = await fetch('/api/build-store-coords', {method:'POST'});
+      if (resp.ok) {
+        const es = new EventSource('/api/progress');
+        es.onmessage = async e => {
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'ping') return;
+          if (msg.type === 'done') {
+            es.close();
+            // Reload the freshly built coords
+            try {
+              const r2 = await fetch('/api/store-coords');
+              window._storeCoords = await r2.json();
+            } catch(e2) {}
+            _setZipStatus(null, false);
+            // Now apply saved ZIP/sort (same as the normal coords-exist path)
+            const savedZip = _lsGet('gc_zip', '');
+            if (savedZip) {
+              document.getElementById('zip-input').value = savedZip;
+              if (_lsGet('gc_zip_sort', false)) {
+                await _geocodeZip(savedZip, /*silent=*/true);
+                if (window._userLat) {
+                  window._zipSortMode = true;
+                  document.getElementById('zip-sort-btn').classList.add('active');
+                  document.getElementById('zip-sort-btn').textContent = '📍 Nearest first';
+                  renderList();
+                }
+              }
+            } else {
+              document.getElementById('zip-input').placeholder = 'ZIP code — ready!';
+              setTimeout(() => {
+                document.getElementById('zip-input').placeholder = 'ZIP code…';
+              }, 3000);
+            }
+          }
+        };
+        return;  // Saved-ZIP restore handled in the done handler above
+      }
+    } catch(e) {}
+    // If build couldn't start (another run in progress, etc.), just reset quietly
+    _setZipStatus(null, false);
+    return;
+  }
+
+  // Coords already exist — restore saved ZIP
   const savedZip = _lsGet('gc_zip', '');
   if (savedZip) {
     document.getElementById('zip-input').value = savedZip;
     // If ZIP sort was active last session, re-apply silently
     if (_lsGet('gc_zip_sort', false)) {
       await _geocodeZip(savedZip, /*silent=*/true);
+      if (window._userLat) {
+        window._zipSortMode = true;
+        document.getElementById('zip-sort-btn').classList.add('active');
+        document.getElementById('zip-sort-btn').textContent = '📍 Nearest first';
+        renderList();
+      }
     }
   }
 }
@@ -4863,6 +4939,7 @@ function showResults(msg, isBaseline) {
       _globalSearchActive = false; _wantListSearchActive = false;
       _globalSearchQuery = '';
     }
+    _srvLoading = false;  // Reset guard — same defensive pattern as browseCache/clearGlobalSearch
     _fetchBrowsePage(1);
     return;
   }
@@ -6056,7 +6133,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.4"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
