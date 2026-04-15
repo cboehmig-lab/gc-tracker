@@ -1318,6 +1318,106 @@ def admin_devices():
     return Response("".join(html), content_type="text/html")
 
 
+@app.route("/admin/listing-patterns")
+def admin_listing_patterns():
+    """Analyze date_listed distribution across the cached inventory to reveal
+    how GC batches new listings — by day, hour-of-day, and minute within hour.
+    Protected by the same RESET_PASSWORD as /admin/devices."""
+    pw = request.args.get("pw", "")
+    admin_pw = os.environ.get("RESET_PASSWORD", "Beatle909!")
+    if pw != admin_pw:
+        return Response("Unauthorized", status=401)
+
+    _load_cat_cache()
+    from collections import Counter
+
+    dates, hours, minutes, exact_times, items_no_date = [], [], [], [], 0
+    for sku, item in _cat_cache.items():
+        dl = item.get("date_listed", "")
+        if not dl:
+            items_no_date += 1
+            continue
+        exact_times.append(dl)
+        # "2026-04-15T14:23:00Z"
+        try:
+            date_part  = dl[:10]          # "2026-04-15"
+            hour_part  = int(dl[11:13])   # 14
+            minute_part= int(dl[14:16])   # 23
+            dates.append(date_part)
+            hours.append(hour_part)
+            minutes.append(minute_part)
+        except Exception:
+            pass
+
+    total = len(exact_times) + items_no_date
+    by_date  = Counter(dates).most_common(60)
+    by_hour  = sorted(Counter(hours).items())
+    by_minute= sorted(Counter(minutes).items())
+
+    # Look for clustering: what fraction of items land on the exact :00 second?
+    on_zero_second = sum(1 for t in exact_times if t.endswith("T00:00:00Z") or t[17:19] == "00")
+    on_midnight    = sum(1 for t in exact_times if t[11:19] == "00:00:00")
+
+    # Sample of 40 most recent timestamps (sorted desc)
+    recent = sorted(exact_times, reverse=True)[:40]
+
+    S = '<style>body{font-family:monospace;background:#111;color:#ddd;padding:24px;max-width:900px}' \
+        'h2{color:#f5c518}table{border-collapse:collapse;width:100%}' \
+        'td,th{border:1px solid #333;padding:6px 10px;text-align:right}' \
+        'th{background:#222;text-align:center}td:first-child{text-align:left}' \
+        '.bar{display:inline-block;background:#c00;height:12px;vertical-align:middle}' \
+        '.note{color:#888;font-size:.85em;margin:8px 0}</style>'
+
+    def bar(n, mx):
+        w = int(n / mx * 200) if mx else 0
+        return f'<span class="bar" style="width:{w}px"></span> {n:,}'
+
+    html = [f'<html><head><title>GC Listing Patterns</title>{S}</head><body>']
+    html.append(f'<h2>GC Listing Pattern Analysis</h2>')
+    html.append(f'<p class="note">Total items in cache: <b>{total:,}</b> &nbsp;|&nbsp; '
+                f'With date_listed: <b>{len(exact_times):,}</b> &nbsp;|&nbsp; '
+                f'Missing date: <b>{items_no_date:,}</b></p>')
+    html.append(f'<p class="note">Items landing at exactly midnight UTC: <b>{on_midnight:,}</b> '
+                f'({on_midnight/len(exact_times)*100:.1f}%)</p>')
+    html.append(f'<p class="note">Items with :00 seconds: <b>{on_zero_second:,}</b> '
+                f'({on_zero_second/len(exact_times)*100:.1f}%) — '
+                f'(high % = timestamps truncated to the minute, not exact)</p>')
+
+    # By hour of day
+    mx_h = max(c for _,c in by_hour) if by_hour else 1
+    html.append('<h2>Items by Hour of Day (UTC)</h2><table><tr><th>Hour (UTC)</th><th>Count</th><th>Distribution</th></tr>')
+    for h, c in by_hour:
+        html.append(f'<tr><td>{h:02d}:00</td><td>{c:,}</td><td>{bar(c, mx_h)}</td></tr>')
+    html.append('</table>')
+
+    # By minute within the hour
+    mx_m = max(c for _,c in by_minute) if by_minute else 1
+    html.append('<h2>Items by Minute Within Hour</h2>'
+                '<p class="note">Spikes at :00 or other specific minutes = batch publishing</p>'
+                '<table><tr><th>Minute</th><th>Count</th><th>Distribution</th></tr>')
+    for m, c in by_minute:
+        html.append(f'<tr><td>:{m:02d}</td><td>{c:,}</td><td>{bar(c, mx_m)}</td></tr>')
+    html.append('</table>')
+
+    # By date (most recent first)
+    mx_d = max(c for _,c in by_date) if by_date else 1
+    html.append('<h2>Items by Date Listed (top 60)</h2><table><tr><th>Date</th><th>Count</th><th>Distribution</th></tr>')
+    for d, c in sorted(by_date, reverse=True):
+        html.append(f'<tr><td>{d}</td><td>{c:,}</td><td>{bar(c, mx_d)}</td></tr>')
+    html.append('</table>')
+
+    # 40 most recent timestamps raw
+    html.append('<h2>40 Most Recent date_listed Values</h2>'
+                '<p class="note">Look for identical timestamps (batch) vs spread-out (item-by-item)</p>'
+                '<table><tr><th>Timestamp (UTC)</th></tr>')
+    for t in recent:
+        html.append(f'<tr><td>{t}</td></tr>')
+    html.append('</table>')
+
+    html.append('</body></html>')
+    return Response("".join(html), content_type="text/html")
+
+
 @app.route("/api/reset", methods=["POST"])
 @login_required
 def api_reset():
@@ -3365,7 +3465,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.1.5</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.1.7</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -4163,6 +4263,12 @@ async function _fetchBrowsePage(page) {
       document.getElementById('res-title').textContent = _srvTotalCount > 0
         ? `${_srvTotalCount.toLocaleString()} Want List matches nationwide`
         : 'No Want List matches found';
+    } else if (_watchFilterActive) {
+      const _wlCount = _srvTotalCount;
+      document.getElementById('res-title').innerHTML =
+        `Want List <span style="color:#aaa;font-weight:normal">(${_wlCount.toLocaleString()} item${_wlCount !== 1 ? 's' : ''} found)</span>` +
+        `<button onclick="searchWantList()" style="background:none;border:1px solid #555;color:#7cb8f0;font-size:.75rem;padding:2px 9px;border-radius:10px;cursor:pointer;vertical-align:middle;margin-left:8px">Search Want List Now</button>`;
+      document.getElementById('res-badge').textContent = '';
     } else if (_globalSearchActive) {
       const label = _srvTotalCount > 0
         ? `${_srvTotalCount.toLocaleString()} results for "${_globalSearchQuery}"`
@@ -6150,7 +6256,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.1.5"
+APP_VERSION = "2.1.7"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
