@@ -3143,7 +3143,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .store-row label{flex:1;font-size:.855rem;cursor:pointer}
 .store-row.hidden{display:none}
 .store-dist{font-size:.72rem;color:#555;flex-shrink:0;min-width:44px;text-align:right}
-.store-dist-inline{font-size:.72rem;color:#555;font-style:italic;font-weight:400}
+.store-dist-inline{font-size:.72rem;color:#aaa;font-style:italic;font-weight:400}
 .fav-btn{background:none;border:none;cursor:pointer;font-size:1rem;line-height:1;padding:0 4px;color:#444;flex-shrink:0;transition:color .15s}
 .fav-btn.active{color:#f5c518}
 .fav-btn:hover{color:#f5c518}
@@ -3631,7 +3631,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.2.2</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.2.3</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -6325,7 +6325,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.2.2"
+APP_VERSION = "2.2.3"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
