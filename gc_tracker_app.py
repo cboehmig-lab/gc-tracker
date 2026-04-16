@@ -1442,6 +1442,23 @@ def admin_validate_stores():
     return Response(html, content_type="text/html")
 
 
+@app.route("/admin/clear-lock")
+def admin_clear_lock():
+    """Force-release the global scan lock if it's stuck after a crash.
+    Protected by the same RESET_PASSWORD as /admin/devices."""
+    pw = request.args.get("pw", "")
+    admin_pw = os.environ.get("RESET_PASSWORD", "Beatle909!")
+    if pw != admin_pw:
+        return Response("Unauthorized", status=401)
+    if _lock.locked():
+        try:
+            _lock.release()
+            return Response("✓ Lock cleared — scans can now run.", content_type="text/plain")
+        except RuntimeError:
+            return Response("Lock was already free (release failed).", content_type="text/plain")
+    return Response("Lock was not held — nothing to clear.", content_type="text/plain")
+
+
 @app.route("/admin/listing-patterns")
 def admin_listing_patterns():
     """Analyze date_listed distribution across the cached inventory to reveal
@@ -3176,7 +3193,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #global-search-clear:hover{background:#3a1a1a}
 
 #log{height:52px;overflow-y:auto;padding:6px 20px;font-family:monospace;font-size:.78rem;color:#6dba8d;line-height:1.75;flex-shrink:0;border-bottom:1px solid #2e2e2e}
-.log-dim{color:#555}
+.log-dim{color:#6dba8d}
 .log-err{color:#f88}
 
 .results{flex:1;overflow-y:auto}
@@ -3631,7 +3648,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.2.3</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.2.4</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -4310,7 +4327,7 @@ async function _fetchBrowsePage(page) {
       document.getElementById('res-title').textContent = 'No Browse Data Yet';
       document.getElementById('res-badge').textContent = '';
       document.getElementById('res-body').innerHTML =
-        '<div class="no-res">Click <b>⬇ Populate Store Data</b> in the left panel to tag your existing inventory with store names. This only needs to run once, then selecting stores will instantly show their inventory.</div>';
+        '<div class="no-res">Select stores on the left, then click <b>Check Now</b> to scan for inventory.</div>';
       ['cond-dropdown','cat-dropdown','subcat-dropdown'].forEach(id => document.getElementById(id).style.display = 'none');
       return;
     }
@@ -5060,7 +5077,7 @@ async function startRun(payload, isBaseline) {
     const e = await resp.json();
     running = false; stopBtn.style.display = 'none'; updateCount();
     if (resp.status === 409) {
-      appendLog('⏳ Another scan is already in progress — try again in a moment.', 'log-dim');
+      appendLog('⏳ Another scan is already in progress — if this is stale, use /admin/clear-lock?pw=… to reset.', 'log-dim');
     } else {
       appendLog('Error: ' + (e.error || resp.statusText), 'log-err');
     }
@@ -5135,7 +5152,7 @@ function showResults(msg, isBaseline) {
   const displayNewCount = freshNewCount > 0 ? freshNewCount : (window._newIds ? window._newIds.size : 0);
   const carryNote = (freshNewCount === 0 && displayNewCount > 0) ? ` (${displayNewCount} still marked NEW from previous scan)` : '';
 
-  appendLog(`\\n✓ Done${stoppedNote} — ${msg.scanned.toLocaleString()} items scanned, ${isFirstRun ? 'initial database built' : freshNewCount.toLocaleString() + ' new this scan' + carryNote}.`, 'log-dim');
+  appendLog(`\\n✓ Done${stoppedNote} — ${isFirstRun ? 'initial database built' : freshNewCount.toLocaleString() + ' new this scan' + carryNote}.`, 'log-dim');
 
   window._lastRunISO = msg.scan_time || new Date().toISOString();
   _lsSet('last_run', window._lastRunISO);
@@ -6325,7 +6342,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.2.3"
+APP_VERSION = "2.2.4"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
