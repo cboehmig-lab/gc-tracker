@@ -553,9 +553,16 @@ def parse_products(data, store_name: str = None) -> list[dict]:
                 name  = _clean_name(hit.get("displayName") or hit.get("name") or "")
                 if not sku or not name:
                     continue
-                price_raw = hit.get("price") or hit.get("listPrice") or 0
+                price_raw = hit.get("price") or 0
+                list_price_raw = hit.get("listPrice") or 0
+                # Fall back to listPrice if price is absent (listPrice is the original/regular price)
+                if not price_raw and list_price_raw:
+                    price_raw = list_price_raw
                 try:    price = float(price_raw) if price_raw else None
                 except: price = None
+                try:    list_price = float(list_price_raw) if list_price_raw else 0.0
+                except: list_price = 0.0
+                has_price_drop = bool(hit.get("priceDrop", False))
                 seo_url = hit.get("seoUrl") or ""
                 url = ("https://www.guitarcenter.com" + seo_url) if seo_url else ""
                 # Brand
@@ -602,18 +609,20 @@ def parse_products(data, store_name: str = None) -> list[dict]:
                 # Image ID for thumbnail hover
                 image_id = hit.get("imageId") or ""
                 products.append({
-                    "id":          sku,
-                    "name":        name,
-                    "brand":       brand,
-                    "price":       price,
-                    "store":       store,
-                    "location":    location,
-                    "url":         url,
-                    "condition":   condition,
-                    "category":    category,
-                    "subcategory": subcategory,
-                    "date_listed": date_str,
-                    "image_id":    image_id,
+                    "id":             sku,
+                    "name":           name,
+                    "brand":          brand,
+                    "price":          price,
+                    "list_price":     list_price,
+                    "has_price_drop": has_price_drop,
+                    "store":          store,
+                    "location":       location,
+                    "url":            url,
+                    "condition":      condition,
+                    "category":       category,
+                    "subcategory":    subcategory,
+                    "date_listed":    date_str,
+                    "image_id":       image_id,
                 })
         except Exception:
             pass
@@ -1524,6 +1533,7 @@ def api_browse():
     f_subs   = data.get("filter_subcategories") or []
     f_watched = bool(data.get("filter_watched"))
     f_want_only = bool(data.get("filter_want_list_only"))
+    f_price_drop_only = bool(data.get("filter_price_drop_only"))
     force_fav_sort = bool(data.get("force_fav_sort"))
 
     _load_cat_cache()
@@ -1604,26 +1614,31 @@ def api_browse():
         brand_lower = brand.lower()
         kw_hit = _kw_match(name_lower, brand_lower) if _kw_compiled else False
 
+        pd_amt   = cached.get("price_drop", 0) or 0
+        lp_raw   = cached.get("list_price", 0) or 0
+        pd_since = cached.get("price_drop_since", "") or ""
         all_items.append({
-            "id":         sku,
-            "name":       name,
-            "brand":      brand,
-            "price":      f"${price_raw:,.2f}" if price_raw else "",
-            "price_raw":  price_raw,
-            "price_drop": 0,
-            "store":      store,
-            "location":   location,
-            "url":        cached.get("url", ""),
-            "category":   category,
-            "subcategory":subcategory,
-            "condition":  condition,
-            "date":       _fmt_date(date_raw),
-            "date_raw":   date_raw,
-            "image_id":   cached.get("image_id", ""),
-            "watched":    sku in wl_ids,
-            "isNew":      sku in new_ids,
-            "kwMatch":    kw_hit,
-            "isFav":      store in fav_stores if fav_stores else False,
+            "id":               sku,
+            "name":             name,
+            "brand":            brand,
+            "price":            f"${price_raw:,.2f}" if price_raw else "",
+            "price_raw":        price_raw,
+            "list_price_raw":   lp_raw,
+            "price_drop":       pd_amt,
+            "price_drop_since": pd_since,
+            "store":            store,
+            "location":         location,
+            "url":              cached.get("url", ""),
+            "category":         category,
+            "subcategory":      subcategory,
+            "condition":        condition,
+            "date":             _fmt_date(date_raw),
+            "date_raw":         date_raw,
+            "image_id":         cached.get("image_id", ""),
+            "watched":          sku in wl_ids,
+            "isNew":            sku in new_ids,
+            "kwMatch":          kw_hit,
+            "isFav":            store in fav_stores if fav_stores else False,
         })
 
     total_unfiltered = len(all_items)
@@ -1648,6 +1663,8 @@ def api_browse():
             filtered = [i for i in filtered if _text_match(i)]
     if f_want_only:
         filtered = [i for i in filtered if i["kwMatch"]]
+    if f_price_drop_only:
+        filtered = [i for i in filtered if i.get("price_drop", 0) > 0]
     if f_watched:
         filtered = [i for i in filtered if i["watched"]]
     if f_brands:
@@ -1681,6 +1698,8 @@ def api_browse():
         filtered.sort(key=lambda x: x.get("price_raw") or 0, reverse=reverse)
     elif sort_field == "date":
         filtered.sort(key=lambda x: x.get("date_raw") or "", reverse=reverse)
+    elif sort_field == "price_drop_since":
+        filtered.sort(key=lambda x: x.get("price_drop_since") or "", reverse=reverse)
     else:
         filtered.sort(key=lambda x: (x.get(sort_field) or "").lower(), reverse=reverse)
 
@@ -1769,25 +1788,32 @@ def api_watchlist_items():
     items = []
     for sku, w in wl.items():
         price_raw = w.get("price", 0) or 0
+        # Pull latest price drop info from live cache if available
+        live = _cat_cache.get(sku, {})
+        pd_amt   = live.get("price_drop", 0) or w.get("price_drop", 0) or 0
+        lp_raw   = live.get("list_price", 0) or w.get("list_price", 0) or 0
+        pd_since = live.get("price_drop_since", "") or w.get("price_drop_since", "") or ""
         items.append({
-            "id":         sku,
-            "name":       w.get("name", ""),
-            "brand":      w.get("brand", ""),
-            "price":      f"${price_raw:,.2f}" if price_raw else "",
-            "price_raw":  price_raw,
-            "price_drop": 0,
-            "store":      w.get("store", ""),
-            "location":   w.get("location") or w.get("store", ""),
-            "url":        w.get("url", ""),
-            "category":   w.get("category", ""),
-            "subcategory":w.get("subcategory", ""),
-            "condition":  w.get("condition", ""),
-            "date":       _fmt_date(w.get("date_listed") or item_dates.get(sku, w.get("date_added",""))),
-            "date_raw":   w.get("date_listed") or item_dates.get(sku, w.get("date_added","")),
-            "image_id":   w.get("image_id", ""),
-            "isNew":      False,
-            "watched":    True,
-            "sold":       w.get("sold", False),
+            "id":               sku,
+            "name":             w.get("name", ""),
+            "brand":            w.get("brand", ""),
+            "price":            f"${price_raw:,.2f}" if price_raw else "",
+            "price_raw":        price_raw,
+            "list_price_raw":   lp_raw,
+            "price_drop":       pd_amt,
+            "price_drop_since": pd_since,
+            "store":            w.get("store", ""),
+            "location":         w.get("location") or w.get("store", ""),
+            "url":              w.get("url", ""),
+            "category":         w.get("category", ""),
+            "subcategory":      w.get("subcategory", ""),
+            "condition":        w.get("condition", ""),
+            "date":             _fmt_date(w.get("date_listed") or item_dates.get(sku, w.get("date_added",""))),
+            "date_raw":         w.get("date_listed") or item_dates.get(sku, w.get("date_added","")),
+            "image_id":         w.get("image_id", ""),
+            "isNew":            False,
+            "watched":          True,
+            "sold":             w.get("sold", False),
         })
     # Sold items at bottom
     items.sort(key=lambda x: x["sold"])
@@ -2801,10 +2827,19 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             condition = p.get("condition") or cached.get("condition", "")
             brand     = p.get("brand") or cached.get("brand", "")
             location  = p.get("location") or cached.get("location", p.get("store", ""))
-            # Price drop detection
-            new_price  = p.get("price") or 0
-            last_price = cached.get("price") or 0
-            price_drop = (last_price - new_price) if (last_price and new_price and new_price < last_price) else 0
+            # Price drop detection — use Algolia's native priceDrop flag + listPrice field
+            new_price       = p.get("price") or 0
+            new_list_price  = p.get("list_price") or 0
+            has_price_drop  = bool(p.get("has_price_drop", False))
+            price_drop_amt  = round(new_list_price - new_price, 2) if (has_price_drop and new_list_price > new_price) else 0
+            # Track when we FIRST detected this drop (preserves timestamp across scans)
+            prev_had_drop   = bool(cached.get("has_price_drop", False))
+            if has_price_drop and not prev_had_drop:
+                price_drop_since = run_time          # newly dropped this scan
+            elif has_price_drop:
+                price_drop_since = cached.get("price_drop_since", run_time)  # preserve
+            else:
+                price_drop_since = ""                # no longer dropped
             _cat_cache[sku] = {
                 "category":          cat,
                 "subcategory":       subcat,
@@ -2815,6 +2850,10 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                 "store":             p.get("store", ""),
                 "location":          location,
                 "price":             new_price,
+                "list_price":        new_list_price,
+                "has_price_drop":    has_price_drop,
+                "price_drop":        price_drop_amt,
+                "price_drop_since":  price_drop_since,
                 "available":         True,
                 "date_listed":       p.get("date_listed") or cached.get("date_listed", ""),
                 "image_id":          p.get("image_id") or cached.get("image_id", ""),
@@ -2826,7 +2865,8 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             p["condition"]   = condition
             p["brand"]       = brand
             p["location"]    = location
-            p["price_drop"]  = price_drop
+            p["price_drop"]  = price_drop_amt
+            p["list_price"]  = new_list_price
 
         # ── Mark sold items (not found in this scan) ────────────────────────────
         if not _stop_event.is_set():
@@ -2880,22 +2920,25 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
 
         def fmt(p):
             date_src = p.get("date_listed") or _cat_cache.get(p["id"], {}).get("date_listed", "")
+            lp = p.get("list_price") or 0
             return {
-                "id":         p["id"],
-                "name":       p["name"],
-                "brand":      p.get("brand", ""),
-                "price":      f"${p['price']:,.2f}" if p["price"] else "",
-                "price_raw":  p.get("price") or 0,
-                "price_drop": p.get("price_drop", 0),
-                "store":      p["store"],
-                "location":   p.get("location") or p.get("store", ""),
-                "url":        p["url"],
-                "category":   p.get("category", ""),
-                "subcategory":p.get("subcategory", ""),
-                "condition":  p.get("condition", ""),
-                "date":       _fmt_date(date_src),
-                "date_raw":   date_src,
-                "image_id":   p.get("image_id") or _cat_cache.get(p["id"], {}).get("image_id", ""),
+                "id":               p["id"],
+                "name":             p["name"],
+                "brand":            p.get("brand", ""),
+                "price":            f"${p['price']:,.2f}" if p["price"] else "",
+                "price_raw":        p.get("price") or 0,
+                "list_price_raw":   lp,
+                "price_drop":       p.get("price_drop", 0),
+                "price_drop_since": _cat_cache.get(p["id"], {}).get("price_drop_since", ""),
+                "store":            p["store"],
+                "location":         p.get("location") or p.get("store", ""),
+                "url":              p["url"],
+                "category":         p.get("category", ""),
+                "subcategory":      p.get("subcategory", ""),
+                "condition":        p.get("condition", ""),
+                "date":             _fmt_date(date_src),
+                "date_raw":         date_src,
+                "image_id":         p.get("image_id") or _cat_cache.get(p["id"], {}).get("image_id", ""),
             }
 
         # ── Per-device new-item detection ─────────────────────────────────────
@@ -3057,6 +3100,7 @@ td a:hover{color:#a8d4ff;text-decoration:underline}
 .tag{background:#c00;color:#fff;font-size:.64rem;font-weight:700;padding:2px 7px;border-radius:10px;letter-spacing:.2px}
 .tag-kw{background:#0a5c2a;color:#4ade80;font-size:.64rem;font-weight:700;padding:2px 7px;border-radius:10px;border:1px solid #2d6a2d;letter-spacing:.2px}
 .price-drop-val{color:#4ade80;cursor:default}
+.price-orig{color:#888;text-decoration:line-through;font-size:.85em;margin-right:2px}
 .tag-sold{background:#3a1a1a;color:#f87171;font-size:.62rem;font-weight:700;padding:2px 5px;border-radius:3px;border:1px solid #6a2d2d}
 .watch-btn{background:none;border:none;cursor:pointer;color:#444;font-size:1rem;line-height:1;padding:0 2px;transition:color .15s;flex-shrink:0}
 .watch-btn:hover{color:#f5c518}
@@ -3465,7 +3509,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.1.9</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.2.0</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -3561,6 +3605,10 @@ tr.fav-row td:last-child{color:#4ade80}
         <button id="watchlist-toggle" onclick="toggleWatchFilter()"
           class="cat-sel" style="border-color:#3a3a3a;color:#aaa;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
           ★ Watch List
+        </button>
+        <button id="price-drop-toggle" onclick="togglePriceDropFilter()"
+          class="cat-sel" style="border-color:#3a3a3a;color:#aaa;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
+          ↓ Price Drops
         </button>
         <button onclick="openKeywords()"
           class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
@@ -3705,6 +3753,7 @@ function _updateFilterDot() {
     (window._selectedCats && window._selectedCats.length) ||
     (window._selectedSubs && window._selectedSubs.length) ||
     _watchFilterActive ||
+    _priceDropFilterActive ||
     (document.getElementById('res-search').value.trim().length > 0);
   dot.classList.toggle('visible', !!hasFilters);
 }
@@ -3826,6 +3875,16 @@ function _timeAgo(iso) {
   if (diff < 86400) return Math.floor(diff / 3600) + ' hours ago';
   if (diff < 172800) return '1 day ago';
   return Math.floor(diff / 86400) + ' days ago';
+}
+
+function _fmtDropDate(iso) {
+  if (!iso) return '';
+  const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (diff < 86400)   return 'today';
+  if (diff < 172800)  return 'yesterday';
+  if (diff < 604800)  return Math.floor(diff / 86400) + ' days ago';
+  // Older than a week: show short date
+  return new Date(iso).toLocaleDateString(undefined, {month:'short', day:'numeric'});
 }
 
 function _updateRelativeTime() {
@@ -4171,6 +4230,7 @@ function updateCount() {
 let _browseTimer = null;
 let _skipBrowse = false;  // Set after a scan to prevent browseCache from overwriting results
 let _watchFilterActive = false;
+let _priceDropFilterActive = false;
 let _globalSearchActive = false;
 let _globalSearchQuery = '';
 let _wantListSearchActive = false;
@@ -4196,7 +4256,8 @@ function _getBrowseFilters() {
     filter_conditions:     window._selectedConds || [],
     filter_categories:     window._selectedCats || [],
     filter_subcategories:  window._selectedSubs || [],
-    filter_watched:        _watchFilterActive,
+    filter_watched:         _watchFilterActive,
+    filter_price_drop_only: _priceDropFilterActive,
   };
 }
 
@@ -4264,10 +4325,14 @@ async function _fetchBrowsePage(page) {
       document.getElementById('res-title').textContent = _srvTotalCount > 0
         ? `${_srvTotalCount.toLocaleString()} Want List matches nationwide`
         : 'No Want List matches found';
+    } else if (_priceDropFilterActive) {
+      document.getElementById('res-title').textContent = _srvTotalCount > 0
+        ? `↓ Price Drops — ${_srvTotalCount.toLocaleString()} item${_srvTotalCount !== 1 ? 's' : ''}`
+        : 'No price drops found in selected stores';
     } else if (_watchFilterActive) {
       document.getElementById('res-title').textContent = _srvTotalCount > 0
-        ? `Want List — ${_srvTotalCount.toLocaleString()} item${_srvTotalCount !== 1 ? 's' : ''} found`
-        : 'Want List — no matches in selected stores';
+        ? `Watch List — ${_srvTotalCount.toLocaleString()} item${_srvTotalCount !== 1 ? 's' : ''} found`
+        : 'Watch List — no matches in selected stores';
       document.getElementById('res-badge').textContent = '';
     } else if (_globalSearchActive) {
       const label = _srvTotalCount > 0
@@ -4364,8 +4429,13 @@ function _buildRowHtml(item) {
   const rowClass = [isSold ? 'sold-row' : '', item.isFav ? 'fav-row' : ''].filter(Boolean).join(' ');
   const brandCell = `<td>${item.brand ? esc(item.brand) : ''}</td>`;
   const hasDrop = item.price_drop > 0;
+  const dropSinceLabel = hasDrop && item.price_drop_since
+    ? ` · dropped ${_fmtDropDate(item.price_drop_since)}`
+    : '';
   const priceCell = hasDrop
-    ? `<td><span class="price-drop-val" title="Price drop! Down $${Math.round(item.price_drop)}">↓ ${item.price||''}</span></td>`
+    ? `<td><span class="price-drop-val" title="Price drop! Down $${item.price_drop.toFixed(2)}${dropSinceLabel}">` +
+      (item.list_price_raw > item.price_raw ? `<span class="price-orig">$${item.list_price_raw.toFixed(2)}</span> ` : '') +
+      `↓ ${item.price||''}</span></td>`
     : `<td>${item.price||''}</td>`;
   return `<tr class="${rowClass}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}" data-image-id="${esc(item.image_id)}">` +
     `<td>${isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
@@ -4623,6 +4693,8 @@ async function browseCache() {
     window._selectedSubs = []; _updateSubcatBtn(); _setSubList([]);
     _watchFilterActive = false;
     document.getElementById('watchlist-toggle').classList.remove('wl-active');
+    _priceDropFilterActive = false;
+    document.getElementById('price-drop-toggle').classList.remove('wl-active');
     _srvLoading = false;  // Cancel any in-flight request so store changes always land
     await _fetchBrowsePage(1);
   }, 300);
@@ -4681,6 +4753,25 @@ function toggleWatchFilter() {
 // Legacy showWatchList — now just activates the toggle
 async function showWatchList() {
   if (!_watchFilterActive) toggleWatchFilter();
+}
+
+function togglePriceDropFilter() {
+  _priceDropFilterActive = !_priceDropFilterActive;
+  const btn = document.getElementById('price-drop-toggle');
+  btn.classList.toggle('wl-active', _priceDropFilterActive);
+  if (_priceDropFilterActive) {
+    // Price Drop mode: sort by drop date descending (most recent first)
+    _srvSortField = 'price_drop_since';
+    _srvSortDir   = 'desc';
+    window._sortCol = null;  // not a user-clicked sort
+    // Deactivate other exclusive filters
+    _watchFilterActive = false;
+    document.getElementById('watchlist-toggle').classList.remove('wl-active');
+    _wantListSearchActive = false;
+  }
+  _updateFilterDot();
+  _srvPage = 1;
+  _fetchBrowsePage(1);
 }
 
 
@@ -4814,6 +4905,8 @@ function globalSearch() {
   window._selectedSubs = []; _updateSubcatBtn(); _setSubList([]);
   _watchFilterActive = false;
   document.getElementById('watchlist-toggle').classList.remove('wl-active');
+  _priceDropFilterActive = false;
+  document.getElementById('price-drop-toggle').classList.remove('wl-active');
   // Show the clear button
   document.getElementById('global-search-clear').style.display = '';
   _fetchBrowsePage(1);
@@ -4864,6 +4957,8 @@ function searchWantList() {
   window._selectedSubs = []; _updateSubcatBtn(); _setSubList([]);
   _watchFilterActive = false;
   document.getElementById('watchlist-toggle').classList.remove('wl-active');
+  _priceDropFilterActive = false;
+  document.getElementById('price-drop-toggle').classList.remove('wl-active');
   document.getElementById('global-search-clear').style.display = '';
   document.getElementById('global-search').value = '🎯 Want List Search';
   document.getElementById('search-wl-link').textContent = 'Clear Want List Search';
@@ -5095,6 +5190,8 @@ function showResults(msg, isBaseline) {
     window._sortCol = null; window._sortDir = 1;
     _watchFilterActive = false;
     document.getElementById('watchlist-toggle').classList.remove('wl-active');
+    _priceDropFilterActive = false;
+    document.getElementById('price-drop-toggle').classList.remove('wl-active');
     if (!_srvStores.length) {
       _globalSearchActive = false; _wantListSearchActive = false;
       _globalSearchQuery = '';
@@ -5680,10 +5777,14 @@ function clearFilters() {
   if (resSearch) { resSearch.value = ''; }
   document.getElementById('res-search-count').textContent = '';
   _updateResSearchClear();
-  // Also turn off watch filter if active
+  // Also turn off watch/price-drop filters if active
   if (_watchFilterActive) {
     _watchFilterActive = false;
     document.getElementById('watchlist-toggle').classList.remove('wl-active');
+  }
+  if (_priceDropFilterActive) {
+    _priceDropFilterActive = false;
+    document.getElementById('price-drop-toggle').classList.remove('wl-active');
   }
   // Bypass debounce — force-clear loading flag and re-fetch immediately
   _srvLoading = false;
@@ -6295,7 +6396,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.1.9"
+APP_VERSION = "2.2.0"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
