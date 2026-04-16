@@ -3050,7 +3050,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 
 /* ── ZIP sort row ── */
 .zip-sort-row{display:flex;align-items:center;gap:6px;margin-top:7px}
-#zip-input{flex:1;padding:5px 9px;border-radius:5px;background:#252525;border:1px solid #3a3a3a;color:#eee;font-size:.82rem;outline:none}
+#zip-input{width:80px;flex:none;padding:5px 9px;border-radius:5px;background:#252525;border:1px solid #3a3a3a;color:#eee;font-size:.82rem;outline:none}
 #zip-input:focus{border-color:#555;box-shadow:0 0 0 2px rgba(255,255,255,.05)}
 #zip-input::placeholder{color:#555}
 #zip-sort-btn{padding:5px 9px;background:#222;border:1px solid #3a3a3a;border-radius:5px;color:#888;font-size:.78rem;cursor:pointer;white-space:nowrap;transition:all .15s}
@@ -3617,7 +3617,7 @@ tr.fav-row td:last-child{color:#4ade80}
     <div id="log"><span class="log-dim">Ready — select stores and click Run, or build a full baseline.</span></div>
     <div class="results" id="res-panel" style="display:none">
       <div class="results-hdr">
-        <span id="res-title">New Items</span>
+        <span id="res-title" style="display:none"></span>
         <span class="badge" id="res-badge" style="display:none!important"></span>
         <button class="mobile-filter-toggle" id="gc-filter-toggle" onclick="toggleMobileFilters('gc')">
           <span class="toggle-arrow" id="gc-filter-arrow">▶</span> Filters
