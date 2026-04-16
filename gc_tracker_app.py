@@ -201,6 +201,16 @@ def _build_store_coords(send_progress=None):
     total = len(stores_to_geocode)
     _send(f"  Found {total} stores to geocode.")
 
+    # Build location fallback map from cache (e.g. "South Austin" → "Austin, TX")
+    # Used when the store name alone doesn't geocode (GC uses internal names Nominatim can't find)
+    _load_cat_cache()
+    name_to_location: dict[str, str] = {}
+    for item in _cat_cache.values():
+        sn = item.get("store", "")
+        loc = item.get("location", "")
+        if sn and loc and sn not in name_to_location:
+            name_to_location[sn] = loc
+
     # Load existing coords so we can skip already-geocoded stores
     existing: dict = {}
     if STORE_COORDS_FILE.exists():
@@ -241,17 +251,29 @@ def _build_store_coords(send_progress=None):
                 f"?q={http.utils.quote(query)}&format=json&limit=1&countrycodes=us"
             )
             r = nom_session.get(url, timeout=10)
-            if r.status_code == 200:
-                results = r.json()
-                if results:
-                    coords[store] = {
-                        "lat": float(results[0]["lat"]),
-                        "lng": float(results[0]["lon"]),
-                    }
-                else:
-                    failed.append(store)
-            else:
+            results = r.json() if r.status_code == 200 else []
+            # Fallback: if store name didn't geocode, try with the Algolia location string
+            # e.g. "Guitar Center South Austin TX" → "Guitar Center Austin, TX"
+            if not results and store in name_to_location:
+                loc = name_to_location[store]
+                fallback_query = f"Guitar Center {loc}"
+                time.sleep(1.0)
+                r2 = nom_session.get(
+                    "https://nominatim.openstreetmap.org/search"
+                    f"?q={http.utils.quote(fallback_query)}&format=json&limit=1&countrycodes=us",
+                    timeout=10
+                )
+                if r2.status_code == 200:
+                    results = r2.json()
+            if results:
+                coords[store] = {
+                    "lat": float(results[0]["lat"]),
+                    "lng": float(results[0]["lon"]),
+                }
+            elif r.status_code != 200:
                 failed.append(f"{store}(HTTP {r.status_code})")
+            else:
+                failed.append(store)
         except Exception as e:
             failed.append(f"{store}({type(e).__name__})")
 
@@ -3509,7 +3531,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.2.0</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.2.1</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -3543,7 +3565,7 @@ tr.fav-row td:last-child{color:#4ade80}
         <button class="sel-btn" onclick="clearAll()">Clear All</button>
       </div>
       <div class="zip-sort-row">
-        <button id="zip-sort-btn" onclick="toggleZipSort()" title="Sort stores by distance from ZIP">📍 ZIP sort</button>
+        <button id="zip-sort-btn" onclick="toggleZipSort()" title="Sort stores by distance from ZIP">📍 ZIP Sort</button>
         <input id="zip-input" type="text" maxlength="5" placeholder="ZIP code…"
           autocomplete="postal-code" inputmode="numeric"
           oninput="this.value=this.value.replace(/\D/g,'')"
@@ -3998,7 +4020,7 @@ async function _loadStoreCoords() {
                 if (window._userLat) {
                   window._zipSortMode = true;
                   document.getElementById('zip-sort-btn').classList.add('active');
-                  document.getElementById('zip-sort-btn').textContent = '📍 Nearest first';
+                  document.getElementById('zip-sort-btn').textContent = '↕ A-Z Sort';
                   renderList();
                 }
               }
@@ -4028,7 +4050,7 @@ async function _loadStoreCoords() {
       if (window._userLat) {
         window._zipSortMode = true;
         document.getElementById('zip-sort-btn').classList.add('active');
-        document.getElementById('zip-sort-btn').textContent = '📍 Nearest first';
+        document.getElementById('zip-sort-btn').textContent = '↕ A-Z Sort';
         renderList();
       }
     }
@@ -4061,7 +4083,7 @@ async function applyZipSort() {
   window._zipSortMode = true;
   _lsSet('gc_zip_sort', true);
   document.getElementById('zip-sort-btn').classList.add('active');
-  document.getElementById('zip-sort-btn').textContent = '📍 Nearest first';
+  document.getElementById('zip-sort-btn').textContent = '↕ A-Z Sort';
   renderList();
 }
 
@@ -4071,7 +4093,7 @@ function toggleZipSort() {
     window._zipSortMode = false;
     _lsSet('gc_zip_sort', false);
     document.getElementById('zip-sort-btn').classList.remove('active');
-    document.getElementById('zip-sort-btn').textContent = '📍 ZIP sort';
+    document.getElementById('zip-sort-btn').textContent = '📍 ZIP Sort';
     renderList();
   } else {
     applyZipSort();
@@ -6396,7 +6418,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.2.1"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
