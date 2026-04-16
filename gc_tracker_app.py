@@ -1349,6 +1349,99 @@ def admin_devices():
     return Response("".join(html), content_type="text/html")
 
 
+def _admin_task_page(title: str, api_path: str, description: str, pw: str) -> str:
+    """Shared HTML template for long-running admin task pages (build-coords, validate-stores)."""
+    admin_pw = os.environ.get("RESET_PASSWORD", "Beatle909!")
+    if pw != admin_pw:
+        return None  # caller should return 401
+    safe_api  = api_path.replace('"', '')
+    safe_title = title.replace('<', '').replace('>', '')
+    safe_desc  = description.replace('<', '').replace('>', '')
+    safe_pw    = admin_pw.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'")
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>{safe_title} — GC Tracker Admin</title>
+<style>
+  body{{background:#111;color:#ddd;font-family:monospace;padding:40px;max-width:800px}}
+  h2{{color:#eee;margin-bottom:4px}} p{{color:#888;margin-top:0}}
+  button{{padding:8px 20px;background:#c00;color:#fff;border:none;border-radius:5px;
+          font-size:1rem;cursor:pointer;margin-top:16px}}
+  button:disabled{{background:#555;cursor:default}}
+  #log{{margin-top:20px;background:#1a1a1a;border:1px solid #333;border-radius:6px;
+        padding:16px;min-height:120px;white-space:pre-wrap;font-size:.82rem;line-height:1.5}}
+  .done{{color:#4ade80}} .err{{color:#f88}}
+</style></head><body>
+<h2>🛠 {safe_title}</h2>
+<p>{safe_desc}</p>
+<button id="run-btn" onclick="run()">▶ Run Now</button>
+<div id="log">Waiting…</div>
+<script>
+async function run() {{
+  const btn = document.getElementById('run-btn');
+  const log = document.getElementById('log');
+  btn.disabled = true; btn.textContent = '⏳ Running…';
+  log.textContent = 'Starting…\\n';
+  const resp = await fetch('{safe_api}', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{pw: '{safe_pw}'}})
+  }});
+  if (!resp.ok) {{
+    const e = await resp.json().catch(()=>({{}}));
+    log.textContent += '❌ Error: ' + (e.error || resp.statusText) + '\\n';
+    btn.disabled = false; btn.textContent = '▶ Run Now';
+    return;
+  }}
+  const es = new EventSource('/api/progress');
+  es.onmessage = e => {{
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'ping') return;
+    if (msg.type === 'progress') {{ log.textContent += (msg.msg || '') + '\\n'; log.scrollTop = log.scrollHeight; return; }}
+    if (msg.type === 'done') {{
+      es.close();
+      log.innerHTML += '<span class="done">\\n✓ Done.</span>';
+      btn.disabled = false; btn.textContent = '▶ Run Again';
+    }}
+  }};
+  es.onerror = () => {{ es.close(); log.innerHTML += '<span class="err">\\nConnection lost.</span>'; btn.disabled = false; btn.textContent = '▶ Run Now'; }};
+}}
+</script></body></html>"""
+
+
+@app.route("/admin/build-coords")
+def admin_build_coords():
+    """Admin page to geocode all stores and build gc_store_coords.json."""
+    pw = request.args.get("pw", "")
+    html = _admin_task_page(
+        title="Build Store Coordinates",
+        api_path="/api/build-store-coords",
+        description="Geocodes all GC stores via Nominatim (~1 req/sec). Takes ~5 min. "
+                    "Skips stores already in gc_store_coords.json. "
+                    "Re-run after adding new stores or to fix missing ones.",
+        pw=pw,
+    )
+    if html is None:
+        return Response("Unauthorized", status=401)
+    return Response(html, content_type="text/html")
+
+
+@app.route("/admin/validate-stores")
+def admin_validate_stores():
+    """Admin page to validate and clean up the store list."""
+    pw = request.args.get("pw", "")
+    html = _admin_task_page(
+        title="Validate Stores",
+        api_path="/api/validate-stores",
+        description="Checks every store for 404s, auto-removes dead stores, "
+                    "renames any whose slugs changed, then rebuilds the store list from GC live data. "
+                    "Takes ~0.5s per store.",
+        pw=pw,
+    )
+    if html is None:
+        return Response("Unauthorized", status=401)
+    return Response(html, content_type="text/html")
+
+
 @app.route("/admin/listing-patterns")
 def admin_listing_patterns():
     """Analyze date_listed distribution across the cached inventory to reveal
@@ -2485,6 +2578,9 @@ def _populate_store_data(selected_stores: list = None):
 @app.route("/api/validate-stores", methods=["POST"])
 @login_required
 def api_validate_stores():
+    admin_pw = os.environ.get("RESET_PASSWORD", "Beatle909!")
+    if request.json.get("pw") != admin_pw:
+        return jsonify({"error": "Unauthorized"}), 401
     if not _lock.acquire(blocking=False):
         return jsonify({"error": "A run is already in progress."}), 409
     _stop_event.clear()
@@ -2511,6 +2607,9 @@ def api_store_coords():
 def api_build_store_coords():
     """Trigger a one-time geocoding run to build gc_store_coords.json.
     Uses the existing SSE stream — progress shows up in the log panel."""
+    admin_pw = os.environ.get("RESET_PASSWORD", "Beatle909!")
+    if (request.json or {}).get("pw") != admin_pw:
+        return jsonify({"error": "Unauthorized"}), 401
     if not _lock.acquire(blocking=False):
         return jsonify({"error": "A run is already in progress."}), 409
     _stop_event.clear()
@@ -3044,6 +3143,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .store-row label{flex:1;font-size:.855rem;cursor:pointer}
 .store-row.hidden{display:none}
 .store-dist{font-size:.72rem;color:#555;flex-shrink:0;min-width:44px;text-align:right}
+.store-dist-inline{font-size:.72rem;color:#555;font-style:italic;font-weight:400}
 .fav-btn{background:none;border:none;cursor:pointer;font-size:1rem;line-height:1;padding:0 4px;color:#444;flex-shrink:0;transition:color .15s}
 .fav-btn.active{color:#f5c518}
 .fav-btn:hover{color:#f5c518}
@@ -3531,7 +3631,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.2.1</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.2.2</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -3577,21 +3677,6 @@ tr.fav-row td:last-child{color:#4ade80}
 
     <div class="left-footer">
       <div id="sel-count">0 stores selected</div>
-      <button id="validate-stores-btn" onclick="validateStores()"
-        style="display:none"
-        title="Check all stores and remove any that no longer exist">
-        ✓ Validate Stores
-      </button>
-      <button id="populate-store-btn" onclick="populateStoreData()"
-        style="display:none"
-        title="One-time: tag all cached items with their store (enables instant browse)">
-        ⬇ Populate Store Data
-      </button>
-      <button id="build-coords-btn" onclick="buildStoreCoords()"
-        style="display:none"
-        title="One-time: geocode all stores so ZIP sort works (~5 min)">
-        📍 Build ZIP Coords
-      </button>
       <button id="reset-btn" onclick="resetData()"
         style="margin-top:6px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #5a2a2a;border-radius:5px;color:#a05050;font-size:.75rem;cursor:pointer"
         title="Delete all cached data and start fresh">
@@ -3874,11 +3959,8 @@ async function loadData() {
   const storeLabel = info.count ? info.count : allStores.length;
   document.getElementById('hdr-status').textContent = storeLabel + ' stores available';
   document.getElementById('s-stores').textContent = storeLabel;
-  // Reveal sidebar action buttons now that stores are loaded
-  document.getElementById('validate-stores-btn').style.display = '';
-  document.getElementById('build-coords-btn').style.display = '';
   if (allStores.length === 0) {
-    appendLog('💡 No stores loaded — click "✓ Validate Stores" to build the store list from GC live data.', 'log-dim');
+    appendLog('💡 No stores loaded yet — a scan will populate them automatically.', 'log-dim');
   }
   // Load store coords and apply ZIP sort if a saved ZIP exists
   _loadStoreCoords();
@@ -3988,73 +4070,12 @@ function _setZipStatus(msg, active) {
 }
 
 async function _loadStoreCoords() {
+  // Load server-side coords (shared for all users, built by admin)
   try {
     const r = await fetch('/api/store-coords');
     window._storeCoords = await r.json();
   } catch(e) {}
-
-  // If coords are empty, auto-build in the background
-  if (Object.keys(window._storeCoords).length === 0) {
-    _setZipStatus('Building ZIP database… please wait', true);
-    try {
-      const resp = await fetch('/api/build-store-coords', {method:'POST'});
-      if (resp.ok) {
-        const es = new EventSource('/api/progress');
-        es.onmessage = async e => {
-          const msg = JSON.parse(e.data);
-          if (msg.type === 'ping') return;
-          if (msg.type === 'done') {
-            es.close();
-            // Reload the freshly built coords
-            try {
-              const r2 = await fetch('/api/store-coords');
-              window._storeCoords = await r2.json();
-            } catch(e2) {}
-            _setZipStatus(null, false);
-            // Now apply saved ZIP/sort (same as the normal coords-exist path)
-            const savedZip = _lsGet('gc_zip', '');
-            if (savedZip) {
-              document.getElementById('zip-input').value = savedZip;
-              if (_lsGet('gc_zip_sort', false)) {
-                await _geocodeZip(savedZip, /*silent=*/true);
-                if (window._userLat) {
-                  window._zipSortMode = true;
-                  document.getElementById('zip-sort-btn').classList.add('active');
-                  document.getElementById('zip-sort-btn').textContent = '↕ A-Z Sort';
-                  renderList();
-                }
-              }
-            } else {
-              document.getElementById('zip-input').placeholder = 'ZIP code — ready!';
-              setTimeout(() => {
-                document.getElementById('zip-input').placeholder = 'ZIP code…';
-              }, 3000);
-            }
-          }
-        };
-        return;  // Saved-ZIP restore handled in the done handler above
-      }
-    } catch(e) {}
-    // If build couldn't start (another run in progress, etc.), just reset quietly
-    _setZipStatus(null, false);
-    return;
-  }
-
-  // Coords already exist — restore saved ZIP
-  const savedZip = _lsGet('gc_zip', '');
-  if (savedZip) {
-    document.getElementById('zip-input').value = savedZip;
-    // If ZIP sort was active last session, re-apply silently
-    if (_lsGet('gc_zip_sort', false)) {
-      await _geocodeZip(savedZip, /*silent=*/true);
-      if (window._userLat) {
-        window._zipSortMode = true;
-        document.getElementById('zip-sort-btn').classList.add('active');
-        document.getElementById('zip-sort-btn').textContent = '↕ A-Z Sort';
-        renderList();
-      }
-    }
-  }
+  // No auto-restore of ZIP or sort — user must type their ZIP each session
 }
 
 async function _geocodeZip(zip, silent=false) {
@@ -4067,7 +4088,7 @@ async function _geocodeZip(zip, silent=false) {
     if (!place) { if (!silent) appendLog('❌ No location for ZIP ' + zip, 'log-err'); return false; }
     window._userLat = parseFloat(place.latitude);
     window._userLng = parseFloat(place.longitude);
-    _lsSet('gc_zip', zip);
+    // Don't persist ZIP — user types it fresh each session
     return true;
   } catch(e) {
     if (!silent) appendLog('❌ ZIP lookup failed — check connection.', 'log-err');
@@ -4081,7 +4102,7 @@ async function applyZipSort() {
   const ok = await _geocodeZip(zip);
   if (!ok) return;
   window._zipSortMode = true;
-  _lsSet('gc_zip_sort', true);
+  // (ZIP sort state is not persisted — cleared on page load)
   document.getElementById('zip-sort-btn').classList.add('active');
   document.getElementById('zip-sort-btn').textContent = '↕ A-Z Sort';
   renderList();
@@ -4091,7 +4112,7 @@ function toggleZipSort() {
   if (window._zipSortMode) {
     // Turn off — go back to A-Z
     window._zipSortMode = false;
-    _lsSet('gc_zip_sort', false);
+    // (not persisted)
     document.getElementById('zip-sort-btn').classList.remove('active');
     document.getElementById('zip-sort-btn').textContent = '📍 ZIP Sort';
     renderList();
@@ -4100,45 +4121,9 @@ function toggleZipSort() {
   }
 }
 
-async function buildStoreCoords() {
-  const btn = document.getElementById('build-coords-btn');
-  const coordCount = Object.keys(window._storeCoords).length;
-  if (coordCount > 0) {
-    const msg = `${coordCount} stores already geocoded. Re-run will skip cached stores and only add new ones.\n\nContinue?`;
-    if (!confirm(msg)) return;
-  }
-  if (running) { appendLog('Stop the current run first.', 'log-err'); return; }
-  btn.textContent = '⏳ Geocoding…';
-  btn.disabled = true;
-  running = true;
-  document.getElementById('res-panel').style.display = 'none';
-  document.getElementById('log').innerHTML = '';
-  const resp = await fetch('/api/build-store-coords', {method:'POST'});
-  if (!resp.ok) {
-    const e = await resp.json().catch(()=>({}));
-    appendLog('Error: ' + (e.error || resp.statusText), 'log-err');
-    btn.textContent = '📍 Build ZIP Coords';
-    btn.disabled = false;
-    running = false;
-    return;
-  }
-  appendLog('📍 Building store coordinates — ~5 min. Progress below. Do not close the page.', 'log-dim');
-  const es = new EventSource('/api/progress');
-  es.onmessage = async e => {
-    const msg = JSON.parse(e.data);
-    if (msg.type === 'ping') return;
-    if (msg.type === 'progress') { appendLog(msg.msg); return; }
-    if (msg.type === 'done') {
-      es.close(); running = false;
-      btn.textContent = '✓ ZIP Coords Built';
-      btn.disabled = false;
-      // Reload coords so ZIP sort works immediately
-      await _loadStoreCoords();
-      appendLog('✓ Store coordinates ready — enter a ZIP code and click 📍 ZIP sort.', 'log-dim');
-      updateCount();
-    }
-  };
-}
+// buildStoreCoords / validateStores are admin-only — use /admin/build-coords and /admin/validate-stores
+function buildStoreCoords() {}
+function validateStores() {}
 
 // ── Mode switching ────────────────────────────────────────────────────────────
 let favsOnly = false;
@@ -4197,7 +4182,10 @@ function renderList(preserveChecked) {
   filtered.forEach(name => {
     const isFav = favorites.includes(name);
     const dist  = (window._zipSortMode && window._userLat) ? _storeDistance(name) : null;
-    const distLabel = dist !== null && dist !== Infinity ? dist + ' mi' : (window._zipSortMode ? '?' : '');
+    // Distance suffix embedded in label: "Austin (7 mi)" — only in ZIP sort mode
+    const distSuffix = dist !== null && dist !== Infinity
+      ? ` <span class="store-dist-inline">(${dist.toLocaleString()} mi)</span>`
+      : (window._zipSortMode ? ' <span class="store-dist-inline">(?)</span>' : '');
     const div   = document.createElement('div');
     div.className = 'store-row';
     div.dataset.name = name;
@@ -4205,8 +4193,7 @@ function renderList(preserveChecked) {
     const isChecked = checked.has(name);
     div.innerHTML =
       `<input type="checkbox" id="${id}" value="${name}" ${isChecked ? 'checked' : ''}>` +
-      `<label for="${id}">${name}</label>` +
-      (distLabel ? `<span class="store-dist">${distLabel}</span>` : '') +
+      `<label for="${id}">${name}${distSuffix}</label>` +
       `<button class="fav-btn ${isFav?'active':''}" title="${isFav?'Remove from':'Add to'} favorites"
         onclick="toggleFav(event,'${name.replace(/'/g,"\\'")}',this)">★</button>`;
     div.querySelector('input').addEventListener('change', updateCount);
@@ -5847,92 +5834,12 @@ function filterResults() {
 }
 
 // ── Populate store data (one-time migration) ──────────────────────────────────
-async function populateStoreData() {
-  if (running) { appendLog('Stop the current run first.', 'log-err'); return; }
-  const selected = getSelected();
-  const btn = document.getElementById('populate-store-btn');
-  const resp = await fetch('/api/populate-store-data', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({stores: selected})
-  });
-  if (!resp.ok) {
-    const e = await resp.json();
-    appendLog('Error: ' + e.error, 'log-err');
-    return;
-  }
-  running = true; updateCount();
-  btn.textContent = '⏳ Populating…';
-  btn.disabled = true;
-  document.getElementById('stop-btn').style.display = 'inline-block';
-  document.getElementById('stop-btn').disabled = false;
-  document.getElementById('log').innerHTML = '';
-  const label = selected.length ? selected.length + ' store(s)' : 'all stores';
-  appendLog('Tagging cached items for ' + label + ' with store names. You can stop at any time.');
-  const es = new EventSource('/api/progress');
-  es.onmessage = e => {
-    const msg = JSON.parse(e.data);
-    if (msg.type === 'ping') return;
-    if (msg.type === 'progress') { appendLog(msg.msg); return; }
-    if (msg.type === 'done') {
-      es.close(); running = false;
-      document.getElementById('stop-btn').style.display = 'none';
-      btn.textContent = '✓ Store Data Populated';
-      btn.disabled = false;
-      updateCount();
-    }
-  };
-}
+// populateStoreData is admin-only
+function populateStoreData() {}
 
-// ── Validate Stores ───────────────────────────────────────────────────────────
-function validateStores() {
-  if (running) { appendLog('Stop the current run before validating.', 'log-err'); return; }
-  document.getElementById('vs-modal').style.display = 'flex';
-}
-
-function cancelValidate() {
-  document.getElementById('vs-modal').style.display = 'none';
-}
-
-async function startValidate(clearBlocklist) {
-  document.getElementById('vs-modal').style.display = 'none';
-
-  if (clearBlocklist) {
-    await fetch('/api/clear-blocklist', {method: 'POST'});
-    appendLog('Blocklist cleared — all stores will be re-evaluated.', 'log-dim');
-  }
-
-  const btn = document.getElementById('validate-stores-btn');
-  const resp = await fetch('/api/validate-stores', {method: 'POST'});
-  if (!resp.ok) {
-    const e = await resp.json();
-    appendLog('Validate error: ' + e.error, 'log-err');
-    return;
-  }
-  running = true; updateCount();
-  btn.textContent = '⏳ Validating…';
-  btn.disabled = true;
-  document.getElementById('stop-btn').style.display = 'inline-block';
-  document.getElementById('stop-btn').disabled = false;
-  document.getElementById('stop-btn').textContent = '⏹ Stop';
-  document.getElementById('log').innerHTML = '';
-  appendLog('Checking all stores for 404s, then rebuilding from GC live data…');
-
-  const es = new EventSource('/api/progress');
-  es.onmessage = e => {
-    const msg = JSON.parse(e.data);
-    if (msg.type === 'ping') return;
-    if (msg.type === 'progress') { appendLog(msg.msg); return; }
-    if (msg.type === 'done') {
-      es.close(); running = false;
-      document.getElementById('stop-btn').style.display = 'none';
-      btn.textContent = '✓ Validate Stores';
-      btn.disabled = false;
-      updateCount();
-      loadData();
-    }
-  };
-}
+// validateStores / startValidate are admin-only — use /admin/validate-stores
+function cancelValidate() {}
+function startValidate() {}
 
 // ── Auto-updater ──────────────────────────────────────────────────────────────
 async function installUpdate() {
@@ -6418,7 +6325,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.2.1"
+APP_VERSION = "2.2.2"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
