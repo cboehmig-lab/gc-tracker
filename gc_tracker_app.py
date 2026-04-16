@@ -168,18 +168,43 @@ def _fetch_state_stores_with_state(state: str) -> list[tuple]:
         return []
 
 
-def _build_store_coords(send_progress=None):
-    """Geocode all known stores via Nominatim (openstreetmap).
-    Scrapes state pages to get state context for each store name, then
-    queries Nominatim at 1 req/sec (per ToS). Writes gc_store_coords.json.
-    Returns dict of {store_name: {"lat": float, "lng": float}}."""
+def _build_store_coords(send_progress=None, force: bool = False):
+    """Geocode all known stores using Algolia's 'storeName' field as the query.
+
+    For each store, we first pull ONE hit from Algolia to discover the human-readable
+    storeName (e.g. 'South Austin, TX' — a real neighborhood Nominatim recognises),
+    then geocode that string directly via Nominatim. This is vastly more reliable than
+    querying 'Guitar Center {store}' because GC stores aren't POIs in Nominatim's DB,
+    but their storeName strings are real geographic places.
+
+    Stores with zero live used inventory (e.g. closed stores still in the cache) can't
+    be resolved via Algolia and are reported as 'no items'. They fall back to a
+    last-ditch '{store}, {state}' Nominatim query using state context from GC's state
+    pages, so permanently-closed stores still have SOME chance of getting coords.
+
+    If force=True, re-geocodes all stores even if already in the coords file.
+    Writes gc_store_coords.json. Returns {store: {lat, lng, source}}.
+    """
     def _send(msg):
         if send_progress:
             send_progress(msg)
 
-    _send("Step 1: Collecting stores with state context…")
+    known_stores = get_store_list()
+    total = len(known_stores)
+    _send(f"Step 1: Found {total} stores in cache.")
 
-    # Re-scrape state pages in parallel to get (name, state) pairs
+    # Load existing coords so we can skip already-geocoded stores (unless force=True).
+    existing: dict = {}
+    if STORE_COORDS_FILE.exists():
+        try:
+            existing = json.loads(STORE_COORDS_FILE.read_text())
+        except Exception:
+            pass
+    coords: dict = dict(existing) if not force else {}
+
+    # Collect state context as a last-ditch fallback for dead stores
+    # (stores with no Algolia items — can't determine storeName from the API).
+    _send("Step 2: Scraping state pages for fallback state context…")
     name_to_state: dict[str, str] = {}
     with ThreadPoolExecutor(max_workers=10) as pool:
         futures = {pool.submit(_fetch_state_stores_with_state, st): st for st in _US_STATES}
@@ -191,102 +216,115 @@ def _build_store_coords(send_progress=None):
             except Exception:
                 pass
 
-    # Also include any stores we know about but may not have found via state pages
-    known_stores = get_store_list()
-    for s in known_stores:
-        if s not in name_to_state:
-            name_to_state[s] = ""  # unknown state
-
-    stores_to_geocode = sorted(name_to_state.keys())
-    total = len(stores_to_geocode)
-    _send(f"  Found {total} stores to geocode.")
-
-    # Build location fallback map from cache (e.g. "South Austin" → "Austin, TX")
-    # Used when the store name alone doesn't geocode (GC uses internal names Nominatim can't find)
-    _load_cat_cache()
-    name_to_location: dict[str, str] = {}
-    for item in _cat_cache.values():
-        sn = item.get("store", "")
-        loc = item.get("location", "")
-        if sn and loc and sn not in name_to_location:
-            name_to_location[sn] = loc
-
-    # Load existing coords so we can skip already-geocoded stores
-    existing: dict = {}
-    if STORE_COORDS_FILE.exists():
+    # Step 3: Hit Algolia once per store to get storeName.
+    # Algolia has no rate limit for this volume — ~235 req completes in ~30 sec.
+    _send("Step 3: Fetching storeName from Algolia for each active store…")
+    store_to_location: dict[str, str] = {}
+    no_items: list[str] = []
+    todo = [s for s in known_stores if force or s not in existing]
+    for i, store in enumerate(todo, 1):
         try:
-            existing = json.loads(STORE_COORDS_FILE.read_text())
-        except Exception:
-            pass
+            data = fetch_page(store, 1)
+            hits = data.get("results", [{}])[0].get("hits", [])
+            if not hits:
+                no_items.append(store)
+                continue
+            sn = (hits[0].get("storeName") or "").strip()
+            if sn:
+                store_to_location[store] = sn
+            else:
+                no_items.append(store)
+        except Exception as e:
+            _send(f"  Algolia error for {store}: {type(e).__name__}")
+            no_items.append(store)
+        if i % 50 == 0:
+            _send(f"  [{i}/{len(todo)}] {len(store_to_location)} storeNames, {len(no_items)} no-items so far…")
 
-    coords: dict = dict(existing)
-    skipped = 0
-    failed: list[str] = []
+    _send(f"  Got storeName for {len(store_to_location)} stores; {len(no_items)} had no items.")
+    if no_items:
+        sample = ", ".join(no_items[:15])
+        more = f" (+{len(no_items)-15} more)" if len(no_items) > 15 else ""
+        _send(f"  No-items stores (likely closed): {sample}{more}")
 
-    _send("Step 2: Geocoding via Nominatim (1 req/sec)…")
-
-    # Use a fresh session with clean API headers — NOT the shared _http session
-    # which carries browser-impersonation headers (Sec-Fetch-*, Accept: text/html)
-    # that cause Nominatim to reject requests.
+    # Step 4: Geocode each storeName via Nominatim (1 req/sec per ToS).
+    # Fresh session with clean API headers — NOT the shared _http session which
+    # carries browser-impersonation headers that Nominatim rejects. (v2.1.3 fix)
     nom_session = http.Session()
     nom_session.headers.update({
-        "User-Agent": "GCTracker/2.1 (personal tool; non-commercial)",
+        "User-Agent": "GCTracker/2.2 (personal tool; non-commercial)",
         "Accept": "application/json",
         "Accept-Language": "en-US,en;q=0.9",
     })
 
-    for i, store in enumerate(stores_to_geocode, 1):
-        if store in existing:
-            skipped += 1
-            continue
+    def _nom(query: str):
+        url = (
+            "https://nominatim.openstreetmap.org/search"
+            f"?q={http.utils.quote(query)}&format=json&limit=1&countrycodes=us"
+        )
+        r = nom_session.get(url, timeout=10)
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}"
+        data = r.json()
+        return (data[0] if data else None), None
 
-        state = name_to_state.get(store, "")
-        query = f"Guitar Center {store}"
-        if state:
-            query += f" {state}"
+    _send(f"Step 4: Geocoding {len(store_to_location)} storeNames via Nominatim (1/sec)…")
+    failed: list[str] = []
+    succeeded = 0
 
+    # Primary pass: stores with storeName from Algolia.
+    loc_items = sorted(store_to_location.items())
+    for i, (store, location) in enumerate(loc_items, 1):
         try:
-            url = (
-                "https://nominatim.openstreetmap.org/search"
-                f"?q={http.utils.quote(query)}&format=json&limit=1&countrycodes=us"
-            )
-            r = nom_session.get(url, timeout=10)
-            results = r.json() if r.status_code == 200 else []
-            # Fallback: if store name didn't geocode, try with the Algolia location string
-            # e.g. "Guitar Center South Austin TX" → "Guitar Center Austin, TX"
-            if not results and store in name_to_location:
-                loc = name_to_location[store]
-                fallback_query = f"Guitar Center {loc}"
-                time.sleep(1.0)
-                r2 = nom_session.get(
-                    "https://nominatim.openstreetmap.org/search"
-                    f"?q={http.utils.quote(fallback_query)}&format=json&limit=1&countrycodes=us",
-                    timeout=10
-                )
-                if r2.status_code == 200:
-                    results = r2.json()
-            if results:
+            result, err = _nom(location)
+            if result:
                 coords[store] = {
-                    "lat": float(results[0]["lat"]),
-                    "lng": float(results[0]["lon"]),
+                    "lat": float(result["lat"]),
+                    "lng": float(result["lon"]),
+                    "source": location,
                 }
-            elif r.status_code != 200:
-                failed.append(f"{store}(HTTP {r.status_code})")
+                succeeded += 1
             else:
-                failed.append(store)
+                failed.append(f"{store} (storeName={location}{', '+err if err else ''})")
         except Exception as e:
-            failed.append(f"{store}({type(e).__name__})")
+            failed.append(f"{store} ({type(e).__name__})")
 
         if i % 25 == 0:
-            geocoded_so_far = len(coords) - len(existing)
-            _send(f"  [{i}/{total}] {geocoded_so_far} geocoded so far…")
-            # Save incrementally so progress isn't lost if interrupted
+            _send(f"  [{i}/{len(loc_items)}] {succeeded} geocoded so far…")
             STORE_COORDS_FILE.write_text(json.dumps(coords, indent=2))
 
-        time.sleep(1.0)  # Nominatim rate limit: 1 req/sec
+        time.sleep(1.0)
+
+    # Last-ditch pass: no-items stores, try "{store}, {state}" with state context.
+    # These are likely closed, but we give them one shot so the coords file is complete.
+    dead_attempted = 0
+    dead_ok = 0
+    for store in no_items:
+        state = name_to_state.get(store, "")
+        if not state:
+            continue  # nothing we can do without state
+        dead_attempted += 1
+        query = f"{store}, {state}"
+        try:
+            result, _err = _nom(query)
+            if result:
+                coords[store] = {
+                    "lat": float(result["lat"]),
+                    "lng": float(result["lon"]),
+                    "source": f"fallback-no-items: {query}",
+                }
+                dead_ok += 1
+        except Exception:
+            pass
+        time.sleep(1.0)
+
+    if dead_attempted:
+        _send(f"  Last-ditch no-items pass: {dead_ok}/{dead_attempted} resolved via state context.")
 
     STORE_COORDS_FILE.write_text(json.dumps(coords, indent=2))
-    _send(f"\n✓ Done — {len(coords)} stores geocoded, {skipped} skipped (cached), {len(failed)} failed.")
+    skipped = total - len(todo)
+    _send(f"\n✓ Done — {succeeded + dead_ok} newly geocoded, {skipped} skipped (cached), "
+          f"{len(no_items)} no-items ({dead_ok} recovered), {len(failed)} failed. "
+          f"Total coords: {len(coords)}/{total}.")
     if failed:
         _send(f"  Failed: {', '.join(failed[:20])}{'…' if len(failed)>20 else ''}")
     return coords
@@ -1349,8 +1387,13 @@ def admin_devices():
     return Response("".join(html), content_type="text/html")
 
 
-def _admin_task_page(title: str, api_path: str, description: str, pw: str) -> str:
-    """Shared HTML template for long-running admin task pages (build-coords, validate-stores)."""
+def _admin_task_page(title: str, api_path: str, description: str, pw: str,
+                     options_html: str = "", extra_body_js: str = "") -> str:
+    """Shared HTML template for long-running admin task pages (build-coords, validate-stores).
+
+    options_html: optional HTML snippet inserted above the Run button (e.g. checkboxes)
+    extra_body_js: optional JS snippet merged into the POST body object (e.g. "force: document.getElementById('force-cb').checked")
+    """
     admin_pw = os.environ.get("RESET_PASSWORD", "Beatle909!")
     if pw != admin_pw:
         return None  # caller should return 401
@@ -1358,6 +1401,7 @@ def _admin_task_page(title: str, api_path: str, description: str, pw: str) -> st
     safe_title = title.replace('<', '').replace('>', '')
     safe_desc  = description.replace('<', '').replace('>', '')
     safe_pw    = admin_pw.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'")
+    body_extra = f", {extra_body_js}" if extra_body_js else ""
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <title>{safe_title} — GC Tracker Admin</title>
@@ -1373,6 +1417,7 @@ def _admin_task_page(title: str, api_path: str, description: str, pw: str) -> st
 </style></head><body>
 <h2>🛠 {safe_title}</h2>
 <p>{safe_desc}</p>
+{options_html}
 <button id="run-btn" onclick="run()">▶ Run Now</button>
 <div id="log">Waiting…</div>
 <script>
@@ -1384,7 +1429,7 @@ async function run() {{
   const resp = await fetch('{safe_api}', {{
     method: 'POST',
     headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{pw: '{safe_pw}'}})
+    body: JSON.stringify({{pw: '{safe_pw}'{body_extra}}})
   }});
   if (!resp.ok) {{
     const e = await resp.json().catch(()=>({{}}));
@@ -1415,10 +1460,15 @@ def admin_build_coords():
     html = _admin_task_page(
         title="Build Store Coordinates",
         api_path="/api/build-store-coords",
-        description="Geocodes all GC stores via Nominatim (~1 req/sec). Takes ~5 min. "
-                    "Skips stores already in gc_store_coords.json. "
-                    "Re-run after adding new stores or to fix missing ones.",
+        description="Pulls 'storeName' (e.g. 'South Austin, TX') from Algolia for each "
+                    "active store, then geocodes that string via Nominatim (~1 req/sec). "
+                    "Takes ~5 min. Skips stores already in gc_store_coords.json unless "
+                    "'Force re-geocode all' is checked.",
         pw=pw,
+        options_html='<label style="display:block;margin-top:14px;color:#bbb;cursor:pointer">'
+                     '<input type="checkbox" id="force-cb" style="vertical-align:middle"> '
+                     'Force re-geocode all stores (even cached ones)</label>',
+        extra_body_js="force: document.getElementById('force-cb').checked",
     )
     if html is None:
         return Response("Unauthorized", status=401)
@@ -2634,11 +2684,13 @@ def api_build_store_coords():
         try: _q.get_nowait()
         except queue.Empty: break
 
+    force = bool((request.json or {}).get("force", False))
+
     def _run():
         try:
             def _send(msg):
                 _q.put({"type": "progress", "msg": msg})
-            _build_store_coords(_send)
+            _build_store_coords(_send, force=force)
             _q.put({"type": "done", "baseline": False, "stopped": False,
                     "new_ids": [], "items": []})
         except Exception as e:
@@ -3648,7 +3700,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.2.4</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.2.5</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -6342,7 +6394,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.2.4"
+APP_VERSION = "2.2.5"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 

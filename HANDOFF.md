@@ -1,5 +1,23 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-04-15 · Current version: v2.1.9*
+*Last updated: 2026-04-16 · Current version: v2.2.5 (pending push)*
+
+---
+
+## ⚠ IN-FLIGHT WORK (2026-04-16)
+
+**v2.2.5 is written locally but NOT yet pushed.** If resuming this session:
+
+- Problem: ZIP-distance sort was missing stores (e.g. South Austin for ZIP 78745) because `_build_store_coords` used `"Guitar Center {store}"` as Nominatim query, which fails — GC stores aren't POIs in OSM. State-page scrape also dedupes by slug so "South Austin" + "Austin" collapse, leaving "South Austin" with no state context.
+- Diagnostic confirmed: Algolia hits do **NOT** contain `_geoloc`, but DO contain `storeName = "South Austin, TX"` (real place, distinct per store, Nominatim-friendly).
+- Fix applied: `_build_store_coords` rewritten to fetch storeName per store from Algolia, then geocode that string. Stores with no Algolia items (closed/dead) get a last-ditch `"{store}, {state}"` pass using state-page context. Coords entries now include a `source` field for auditing.
+- Also added: `force=true` flag on `/api/build-store-coords` + "Force re-geocode all" checkbox on `/admin/build-coords` page. `_admin_task_page()` got `options_html` and `extra_body_js` params to support this generically.
+- Version bumped: `APP_VERSION = "2.2.5"` (line 6397) and `<h1>` span (line 3703).
+- **Next step**: Chuck compiles + pushes from Mac terminal (see one-liner in chat), then hits `/admin/build-coords?pw=Beatle909!` with the Force checkbox CHECKED to overwrite the bad cached coords from the previous failed run.
+
+Files touched:
+- `gc_tracker_app.py` — `_build_store_coords`, `_admin_task_page`, `admin_build_coords`, `api_build_store_coords`, `APP_VERSION`, h1 version span.
+
+---
 
 ---
 
@@ -170,7 +188,8 @@ Update both places when bumping:
 
 **Scan hangs / 409 forever**
 - Something crashed while holding `_lock` without releasing it
-- Restart the Railway service to reset the process
+- Hit `/admin/clear-lock?pw=Beatle909!` to force-release without a Railway restart
+- As a last resort, restart the Railway service to reset the process
 
 **No data after redeploy**
 - Likely ephemeral storage — Railway wipes files on redeploy unless a volume is mounted
@@ -213,3 +232,18 @@ Update both places when bumping:
 - Want list modal: keywords now display as A–Z sorted pill cloud (flex-wrap), each pill has embedded ✕
 - `res-badge` permanently hidden (`display:none!important`) — count badge in toolbar is the new NEW signal display
 - `renderKeywordList()` fully rewritten: sorted copy with original indices preserved for safe `removeKeywordAt(i)` calls
+
+### v2.2.x series — UI polish + admin tooling
+
+### v2.2.4
+- `.log-dim` color changed from `#555` (invisible dark grey) to `#6dba8d` (green) — all processing box text now readable
+- Done message shortened: removed "X items scanned," — now reads `✓ Done — 0 new this scan (850 still marked NEW from previous scan).`
+- `/admin/clear-lock?pw=…` endpoint added — force-releases stuck `_lock` without Railway restart
+- 409 UI message updated to mention the clear-lock URL
+
+### v2.2.5 (pending push)
+- **Store geocoding rewritten** to use Algolia's `storeName` field (e.g. `"South Austin, TX"`) as the Nominatim query instead of `"Guitar Center {store}"`. Fixes distance sort missing multi-store-city locations (South Austin, North Austin, West LA, Long Island, etc.).
+- `_build_store_coords` now: (1) pulls 1 Algolia hit per store to get storeName, (2) geocodes storeName via Nominatim, (3) for stores with no items (dead/closed), tries `"{store}, {state}"` as last-ditch. Each coords entry gets a `source` string for auditing.
+- `force=True` flag on `_build_store_coords` re-geocodes everything even if cached. Exposed via `/api/build-store-coords` body param and a "Force re-geocode all" checkbox on `/admin/build-coords`.
+- `_admin_task_page()` helper extended with `options_html` and `extra_body_js` params for per-page customisation (checkboxes etc).
+- Per-store Algolia errors now logged. Progress messages more detailed.
