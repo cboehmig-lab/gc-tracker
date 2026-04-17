@@ -1,23 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-04-16 · Current version: v2.2.5 (pending push)*
-
----
-
-## ⚠ IN-FLIGHT WORK (2026-04-16)
-
-**v2.2.5 is written locally but NOT yet pushed.** If resuming this session:
-
-- Problem: ZIP-distance sort was missing stores (e.g. South Austin for ZIP 78745) because `_build_store_coords` used `"Guitar Center {store}"` as Nominatim query, which fails — GC stores aren't POIs in OSM. State-page scrape also dedupes by slug so "South Austin" + "Austin" collapse, leaving "South Austin" with no state context.
-- Diagnostic confirmed: Algolia hits do **NOT** contain `_geoloc`, but DO contain `storeName = "South Austin, TX"` (real place, distinct per store, Nominatim-friendly).
-- Fix applied: `_build_store_coords` rewritten to fetch storeName per store from Algolia, then geocode that string. Stores with no Algolia items (closed/dead) get a last-ditch `"{store}, {state}"` pass using state-page context. Coords entries now include a `source` field for auditing.
-- Also added: `force=true` flag on `/api/build-store-coords` + "Force re-geocode all" checkbox on `/admin/build-coords` page. `_admin_task_page()` got `options_html` and `extra_body_js` params to support this generically.
-- Version bumped: `APP_VERSION = "2.2.5"` (line 6397) and `<h1>` span (line 3703).
-- **Next step**: Chuck compiles + pushes from Mac terminal (see one-liner in chat), then hits `/admin/build-coords?pw=Beatle909!` with the Force checkbox CHECKED to overwrite the bad cached coords from the previous failed run.
-
-Files touched:
-- `gc_tracker_app.py` — `_build_store_coords`, `_admin_task_page`, `admin_build_coords`, `api_build_store_coords`, `APP_VERSION`, h1 version span.
-
----
+*Last updated: 2026-04-17 · Current version: v2.2.6*
 
 ---
 
@@ -241,9 +223,12 @@ Update both places when bumping:
 - `/admin/clear-lock?pw=…` endpoint added — force-releases stuck `_lock` without Railway restart
 - 409 UI message updated to mention the clear-lock URL
 
-### v2.2.5 (pending push)
+### v2.2.5
 - **Store geocoding rewritten** to use Algolia's `storeName` field (e.g. `"South Austin, TX"`) as the Nominatim query instead of `"Guitar Center {store}"`. Fixes distance sort missing multi-store-city locations (South Austin, North Austin, West LA, Long Island, etc.).
 - `_build_store_coords` now: (1) pulls 1 Algolia hit per store to get storeName, (2) geocodes storeName via Nominatim, (3) for stores with no items (dead/closed), tries `"{store}, {state}"` as last-ditch. Each coords entry gets a `source` string for auditing.
 - `force=True` flag on `_build_store_coords` re-geocodes everything even if cached. Exposed via `/api/build-store-coords` body param and a "Force re-geocode all" checkbox on `/admin/build-coords`.
 - `_admin_task_page()` helper extended with `options_html` and `extra_body_js` params for per-page customisation (checkboxes etc).
 - Per-store Algolia errors now logged. Progress messages more detailed.
+
+### v2.2.6
+- **NEW detection fixed**: was comparing `date_listed` (Algolia `creationDate`) against `prev_scan_time`. Root cause: `creationDate` is when GC first catalogued the product (e.g. 2019 for a Les Paul), NOT when the used item was listed. Now uses `first_seen` from the cache instead — set to `run_time` on the scan that first encounters each item. Items first seen after your last scan = NEW. This restores reliable per-device new-item detection.

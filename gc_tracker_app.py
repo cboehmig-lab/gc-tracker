@@ -3132,15 +3132,21 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             }
 
         # ── Per-device new-item detection ─────────────────────────────────────
-        # An item is NEW if and only if its date_listed (Algolia startDate, UTC)
-        # is more recent than this device's previous "Check for New" run.
-        # prev_scan_time comes from the device's localStorage so each browser/
-        # phone has its own independent window. Both timestamps are in the same
-        # format (YYYY-MM-DDTHH:MM:SSZ) so plain string comparison is accurate.
+        # An item is NEW if our system first encountered it AFTER this device's
+        # previous scan.  We use `first_seen` (set to run_time on the scan that
+        # first finds each item) rather than Algolia's `date_listed`/`creationDate`
+        # field.  `creationDate` is when GC first catalogued the product — not when
+        # it was listed as used — so a Les Paul traded in today can have a
+        # creationDate from 2019, silently preventing NEW detection.
+        # `first_seen` is set in the cache update loop above (run_time for new
+        # items, preserved for existing ones), so this comparison is correct:
+        #   first_seen > prev_scan_time  →  appeared after last scan  →  NEW ✓
+        #   first_seen ≤ prev_scan_time  →  was already there         →  not new ✓
+        # Both timestamps are YYYY-MM-DDTHH:MM:SSZ so string comparison is valid.
         new_ids_list = []
         if not baseline and prev_scan_time:
             for p in all_products:
-                item_date = p.get("date_listed") or _cat_cache.get(p["id"], {}).get("date_listed", "")
+                item_date = _cat_cache.get(p["id"], {}).get("first_seen", "")
                 if item_date and item_date > prev_scan_time:
                     new_ids_list.append(p["id"])
         send({"type":"progress","msg":f"  {len(new_ids_list):,} new items since last scan."})
@@ -3700,7 +3706,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.2.5</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.2.6</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -6394,7 +6400,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.2.5"
+APP_VERSION = "2.2.6"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
