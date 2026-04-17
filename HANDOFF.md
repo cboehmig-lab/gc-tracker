@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-04-17 · Current version: v2.2.7 · Status: CLEAN — no in-flight work*
+*Last updated: 2026-04-17 · Current version: v2.2.8 · Status: CLEAN — no in-flight work*
 
 ---
 
@@ -229,6 +229,9 @@ Update both places when bumping:
 - `force=True` flag on `_build_store_coords` re-geocodes everything even if cached. Exposed via `/api/build-store-coords` body param and a "Force re-geocode all" checkbox on `/admin/build-coords`.
 - `_admin_task_page()` helper extended with `options_html` and `extra_body_js` params for per-page customisation (checkboxes etc).
 - Per-store Algolia errors now logged. Progress messages more detailed.
+
+### v2.2.8
+- **Want List button fixed**: two bugs from v2.2.7 — (1) `_wantListSearchActive` was being reset to `false` inside `searchWantList()` itself (copy-paste error from reset-path edits), so the toggle-off click never fired; (2) button was hijacking the global search box with "🎯 Want List Search" text. Both removed. Button now cleanly activates/deactivates like Watch List. Count badge removed entirely; "Edit Want List" link shows/hides based on whether keywords exist.
 
 ### v2.2.7
 - **Want List button/link swapped**: 🎯 Want List button now filters to want list (toggles green when active, same pattern as Watch List and Price Drops). "Edit Want List" text link next to it opens the keyword editor modal. Match count shows as grey `(N matches)` next to the link. All reset paths updated to clear the want-list-toggle active state.

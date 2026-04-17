@@ -3705,7 +3705,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.2.7</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.2.8</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -3795,7 +3795,6 @@ tr.fav-row td:last-child{color:#4ade80}
           class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
           🎯 Want List
         </button>
-        <span id="wl-count-badge" style="display:none;color:#888;font-size:.78rem;white-space:nowrap;margin-left:2px"></span>
         <a id="search-wl-link" onclick="openKeywords()" style="display:none;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Edit Want List</a>
         <div id="brand-dropdown" class="brand-dd" style="display:none;position:relative">
           <button id="brand-dd-btn" class="cat-sel" onclick="toggleBrandDropdown()" style="cursor:pointer;white-space:nowrap">All Brands ▾</button>
@@ -5046,10 +5045,6 @@ function searchWantList() {
   document.getElementById('watchlist-toggle').classList.remove('wl-active');
   _priceDropFilterActive = false;
   document.getElementById('price-drop-toggle').classList.remove('wl-active');
-  _wantListSearchActive = false;
-  document.getElementById('want-list-toggle').classList.remove('wl-active');
-  document.getElementById('global-search-clear').style.display = '';
-  document.getElementById('global-search').value = '🎯 Want List Search';
   document.getElementById('want-list-toggle').classList.add('wl-active');
   _fetchBrowsePage(1);
 }
@@ -5059,38 +5054,13 @@ function _resetWantListLink() {
   if (btn) btn.classList.remove('wl-active');
 }
 
-// Show how many want list items are available in the currently selected stores
+// Show/hide Edit Want List link based on whether keywords exist
 let _wlCountTimer = null;
 function _updateWantListCount() {
-  const badge = document.getElementById('wl-count-badge');
   const editLink = document.getElementById('search-wl-link');
-  if (!badge) return;
+  if (!editLink) return;
   const hasKeywords = window._keywords && window._keywords.length;
-  // Always show Edit Want List link when keywords exist
-  if (editLink) editLink.style.display = hasKeywords ? 'inline' : 'none';
-  if (!hasKeywords || !_srvStores || !_srvStores.length) {
-    badge.style.display = 'none';
-    return;
-  }
-  clearTimeout(_wlCountTimer);
-  _wlCountTimer = setTimeout(() => {
-    fetch('/api/browse', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        page: 1, per_page: 1, stores: _srvStores,
-        keywords: window._keywords, filter_want_list_only: true, new_ids: []
-      })
-    }).then(r => r.json()).then(d => {
-      const n = d.total_count || 0;
-      if (n > 0) {
-        badge.textContent = '(' + n.toLocaleString() + ' matches)';
-        badge.style.display = 'inline';
-      } else {
-        badge.style.display = 'none';
-      }
-    }).catch(() => { badge.style.display = 'none'; });
-  }, 400);
+  editLink.style.display = hasKeywords ? 'inline' : 'none';
 }
 
 function cancelReset() {
@@ -6414,7 +6384,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.2.7"
+APP_VERSION = "2.2.8"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
