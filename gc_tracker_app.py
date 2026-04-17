@@ -202,6 +202,22 @@ def _build_store_coords(send_progress=None, force: bool = False):
             pass
     coords: dict = dict(existing) if not force else {}
 
+    # Load pre-seeded coords from CSV-derived seed file (committed alongside the app).
+    # These use real ZIP-code centroids so they're more accurate than city geocoding.
+    # Seed entries are used as-is and skip the Algolia+Nominatim pipeline entirely.
+    seed_file = Path(__file__).parent / "gc_store_coords_seed.json"
+    if seed_file.exists():
+        try:
+            seed = json.loads(seed_file.read_text())
+            loaded = 0
+            for store, data in seed.items():
+                if force or store not in coords:
+                    coords[store] = data
+                    loaded += 1
+            _send(f"  Loaded {loaded} pre-seeded coords from gc_store_coords_seed.json.")
+        except Exception as e:
+            _send(f"  Warning: could not load seed file: {e}")
+
     # Collect state context as a last-ditch fallback for dead stores
     # (stores with no Algolia items — can't determine storeName from the API).
     _send("Step 2: Scraping state pages for fallback state context…")
@@ -3718,7 +3734,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.3.0</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.3.1</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -3796,6 +3812,7 @@ tr.fav-row td:last-child{color:#4ade80}
           <span class="filter-active-dot" id="gc-filter-dot"></span>
         </button>
         <div id="gc-filter-collapsible" class="filter-collapsible">
+        <span id="filter-item-count" style="color:#888;font-size:.78rem;white-space:nowrap;margin-right:6px"></span>
         <button id="price-drop-toggle" onclick="togglePriceDropFilter()"
           class="cat-sel" style="border-color:#3a3a3a;color:#aaa;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
           ↓ Price Drops
@@ -4417,20 +4434,9 @@ async function _fetchBrowsePage(page) {
     _srvTotalUnfiltered = d.total_unfiltered;
     _srvTotalPages     = d.total_pages;
 
-    // Update Items / Stores counts in status bar to reflect active filters
-    const isFiltered = _wantListSearchActive || _priceDropFilterActive || _watchFilterActive
-      || _globalSearchActive
-      || (filters.filter_brands && filters.filter_brands.length)
-      || (filters.filter_conditions && filters.filter_conditions.length)
-      || (filters.filter_categories && filters.filter_categories.length);
-    if (isFiltered) {
-      document.getElementById('s-known').textContent = _srvTotalCount.toLocaleString();
-      if (d.store_count != null)
-        document.getElementById('s-stores').textContent = d.store_count.toLocaleString();
-    } else {
-      document.getElementById('s-known').textContent = (_baseItemCount || _srvTotalUnfiltered).toLocaleString();
-      document.getElementById('s-stores').textContent = _baseStoreCount.toLocaleString();
-    }
+    // Live item count near filter buttons — always reflects current view
+    const countEl2 = document.getElementById('filter-item-count');
+    if (countEl2) countEl2.textContent = _srvTotalCount.toLocaleString() + ' items';
 
     // Update header
     const hasFilters = filters.filter_q || (filters.filter_brands && filters.filter_brands.length) || (filters.filter_conditions && filters.filter_conditions.length) || (filters.filter_categories && filters.filter_categories.length) || (filters.filter_subcategories && filters.filter_subcategories.length) || filters.filter_watched;
@@ -6416,7 +6422,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.3.1"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 

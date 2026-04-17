@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-04-17 · Current version: v2.3.0 · Status: CLEAN — no in-flight work*
+*Last updated: 2026-04-17 · Current version: v2.3.1 · Status: CLEAN — no in-flight work*
 
 ---
 
@@ -229,6 +229,11 @@ Update both places when bumping:
 - `force=True` flag on `_build_store_coords` re-geocodes everything even if cached. Exposed via `/api/build-store-coords` body param and a "Force re-geocode all" checkbox on `/admin/build-coords`.
 - `_admin_task_page()` helper extended with `options_html` and `extra_body_js` params for per-page customisation (checkboxes etc).
 - Per-store Algolia errors now logged. Progress messages more detailed.
+
+### v2.3.1
+- **Header counts reverted to static**: Items/Stores in status bar always show full catalog totals again.
+- **Live item count near filter buttons**: `<span id="filter-item-count">` sits to the left of the Price Drops button and updates to `_srvTotalCount` after every browse — reflects current view including store selection, want list, price drops, search, etc.
+- **ZIP-code seed for geocoding**: `seed_coords.py` script reads Gemini's CSV, geocodes each store ZIP via api.zippopotam.us, writes `gc_store_coords_seed.json`. `_build_store_coords` now loads this seed file first (skipping Algolia+Nominatim for those stores), then only geocodes the remainder. Seed file must be committed to git to deploy. **Next step**: run `python3 seed_coords.py Guitar_Center_Locations_US.csv` in ~/Desktop/gc_tracker, commit the output JSON, push, then run Force re-geocode from /admin/build-coords to fill the remaining ~130 stores.
 
 ### v2.3.0
 - **Filter buttons all green when active**: Watch List and Price Drops now use the same green highlight as Want List (`#2d6a2d` bg / `#4ade80` border) instead of red. Buttons reordered to: Price Drops → Watch List → Want List.
