@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-04-17 · Current version: v2.2.8 · Status: CLEAN — no in-flight work*
+*Last updated: 2026-04-17 · Current version: v2.3.0 · Status: CLEAN — no in-flight work*
 
 ---
 
@@ -229,6 +229,14 @@ Update both places when bumping:
 - `force=True` flag on `_build_store_coords` re-geocodes everything even if cached. Exposed via `/api/build-store-coords` body param and a "Force re-geocode all" checkbox on `/admin/build-coords`.
 - `_admin_task_page()` helper extended with `options_html` and `extra_body_js` params for per-page customisation (checkboxes etc).
 - Per-store Algolia errors now logged. Progress messages more detailed.
+
+### v2.3.0
+- **Filter buttons all green when active**: Watch List and Price Drops now use the same green highlight as Want List (`#2d6a2d` bg / `#4ade80` border) instead of red. Buttons reordered to: Price Drops → Watch List → Want List.
+- **Dynamic Items/Stores counts**: status bar "Items: X · Stores: Y" now reflects the active filter. When any filter is active (want list, price drops, watch list, search, brand/condition/category), Items updates to the filtered count and Stores updates to the number of unique stores in those results. Clears back to catalog totals when no filter is active. Browse API now returns `store_count` (unique stores in filtered result set). Baseline counts stored in `_baseItemCount` / `_baseStoreCount` on page load.
+
+### v2.2.9
+- **Store geocoding fallback**: if Nominatim can't resolve a storeName like "Yonkers at Ridge Hill, NY", automatically strips "at <venue>" suffix and retries with "Yonkers, NY". Handles GC stores named after the shopping center they're in.
+- **ZIP sort**: still needs Force re-geocode run at `/admin/build-coords?pw=Beatle909!` (with Force checkbox) to populate South Austin and other previously-failed stores. After that run, paste the "Failed:" line from the log to address any remaining stragglers.
 
 ### v2.2.8
 - **Want List button fixed**: two bugs from v2.2.7 — (1) `_wantListSearchActive` was being reset to `false` inside `searchWantList()` itself (copy-paste error from reset-path edits), so the toggle-off click never fired; (2) button was hijacking the global search box with "🎯 Want List Search" text. Both removed. Button now cleanly activates/deactivates like Watch List. Count badge removed entirely; "Edit Want List" link shows/hides based on whether keywords exist.

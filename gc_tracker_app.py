@@ -276,6 +276,16 @@ def _build_store_coords(send_progress=None, force: bool = False):
     for i, (store, location) in enumerate(loc_items, 1):
         try:
             result, err = _nom(location)
+            if not result:
+                # Fallback: strip "at <venue>" suffix from storeName.
+                # e.g. "Yonkers at Ridge Hill, NY" → "Yonkers, NY"
+                # Handles GC stores named after the shopping center they're in.
+                stripped = re.sub(r'\s+at\s+[^,]+', '', location, flags=re.IGNORECASE).strip()
+                if stripped != location:
+                    time.sleep(1.0)
+                    result, err = _nom(stripped)
+                    if result:
+                        location = stripped  # record the simpler query as source
             if result:
                 coords[store] = {
                     "lat": float(result["lat"]),
@@ -284,7 +294,7 @@ def _build_store_coords(send_progress=None, force: bool = False):
                 }
                 succeeded += 1
             else:
-                failed.append(f"{store} (storeName={location}{', '+err if err else ''})")
+                failed.append(f"{store} (storeName={store_to_location[store]}{', '+err if err else ''})")
         except Exception as e:
             failed.append(f"{store} ({type(e).__name__})")
 
@@ -1902,6 +1912,8 @@ def api_browse():
 
     # Count items that are both want-list matches AND new (for the status notification)
     new_want_count = sum(1 for i in filtered if i.get("isNew") and i.get("kwMatch"))
+    # Unique stores in filtered result set
+    store_count = len(set(i.get("store", "") for i in filtered if i.get("store")))
 
     return jsonify({
         "items":            page_items,
@@ -1910,6 +1922,7 @@ def api_browse():
         "total_count":      total_filtered,
         "total_unfiltered": total_unfiltered,
         "total_pages":      total_pages,
+        "store_count":      store_count,
         "new_count":        new_count_unfiltered,
         "new_want_count":   new_want_count,
         "no_store_data":    False,
@@ -3257,8 +3270,8 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .badge{background:#c00;color:#fff;font-size:.7rem;font-weight:700;padding:2px 7px;border-radius:10px}.badge:empty{display:none}
 .cat-sel{padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer}
 .cat-sel:focus{border-color:#c00}
-#watchlist-toggle.wl-active,#cl-watchlist-toggle.wl-active{background:#c00;border-color:#c00;color:#fff}
-#want-list-toggle.wl-active{background:#2d6a2d;border-color:#4ade80;color:#fff}
+#watchlist-toggle.wl-active,#cl-watchlist-toggle.wl-active,
+#price-drop-toggle.wl-active,#want-list-toggle.wl-active{background:#2d6a2d;border-color:#4ade80;color:#fff}
 .brand-dd-item{display:flex;align-items:center;padding:6px 12px;cursor:pointer;font-size:.82rem;color:#ccc;gap:6px}
 .brand-dd-item:hover{background:#252525}
 .brand-dd-item.active{background:#c00;color:#fff}
@@ -3705,7 +3718,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.2.8</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.3.0</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -3783,13 +3796,13 @@ tr.fav-row td:last-child{color:#4ade80}
           <span class="filter-active-dot" id="gc-filter-dot"></span>
         </button>
         <div id="gc-filter-collapsible" class="filter-collapsible">
-        <button id="watchlist-toggle" onclick="toggleWatchFilter()"
-          class="cat-sel" style="border-color:#3a3a3a;color:#aaa;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
-          ★ Watch List
-        </button>
         <button id="price-drop-toggle" onclick="togglePriceDropFilter()"
           class="cat-sel" style="border-color:#3a3a3a;color:#aaa;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
           ↓ Price Drops
+        </button>
+        <button id="watchlist-toggle" onclick="toggleWatchFilter()"
+          class="cat-sel" style="border-color:#3a3a3a;color:#aaa;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
+          ★ Watch List
         </button>
         <button id="want-list-toggle" onclick="searchWantList()"
           class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
@@ -4030,6 +4043,7 @@ async function loadData() {
   renderList(new Set(d.stores));  // Select all stores on initial load
   const info = d.info || {};
   const storeLabel = info.count ? info.count : allStores.length;
+  _baseStoreCount = parseInt(storeLabel) || allStores.length;
   document.getElementById('hdr-status').textContent = storeLabel + ' stores available';
   document.getElementById('s-stores').textContent = storeLabel;
   if (allStores.length === 0) {
@@ -4079,7 +4093,8 @@ async function loadState() {
   // Shared state from server
   const r = await fetch('/api/state');
   const s = await r.json();
-  document.getElementById('s-known').textContent = s.total_items.toLocaleString();
+  _baseItemCount = s.total_items || 0;
+  document.getElementById('s-known').textContent = _baseItemCount.toLocaleString();
   if (s.excel_exists) document.getElementById('s-excel').style.display = 'inline';
 
   // Display is based on user's own last_run only (no nightly scan)
@@ -4330,6 +4345,8 @@ let _srvTotalCount = 0;
 let _srvTotalUnfiltered = 0;
 let _srvTotalPages = 1;
 let _srvLoading = false;
+let _baseItemCount = 0;   // full catalog count (set on load, reset target when filters clear)
+let _baseStoreCount = 0;  // full store count (set on load)
 
 function _getBrowseFilters() {
   return {
@@ -4399,6 +4416,21 @@ async function _fetchBrowsePage(page) {
     _srvTotalCount     = d.total_count;
     _srvTotalUnfiltered = d.total_unfiltered;
     _srvTotalPages     = d.total_pages;
+
+    // Update Items / Stores counts in status bar to reflect active filters
+    const isFiltered = _wantListSearchActive || _priceDropFilterActive || _watchFilterActive
+      || _globalSearchActive
+      || (filters.filter_brands && filters.filter_brands.length)
+      || (filters.filter_conditions && filters.filter_conditions.length)
+      || (filters.filter_categories && filters.filter_categories.length);
+    if (isFiltered) {
+      document.getElementById('s-known').textContent = _srvTotalCount.toLocaleString();
+      if (d.store_count != null)
+        document.getElementById('s-stores').textContent = d.store_count.toLocaleString();
+    } else {
+      document.getElementById('s-known').textContent = (_baseItemCount || _srvTotalUnfiltered).toLocaleString();
+      document.getElementById('s-stores').textContent = _baseStoreCount.toLocaleString();
+    }
 
     // Update header
     const hasFilters = filters.filter_q || (filters.filter_brands && filters.filter_brands.length) || (filters.filter_conditions && filters.filter_conditions.length) || (filters.filter_categories && filters.filter_categories.length) || (filters.filter_subcategories && filters.filter_subcategories.length) || filters.filter_watched;
@@ -6384,7 +6416,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.2.8"
+APP_VERSION = "2.3.0"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
