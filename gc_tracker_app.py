@@ -237,7 +237,9 @@ def _build_store_coords(send_progress=None, force: bool = False):
     _send("Step 3: Fetching storeName from Algolia for each active store…")
     store_to_location: dict[str, str] = {}
     no_items: list[str] = []
-    todo = [s for s in known_stores if force or s not in existing]
+    # Skip stores already resolved (existing file OR seed). Seed always wins —
+    # it comes from real street addresses so we never need to re-geocode it.
+    todo = [s for s in known_stores if s not in coords]
     for i, store in enumerate(todo, 1):
         try:
             data = fetch_page(store, 1)
@@ -3734,7 +3736,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.3.1</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.3.2</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -3814,11 +3816,11 @@ tr.fav-row td:last-child{color:#4ade80}
         <div id="gc-filter-collapsible" class="filter-collapsible">
         <span id="filter-item-count" style="color:#888;font-size:.78rem;white-space:nowrap;margin-right:6px"></span>
         <button id="price-drop-toggle" onclick="togglePriceDropFilter()"
-          class="cat-sel" style="border-color:#3a3a3a;color:#aaa;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
+          class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
           ↓ Price Drops
         </button>
         <button id="watchlist-toggle" onclick="toggleWatchFilter()"
-          class="cat-sel" style="border-color:#3a3a3a;color:#aaa;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
+          class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
           ★ Watch List
         </button>
         <button id="want-list-toggle" onclick="searchWantList()"
@@ -6422,7 +6424,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.3.1"
+APP_VERSION = "2.3.2"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 

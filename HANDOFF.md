@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-04-17 · Current version: v2.3.1 · Status: CLEAN — no in-flight work*
+*Last updated: 2026-04-17 · Current version: v2.3.2 · Status: CLEAN — no in-flight work*
 
 ---
 
@@ -229,6 +229,10 @@ Update both places when bumping:
 - `force=True` flag on `_build_store_coords` re-geocodes everything even if cached. Exposed via `/api/build-store-coords` body param and a "Force re-geocode all" checkbox on `/admin/build-coords`.
 - `_admin_task_page()` helper extended with `options_html` and `extra_body_js` params for per-page customisation (checkboxes etc).
 - Per-store Algolia errors now logged. Progress messages more detailed.
+
+### v2.3.2
+- **Geocoding fix**: `todo` list was built from `existing` (old coords file) instead of `coords` (which includes seed). So all 298 stores were re-queued even when 171 were already seeded. Fixed to `s not in coords` — seeded stores are always skipped, seed wins over force-flag.
+- **Button styles unified**: Price Drops and Watch List now use the same green border/font as Want List (`border-color:#2d6a2d;color:#4ade80`) so all three filter buttons look consistent.
 
 ### v2.3.1
 - **Header counts reverted to static**: Items/Stores in status bar always show full catalog totals again.
