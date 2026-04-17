@@ -1,0 +1,857 @@
+{
+  "South Austin": {
+    "lat": 30.2166,
+    "lng": -97.8508,
+    "source": "csv-zip:78749 (Austin, TX)"
+  },
+  "Austin": {
+    "lat": 30.3437,
+    "lng": -97.7316,
+    "source": "csv-zip:78757 (Austin, TX)"
+  },
+  "Round Rock": {
+    "lat": 30.5084,
+    "lng": -97.7062,
+    "source": "csv-zip:78681 (Round Rock, TX)"
+  },
+  "New Braunfels": {
+    "lat": 29.7229,
+    "lng": -98.0742,
+    "source": "csv-zip:78130 (New Braunfels, TX)"
+  },
+  "Killeen": {
+    "lat": 31.0376,
+    "lng": -97.6809,
+    "source": "csv-zip:76542 (Killeen, TX)"
+  },
+  "Anchorage": {
+    "lat": 61.19,
+    "lng": -149.8938,
+    "source": "csv-zip:99503 (Anchorage, AK)"
+  },
+  "Huntsville": {
+    "lat": 34.7448,
+    "lng": -86.6704,
+    "source": "csv-zip:35806 (Huntsville, AL)"
+  },
+  "Fayetteville": {
+    "lat": 36.0992,
+    "lng": -94.1716,
+    "source": "csv-zip:72703 (Fayetteville, AR)"
+  },
+  "Tucson": {
+    "lat": 32.3472,
+    "lng": -111.0419,
+    "source": "csv-zip:85741 (Tucson, AZ)"
+  },
+  "Santa Maria": {
+    "lat": 34.9545,
+    "lng": -120.4324,
+    "source": "csv-zip:93454 (Santa Maria, CA)"
+  },
+  "Grand Junction": {
+    "lat": 39.1071,
+    "lng": -108.5968,
+    "source": "csv-zip:81505 (Grand Junction, CO)"
+  },
+  "Southington": {
+    "lat": 41.6052,
+    "lng": -72.8727,
+    "source": "csv-zip:06489 (Southington, CT)"
+  },
+  "Wilmington": {
+    "lat": 39.7994,
+    "lng": -75.5317,
+    "source": "csv-zip:19803 (Wilmington, DE)"
+  },
+  "Naples": {
+    "lat": 26.2823,
+    "lng": -81.7573,
+    "source": "csv-zip:34110 (Naples, FL)"
+  },
+  "Savannah": {
+    "lat": 31.989,
+    "lng": -81.0979,
+    "source": "csv-zip:31406 (Savannah, GA)"
+  },
+  "Atlanta": {
+    "lat": 33.8236,
+    "lng": -84.3214,
+    "source": "csv-zip:30329 (Atlanta, GA)"
+  },
+  "Hollywood": {
+    "lat": 34.1074,
+    "lng": -118.3652,
+    "source": "csv-zip:90046 (Hollywood, CA)"
+  },
+  "Manhattan": {
+    "lat": 40.7402,
+    "lng": -73.9996,
+    "source": "csv-zip:10011 (New York, NY)"
+  },
+  "Nashville": {
+    "lat": 36.1504,
+    "lng": -86.7916,
+    "source": "csv-zip:37203 (Nashville, TN)"
+  },
+  "Chicago": {
+    "lat": 41.9229,
+    "lng": -87.6483,
+    "source": "csv-zip:60614 (Chicago, IL)"
+  },
+  "Seattle": {
+    "lat": 47.6339,
+    "lng": -122.3476,
+    "source": "csv-zip:98109 (Seattle, WA)"
+  },
+  "Dallas": {
+    "lat": 32.831,
+    "lng": -96.7692,
+    "source": "csv-zip:75206 (Dallas, TX)"
+  },
+  "Houston": {
+    "lat": 29.7736,
+    "lng": -95.4034,
+    "source": "csv-zip:77007 (Houston, TX)"
+  },
+  "Plano": {
+    "lat": 33.0277,
+    "lng": -96.6777,
+    "source": "csv-zip:75074 (Plano, TX)"
+  },
+  "San Jose": {
+    "lat": 37.3483,
+    "lng": -121.9844,
+    "source": "csv-zip:95051 (Santa Clara, CA)"
+  },
+  "San Francisco": {
+    "lat": 37.7917,
+    "lng": -122.4186,
+    "source": "csv-zip:94109 (San Francisco, CA)"
+  },
+  "Boston": {
+    "lat": 42.3471,
+    "lng": -71.1027,
+    "source": "csv-zip:02215 (Boston, MA)"
+  },
+  "Philadelphia": {
+    "lat": 39.9487,
+    "lng": -75.1593,
+    "source": "csv-zip:19107 (Philadelphia, PA)"
+  },
+  "Phoenix": {
+    "lat": 33.5961,
+    "lng": -112.1199,
+    "source": "csv-zip:85029 (Phoenix, AZ)"
+  },
+  "Denver": {
+    "lat": 39.671,
+    "lng": -104.9279,
+    "source": "csv-zip:80222 (Denver, CO)"
+  },
+  "Orlando": {
+    "lat": 28.3949,
+    "lng": -81.4179,
+    "source": "csv-zip:32837 (Orlando, FL)"
+  },
+  "Miami": {
+    "lat": 25.6682,
+    "lng": -80.2973,
+    "source": "csv-zip:33156 (Miami, FL)"
+  },
+  "Las Vegas": {
+    "lat": 36.1008,
+    "lng": -115.1365,
+    "source": "csv-zip:89119 (Las Vegas, NV)"
+  },
+  "Columbus": {
+    "lat": 40.0839,
+    "lng": -82.9726,
+    "source": "csv-zip:43229 (Columbus, OH)"
+  },
+  "Portland": {
+    "lat": 45.415,
+    "lng": -122.52,
+    "source": "csv-zip:97015 (Clackamas, OR)"
+  },
+  "Charlotte": {
+    "lat": 35.2836,
+    "lng": -80.7638,
+    "source": "csv-zip:28213 (Charlotte, NC)"
+  },
+  "Indianapolis": {
+    "lat": 39.9048,
+    "lng": -86.0673,
+    "source": "csv-zip:46250 (Indianapolis, IN)"
+  },
+  "St. Louis": {
+    "lat": 38.4915,
+    "lng": -90.3772,
+    "source": "csv-zip:63128 (St. Louis, MO)"
+  },
+  "Minneapolis": {
+    "lat": 44.7609,
+    "lng": -93.2753,
+    "source": "csv-zip:55337 (Burnsville, MN)"
+  },
+  "Salt Lake City": {
+    "lat": 40.6596,
+    "lng": -111.9193,
+    "source": "csv-zip:84123 (Taylorsville, UT)"
+  },
+  "San Diego": {
+    "lat": 32.7972,
+    "lng": -117.1708,
+    "source": "csv-zip:92111 (San Diego, CA)"
+  },
+  "Sacramento": {
+    "lat": 38.5892,
+    "lng": -121.4057,
+    "source": "csv-zip:95825 (Sacramento, CA)"
+  },
+  "Raleigh": {
+    "lat": 35.8334,
+    "lng": -78.5799,
+    "source": "csv-zip:27604 (Raleigh, NC)"
+  },
+  "Baltimore": {
+    "lat": 39.3876,
+    "lng": -76.5418,
+    "source": "csv-zip:21234 (Parkville, MD)"
+  },
+  "Detroit": {
+    "lat": 42.2941,
+    "lng": -83.2536,
+    "source": "csv-zip:48124 (Dearborn, MI)"
+  },
+  "Kansas City": {
+    "lat": 38.9273,
+    "lng": -94.7143,
+    "source": "csv-zip:66210 (Overland Park, KS)"
+  },
+  "Albuquerque": {
+    "lat": 35.1104,
+    "lng": -106.5781,
+    "source": "csv-zip:87110 (Albuquerque, NM)"
+  },
+  "New Orleans": {
+    "lat": 29.9511,
+    "lng": -90.206,
+    "source": "csv-zip:70123 (Harahan, LA)"
+  },
+  "Memphis": {
+    "lat": 35.1602,
+    "lng": -89.7816,
+    "source": "csv-zip:38016 (Cordova, TN)"
+  },
+  "Oklahoma City": {
+    "lat": 35.5184,
+    "lng": -97.5746,
+    "source": "csv-zip:73112 (Oklahoma City, OK)"
+  },
+  "Birmingham": {
+    "lat": 33.4653,
+    "lng": -86.8082,
+    "source": "csv-zip:35209 (Birmingham, AL)"
+  },
+  "Phoenix Metro": {
+    "lat": 33.6238,
+    "lng": -112.0044,
+    "source": "csv-zip:85032 (Phoenix, AZ)"
+  },
+  "Fresno": {
+    "lat": 36.8236,
+    "lng": -119.762,
+    "source": "csv-zip:93710 (Fresno, CA)"
+  },
+  "Roseville": {
+    "lat": 38.7609,
+    "lng": -121.2867,
+    "source": "csv-zip:95678 (Roseville, CA)"
+  },
+  "Fountain Valley": {
+    "lat": 33.7102,
+    "lng": -117.9503,
+    "source": "csv-zip:92708 (Fountain Valley, CA)"
+  },
+  "Oxnard": {
+    "lat": 34.1685,
+    "lng": -119.1717,
+    "source": "csv-zip:93033 (Oxnard, CA)"
+  },
+  "Sherman Oaks": {
+    "lat": 34.1526,
+    "lng": -118.4322,
+    "source": "csv-zip:91423 (Sherman Oaks, CA)"
+  },
+  "Modesto": {
+    "lat": 37.7005,
+    "lng": -121.0252,
+    "source": "csv-zip:95356 (Modesto, CA)"
+  },
+  "Temecula": {
+    "lat": 33.5217,
+    "lng": -117.1286,
+    "source": "csv-zip:92591 (Temecula, CA)"
+  },
+  "Orange": {
+    "lat": 33.811,
+    "lng": -117.8493,
+    "source": "csv-zip:92867 (Orange, CA)"
+  },
+  "Stockton": {
+    "lat": 38.0024,
+    "lng": -121.3238,
+    "source": "csv-zip:95207 (Stockton, CA)"
+  },
+  "Colorado Springs": {
+    "lat": 38.9129,
+    "lng": -104.7734,
+    "source": "csv-zip:80918 (Colorado Springs, CO)"
+  },
+  "Danbury": {
+    "lat": 41.3917,
+    "lng": -73.4532,
+    "source": "csv-zip:06810 (Danbury, CT)"
+  },
+  "Jacksonville": {
+    "lat": 30.351,
+    "lng": -81.5061,
+    "source": "csv-zip:32225 (Jacksonville, FL)"
+  },
+  "Clearwater": {
+    "lat": 27.9902,
+    "lng": -82.7433,
+    "source": "csv-zip:33765 (Clearwater, FL)"
+  },
+  "North Miami": {
+    "lat": 25.8965,
+    "lng": -80.157,
+    "source": "csv-zip:33181 (North Miami, FL)"
+  },
+  "Pensacola": {
+    "lat": 30.4564,
+    "lng": -87.2104,
+    "source": "csv-zip:32503 (Pensacola, FL)"
+  },
+  "Tallahassee": {
+    "lat": 30.4286,
+    "lng": -84.2593,
+    "source": "csv-zip:32301 (Tallahassee, FL)"
+  },
+  "Tampa": {
+    "lat": 28.0772,
+    "lng": -82.4455,
+    "source": "csv-zip:33613 (Tampa, FL)"
+  },
+  "West Palm Beach": {
+    "lat": 26.7165,
+    "lng": -80.0679,
+    "source": "csv-zip:33401 (West Palm Beach, FL)"
+  },
+  "Lawrenceville": {
+    "lat": 33.8635,
+    "lng": -84.0081,
+    "source": "csv-zip:30078 (Snellville, GA)"
+  },
+  "Marietta": {
+    "lat": 33.9282,
+    "lng": -84.4733,
+    "source": "csv-zip:30067 (Marietta, GA)"
+  },
+  "Boise": {
+    "lat": 43.633,
+    "lng": -116.2951,
+    "source": "csv-zip:83704 (Boise, ID)"
+  },
+  "Central Chicago": {
+    "lat": 41.9229,
+    "lng": -87.6483,
+    "source": "csv-zip:60614 (Chicago, IL)"
+  },
+  "Villa Park": {
+    "lat": 41.8799,
+    "lng": -87.9782,
+    "source": "csv-zip:60181 (Villa Park, IL)"
+  },
+  "Joliet": {
+    "lat": 41.5454,
+    "lng": -88.1299,
+    "source": "csv-zip:60435 (Joliet, IL)"
+  },
+  "Fort Wayne": {
+    "lat": 41.0977,
+    "lng": -85.1189,
+    "source": "csv-zip:46805 (Fort Wayne, IN)"
+  },
+  "South Bend": {
+    "lat": 41.6835,
+    "lng": -86.1682,
+    "source": "csv-zip:46545 (Mishawaka, IN)"
+  },
+  "Wichita": {
+    "lat": 37.668,
+    "lng": -97.3591,
+    "source": "csv-zip:67213 (Wichita, KS)"
+  },
+  "Lexington": {
+    "lat": 38.0102,
+    "lng": -84.4274,
+    "source": "csv-zip:40509 (Lexington, KY)"
+  },
+  "Louisville": {
+    "lat": 38.2422,
+    "lng": -85.5353,
+    "source": "csv-zip:40243 (Louisville, KY)"
+  },
+  "Shrewsbury": {
+    "lat": 42.2848,
+    "lng": -71.7205,
+    "source": "csv-zip:01545 (Shrewsbury, MA)"
+  },
+  "Rockville": {
+    "lat": 39.0496,
+    "lng": -77.1204,
+    "source": "csv-zip:20852 (Rockville, MD)"
+  },
+  "Canton": {
+    "lat": 42.332,
+    "lng": -83.4695,
+    "source": "csv-zip:48187 (Canton, MI)"
+  },
+  "Grand Rapids": {
+    "lat": 42.8802,
+    "lng": -85.5352,
+    "source": "csv-zip:49512 (Grand Rapids, MI)"
+  },
+  "Independence": {
+    "lat": 39.0731,
+    "lng": -94.3533,
+    "source": "csv-zip:64057 (Independence, MO)"
+  },
+  "Ridgeland": {
+    "lat": 32.4122,
+    "lng": -90.1207,
+    "source": "csv-zip:39157 (Ridgeland, MS)"
+  },
+  "Asheville": {
+    "lat": 35.6004,
+    "lng": -82.4918,
+    "source": "csv-zip:28805 (Asheville, NC)"
+  },
+  "Greensboro": {
+    "lat": 36.0334,
+    "lng": -79.8626,
+    "source": "csv-zip:27407 (Greensboro, NC)"
+  },
+  "Omaha": {
+    "lat": 41.2879,
+    "lng": -96.1495,
+    "source": "csv-zip:68116 (Omaha, NE)"
+  },
+  "Nashua": {
+    "lat": 42.7564,
+    "lng": -71.4667,
+    "source": "csv-zip:03060 (Nashua, NH)"
+  },
+  "Cherry Hill": {
+    "lat": 39.9308,
+    "lng": -75.0175,
+    "source": "csv-zip:08002 (Cherry Hill, NJ)"
+  },
+  "Paramus": {
+    "lat": 40.9477,
+    "lng": -74.0672,
+    "source": "csv-zip:07652 (Paramus, NJ)"
+  },
+  "Las Vegas Central": {
+    "lat": 36.1008,
+    "lng": -115.1365,
+    "source": "csv-zip:89119 (Las Vegas, NV)"
+  },
+  "Albany": {
+    "lat": 42.7198,
+    "lng": -73.8207,
+    "source": "csv-zip:12205 (Albany, NY)"
+  },
+  "Commack": {
+    "lat": 40.843,
+    "lng": -73.2799,
+    "source": "csv-zip:11725 (Commack, NY)"
+  },
+  "Brooklyn": {
+    "lat": 40.6784,
+    "lng": -73.9211,
+    "source": "csv-zip:11233 (Brooklyn, NY)"
+  },
+  "Akron": {
+    "lat": 41.0334,
+    "lng": -81.4385,
+    "source": "csv-zip:44312 (Akron, OH)"
+  },
+  "Cincinnati": {
+    "lat": 39.2839,
+    "lng": -84.4744,
+    "source": "csv-zip:45246 (Springdale, OH)"
+  },
+  "Eugene": {
+    "lat": 44.0611,
+    "lng": -123.0153,
+    "source": "csv-zip:97477 (Springfield, OR)"
+  },
+  "Allentown": {
+    "lat": 40.6567,
+    "lng": -75.5041,
+    "source": "csv-zip:18052 (Whitehall, PA)"
+  },
+  "Warwick": {
+    "lat": 41.7026,
+    "lng": -71.4476,
+    "source": "csv-zip:02886 (Warwick, RI)"
+  },
+  "Columbia": {
+    "lat": 34.0726,
+    "lng": -81.1796,
+    "source": "csv-zip:29212 (Columbia, SC)"
+  },
+  "Greenville": {
+    "lat": 34.8285,
+    "lng": -82.3516,
+    "source": "csv-zip:29607 (Greenville, SC)"
+  },
+  "Sioux Falls": {
+    "lat": 43.5179,
+    "lng": -96.7924,
+    "source": "csv-zip:57106 (Sioux Falls, SD)"
+  },
+  "Chattanooga": {
+    "lat": 35.025,
+    "lng": -85.1459,
+    "source": "csv-zip:37421 (Chattanooga, TN)"
+  },
+  "Knoxville": {
+    "lat": 35.9331,
+    "lng": -84.0761,
+    "source": "csv-zip:37923 (Knoxville, TN)"
+  },
+  "Arlington": {
+    "lat": 32.6548,
+    "lng": -97.092,
+    "source": "csv-zip:76018 (Arlington, TX)"
+  },
+  "Beaumont": {
+    "lat": 30.0948,
+    "lng": -94.1648,
+    "source": "csv-zip:77706 (Beaumont, TX)"
+  },
+  "Dallas Central": {
+    "lat": 32.831,
+    "lng": -96.7692,
+    "source": "csv-zip:75206 (Dallas, TX)"
+  },
+  "El Paso": {
+    "lat": 31.7677,
+    "lng": -106.3016,
+    "source": "csv-zip:79936 (El Paso, TX)"
+  },
+  "Fort Worth": {
+    "lat": 32.6711,
+    "lng": -97.4056,
+    "source": "csv-zip:76132 (Fort Worth, TX)"
+  },
+  "Houston North": {
+    "lat": 30.0167,
+    "lng": -95.447,
+    "source": "csv-zip:77090 (Houston, TX)"
+  },
+  "Lubbock": {
+    "lat": 33.5159,
+    "lng": -101.9344,
+    "source": "csv-zip:79424 (Lubbock, TX)"
+  },
+  "McAllen": {
+    "lat": 26.2154,
+    "lng": -98.2359,
+    "source": "csv-zip:78501 (McAllen, TX)"
+  },
+  "Mesquite": {
+    "lat": 32.6396,
+    "lng": -96.707,
+    "source": "csv-zip:75141 (Mesquite, TX)"
+  },
+  "San Antonio": {
+    "lat": 29.5234,
+    "lng": -98.5273,
+    "source": "csv-zip:78213 (San Antonio, TX)"
+  },
+  "Murray": {
+    "lat": 40.6596,
+    "lng": -111.9193,
+    "source": "csv-zip:84123 (Taylorsville, UT)"
+  },
+  "Fairfax": {
+    "lat": 38.8458,
+    "lng": -77.3242,
+    "source": "csv-zip:22030 (Fairfax, VA)"
+  },
+  "Richmond": {
+    "lat": 37.6329,
+    "lng": -77.5451,
+    "source": "csv-zip:23294 (Richmond, VA)"
+  },
+  "Burlington": {
+    "lat": 44.4513,
+    "lng": -73.1796,
+    "source": "csv-zip:05403 (South Burlington, VT)"
+  },
+  "Bellingham": {
+    "lat": 48.7974,
+    "lng": -122.4448,
+    "source": "csv-zip:98226 (Bellingham, WA)"
+  },
+  "Spokane": {
+    "lat": 47.6634,
+    "lng": -117.2193,
+    "source": "csv-zip:99216 (Spokane Valley, WA)"
+  },
+  "Brookfield": {
+    "lat": 43.0622,
+    "lng": -88.098,
+    "source": "csv-zip:53005 (Brookfield, WI)"
+  },
+  "Madison": {
+    "lat": 43.1205,
+    "lng": -89.3523,
+    "source": "csv-zip:53704 (Madison, WI)"
+  },
+  "Charleston": {
+    "lat": 38.349,
+    "lng": -81.6306,
+    "source": "csv-zip:25301 (Charleston, WV)"
+  },
+  "Casper": {
+    "lat": 42.8406,
+    "lng": -106.2806,
+    "source": "csv-zip:82609 (Casper, WY)"
+  },
+  "Honolulu": {
+    "lat": 21.2998,
+    "lng": -157.8439,
+    "source": "csv-zip:96814 (Honolulu, HI)"
+  },
+  "Mobile": {
+    "lat": 30.6817,
+    "lng": -88.2945,
+    "source": "csv-zip:36608 (Mobile, AL)"
+  },
+  "Des Moines": {
+    "lat": 41.5695,
+    "lng": -93.7994,
+    "source": "csv-zip:50266 (West Des Moines, IA)"
+  },
+  "Davenport": {
+    "lat": 41.5733,
+    "lng": -90.6038,
+    "source": "csv-zip:52806 (Davenport, IA)"
+  },
+  "Peoria": {
+    "lat": 40.7681,
+    "lng": -89.6026,
+    "source": "csv-zip:61614 (Peoria, IL)"
+  },
+  "Fairview Heights": {
+    "lat": 38.596,
+    "lng": -90.0071,
+    "source": "csv-zip:62208 (Fairview Heights, IL)"
+  },
+  "Evansville": {
+    "lat": 37.9678,
+    "lng": -87.4855,
+    "source": "csv-zip:47715 (Evansville, IN)"
+  },
+  "Topeka": {
+    "lat": 39.0405,
+    "lng": -95.7178,
+    "source": "csv-zip:66604 (Topeka, KS)"
+  },
+  "Baton Rouge": {
+    "lat": 30.4558,
+    "lng": -91.0596,
+    "source": "csv-zip:70815 (Baton Rouge, LA)"
+  },
+  "Shreveport": {
+    "lat": 32.4589,
+    "lng": -93.7143,
+    "source": "csv-zip:71105 (Shreveport, LA)"
+  },
+  "Danvers": {
+    "lat": 42.5694,
+    "lng": -70.9425,
+    "source": "csv-zip:01923 (Danvers, MA)"
+  },
+  "Lansing": {
+    "lat": 42.7371,
+    "lng": -84.5244,
+    "source": "csv-zip:48912 (Lansing, MI)"
+  },
+  "Duluth": {
+    "lat": 46.8147,
+    "lng": -92.1998,
+    "source": "csv-zip:55811 (Duluth, MN)"
+  },
+  "Springfield": {
+    "lat": 37.1654,
+    "lng": -93.2522,
+    "source": "csv-zip:65804 (Springfield, MO)"
+  },
+  "Jackson": {
+    "lat": 32.4122,
+    "lng": -90.1207,
+    "source": "csv-zip:39157 (Ridgeland, MS)"
+  },
+  "Billings": {
+    "lat": 45.7813,
+    "lng": -108.5727,
+    "source": "csv-zip:59102 (Billings, MT)"
+  },
+  "Durham": {
+    "lat": 36.0383,
+    "lng": -78.8764,
+    "source": "csv-zip:27704 (Durham, NC)"
+  },
+  "Wilmington NC": {
+    "lat": 34.2237,
+    "lng": -77.8862,
+    "source": "csv-zip:28403 (Wilmington, NC)"
+  },
+  "Fargo": {
+    "lat": 46.8564,
+    "lng": -96.8123,
+    "source": "csv-zip:58103 (Fargo, ND)"
+  },
+  "Lincoln": {
+    "lat": 40.8247,
+    "lng": -96.6252,
+    "source": "csv-zip:68505 (Lincoln, NE)"
+  },
+  "Manchester": {
+    "lat": 42.9656,
+    "lng": -71.4493,
+    "source": "csv-zip:03103 (Manchester, NH)"
+  },
+  "East Brunswick": {
+    "lat": 40.4284,
+    "lng": -74.4064,
+    "source": "csv-zip:08816 (East Brunswick, NJ)"
+  },
+  "Totowa": {
+    "lat": 40.9048,
+    "lng": -74.2168,
+    "source": "csv-zip:07512 (Totowa, NJ)"
+  },
+  "Reno": {
+    "lat": 39.4151,
+    "lng": -119.7668,
+    "source": "csv-zip:89511 (Reno, NV)"
+  },
+  "Buffalo": {
+    "lat": 43.0408,
+    "lng": -78.7812,
+    "source": "csv-zip:14228 (Amherst, NY)"
+  },
+  "Rochester": {
+    "lat": 43.0834,
+    "lng": -77.6344,
+    "source": "csv-zip:14623 (Rochester, NY)"
+  },
+  "Syracuse": {
+    "lat": 43.0397,
+    "lng": -76.0722,
+    "source": "csv-zip:13214 (Syracuse, NY)"
+  },
+  "Canton OH": {
+    "lat": 40.8465,
+    "lng": -81.4408,
+    "source": "csv-zip:44718 (Canton, OH)"
+  },
+  "Toledo": {
+    "lat": 41.708,
+    "lng": -83.6434,
+    "source": "csv-zip:43623 (Toledo, OH)"
+  },
+  "Tulsa": {
+    "lat": 36.0284,
+    "lng": -95.9306,
+    "source": "csv-zip:74137 (Tulsa, OK)"
+  },
+  "Salem": {
+    "lat": 44.949,
+    "lng": -123.004,
+    "source": "csv-zip:97301 (Salem, OR)"
+  },
+  "Harrisburg": {
+    "lat": 40.291,
+    "lng": -76.8203,
+    "source": "csv-zip:17109 (Harrisburg, PA)"
+  },
+  "Pittsburgh": {
+    "lat": 40.4322,
+    "lng": -80.1021,
+    "source": "csv-zip:15205 (Pittsburgh, PA)"
+  },
+  "Scranton": {
+    "lat": 41.4623,
+    "lng": -75.6243,
+    "source": "csv-zip:18519 (Dickson City, PA)"
+  },
+  "Charleston SC": {
+    "lat": 32.7993,
+    "lng": -80.006,
+    "source": "csv-zip:29407 (Charleston, SC)"
+  },
+  "Amarillo": {
+    "lat": 35.1663,
+    "lng": -101.8868,
+    "source": "csv-zip:79109 (Amarillo, TX)"
+  },
+  "Brownsville": {
+    "lat": 25.9717,
+    "lng": -97.4699,
+    "source": "csv-zip:78526 (Brownsville, TX)"
+  },
+  "Corpus Christi": {
+    "lat": 27.7311,
+    "lng": -97.3877,
+    "source": "csv-zip:78411 (Corpus Christi, TX)"
+  },
+  "Denton": {
+    "lat": 33.2117,
+    "lng": -97.0612,
+    "source": "csv-zip:76208 (Denton, TX)"
+  },
+  "Laredo": {
+    "lat": 27.6357,
+    "lng": -99.5923,
+    "source": "csv-zip:78045 (Laredo, TX)"
+  },
+  "Waco": {
+    "lat": 31.5175,
+    "lng": -97.1547,
+    "source": "csv-zip:76711 (Waco, TX)"
+  },
+  "Virginia Beach": {
+    "lat": 36.8012,
+    "lng": -76.423,
+    "source": "csv-zip:23321 (Chesapeake, VA)"
+  },
+  "Yakima": {
+    "lat": 46.5445,
+    "lng": -120.7444,
+    "source": "csv-zip:98903 (Union Gap, WA)"
+  },
+  "Appleton": {
+    "lat": 44.3456,
+    "lng": -88.4343,
+    "source": "csv-zip:54913 (Appleton, WI)"
+  }
+}
