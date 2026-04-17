@@ -3258,6 +3258,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .cat-sel{padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer}
 .cat-sel:focus{border-color:#c00}
 #watchlist-toggle.wl-active,#cl-watchlist-toggle.wl-active{background:#c00;border-color:#c00;color:#fff}
+#want-list-toggle.wl-active{background:#2d6a2d;border-color:#4ade80;color:#fff}
 .brand-dd-item{display:flex;align-items:center;padding:6px 12px;cursor:pointer;font-size:.82rem;color:#ccc;gap:6px}
 .brand-dd-item:hover{background:#252525}
 .brand-dd-item.active{background:#c00;color:#fff}
@@ -3704,7 +3705,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.2.6</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.2.7</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -3790,12 +3791,12 @@ tr.fav-row td:last-child{color:#4ade80}
           class="cat-sel" style="border-color:#3a3a3a;color:#aaa;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
           ↓ Price Drops
         </button>
-        <button onclick="openKeywords()"
+        <button id="want-list-toggle" onclick="searchWantList()"
           class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
           🎯 Want List
         </button>
-        <span id="wl-count-badge" onclick="searchWantList()" style="display:none;color:#4caf50;font-size:.78rem;font-weight:700;white-space:nowrap;margin-left:2px;cursor:pointer;text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'"></span>
-        <a id="search-wl-link" onclick="searchWantList()" style="display:none;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Filter to Want List</a>
+        <span id="wl-count-badge" style="display:none;color:#888;font-size:.78rem;white-space:nowrap;margin-left:2px"></span>
+        <a id="search-wl-link" onclick="openKeywords()" style="display:none;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Edit Want List</a>
         <div id="brand-dropdown" class="brand-dd" style="display:none;position:relative">
           <button id="brand-dd-btn" class="cat-sel" onclick="toggleBrandDropdown()" style="cursor:pointer;white-space:nowrap">All Brands ▾</button>
           <div id="brand-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:260px;max-height:320px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
@@ -4777,6 +4778,8 @@ async function browseCache() {
     document.getElementById('watchlist-toggle').classList.remove('wl-active');
     _priceDropFilterActive = false;
     document.getElementById('price-drop-toggle').classList.remove('wl-active');
+    _wantListSearchActive = false;
+    document.getElementById('want-list-toggle').classList.remove('wl-active');
     _srvLoading = false;  // Cancel any in-flight request so store changes always land
     await _fetchBrowsePage(1);
   }, 300);
@@ -4989,6 +4992,8 @@ function globalSearch() {
   document.getElementById('watchlist-toggle').classList.remove('wl-active');
   _priceDropFilterActive = false;
   document.getElementById('price-drop-toggle').classList.remove('wl-active');
+  _wantListSearchActive = false;
+  document.getElementById('want-list-toggle').classList.remove('wl-active');
   // Show the clear button
   document.getElementById('global-search-clear').style.display = '';
   _fetchBrowsePage(1);
@@ -5041,24 +5046,29 @@ function searchWantList() {
   document.getElementById('watchlist-toggle').classList.remove('wl-active');
   _priceDropFilterActive = false;
   document.getElementById('price-drop-toggle').classList.remove('wl-active');
+  _wantListSearchActive = false;
+  document.getElementById('want-list-toggle').classList.remove('wl-active');
   document.getElementById('global-search-clear').style.display = '';
   document.getElementById('global-search').value = '🎯 Want List Search';
-  document.getElementById('search-wl-link').textContent = 'Clear Want List Search';
-  document.getElementById('search-wl-link').style.color = '#f88';
+  document.getElementById('want-list-toggle').classList.add('wl-active');
   _fetchBrowsePage(1);
 }
 
 function _resetWantListLink() {
-  document.getElementById('search-wl-link').textContent = 'Filter to Want List';
-  document.getElementById('search-wl-link').style.color = '#4ade80';
+  const btn = document.getElementById('want-list-toggle');
+  if (btn) btn.classList.remove('wl-active');
 }
 
 // Show how many want list items are available in the currently selected stores
 let _wlCountTimer = null;
 function _updateWantListCount() {
   const badge = document.getElementById('wl-count-badge');
+  const editLink = document.getElementById('search-wl-link');
   if (!badge) return;
-  if (!window._keywords || !window._keywords.length || !_srvStores || !_srvStores.length) {
+  const hasKeywords = window._keywords && window._keywords.length;
+  // Always show Edit Want List link when keywords exist
+  if (editLink) editLink.style.display = hasKeywords ? 'inline' : 'none';
+  if (!hasKeywords || !_srvStores || !_srvStores.length) {
     badge.style.display = 'none';
     return;
   }
@@ -5074,7 +5084,7 @@ function _updateWantListCount() {
     }).then(r => r.json()).then(d => {
       const n = d.total_count || 0;
       if (n > 0) {
-        badge.textContent = n.toLocaleString() + ' want list item' + (n !== 1 ? 's' : '') + ' available';
+        badge.textContent = '(' + n.toLocaleString() + ' matches)';
         badge.style.display = 'inline';
       } else {
         badge.style.display = 'none';
@@ -5274,6 +5284,8 @@ function showResults(msg, isBaseline) {
     document.getElementById('watchlist-toggle').classList.remove('wl-active');
     _priceDropFilterActive = false;
     document.getElementById('price-drop-toggle').classList.remove('wl-active');
+    _wantListSearchActive = false;
+    document.getElementById('want-list-toggle').classList.remove('wl-active');
     if (!_srvStores.length) {
       _globalSearchActive = false; _wantListSearchActive = false;
       _globalSearchQuery = '';
@@ -5868,6 +5880,10 @@ function clearFilters() {
     _priceDropFilterActive = false;
     document.getElementById('price-drop-toggle').classList.remove('wl-active');
   }
+  if (_wantListSearchActive) {
+    _wantListSearchActive = false;
+    document.getElementById('want-list-toggle').classList.remove('wl-active');
+  }
   // Bypass debounce — force-clear loading flag and re-fetch immediately
   _srvLoading = false;
   _srvPage = 1;
@@ -6398,7 +6414,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.2.6"
+APP_VERSION = "2.2.7"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
