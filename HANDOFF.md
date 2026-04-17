@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-04-17 · Current version: v2.2.6*
+*Last updated: 2026-04-17 · Current version: v2.2.6 · Status: CLEAN — no in-flight work*
 
 ---
 
@@ -231,4 +231,6 @@ Update both places when bumping:
 - Per-store Algolia errors now logged. Progress messages more detailed.
 
 ### v2.2.6
-- **NEW detection fixed**: was comparing `date_listed` (Algolia `creationDate`) against `prev_scan_time`. Root cause: `creationDate` is when GC first catalogued the product (e.g. 2019 for a Les Paul), NOT when the used item was listed. Now uses `first_seen` from the cache instead — set to `run_time` on the scan that first encounters each item. Items first seen after your last scan = NEW. This restores reliable per-device new-item detection.
+- **NEW detection fixed**: logic is `date_listed > prev_scan_time → NEW`. `date_listed` comes from Algolia's `startDate` (seconds) or `creationDate/1000` (ms) for each used-item record — this IS the listing date for that specific used item. `prev_scan_time` = this device's last scan time from localStorage (`gt_last_run`). Both timestamps are UTC ISO strings so string comparison is valid and correct.
+- Root cause of regression: an intermediate commit tried using `first_seen` (when our scanner first found the item) instead of `date_listed`. This caused old inventory to be flagged NEW if it was first-scanned recently, and new inventory (like 4/17 items) to be missed. Reverted.
+- Key insight: each used item is a distinct Algolia record with its own `creationDate` = when it was listed as used. Not related to the product's catalog age.
