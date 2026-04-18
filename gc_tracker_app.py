@@ -3736,7 +3736,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.3.2</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.3.3</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -5217,18 +5217,14 @@ function showResults(msg, isBaseline) {
   const isFirstRun = msg.baseline;
   const freshNewCount = newIdSet.size;
 
-  // If this scan found new items, replace the NEW set. If it found 0, PRESERVE the
-  // existing set — running a second scan quickly shouldn't erase NEW tags from the first.
-  // Items leave the NEW list only when a subsequent scan finds something genuinely newer.
-  if (!isFirstRun && freshNewCount > 0) {
+  // Always replace the NEW set with exactly what this scan found.
+  // 0 new = all NEW tags clear. Each scan is the source of truth.
+  if (!isFirstRun) {
     window._newIds = newIdSet;
     _lsSet('new_ids', [...newIdSet]);
   }
-  // (If freshNewCount === 0, window._newIds retains whatever was loaded at startup)
-  const displayNewCount = freshNewCount > 0 ? freshNewCount : (window._newIds ? window._newIds.size : 0);
-  const carryNote = (freshNewCount === 0 && displayNewCount > 0) ? ` (${displayNewCount} still marked NEW from previous scan)` : '';
 
-  appendLog(`\\n✓ Done${stoppedNote} — ${isFirstRun ? 'initial database built' : freshNewCount.toLocaleString() + ' new this scan' + carryNote}.`, 'log-dim');
+  appendLog(`\\n✓ Done${stoppedNote} — ${isFirstRun ? 'initial database built' : freshNewCount.toLocaleString() + ' new this scan'}.`, 'log-dim');
 
   window._lastRunISO = msg.scan_time || new Date().toISOString();
   _lsSet('last_run', window._lastRunISO);
@@ -6424,7 +6420,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.3.2"
+APP_VERSION = "2.3.3"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
