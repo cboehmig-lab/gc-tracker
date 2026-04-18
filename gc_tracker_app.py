@@ -3312,15 +3312,19 @@ th:hover{color:#ccc}
 th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
 th.sort-desc::after{content:" ▼";color:#c00;font-size:.6rem}
 td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-td:nth-child(1){width:48px;text-align:center;overflow:visible}
-td:nth-child(2){width:54px;text-align:center;overflow:visible}
-td:nth-child(3){width:30px;text-align:center}
-/* col 4 = Item: no explicit width → gets all remaining space; autoSizeItemColumn caps at 520px */
-td:nth-child(5),td:nth-child(6),td:nth-child(7),td:nth-child(8),td:nth-child(9),td:nth-child(10),td:nth-child(11){width:max(65px, calc((80% - 132px) / 7))}
-th:nth-child(1){width:48px}
-th:nth-child(2){width:54px}
-th:nth-child(3){width:30px}
-th:nth-child(5),th:nth-child(6),th:nth-child(7),th:nth-child(8),th:nth-child(9),th:nth-child(10),th:nth-child(11){width:max(65px, calc((80% - 132px) / 7))}
+/* Action cols: fixed narrow */
+th:nth-child(1),td:nth-child(1){width:44px;text-align:center;overflow:visible}
+th:nth-child(2),td:nth-child(2){width:50px;text-align:center;overflow:visible}
+th:nth-child(3),td:nth-child(3){width:28px;text-align:center}
+/* col 4 = Item: no width → absorbs all remaining space */
+/* Data cols: sized to content, consistent across all pages */
+th:nth-child(5),td:nth-child(5){width:90px}
+th:nth-child(6),td:nth-child(6){width:74px;text-align:right}
+th:nth-child(7),td:nth-child(7){width:80px}
+th:nth-child(8),td:nth-child(8){width:90px}
+th:nth-child(9),td:nth-child(9){width:130px}
+th:nth-child(10),td:nth-child(10){width:64px}
+th:nth-child(11),td:nth-child(11){width:90px}
 table.no-new th:nth-child(1),table.no-new td:nth-child(1){display:none}
 table.no-want th:nth-child(2),table.no-want td:nth-child(2){display:none}
 tr:hover td{background:#1d1d1d}
@@ -3738,7 +3742,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.4.4</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.4.5</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -4553,7 +4557,7 @@ function _buildRowHtml(item) {
   const soldBadge = isSold ? ' <span class="tag-sold">Sold</span>' : '';
   const isNew = item.isNew || (item.id && window._newIds && window._newIds.has(item.id));
   const rowClass = [isSold ? 'sold-row' : '', item.isFav ? 'fav-row' : ''].filter(Boolean).join(' ');
-  const brandCell = `<td>${item.brand ? esc(item.brand) : ''}</td>`;
+  const brandCell = `<td title="${esc(item.brand)}">${item.brand ? esc(item.brand) : ''}</td>`;
   const hasDrop = item.price_drop > 0;
   const dropSinceLabel = hasDrop && item.price_drop_since
     ? ` · dropped ${_fmtDropDate(item.price_drop_since)}`
@@ -4567,13 +4571,13 @@ function _buildRowHtml(item) {
     `<td>${isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
     `<td>${item.kwMatch ? '<span class="tag-kw">WANT</span>' : ''}</td>` +
     `<td>${watchStar}</td>` +
-    `<td>${nameCell}${soldBadge}</td>` +
+    `<td title="${esc(item.name)}">${nameCell}${soldBadge}</td>` +
     (_isMobile() ? priceCell + brandCell : brandCell + priceCell) +
-    `<td>${esc(item.condition)}</td>` +
-    `<td>${esc(item.category)}</td>` +
-    `<td>${esc(item.subcategory)}</td>` +
+    `<td title="${esc(item.condition)}">${esc(item.condition)}</td>` +
+    `<td title="${esc(item.category)}">${esc(item.category)}</td>` +
+    `<td title="${esc(item.subcategory)}">${esc(item.subcategory)}</td>` +
     `<td>${esc(item.date||'')}</td>` +
-    `<td>${esc(item.store||item.location)}</td>` +
+    `<td title="${esc(item.store||item.location)}">${esc(item.store||item.location)}</td>` +
     `</tr>`;
 }
 
@@ -4657,7 +4661,7 @@ function _renderServerTable(items) {
     <th data-col="watch"></th>
     <th data-col="1">Item</th>
     <th data-col="2">Brand</th>
-    <th data-col="3">Price</th>
+    <th data-col="3" style="text-align:right">Price</th>
     <th data-col="4">Condition</th>
     <th data-col="5">Category</th>
     <th data-col="6">Subcategory</th>
@@ -4682,7 +4686,6 @@ function _renderServerTable(items) {
     if (!_SORT_COLS[colIdx]) return;
     th.addEventListener('click', () => sortTable(colIdx));
   });
-  autoSizeItemColumn();
 }
 
 // ── Mobile view toggle ────────────────────────────────────────────────────────
@@ -5477,8 +5480,6 @@ function renderTable() {
     if (!_SORT_COLS[colIdx]) return;
     th.addEventListener('click', () => sortTable(colIdx));
   });
-
-  autoSizeItemColumn();
 }
 
 function goToPage(page) {
@@ -6443,7 +6444,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.4.4"
+APP_VERSION = "2.4.5"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
