@@ -1797,12 +1797,10 @@ def api_browse():
             continue
         if not cached.get("available", True):
             continue
-        # Per-user filtering: skip items this user hasn't "seen" yet
-        # (first_seen is after their last local scan)
-        if user_last_scan:
-            first_seen = cached.get("first_seen", "")
-            if first_seen and first_seen > user_last_scan:
-                continue
+        # (user_last_scan gating removed v2.3.6 — was hiding items discovered by
+        # another device's scan after this device's last scan, causing mobile/desktop
+        # to show different results. NEW detection is handled by _newIds from scan,
+        # not by hiding items from browse.)
         price_raw  = cached.get("price", 0) or 0
         name       = cached.get("name", "")
         brand      = cached.get("brand", "")
@@ -3736,7 +3734,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.3.5</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.3.6</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -6428,7 +6426,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.3.5"
+APP_VERSION = "2.3.6"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
