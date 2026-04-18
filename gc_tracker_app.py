@@ -3736,7 +3736,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.3.3</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.3.4</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -4569,7 +4569,7 @@ function _buildRowHtml(item) {
     `<td>${esc(item.category)}</td>` +
     `<td>${esc(item.subcategory)}</td>` +
     `<td>${esc(item.date||'')}</td>` +
-    `<td>${esc(item.location||item.store)}</td>` +
+    `<td>${esc(item.store||item.location)}</td>` +
     `</tr>`;
 }
 
@@ -4752,7 +4752,7 @@ function _renderMobileCards(items) {
     html += `<div class="card-badges">${newBadge}${wantBadge}${soldBadge}</div>`;
     html += `<div class="card-name"><a href="${url}" target="_blank" rel="noopener">${name}</a></div>`;
     html += `<div class="card-price">${price}</div>`;
-    html += `<div class="card-meta">${store}${loc ? ' · ' + loc : ''}${cond ? ' · ' + cond : ''}</div>`;
+    html += `<div class="card-meta">${store}${item.date ? ' · ' + esc(item.date) : ''}</div>`;
     html += `<div class="card-actions">`;
     html += `<button class="card-watch-btn${watchCls}" onclick="toggleWatch('${item.id}',this)" data-id="${item.id}">${watched ? '★' : '☆'}</button>`;
     html += `</div>`;
@@ -4985,6 +4985,7 @@ function removeKeywordAt(i) {
 
 function clearAllKeywords() {
   if (!window._keywords.length) return;
+  if (!confirm(`Clear all ${window._keywords.length} want list item${window._keywords.length !== 1 ? 's' : ''}? This cannot be undone.`)) return;
   window._keywords = [];
   _lsSet('keywords', window._keywords);
   renderKeywordList();
@@ -5222,6 +5223,11 @@ function showResults(msg, isBaseline) {
   if (!isFirstRun) {
     window._newIds = newIdSet;
     _lsSet('new_ids', [...newIdSet]);
+    // Immediately remove stale NEW badges from the DOM — don't wait for async browse re-render
+    if (freshNewCount === 0) {
+      document.querySelectorAll('.tag').forEach(el => { if (el.textContent.trim() === 'NEW') el.remove(); });
+      document.querySelectorAll('.is-new').forEach(el => el.classList.remove('is-new'));
+    }
   }
 
   appendLog(`\\n✓ Done${stoppedNote} — ${isFirstRun ? 'initial database built' : freshNewCount.toLocaleString() + ' new this scan'}.`, 'log-dim');
@@ -6420,7 +6426,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.3.3"
+APP_VERSION = "2.3.4"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
