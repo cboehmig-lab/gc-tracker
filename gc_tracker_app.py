@@ -3306,19 +3306,21 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #res-search:focus{border-color:#c00;box-shadow:0 0 0 3px rgba(204,0,0,.15)}
 #res-search-count{font-size:.75rem;color:#555;white-space:nowrap}
 
-table{width:100%;border-collapse:collapse;font-size:.83rem;table-layout:auto}
+table{width:100%;border-collapse:collapse;font-size:.83rem;table-layout:fixed}
 th{background:#161616;color:#666;font-weight:600;text-align:left;padding:7px 10px;font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:40px;cursor:pointer;user-select:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 th:hover{color:#ccc}
 th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
 th.sort-desc::after{content:" ▼";color:#c00;font-size:.6rem}
 td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-td:nth-child(1){width:48px;min-width:48px;text-align:center;overflow:visible}
-td:nth-child(2){width:54px;min-width:54px;text-align:center;overflow:visible}
-td:nth-child(3){width:30px;min-width:30px;text-align:center}
-td:nth-child(4){min-width:120px;max-width:420px}
-th:nth-child(1){width:48px;min-width:48px}
-th:nth-child(2){width:54px;min-width:54px}
-th:nth-child(3){width:30px;min-width:30px}
+td:nth-child(1){width:48px;text-align:center;overflow:visible}
+td:nth-child(2){width:54px;text-align:center;overflow:visible}
+td:nth-child(3){width:30px;text-align:center}
+/* col 4 = Item: no explicit width → gets all remaining space; autoSizeItemColumn caps at 520px */
+td:nth-child(5),td:nth-child(6),td:nth-child(7),td:nth-child(8),td:nth-child(9),td:nth-child(10),td:nth-child(11){width:max(65px, calc((80% - 132px) / 7))}
+th:nth-child(1){width:48px}
+th:nth-child(2){width:54px}
+th:nth-child(3){width:30px}
+th:nth-child(5),th:nth-child(6),th:nth-child(7),th:nth-child(8),th:nth-child(9),th:nth-child(10),th:nth-child(11){width:max(65px, calc((80% - 132px) / 7))}
 table.no-new th:nth-child(1),table.no-new td:nth-child(1){display:none}
 table.no-want th:nth-child(2),table.no-want td:nth-child(2){display:none}
 tr:hover td{background:#1d1d1d}
@@ -3736,7 +3738,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.4.1</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.4.2</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -6443,7 +6445,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.4.1"
+APP_VERSION = "2.4.2"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
