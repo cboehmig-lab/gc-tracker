@@ -1797,10 +1797,13 @@ def api_browse():
             continue
         if not cached.get("available", True):
             continue
-        # (user_last_scan gating removed v2.3.6 — was hiding items discovered by
-        # another device's scan after this device's last scan, causing mobile/desktop
-        # to show different results. NEW detection is handled by _newIds from scan,
-        # not by hiding items from browse.)
+        # Per-user browse gating: hide items first seen after this user's last scan.
+        # Ensures each device only sees inventory that existed when IT scanned —
+        # items added to cache by another device's newer scan stay hidden here.
+        if user_last_scan:
+            first_seen = cached.get("first_seen", "")
+            if first_seen and first_seen > user_last_scan:
+                continue
         price_raw  = cached.get("price", 0) or 0
         name       = cached.get("name", "")
         brand      = cached.get("brand", "")
@@ -3734,7 +3737,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.3.6</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.3.7</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -5188,6 +5191,12 @@ async function startRun(payload, isBaseline) {
       stopBtn.style.display = 'none';
       updateCount(); loadState();
       appendLog('Connection to server lost. Refreshing results…', 'log-dim');
+      // The scan likely completed on the server even if our SSE stream dropped
+      // (common on mobile when screen locks or network blips). Update _lastRunISO
+      // to now so browse gating doesn't hide items the scan found.
+      window._lastRunISO = new Date().toISOString();
+      _lsSet('last_run', window._lastRunISO);
+      _updateRelativeTime();
       // Fall back to browse mode to show whatever data was saved
       setTimeout(() => {
         const stores = getSelected();
@@ -6426,7 +6435,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.3.6"
+APP_VERSION = "2.3.7"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
