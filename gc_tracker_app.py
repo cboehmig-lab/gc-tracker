@@ -3736,7 +3736,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.3.4</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.3.5</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -3804,7 +3804,7 @@ tr.fav-row td:last-child{color:#4ade80}
       <span id="s-excel" style="display:none"><a style="color:#6ab0f5" href="/download/excel">Download Excel ↗</a></span>
       <span id="s-want-match" style="display:none;color:#4caf50;font-weight:600;font-size:.82rem;cursor:pointer" onclick="searchWantList()" title="Click to view want list matches"></span>
     </div>
-    <div id="log"><span class="log-dim">Ready — select stores and click Run, or build a full baseline.</span></div>
+    <div id="log"><span class="log-dim">Ready</span></div>
     <div class="results" id="res-panel" style="display:none">
       <div class="results-hdr">
         <span id="res-title" style="display:none"></span>
@@ -4099,6 +4099,8 @@ function _fmtDropDate(iso) {
 
 function _updateRelativeTime() {
   document.getElementById('s-last').textContent = _timeAgo(window._lastRunISO);
+  const btn = document.getElementById('check-now-btn');
+  if (btn) btn.textContent = window._lastRunISO ? 'Check Now' : 'Run Initial Scan';
   clearInterval(_relTimeTimer);
   _relTimeTimer = setInterval(() => {
     document.getElementById('s-last').textContent = _timeAgo(window._lastRunISO);
@@ -6426,7 +6428,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.3.4"
+APP_VERSION = "2.3.5"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
