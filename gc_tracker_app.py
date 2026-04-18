@@ -3738,7 +3738,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.4.2</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.4.4</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -4668,6 +4668,9 @@ function _renderServerTable(items) {
   html += '</tbody></table>';
   html += _buildPaginatorHtml(_srvPage, _srvTotalPages, _srvTotalCount, 50);
   document.getElementById('res-body').innerHTML = html;
+  // Scroll to top after content renders — desktop scrolls .results, mobile scrolls #res-body
+  document.getElementById('res-panel')?.scrollTo(0, 0);
+  document.getElementById('res-body')?.scrollTo(0, 0);
 
   // Attach sort headers
   if (window._sortCol !== null) {
@@ -5479,21 +5482,16 @@ function renderTable() {
 }
 
 function goToPage(page) {
-  // Scroll to top of results — desktop uses .results, mobile uses #res-body
-  function _scrollResultsTop() {
-    document.querySelector('.results')?.scrollTo(0, 0);
-    document.getElementById('res-body')?.scrollTo(0, 0);
-  }
   if (_browseMode === 'server') {
     if (page < 1 || page > _srvTotalPages || page === _srvPage) return;
-    _fetchBrowsePage(page);
-    _scrollResultsTop();
+    _fetchBrowsePage(page);  // scroll handled inside _fetchBrowsePage after innerHTML
     return;
   }
   // Local mode
   window._localPage = page;
   renderTable();
-  _scrollResultsTop();
+  document.getElementById('res-panel')?.scrollTo(0, 0);
+  document.getElementById('res-body')?.scrollTo(0, 0);
 }
 
 function sortTable(colIdx) {
@@ -5557,7 +5555,7 @@ function autoSizeItemColumn() {
     });
   }
   // Add padding (link underline cursor area + 24px right padding)
-  const colW = Math.min(Math.ceil(maxW) + 32, 520); // cap at 520px
+  const colW = Math.min(Math.ceil(maxW) + 32, 260); // cap at 260px
   const th = document.querySelector('#res-table th[data-col="1"]');
   if (th) th.style.width = colW + 'px';
   // Also set td widths via col group or direct style on first td of each row
@@ -6445,7 +6443,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.4.2"
+APP_VERSION = "2.4.4"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
