@@ -3737,7 +3737,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.3.7</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.3.9</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -5284,7 +5284,7 @@ function showResults(msg, isBaseline) {
   document.getElementById('res-search').value = '';
   document.getElementById('res-search-count').textContent = '';
   document.getElementById('res-title').textContent = `${msg.scanned.toLocaleString()} Items`;
-  document.getElementById('res-badge').textContent = displayNewCount > 0 ? displayNewCount + ' NEW' : '';
+  document.getElementById('res-badge').textContent = freshNewCount > 0 ? freshNewCount + ' NEW' : '';
 
   if (msg.scanned === 0) {
     document.getElementById('res-body').innerHTML = '<div class="no-res">Nothing found for selected stores.</div>';
@@ -5478,6 +5478,7 @@ function goToPage(page) {
   if (_browseMode === 'server') {
     if (page < 1 || page > _srvTotalPages || page === _srvPage) return;
     _fetchBrowsePage(page);
+    (document.getElementById('res-body') || document.querySelector('.results'))?.scrollTo(0, 0);
     return;
   }
   // Local mode
@@ -6435,7 +6436,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.3.7"
+APP_VERSION = "2.3.9"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
