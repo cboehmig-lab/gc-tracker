@@ -3306,22 +3306,21 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #res-search:focus{border-color:#c00;box-shadow:0 0 0 3px rgba(204,0,0,.15)}
 #res-search-count{font-size:.75rem;color:#555;white-space:nowrap}
 
-table{width:100%;border-collapse:collapse;font-size:.83rem;table-layout:fixed}
+table{width:100%;border-collapse:collapse;font-size:.83rem;table-layout:auto}
 th{background:#161616;color:#666;font-weight:600;text-align:left;padding:7px 10px;font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:40px;cursor:pointer;user-select:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 th:hover{color:#ccc}
 th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
 th.sort-desc::after{content:" ▼";color:#c00;font-size:.6rem}
 td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-td:nth-child(1){width:52px;text-align:center;overflow:visible}
-td:nth-child(2){width:62px;text-align:center;overflow:visible}
-td:nth-child(3){width:30px;text-align:center}
-td:nth-child(4){width:12%}
-td:nth-child(5),td:nth-child(6),td:nth-child(7),td:nth-child(8),td:nth-child(9),td:nth-child(10),td:nth-child(11){width:calc((88% - 144px) / 7)}
-th:nth-child(1){width:52px}
-th:nth-child(2){width:62px}
-th:nth-child(3){width:30px}
-th:nth-child(4){width:12%}
-th:nth-child(5),th:nth-child(6),th:nth-child(7),th:nth-child(8),th:nth-child(9),th:nth-child(10),th:nth-child(11){width:calc((88% - 144px) / 7)}
+td:nth-child(1){width:48px;min-width:48px;text-align:center;overflow:visible}
+td:nth-child(2){width:54px;min-width:54px;text-align:center;overflow:visible}
+td:nth-child(3){width:30px;min-width:30px;text-align:center}
+td:nth-child(4){min-width:120px;max-width:420px}
+th:nth-child(1){width:48px;min-width:48px}
+th:nth-child(2){width:54px;min-width:54px}
+th:nth-child(3){width:30px;min-width:30px}
+table.no-new th:nth-child(1),table.no-new td:nth-child(1){display:none}
+table.no-want th:nth-child(2),table.no-want td:nth-child(2){display:none}
 tr:hover td{background:#1d1d1d}
 td a{color:#7bbff7;text-decoration:none}
 td a:hover{color:#a8d4ff;text-decoration:underline}
@@ -3737,7 +3736,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.3.9</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.4.1</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -4647,7 +4646,10 @@ function _renderServerTable(items) {
     return;
   }
 
-  let html = `<table id="res-table"><thead><tr>
+  const hasNew  = items.some(i => i.isNew);
+  const hasWant = items.some(i => i.kwMatch);
+  const tblCls  = [!hasNew ? 'no-new' : '', !hasWant ? 'no-want' : ''].filter(Boolean).join(' ');
+  let html = `<table id="res-table"${tblCls ? ` class="${tblCls}"` : ''}><thead><tr>
     <th data-col="0"></th>
     <th data-col="kw"></th>
     <th data-col="watch"></th>
@@ -5475,16 +5477,21 @@ function renderTable() {
 }
 
 function goToPage(page) {
+  // Scroll to top of results — desktop uses .results, mobile uses #res-body
+  function _scrollResultsTop() {
+    document.querySelector('.results')?.scrollTo(0, 0);
+    document.getElementById('res-body')?.scrollTo(0, 0);
+  }
   if (_browseMode === 'server') {
     if (page < 1 || page > _srvTotalPages || page === _srvPage) return;
     _fetchBrowsePage(page);
-    (document.getElementById('res-body') || document.querySelector('.results'))?.scrollTo(0, 0);
+    _scrollResultsTop();
     return;
   }
   // Local mode
   window._localPage = page;
   renderTable();
-  (document.getElementById('res-body') || document.querySelector('.results'))?.scrollTo(0, 0);
+  _scrollResultsTop();
 }
 
 function sortTable(colIdx) {
@@ -5552,7 +5559,7 @@ function autoSizeItemColumn() {
   const th = document.querySelector('#res-table th[data-col="1"]');
   if (th) th.style.width = colW + 'px';
   // Also set td widths via col group or direct style on first td of each row
-  document.querySelectorAll('#res-table tbody tr td:nth-child(3)').forEach(td => {
+  document.querySelectorAll('#res-table tbody tr td:nth-child(4)').forEach(td => {
     td.style.maxWidth = colW + 'px';
   });
 }
@@ -6436,7 +6443,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.3.9"
+APP_VERSION = "2.4.1"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
