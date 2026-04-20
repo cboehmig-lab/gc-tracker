@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-04-20 · Current version: v2.4.6 · Status: CLEAN — no in-flight work*
+*Last updated: 2026-04-20 · Current version: v2.4.7 · Status: CLEAN — no in-flight work*
 
 ---
 
@@ -183,7 +183,7 @@ Update both places when bumping:
 
 ---
 
-## Recent Changes (v2.3.3 → v2.4.6)
+## Recent Changes (v2.3.3 → v2.4.7)
 
 ### v2.3.3
 - **0-new scan now clears NEW tags**: Changed philosophy — scan result is always source of truth. If scan returns 0 new items, `_newIds` is cleared (previously was preserved). Clean slate each scan.
@@ -218,6 +218,9 @@ Update both places when bumping:
 
 ### v2.4.5
 - **Content-appropriate column widths**: Each column sized to its content (price, date, location each given appropriate fixed widths). Price column right-aligned. Title tooltips added (full text on hover for truncated titles).
+
+### v2.4.7
+- **Contextual (faceted) filter counts**: Brand, condition, category, and subcategory dropdowns now show counts scoped to all OTHER active filters. E.g. when "Bass" category is selected, Ibanez shows ~500 (Bass items only) not ~2100 (all items). Zero-count options are hidden automatically; currently-selected options always remain visible (showing 0) so they can be deselected. Implementation: `/api/browse` computes contextual counts server-side using a `_ctx_counts()` helper — for each facet, apply all other facet filters to the non-facet-filtered base set. Returns `{name, count}` objects for all four facets. Client-side `_renderCondList`, `_renderCatList`, `_renderSubList` updated to handle the new format and display counts.
 
 ### v2.4.6
 - **Wider price/date/location columns**: Tuned column widths wider based on real content. Removed title tooltips (were cluttering the UI).

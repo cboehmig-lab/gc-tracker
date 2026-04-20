@@ -1791,7 +1791,6 @@ def api_browse():
 
     # ── Build full item list for selected stores (lightweight dicts) ──────
     all_items = []
-    brand_counts = {}; cond_set = set(); cat_set = set(); subcat_set = set()
     for sku, cached in _cat_cache.items():
         if store_set is not None and cached.get("store") not in store_set:
             continue
@@ -1813,12 +1812,6 @@ def api_browse():
         condition  = cached.get("condition", "")
         date_raw   = cached.get("date_listed") or item_dates.get(sku, "")
         store      = cached.get("store", "")
-
-        # Collect filter options from ALL items (pre-filter)
-        if brand:      brand_counts[brand] = brand_counts.get(brand, 0) + 1
-        if condition:  cond_set.add(condition)
-        if category:   cat_set.add(category)
-        if subcategory: subcat_set.add(subcategory)
 
         # Check keyword match
         name_lower = name.lower()
@@ -1855,49 +1848,73 @@ def api_browse():
     total_unfiltered = len(all_items)
     new_count_unfiltered = sum(1 for i in all_items if i.get("isNew"))
 
-    # ── Apply filters ─────────────────────────────────────────────────────
-    filtered = all_items
-    if fq:
-        # Quoted = exact phrase, otherwise all words must appear (AND)
-        if fq.startswith('"') and fq.endswith('"') and len(fq) > 2:
-            phrase = fq[1:-1]
-            filtered = [i for i in filtered if
-                        phrase in (i["name"] or "").lower() or
-                        phrase in (i["brand"] or "").lower()]
-        else:
-            words = fq.split()
-            def _text_match(i):
-                text = " ".join(((i["name"] or ""), (i["brand"] or ""),
-                                 (i["store"] or ""), (i["location"] or ""),
-                                 (i["category"] or ""), (i["subcategory"] or ""))).lower()
-                return all(w in text for w in words)
-            filtered = [i for i in filtered if _text_match(i)]
-    if f_want_only:
-        filtered = [i for i in filtered if i["kwMatch"]]
-    if f_price_drop_only:
-        filtered = [i for i in filtered if i.get("price_drop", 0) > 0]
-    if f_watched:
-        filtered = [i for i in filtered if i["watched"]]
-    if f_brands:
-        brand_set_filter = set(f_brands)
-        filtered = [i for i in filtered if i["brand"] in brand_set_filter]
-    if f_conds:
-        cond_set_filter = set(f_conds)
-        filtered = [i for i in filtered if i["condition"] in cond_set_filter]
-    if f_cats:
-        cat_set_filter = set(f_cats)
-        filtered = [i for i in filtered if i["category"] in cat_set_filter]
-    if f_subs:
-        sub_set_filter = set(f_subs)
-        filtered = [i for i in filtered if i["subcategory"] in sub_set_filter]
+    # ── Contextual facet counts ───────────────────────────────────────────
+    # Step 1: apply non-facet filters (text search, want list, price drops, watched)
+    def _apply_base(items):
+        r = items
+        if fq:
+            if fq.startswith('"') and fq.endswith('"') and len(fq) > 2:
+                phrase = fq[1:-1]
+                r = [i for i in r if phrase in (i["name"] or "").lower()
+                     or phrase in (i["brand"] or "").lower()]
+            else:
+                words = fq.split()
+                r = [i for i in r if all(
+                    w in " ".join([i["name"] or "", i["brand"] or "",
+                                   i["store"] or "", i["location"] or "",
+                                   i["category"] or "", i["subcategory"] or ""]).lower()
+                    for w in words)]
+        if f_want_only:       r = [i for i in r if i["kwMatch"]]
+        if f_price_drop_only: r = [i for i in r if i.get("price_drop", 0) > 0]
+        if f_watched:         r = [i for i in r if i["watched"]]
+        return r
 
-    # Subcategory options scoped to current category filter
-    scoped_subcats = set()
+    base_items = _apply_base(all_items)
+
+    # Step 2: for each facet, count items passing all OTHER facet filters
+    def _ctx_counts(count_field, excl_brands=False, excl_conds=False,
+                    excl_cats=False, excl_subs=False):
+        r = base_items
+        if f_brands and not excl_brands:
+            bs = set(f_brands); r = [i for i in r if i["brand"] in bs]
+        if f_conds and not excl_conds:
+            cs = set(f_conds); r = [i for i in r if i["condition"] in cs]
+        if f_cats and not excl_cats:
+            cs = set(f_cats); r = [i for i in r if i["category"] in cs]
+        if f_subs and not excl_subs:
+            ss = set(f_subs); r = [i for i in r if i["subcategory"] in ss]
+        counts = {}
+        for i in r:
+            v = i.get(count_field) or ""
+            if v: counts[v] = counts.get(v, 0) + 1
+        return counts
+
+    brand_ctx = _ctx_counts("brand",       excl_brands=True)
+    cond_ctx  = _ctx_counts("condition",   excl_conds=True)
+    cat_ctx   = _ctx_counts("category",    excl_cats=True)
+    sub_ctx   = _ctx_counts("subcategory", excl_subs=True)
+    _cond_order = {"Excellent": 0, "Great": 1, "Good": 2, "Fair": 3, "Poor": 4}
+
+    # Always include currently-selected values so users can deselect them
+    for b in f_brands:
+        if b not in brand_ctx: brand_ctx[b] = 0
+    for c in f_conds:
+        if c not in cond_ctx: cond_ctx[c] = 0
+    for c in f_cats:
+        if c not in cat_ctx: cat_ctx[c] = 0
+    for s in f_subs:
+        if s not in sub_ctx: sub_ctx[s] = 0
+
+    # ── Apply filters ─────────────────────────────────────────────────────
+    filtered = base_items
+    if f_brands:
+        bs = set(f_brands); filtered = [i for i in filtered if i["brand"] in bs]
+    if f_conds:
+        cs = set(f_conds); filtered = [i for i in filtered if i["condition"] in cs]
     if f_cats:
-        cat_set_scope = set(f_cats)
-        for i in all_items:
-            if i["category"] in cat_set_scope and i["subcategory"]:
-                scoped_subcats.add(i["subcategory"])
+        cs = set(f_cats); filtered = [i for i in filtered if i["category"] in cs]
+    if f_subs:
+        ss = set(f_subs); filtered = [i for i in filtered if i["subcategory"] in ss]
 
     # ── Sort ──────────────────────────────────────────────────────────────
     # NEW items float to top ONLY on default sort (no explicit column click)
@@ -1945,11 +1962,11 @@ def api_browse():
         "new_count":        new_count_unfiltered,
         "new_want_count":   new_want_count,
         "no_store_data":    False,
-        # Filter option lists (always full set so dropdowns stay populated)
-        "brands":           [{"name": b, "count": c} for b, c in sorted(brand_counts.items(), key=lambda x: -x[1])],
-        "conditions":       sorted(cond_set, key=lambda c: {"Excellent":0,"Great":1,"Good":2,"Fair":3,"Poor":4}.get(c, 5)),
-        "categories":       sorted(cat_set),
-        "subcategories":    sorted(scoped_subcats) if f_cats else sorted(subcat_set),
+        # Contextual facet counts — each facet reflects all OTHER active filters
+        "brands":        [{"name": b, "count": c} for b, c in sorted(brand_ctx.items(), key=lambda x: -x[1])],
+        "conditions":    [{"name": c, "count": n} for c, n in sorted(cond_ctx.items(), key=lambda x: _cond_order.get(x[0], 5))],
+        "categories":    [{"name": c, "count": n} for c, n in sorted(cat_ctx.items())],
+        "subcategories": [{"name": s, "count": n} for s, n in sorted(sub_ctx.items())],
     })
 
 
@@ -3742,7 +3759,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.4.6</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.4.7</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -4524,18 +4541,18 @@ function _populateFiltersFromServer(brands, conditions, categories, subcategorie
 
   _setCondList(conditions);
   const savedConds = currentFilters.filter_conditions || [];
-  window._selectedConds = savedConds.filter(c => conditions.includes(c));
+  window._selectedConds = savedConds.filter(c => conditions.some(x => (x.name !== undefined ? x.name : x) === c));
   _updateCondBtn();
 
   _setCatList(categories);
   const savedCats = currentFilters.filter_categories || [];
-  window._selectedCats = savedCats.filter(c => categories.includes(c));
+  window._selectedCats = savedCats.filter(c => categories.some(x => (x.name !== undefined ? x.name : x) === c));
   _updateCatBtn();
 
   if (subcategories.length && window._selectedCats.length) {
     _setSubList(subcategories);
     const savedSubs = currentFilters.filter_subcategories || [];
-    window._selectedSubs = savedSubs.filter(s => subcategories.includes(s));
+    window._selectedSubs = savedSubs.filter(s => subcategories.some(x => (x.name !== undefined ? x.name : x) === s));
   } else {
     _setSubList([]);
     window._selectedSubs = [];
@@ -5661,6 +5678,7 @@ function _renderBrandList() {
   window._brandList.forEach(b => {
     if (q && !b.name.toLowerCase().includes(q)) return;
     const isActive = window._selectedBrands.includes(b.name);
+    if (b.count === 0 && !isActive) return;
     const esc = b.name.replace(/"/g,'&quot;');
     html += '<div class="brand-dd-item' + (isActive ? ' active' : '') + '" data-brand="' + esc + '">'
          + '<span class="cond-dd-check">' + (isActive ? '✓' : '') + '</span>'
@@ -5735,11 +5753,14 @@ function _renderCondList() {
   const panel = document.getElementById('cond-dd-panel');
   let html = '';
   window._condList.forEach(c => {
-    const isActive = window._selectedConds.includes(c);
-    const esc = c.replace(/"/g,'&quot;');
+    const name = (c && c.name !== undefined) ? c.name : c;
+    const count = (c && c.count !== undefined) ? c.count : '';
+    const isActive = window._selectedConds.includes(name);
+    if (count === 0 && !isActive) return;
+    const esc = name.replace(/"/g,'&quot;');
     html += '<div class="cond-dd-item' + (isActive ? ' active' : '') + '" data-cond="' + esc + '">'
          + '<span class="cond-dd-check">' + (isActive ? '✓' : '') + '</span>'
-         + esc + '</div>';
+         + esc + (count !== '' ? '<span class="bcount">' + count + '</span>' : '') + '</div>';
   });
   panel.innerHTML = html;
   panel.onclick = function(e) {
@@ -5800,10 +5821,14 @@ function _renderCatList() {
   const panel = document.getElementById('cat-dd-panel');
   let html = '';
   window._catList.forEach(c => {
-    const isActive = window._selectedCats.includes(c);
-    const esc = c.replace(/"/g,'&quot;');
+    const name = (c && c.name !== undefined) ? c.name : c;
+    const count = (c && c.count !== undefined) ? c.count : '';
+    const isActive = window._selectedCats.includes(name);
+    if (count === 0 && !isActive) return;
+    const esc = name.replace(/"/g,'&quot;');
     html += '<div class="cond-dd-item' + (isActive ? ' active' : '') + '" data-val="' + esc + '">'
-         + '<span class="cond-dd-check">' + (isActive ? '✓' : '') + '</span>' + esc + '</div>';
+         + '<span class="cond-dd-check">' + (isActive ? '✓' : '') + '</span>' + esc
+         + (count !== '' ? '<span class="bcount">' + count + '</span>' : '') + '</div>';
   });
   panel.innerHTML = html;
   panel.onclick = function(e) {
@@ -5856,10 +5881,14 @@ function _renderSubList() {
   const panel = document.getElementById('subcat-dd-panel');
   let html = '';
   window._subList.forEach(s => {
-    const isActive = window._selectedSubs.includes(s);
-    const esc = s.replace(/"/g,'&quot;');
+    const name = (s && s.name !== undefined) ? s.name : s;
+    const count = (s && s.count !== undefined) ? s.count : '';
+    const isActive = window._selectedSubs.includes(name);
+    if (count === 0 && !isActive) return;
+    const esc = name.replace(/"/g,'&quot;');
     html += '<div class="cond-dd-item' + (isActive ? ' active' : '') + '" data-val="' + esc + '">'
-         + '<span class="cond-dd-check">' + (isActive ? '✓' : '') + '</span>' + esc + '</div>';
+         + '<span class="cond-dd-check">' + (isActive ? '✓' : '') + '</span>' + name
+         + (count !== '' ? '<span class="bcount">' + count + '</span>' : '') + '</div>';
   });
   panel.innerHTML = html;
   panel.onclick = function(e) {
@@ -6444,7 +6473,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.4.6"
+APP_VERSION = "2.4.7"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
