@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-04-17 · Current version: v2.3.2 · Status: CLEAN — no in-flight work*
+*Last updated: 2026-04-20 · Current version: v2.4.6 · Status: CLEAN — no in-flight work*
 
 ---
 
@@ -183,7 +183,48 @@ Update both places when bumping:
 
 ---
 
-## Recent Changes (v2.0.1 → v2.1.9)
+## Recent Changes (v2.3.3 → v2.4.6)
+
+### v2.3.3
+- **0-new scan now clears NEW tags**: Changed philosophy — scan result is always source of truth. If scan returns 0 new items, `_newIds` is cleared (previously was preserved). Clean slate each scan.
+
+### v2.3.4
+- **Instant NEW tag clear**: Clicking "Clear NEW tags" now clears immediately without re-browse
+- **Location column fix**: desktop table location column now displays correctly
+- **Confirm clear want list**: Added confirmation dialog before clearing all want list keywords
+- **Mobile card**: shows location + date fields
+
+### v2.3.5
+- **First-visit UX**: Check Now button says "Run Initial Scan" when no prior scan exists; status bar shows "Ready" instead of blank
+
+### v2.3.6
+- **Removed `user_last_scan` browse gating**: Was hiding items from mobile that desktop had already seen (different localStorage), causing confusing cross-device inconsistency. Items now always show regardless of when device first saw them.
+
+### v2.3.7
+- **Restored `user_last_scan` gating** (reverted v2.3.6): Removing it caused unintended side-effects. Brought back with targeted fix instead.
+- **Mobile SSE disconnect fix**: Mobile was losing `lastRunISO` when SSE connection dropped during scan; now preserved correctly.
+
+### v2.3.9
+- **Table not updating after scan fix**: `displayNewCount` ReferenceError was preventing table from re-rendering after scan completion.
+- **Scroll-to-top on desktop page nav**: Desktop result table now scrolls to top when paging through results.
+
+### v2.4.x series — Desktop table layout overhaul
+
+### v2.4.2
+- **Fixed-layout table**: Switched to `table-layout:fixed` with equal-width columns (min 65px each). Item/title column is `auto` with a 520px JS cap. Hides NEW and WANT columns when empty (no new items / no want list keywords).
+
+### v2.4.4
+- **Scroll-to-top fix**: Moved scroll call inside `_fetchBrowsePage` to run after `innerHTML` is set (was firing before DOM update).
+
+### v2.4.5
+- **Content-appropriate column widths**: Each column sized to its content (price, date, location each given appropriate fixed widths). Price column right-aligned. Title tooltips added (full text on hover for truncated titles).
+
+### v2.4.6
+- **Wider price/date/location columns**: Tuned column widths wider based on real content. Removed title tooltips (were cluttering the UI).
+
+---
+
+## Recent Changes (v2.0.1 → v2.2.9)
 
 ### v2.1.3
 - Nominatim geocoding fixed: was failing 298/298 because `_http` session carried `Sec-Fetch-*` headers that Nominatim rejected. Now uses a clean `nom_session`.
