@@ -2106,14 +2106,18 @@ def api_run():
     device_last_run = (data.get("device_last_run") or "").strip()
     # Empty stores = nationwide scan (used by both baseline and Check for New)
     # Create a per-run queue so each client gets its own message stream
+    # Compute run_time here so we can return it to the client immediately.
+    # The client stores it for use in SSE error recovery, ensuring _lastRunISO
+    # is set to the actual scan start time even if the SSE stream drops.
+    run_time_now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     run_id, run_q = _create_run_queue()
     # Also mirror to legacy _q for any other endpoints that read it
     while not _q.empty():
         try: _q.get_nowait()
         except queue.Empty: break
-    t = threading.Thread(target=_run, args=(selected, baseline, run_id, device_last_run), daemon=True)
+    t = threading.Thread(target=_run, args=(selected, baseline, run_id, device_last_run, run_time_now), daemon=True)
     t.start()
-    return jsonify({"status": "started", "run_id": run_id})
+    return jsonify({"status": "started", "run_id": run_id, "run_time": run_time_now})
 
 @app.route("/api/set-cookies", methods=["POST"])
 @login_required
@@ -2955,14 +2959,17 @@ def _fill_gaps(selected_stores: list[str]):
 
 
 
-def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_last_run: str = ""):
+def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_last_run: str = "", run_time: str = ""):
     run_q = _get_run_queue(run_id) if run_id else None
     def send(msg):
         if run_q:
             run_q.put(msg)
         _q.put(msg)  # also send to legacy queue for backwards compat
     try:
-        run_time   = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Use the run_time passed in from api_run (computed before thread start)
+        # so the client and server share the exact same timestamp.
+        if not run_time:
+            run_time = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
         stores_to_scan = selected_stores if not baseline else []
         nationwide = baseline or len(stores_to_scan) == 0
@@ -3759,7 +3766,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.4.7</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.4.8</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -4829,26 +4836,17 @@ async function browseCache() {
     const stores = getSelected();
     if (!stores.length) return;
     _browseMode = 'server';
-    _globalSearchActive = false; _wantListSearchActive = false;
+    _globalSearchActive = false;
     _globalSearchQuery = '';
     document.getElementById('global-search').value = '';
     document.getElementById('global-search-clear').style.display = 'none';
     _resetWantListLink();
     _srvStores = stores;
     _srvPage = 1;
-    // Preserve current sort — don't reset _srvSortField/_srvSortDir/window._sortCol
-    document.getElementById('res-search').value = '';
-    document.getElementById('res-search-count').textContent = '';
-    window._selectedBrands = []; _updateBrandBtn();
-    window._selectedConds = []; _updateCondBtn();
-    window._selectedCats = []; _updateCatBtn();
-    window._selectedSubs = []; _updateSubcatBtn(); _setSubList([]);
-    _watchFilterActive = false;
-    document.getElementById('watchlist-toggle').classList.remove('wl-active');
-    _priceDropFilterActive = false;
-    document.getElementById('price-drop-toggle').classList.remove('wl-active');
-    _wantListSearchActive = false;
-    document.getElementById('want-list-toggle').classList.remove('wl-active');
+    // Preserve current sort and all active filters (brand/condition/category/subcategory/
+    // search text/watch/price-drop/want-list) — contextual facet counts will automatically
+    // update to reflect what's available in the new store set, and zero-count options
+    // will be hidden. Don't reset _srvSortField/_srvSortDir/window._sortCol either.
     _srvLoading = false;  // Cancel any in-flight request so store changes always land
     await _fetchBrowsePage(1);
   }, 300);
@@ -5190,9 +5188,12 @@ async function startRun(payload, isBaseline) {
     }
     return;
   }
-  // Get run_id for per-session message stream (prevents cross-user contamination)
+  // Get run_id and run_time from start response.
+  // run_time is the server's scan start timestamp — used in SSE error recovery so
+  // _lastRunISO is set to the actual scan time even when the SSE stream drops.
   const runData = await resp.json();
   const runId = runData.run_id || '';
+  const scanRunTime = runData.run_time || '';
 
   const es = new EventSource('/api/progress' + (runId ? '?run_id=' + encodeURIComponent(runId) : ''));
   es.onmessage = e => {
@@ -5219,9 +5220,11 @@ async function startRun(payload, isBaseline) {
       updateCount(); loadState();
       appendLog('Connection to server lost. Refreshing results…', 'log-dim');
       // The scan likely completed on the server even if our SSE stream dropped
-      // (common on mobile when screen locks or network blips). Update _lastRunISO
-      // to now so browse gating doesn't hide items the scan found.
-      window._lastRunISO = new Date().toISOString();
+      // (common on mobile when screen locks or network blips). Use the scan's
+      // actual start time (returned by /api/run) so browse gating doesn't hide
+      // items the scan found, AND so the next scan's new-detection window starts
+      // from the right place rather than an arbitrary "now".
+      window._lastRunISO = scanRunTime || new Date().toISOString();
       _lsSet('last_run', window._lastRunISO);
       _updateRelativeTime();
       // Fall back to browse mode to show whatever data was saved
@@ -6473,7 +6476,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.4.7"
+APP_VERSION = "2.4.8"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
