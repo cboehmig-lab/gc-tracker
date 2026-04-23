@@ -711,6 +711,9 @@ def parse_products(data, store_name: str = None) -> list[dict]:
                     "subcategory":    subcategory,
                     "date_listed":    date_str,
                     "image_id":       image_id,
+                    # Raw Algolia timestamps for diagnostics (not stored in cache)
+                    "_raw_startDate":    start_ts,
+                    "_raw_creationDate": creation_ts,
                 })
         except Exception:
             pass
@@ -3188,21 +3191,46 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             }
 
         # ── Per-device new-item detection ─────────────────────────────────────
-        # Simple rule: was this item listed after the user's previous scan?
-        #   date_listed > prev_scan_time  →  NEW
-        #   date_listed ≤ prev_scan_time  →  not new
-        # date_listed comes from Algolia's startDate (Unix seconds) or
-        # creationDate (Unix ms) for the specific used-item record — both reflect
-        # when that used listing was created, not a product catalog date.
-        # prev_scan_time is this device's last scan timestamp from localStorage,
-        # so each device has its own independent NEW window.
+        # Dual detection: an item is NEW if EITHER:
+        #   1. date_listed > prev_scan_time  (Algolia says it was listed after last scan)
+        #   2. first_seen > prev_scan_time   (our system first found it after last scan)
+        # The dual approach is needed because Algolia's startDate/creationDate can be
+        # set BEFORE the item actually appears in search results (indexing pipeline
+        # delay).  Items can be genuinely new to search but have dates older than
+        # prev_scan_time.  first_seen catches those because it's set to run_time
+        # when an item first enters our cache — regardless of Algolia's dates.
         # Both sides are YYYY-MM-DDTHH:MM:SSZ UTC so string comparison is valid.
         new_ids_list = []
+        _new_by_date = 0
+        _new_by_first_seen = 0
+        _no_date_count = 0
         if not baseline and prev_scan_time:
             for p in all_products:
                 item_date = p.get("date_listed") or _cat_cache.get(p["id"], {}).get("date_listed", "")
-                if item_date and item_date > prev_scan_time:
+                first_seen = _cat_cache.get(p["id"], {}).get("first_seen", "")
+                by_date = bool(item_date and item_date > prev_scan_time)
+                by_fs   = bool(first_seen and first_seen > prev_scan_time)
+                if by_date:
+                    _new_by_date += 1
+                if by_fs:
+                    _new_by_first_seen += 1
+                if not item_date:
+                    _no_date_count += 1
+                if by_date or by_fs:
                     new_ids_list.append(p["id"])
+
+        # ── Diagnostic logging (visible in scan progress) ─────────────────────
+        send({"type":"progress","msg":f"  [DEBUG] prev_scan_time={prev_scan_time!r}  device_last_run={device_last_run!r}  global={global_prev_scan!r}"})
+        send({"type":"progress","msg":f"  [DEBUG] run_time={run_time!r}  baseline={baseline}  total_products={len(all_products)}"})
+        # Sample a few items to show their date_listed vs prev_scan_time
+        _sample_items = all_products[:5] if all_products else []
+        for _si in _sample_items:
+            _sd = _si.get("date_listed", "")
+            _fs = _cat_cache.get(_si["id"], {}).get("first_seen", "")
+            _raw_start = _si.get("_raw_startDate", "?")
+            _raw_create = _si.get("_raw_creationDate", "?")
+            send({"type":"progress","msg":f"  [DEBUG] SKU={_si['id']}  date_listed={_sd!r}  first_seen={_fs!r}  startDate_raw={_raw_start}  creationDate_raw={_raw_create}  date>prev={_sd > prev_scan_time if _sd and prev_scan_time else 'N/A'}"})
+        send({"type":"progress","msg":f"  [DEBUG] new_by_date={_new_by_date}  new_by_first_seen={_new_by_first_seen}  no_date={_no_date_count}  total_new={len(new_ids_list)}"})
         send({"type":"progress","msg":f"  {len(new_ids_list):,} new items since last scan."})
 
         # For large scans, don't send full item lists via SSE — client will use server-side browse
@@ -3766,7 +3794,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.4.8</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.4.9</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -6476,7 +6504,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.4.8"
+APP_VERSION = "2.4.9"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
