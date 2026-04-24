@@ -3191,14 +3191,10 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             }
 
         # ── Per-device new-item detection ─────────────────────────────────────
-        # Dual detection: an item is NEW if EITHER:
-        #   1. date_listed > prev_scan_time  (Algolia says it was listed after last scan)
-        #   2. first_seen > prev_scan_time   (our system first found it after last scan)
-        # The dual approach is needed because Algolia's startDate/creationDate can be
-        # set BEFORE the item actually appears in search results (indexing pipeline
-        # delay).  Items can be genuinely new to search but have dates older than
-        # prev_scan_time.  first_seen catches those because it's set to run_time
-        # when an item first enters our cache — regardless of Algolia's dates.
+        # An item is NEW if date_listed > prev_scan_time (Algolia listing date
+        # is after this device's previous scan).  first_seen is tracked for
+        # diagnostics only — it's too broad for NEW tagging because it catches
+        # old items that simply weren't in our cache yet.
         # Both sides are YYYY-MM-DDTHH:MM:SSZ UTC so string comparison is valid.
         new_ids_list = []
         _new_by_date = 0
@@ -3216,7 +3212,8 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                     _new_by_first_seen += 1
                 if not item_date:
                     _no_date_count += 1
-                if by_date or by_fs:
+                # Only use date_listed for NEW tagging
+                if by_date:
                     new_ids_list.append(p["id"])
 
         # ── Diagnostic logging (visible in scan progress) ─────────────────────
@@ -3794,7 +3791,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.4.9</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.4.10</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -6504,7 +6501,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.4.9"
+APP_VERSION = "2.4.10"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
