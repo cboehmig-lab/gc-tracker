@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-04-28 · Current version: v2.5.1 · Status: CLEAN — no in-flight work*
+*Last updated: 2026-04-28 · Current version: v2.5.2 · Status: CLEAN — no in-flight work*
 
 ---
 
@@ -200,7 +200,10 @@ Update both places when bumping:
 
 ---
 
-## Recent Changes (v2.5.0 → v2.5.1)
+## Recent Changes (v2.5.0 → v2.5.2)
+
+### v2.5.2
+- **Desktop table layout overhaul**: Switched from `table-layout:fixed` (Item column absorbed all leftover space, leaving data columns cramped/truncated) to `table-layout:auto`. Data columns (Brand, Price, Condition, Category, Subcategory, Date, Location) now auto-size to their content with `white-space:nowrap` so nothing truncates. Item column capped at 420px max-width so it doesn't hog screen space. JS dynamic-sizing updated to use `maxWidth` instead of `width` with a 420px cap (was 260px).
 
 ### v2.5.0
 - **NEW detection rewritten — hybrid date + first_seen**: Root cause of persistent "0 new items" bug identified: Algolia's `creationDate` is set when GC internally creates a listing record, but the item may not appear in search results for 6-12+ hours (indexing pipeline delay). Pure date comparison (`date_listed > prev_scan_time`) fails because the date is from hours before the item became searchable. Fix: dual detection — item is NEW if `date_listed > prev_scan_time` OR (`first_seen > prev_scan_time` AND `date_listed > prev_scan_time - 24h`). The 24h buffer catches delayed items while preventing old pagination misses from being tagged.
