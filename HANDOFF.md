@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-04-20 · Current version: v2.4.8 · Status: CLEAN — no in-flight work*
+*Last updated: 2026-04-28 · Current version: v2.5.1 · Status: CLEAN — no in-flight work*
 
 ---
 
@@ -17,7 +17,7 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 | Auto-deploy | Every push to `main` triggers a Railway redeploy |
 | Branch protection | Force-pushes blocked on `main` (set in GitHub → Settings → Branches) |
 | Data dir | Set via `DATA_DIR` env var on Railway — **must be a persistent volume**, not ephemeral storage |
-| Python entry | `gc_tracker_app.py` (single file, ~6300+ lines) |
+| Python entry | `gc_tracker_app.py` (single file, ~6400+ lines) |
 
 ### Critical env vars
 | Var | Purpose |
@@ -27,6 +27,12 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 | `APP_PASSWORD` | Site-wide login (currently bypassed — see Auth section) |
 | `RESET_PASSWORD` | Password for `/api/reset` and `/admin/devices` — default `Beatle909!` |
 | `ALGOLIA_APP_ID` / `ALGOLIA_API_KEY` | GC inventory API |
+
+### Git push auth
+- The default `origin` remote may authenticate as the wrong GitHub account (`charlesboehmig-boop` instead of `cboehmig-lab`)
+- Fix: `git remote set-url origin https://cboehmig-lab@github.com/cboehmig-lab/gc-tracker.git`
+- Or push explicitly: `git push https://cboehmig-lab@github.com/cboehmig-lab/gc-tracker.git main`
+- Uses a GitHub PAT (personal access token) for auth — generate at https://github.com/settings/tokens with `repo` scope
 
 ---
 
@@ -50,20 +56,22 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 3. Scan runs in background thread, streams progress via SSE (`/api/progress?run_id=...`)
 4. On completion, server returns `{new_ids, scan_time}` — client saves to localStorage
 
-### NEW detection (per-device)
+### NEW detection (per-device) — HYBRID approach (v2.5.0+)
 - Each device has its own `last_run` and `new_ids` in **localStorage**
-- On scan: server compares each item's `date_listed` (Algolia `startDate`, UTC ISO) against `device_last_run` sent from client
-- Items where `date_listed > device_last_run` → NEW for that device
+- On scan: server uses **two signals** to detect NEW items:
+  1. **date_listed > prev_scan_time** — Algolia's `creationDate` is after the device's previous scan
+  2. **first_seen > prev_scan_time AND date_listed > prev_scan_time - 24h** — item is new to our cache AND was listed within the last 24 hours
+- Rule 2 handles the **Algolia indexing delay**: GC sets `creationDate` when a listing record is created, but the item may not appear in Algolia search results for **6-12+ hours**. An item created at 7 AM may not be searchable until 5 PM. Its `date_listed` (7 AM) is before `prev_scan_time` (the scan at 3 PM), but `first_seen` catches it because it wasn't in the cache during the previous scan. The 24h date cutoff prevents old pagination-instability misses from being tagged.
 - Phone scan **does not** affect desktop's NEW tags — fully independent per localStorage
 - `new_ids` are sent from client to server on every browse request; server marks `isNew` accordingly
-- **NEW tags are preserved on 0-new scans**: if fresh scan finds 0 new items, existing `_newIds` are kept (not cleared)
+- Each scan replaces `_newIds` entirely — 0 new = clean slate
 
-### Algolia date fields (investigated 2026-04-15)
+### Algolia date fields (investigated 2026-04-28)
 - Only two top-level date fields exist: `startDate` (Unix seconds, can be 0) and `creationDate` (Unix ms, always set)
-- `startDate = 0` is common on fresh used items; fallback to `creationDate / 1000` kicks in
+- `startDate = 0` is the norm on fresh used items; fallback to `creationDate / 1000` kicks in
+- **Critical finding**: `creationDate` reflects when GC internally creates the listing record, NOT when the item becomes searchable in Algolia. There is a **6-12+ hour indexing pipeline delay**. This is why pure date-based NEW detection fails — items can have `creationDate` from the morning but only appear in search results in the afternoon.
 - Our comparison is apples-to-apples: both sides are `YYYY-MM-DDTHH:MM:SSZ` UTC strings
 - GC lists items in real-time (item-by-item), peak volume 1–4am UTC = store closing times across US time zones
-- No "went live" field exists separately — `startDate`/`creationDate` is the best available signal
 
 ### Browse flow (server-side pagination)
 - Client POST `/api/browse` with filters, sort, page, `new_ids`, `user_last_scan`
@@ -136,6 +144,14 @@ Update both places when bumping:
 
 ---
 
+## Filter Buttons Behavior
+
+- **Price Drops**: stackable filter — layers on top of watch list, want list, or any other active filter. Does NOT reset other filters when toggled.
+- **Watch List**: stackable filter — toggles `_watchFilterActive`, layers on other filters.
+- **Want List**: exclusive search — activates global search mode (`_globalSearchActive`), resets brand/condition/category filters and deactivates watch list and price drops. This is because want list searches across all stores.
+
+---
+
 ## Key JS State (client-side)
 
 | Variable | Where | Purpose |
@@ -151,6 +167,7 @@ Update both places when bumping:
 | `_skipBrowse` | JS var | Set after scan to prevent overwrite of scan results |
 | `_watchFilterActive` | JS var | True when filtering browse to watchlist items |
 | `_wantListSearchActive` | JS var | True when filtering browse to want list keywords |
+| `_priceDropFilterActive` | JS var | True when filtering to price-dropped items |
 | `_wlCountTimer` | JS var | Debounce timer for `_updateWantListCount()` |
 
 ---
@@ -158,10 +175,10 @@ Update both places when bumping:
 ## Common Debugging
 
 **Items not showing as NEW**
-- Check `date_listed` and `run_time` are both `YYYY-MM-DDTHH:MM:SSZ` (no microseconds) — confirmed correct
+- The most common cause is the **Algolia indexing delay** — items can have `creationDate` 6-12 hours before they appear in search results. The hybrid detection (v2.5.0) handles this by also checking `first_seen`.
 - Check `window._newIds` in browser console — should be a Set of SKU strings
 - Check `window._lastRunISO` — should be the ISO time of last scan on this device
-- NEW tags now preserved on 0-new scans (fixed v2.1.5) — if 0 new found, old tags stay
+- If `_lastRunISO` is null/empty, localStorage may have been cleared (Safari does this aggressively on mobile) — `prev_scan_time` falls back to global `gc_last_scan.txt` which may be very recent from another device's scan
 
 **Sandbox git lock files**
 - The Cowork sandbox sometimes leaves stale `.git/*.lock` files after commits
@@ -180,6 +197,20 @@ Update both places when bumping:
 **Nominatim geocoding failures**
 - Must use a clean `requests.Session()` (not the shared `_http` session which has browser-impersonation headers)
 - Fixed in v2.1.3: `nom_session = http.Session()` with clean User-Agent and Accept headers
+
+---
+
+## Recent Changes (v2.5.0 → v2.5.1)
+
+### v2.5.0
+- **NEW detection rewritten — hybrid date + first_seen**: Root cause of persistent "0 new items" bug identified: Algolia's `creationDate` is set when GC internally creates a listing record, but the item may not appear in search results for 6-12+ hours (indexing pipeline delay). Pure date comparison (`date_listed > prev_scan_time`) fails because the date is from hours before the item became searchable. Fix: dual detection — item is NEW if `date_listed > prev_scan_time` OR (`first_seen > prev_scan_time` AND `date_listed > prev_scan_time - 24h`). The 24h buffer catches delayed items while preventing old pagination misses from being tagged.
+- **Price drop display reordered**: New price shows first (`↓ $84.99 $139.99`), old strikethrough price after. If column truncates, only the less-important old price is clipped.
+- **Price column widened**: 90px → 140px to better fit price drop display.
+
+### v2.5.1
+- **Price Drops is now a stackable filter**: No longer resets watch list/want list when toggled. Layers on top of whatever view is active.
+- **Price column left-justified**: Better alignment now that new price shows first.
+- **Debug logging removed**: Scan progress no longer shows `[DEBUG]` lines.
 
 ---
 

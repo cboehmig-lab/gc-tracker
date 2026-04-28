@@ -3357,7 +3357,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #res-search:focus{border-color:#c00;box-shadow:0 0 0 3px rgba(204,0,0,.15)}
 #res-search-count{font-size:.75rem;color:#555;white-space:nowrap}
 
-table{width:100%;border-collapse:collapse;font-size:.83rem;table-layout:fixed}
+table{width:100%;border-collapse:collapse;font-size:.83rem;table-layout:auto}
 th{background:#161616;color:#666;font-weight:600;text-align:left;padding:7px 10px;font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:40px;cursor:pointer;user-select:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 th:hover{color:#ccc}
 th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
@@ -3367,15 +3367,16 @@ td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowra
 th:nth-child(1),td:nth-child(1){width:44px;text-align:center;overflow:visible}
 th:nth-child(2),td:nth-child(2){width:50px;text-align:center;overflow:visible}
 th:nth-child(3),td:nth-child(3){width:28px;text-align:center}
-/* col 4 = Item: no width → absorbs all remaining space */
-/* Data cols: sized to content, consistent across all pages */
-th:nth-child(5),td:nth-child(5){width:90px}
-th:nth-child(6),td:nth-child(6){width:140px;text-align:left}
-th:nth-child(7),td:nth-child(7){width:92px}
-th:nth-child(8),td:nth-child(8){width:90px}
-th:nth-child(9),td:nth-child(9){width:130px}
-th:nth-child(10),td:nth-child(10){width:82px}
-th:nth-child(11),td:nth-child(11){width:115px}
+/* col 4 = Item: capped so data cols can breathe */
+th:nth-child(4),td:nth-child(4){max-width:420px}
+/* Data cols: auto-sized, nowrap keeps them from collapsing */
+th:nth-child(5),td:nth-child(5){white-space:nowrap}
+th:nth-child(6),td:nth-child(6){white-space:nowrap;text-align:left}
+th:nth-child(7),td:nth-child(7){white-space:nowrap}
+th:nth-child(8),td:nth-child(8){white-space:nowrap}
+th:nth-child(9),td:nth-child(9){white-space:nowrap}
+th:nth-child(10),td:nth-child(10){white-space:nowrap}
+th:nth-child(11),td:nth-child(11){white-space:nowrap}
 table.no-new th:nth-child(1),table.no-new td:nth-child(1){display:none}
 table.no-want th:nth-child(2),table.no-want td:nth-child(2){display:none}
 tr:hover td{background:#1d1d1d}
@@ -3793,7 +3794,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.5.1</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.5.2</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -5596,11 +5597,10 @@ function autoSizeItemColumn() {
       if (w > maxW) maxW = w;
     });
   }
-  // Add padding (link underline cursor area + 24px right padding)
-  const colW = Math.min(Math.ceil(maxW) + 32, 260); // cap at 260px
+  // Add padding; cap so data columns get room to breathe
+  const colW = Math.min(Math.ceil(maxW) + 32, 420); // cap at 420px
   const th = document.querySelector('#res-table th[data-col="1"]');
-  if (th) th.style.width = colW + 'px';
-  // Also set td widths via col group or direct style on first td of each row
+  if (th) th.style.maxWidth = colW + 'px';
   document.querySelectorAll('#res-table tbody tr td:nth-child(4)').forEach(td => {
     td.style.maxWidth = colW + 'px';
   });
@@ -6497,7 +6497,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.5.1"
+APP_VERSION = "2.5.2"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
