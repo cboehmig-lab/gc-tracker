@@ -8,7 +8,7 @@ Then open: http://localhost:5050
 
 import json, os, re, sys, time, threading, queue, webbrowser, random
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
 
@@ -3191,14 +3191,29 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             }
 
         # ── Per-device new-item detection ─────────────────────────────────────
-        # An item is NEW if date_listed > prev_scan_time (Algolia listing date
-        # is after this device's previous scan).  first_seen is tracked for
-        # diagnostics only — it's too broad for NEW tagging because it catches
-        # old items that simply weren't in our cache yet.
+        # An item is NEW if:
+        #   1. date_listed > prev_scan_time  (Algolia date is after last scan), OR
+        #   2. first_seen > prev_scan_time AND date_listed > date_cutoff
+        #      (item is new to our cache AND was listed within the last 24h)
+        #
+        # Rule 2 handles the Algolia indexing delay: GC sets creationDate when
+        # a listing record is created, but the item may not appear in search
+        # results for 6-12+ hours.  So an item created at 7 AM may not show
+        # up until 5 PM — its date_listed is before prev_scan_time but it's
+        # genuinely new.  first_seen catches it because it wasn't in our cache.
+        # The 24h date_cutoff prevents old pagination misses from being tagged.
+        #
         # Both sides are YYYY-MM-DDTHH:MM:SSZ UTC so string comparison is valid.
+        _DL_BUFFER_HOURS = 24
+        try:
+            _prev_dt = datetime.strptime(prev_scan_time, "%Y-%m-%dT%H:%M:%SZ")
+            _date_cutoff = (_prev_dt - timedelta(hours=_DL_BUFFER_HOURS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:
+            _date_cutoff = prev_scan_time  # fallback: no buffer
         new_ids_list = []
         _new_by_date = 0
         _new_by_first_seen = 0
+        _new_by_hybrid = 0
         _no_date_count = 0
         if not baseline and prev_scan_time:
             for p in all_products:
@@ -3206,28 +3221,29 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                 first_seen = _cat_cache.get(p["id"], {}).get("first_seen", "")
                 by_date = bool(item_date and item_date > prev_scan_time)
                 by_fs   = bool(first_seen and first_seen > prev_scan_time)
+                by_hybrid = bool(by_fs and item_date and item_date > _date_cutoff)
                 if by_date:
                     _new_by_date += 1
                 if by_fs:
                     _new_by_first_seen += 1
+                if by_hybrid and not by_date:
+                    _new_by_hybrid += 1
                 if not item_date:
                     _no_date_count += 1
-                # Only use date_listed for NEW tagging
-                if by_date:
+                if by_date or by_hybrid:
                     new_ids_list.append(p["id"])
 
         # ── Diagnostic logging (visible in scan progress) ─────────────────────
         send({"type":"progress","msg":f"  [DEBUG] prev_scan_time={prev_scan_time!r}  device_last_run={device_last_run!r}  global={global_prev_scan!r}"})
-        send({"type":"progress","msg":f"  [DEBUG] run_time={run_time!r}  baseline={baseline}  total_products={len(all_products)}"})
-        # Sample a few items to show their date_listed vs prev_scan_time
+        send({"type":"progress","msg":f"  [DEBUG] run_time={run_time!r}  baseline={baseline}  total_products={len(all_products)}  date_cutoff={_date_cutoff!r}"})
         _sample_items = all_products[:5] if all_products else []
         for _si in _sample_items:
             _sd = _si.get("date_listed", "")
             _fs = _cat_cache.get(_si["id"], {}).get("first_seen", "")
             _raw_start = _si.get("_raw_startDate", "?")
             _raw_create = _si.get("_raw_creationDate", "?")
-            send({"type":"progress","msg":f"  [DEBUG] SKU={_si['id']}  date_listed={_sd!r}  first_seen={_fs!r}  startDate_raw={_raw_start}  creationDate_raw={_raw_create}  date>prev={_sd > prev_scan_time if _sd and prev_scan_time else 'N/A'}"})
-        send({"type":"progress","msg":f"  [DEBUG] new_by_date={_new_by_date}  new_by_first_seen={_new_by_first_seen}  no_date={_no_date_count}  total_new={len(new_ids_list)}"})
+            send({"type":"progress","msg":f"  [DEBUG] SKU={_si['id']}  date_listed={_sd!r}  first_seen={_fs!r}  raw_start={_raw_start}  raw_create={_raw_create}  date>prev={_sd > prev_scan_time if _sd and prev_scan_time else 'N/A'}  date>cutoff={_sd > _date_cutoff if _sd else 'N/A'}"})
+        send({"type":"progress","msg":f"  [DEBUG] new_by_date={_new_by_date}  new_by_hybrid={_new_by_hybrid}  new_by_first_seen_only={_new_by_first_seen - _new_by_hybrid - _new_by_date}  no_date={_no_date_count}  total_new={len(new_ids_list)}"})
         send({"type":"progress","msg":f"  {len(new_ids_list):,} new items since last scan."})
 
         # For large scans, don't send full item lists via SSE — client will use server-side browse
@@ -3791,7 +3807,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.4.10</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.5.0</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -6501,7 +6517,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.4.10"
+APP_VERSION = "2.5.0"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
