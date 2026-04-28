@@ -3384,7 +3384,7 @@ th:nth-child(3),td:nth-child(3){width:28px;text-align:center}
 /* col 4 = Item: no width → absorbs all remaining space */
 /* Data cols: sized to content, consistent across all pages */
 th:nth-child(5),td:nth-child(5){width:90px}
-th:nth-child(6),td:nth-child(6){width:90px;text-align:right}
+th:nth-child(6),td:nth-child(6){width:140px;text-align:right}
 th:nth-child(7),td:nth-child(7){width:92px}
 th:nth-child(8),td:nth-child(8){width:90px}
 th:nth-child(9),td:nth-child(9){width:130px}
