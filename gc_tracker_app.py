@@ -4629,8 +4629,9 @@ function _buildRowHtml(item) {
     : '';
   const priceCell = hasDrop
     ? `<td><span class="price-drop-val" title="Price drop! Down $${item.price_drop.toFixed(2)}${dropSinceLabel}">` +
-      (item.list_price_raw > item.price_raw ? `<span class="price-orig">$${item.list_price_raw.toFixed(2)}</span> ` : '') +
-      `↓ ${item.price||''}</span></td>`
+      `↓ ${item.price||''}` +
+      (item.list_price_raw > item.price_raw ? ` <span class="price-orig">$${item.list_price_raw.toFixed(2)}</span>` : '') +
+      `</span></td>`
     : `<td>${item.price||''}</td>`;
   return `<tr class="${rowClass}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}" data-image-id="${esc(item.image_id)}">` +
     `<td>${isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
