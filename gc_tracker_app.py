@@ -711,9 +711,6 @@ def parse_products(data, store_name: str = None) -> list[dict]:
                     "subcategory":    subcategory,
                     "date_listed":    date_str,
                     "image_id":       image_id,
-                    # Raw Algolia timestamps for diagnostics (not stored in cache)
-                    "_raw_startDate":    start_ts,
-                    "_raw_creationDate": creation_ts,
                 })
         except Exception:
             pass
@@ -3233,17 +3230,6 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                 if by_date or by_hybrid:
                     new_ids_list.append(p["id"])
 
-        # ── Diagnostic logging (visible in scan progress) ─────────────────────
-        send({"type":"progress","msg":f"  [DEBUG] prev_scan_time={prev_scan_time!r}  device_last_run={device_last_run!r}  global={global_prev_scan!r}"})
-        send({"type":"progress","msg":f"  [DEBUG] run_time={run_time!r}  baseline={baseline}  total_products={len(all_products)}  date_cutoff={_date_cutoff!r}"})
-        _sample_items = all_products[:5] if all_products else []
-        for _si in _sample_items:
-            _sd = _si.get("date_listed", "")
-            _fs = _cat_cache.get(_si["id"], {}).get("first_seen", "")
-            _raw_start = _si.get("_raw_startDate", "?")
-            _raw_create = _si.get("_raw_creationDate", "?")
-            send({"type":"progress","msg":f"  [DEBUG] SKU={_si['id']}  date_listed={_sd!r}  first_seen={_fs!r}  raw_start={_raw_start}  raw_create={_raw_create}  date>prev={_sd > prev_scan_time if _sd and prev_scan_time else 'N/A'}  date>cutoff={_sd > _date_cutoff if _sd else 'N/A'}"})
-        send({"type":"progress","msg":f"  [DEBUG] new_by_date={_new_by_date}  new_by_hybrid={_new_by_hybrid}  new_by_first_seen_only={_new_by_first_seen - _new_by_hybrid - _new_by_date}  no_date={_no_date_count}  total_new={len(new_ids_list)}"})
         send({"type":"progress","msg":f"  {len(new_ids_list):,} new items since last scan."})
 
         # For large scans, don't send full item lists via SSE — client will use server-side browse
@@ -3384,7 +3370,7 @@ th:nth-child(3),td:nth-child(3){width:28px;text-align:center}
 /* col 4 = Item: no width → absorbs all remaining space */
 /* Data cols: sized to content, consistent across all pages */
 th:nth-child(5),td:nth-child(5){width:90px}
-th:nth-child(6),td:nth-child(6){width:140px;text-align:right}
+th:nth-child(6),td:nth-child(6){width:140px;text-align:left}
 th:nth-child(7),td:nth-child(7){width:92px}
 th:nth-child(8),td:nth-child(8){width:90px}
 th:nth-child(9),td:nth-child(9){width:130px}
@@ -3807,7 +3793,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.5.0</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.5.1</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
 </header>
@@ -4727,7 +4713,7 @@ function _renderServerTable(items) {
     <th data-col="watch"></th>
     <th data-col="1">Item</th>
     <th data-col="2">Brand</th>
-    <th data-col="3" style="text-align:right">Price</th>
+    <th data-col="3">Price</th>
     <th data-col="4">Condition</th>
     <th data-col="5">Category</th>
     <th data-col="6">Subcategory</th>
@@ -4953,16 +4939,9 @@ function togglePriceDropFilter() {
   _priceDropFilterActive = !_priceDropFilterActive;
   const btn = document.getElementById('price-drop-toggle');
   btn.classList.toggle('wl-active', _priceDropFilterActive);
-  if (_priceDropFilterActive) {
-    // Price Drop mode: sort by drop date descending (most recent first)
-    _srvSortField = 'price_drop_since';
-    _srvSortDir   = 'desc';
-    window._sortCol = null;  // not a user-clicked sort
-    // Deactivate other exclusive filters
-    _watchFilterActive = false;
-    document.getElementById('watchlist-toggle').classList.remove('wl-active');
-    _wantListSearchActive = false;
-  }
+  // Price drops is a stackable filter — it layers on top of whatever
+  // view is active (watch list, want list, brand filter, etc.).
+  // Don't reset sort or deactivate other filters.
   _updateFilterDot();
   _srvPage = 1;
   _fetchBrowsePage(1);
@@ -6518,7 +6497,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.5.1"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
