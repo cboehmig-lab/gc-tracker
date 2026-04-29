@@ -68,18 +68,11 @@ def _init_user_db():
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                email         TEXT    UNIQUE NOT NULL COLLATE NOCASE,
                 username      TEXT    UNIQUE NOT NULL COLLATE NOCASE,
                 password_hash TEXT    NOT NULL,
                 created_at    TEXT    NOT NULL
             )
         """)
-        # Migration: add username column to existing databases that predate this field
-        try:
-            conn.execute("ALTER TABLE users ADD COLUMN username TEXT NOT NULL DEFAULT '' COLLATE NOCASE")
-            conn.commit()
-        except Exception:
-            pass  # Column already exists
         conn.execute("""
             CREATE TABLE IF NOT EXISTS user_data (
                 user_id   INTEGER PRIMARY KEY REFERENCES users(id),
@@ -93,9 +86,9 @@ def _init_user_db():
         """)
         conn.commit()
 
-def _user_by_email(email: str) -> dict | None:
+def _user_by_username(username: str) -> dict | None:
     with _user_db() as conn:
-        row = conn.execute("SELECT * FROM users WHERE email=?", (email.lower().strip(),)).fetchone()
+        row = conn.execute("SELECT * FROM users WHERE username=?", (username.strip(),)).fetchone()
         return dict(row) if row else None
 
 def _user_by_id(user_id: int) -> dict | None:
@@ -1422,59 +1415,47 @@ def logout():
 @app.route("/api/register", methods=["POST"])
 def api_register():
     data     = request.json or {}
-    email    = (data.get("email") or "").strip().lower()
     username = re.sub(r'[^A-Za-z0-9_\-]', '', (data.get("username") or "").strip())
     password = (data.get("password") or "").strip()
-    if not email or "@" not in email or "." not in email.split("@")[-1]:
-        return jsonify({"error": "Please enter a valid email address."}), 400
     if not username or len(username) < 3:
         return jsonify({"error": "Username must be at least 3 characters (letters, numbers, _ -)"}), 400
     if len(username) > 30:
         return jsonify({"error": "Username must be 30 characters or fewer."}), 400
     if len(password) < 8:
         return jsonify({"error": "Password must be at least 8 characters."}), 400
-    if _user_by_email(email):
-        return jsonify({"error": "An account with this email already exists."}), 409
-    with _user_db() as conn:
-        existing = conn.execute(
-            "SELECT id FROM users WHERE username=?", (username,)
-        ).fetchone()
-    if existing:
+    if _user_by_username(username):
         return jsonify({"error": "That username is already taken."}), 409
     pw_hash = generate_password_hash(password)
     now     = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     with _user_db() as conn:
         cur     = conn.execute(
-            "INSERT INTO users (email, username, password_hash, created_at) VALUES (?,?,?,?)",
-            (email, username, pw_hash, now)
+            "INSERT INTO users (username, password_hash, created_at) VALUES (?,?,?)",
+            (username, pw_hash, now)
         )
         user_id = cur.lastrowid
         conn.commit()
     session.permanent = True
     session["user_id"]       = user_id
-    session["user_email"]    = email
     session["user_username"] = username
-    return jsonify({"status": "registered", "email": email, "username": username, "data": _get_user_data(user_id)})
+    return jsonify({"status": "registered", "username": username, "data": _get_user_data(user_id)})
 
 @app.route("/api/login", methods=["POST"])
 def api_login():
     data     = request.json or {}
-    email    = (data.get("email") or "").strip().lower()
+    username = (data.get("username") or "").strip()
     password = (data.get("password") or "").strip()
-    user     = _user_by_email(email)
+    user     = _user_by_username(username)
     if not user or not check_password_hash(user["password_hash"], password):
-        return jsonify({"error": "Incorrect email or password."}), 401
-    username = user.get("username") or email.split("@")[0]
+        return jsonify({"error": "Incorrect username or password."}), 401
     session.permanent = True
     session["user_id"]       = user["id"]
-    session["user_email"]    = email
     session["user_username"] = username
-    return jsonify({"status": "ok", "email": email, "username": username, "data": _get_user_data(user["id"])})
+    return jsonify({"status": "ok", "username": username, "data": _get_user_data(user["id"])})
 
 @app.route("/api/logout", methods=["POST"])
 def api_logout():
-    session.pop("user_id",    None)
-    session.pop("user_email", None)
+    session.pop("user_id",       None)
+    session.pop("user_username", None)
     return jsonify({"status": "logged_out"})
 
 @app.route("/api/me")
@@ -1484,7 +1465,6 @@ def api_me():
         return jsonify({"logged_in": False})
     return jsonify({
         "logged_in": True,
-        "email":     session.get("user_email", ""),
         "username":  session.get("user_username", ""),
         "data":      _get_user_data(user_id),
     })
@@ -3962,15 +3942,35 @@ tr.fav-row td:last-child{color:#4ade80}
   </div>
 </div>
 
-<div id="first-run-modal" style="display:none;position:fixed;inset:0;z-index:100;align-items:center;justify-content:center">
-  <div style="position:absolute;inset:0;background:rgba(0,0,0,.7)" onclick="dismissFirstRun()"></div>
-  <div style="position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:30px 28px;width:400px;z-index:1">
-    <h2 style="color:#fff;font-size:1.05rem;margin-bottom:10px">🎸 Welcome to Gear Tracker</h2>
-    <p style="color:#999;font-size:.85rem;line-height:1.6;margin-bottom:8px">The inventory database is empty. Click below to build it now. This captures Guitar Center's full used inventory across ~300 stores.</p>
-    <p style="color:#777;font-size:.82rem;margin-bottom:20px">Building takes a few minutes.</p>
-    <div style="display:flex;gap:10px;justify-content:flex-end">
-      <button onclick="dismissFirstRun()" style="padding:8px 18px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#aaa;font-size:.85rem;cursor:pointer">Later</button>
-      <button onclick="dismissFirstRun();runTracker()" style="padding:8px 18px;background:#c00;border:none;border-radius:5px;color:#fff;font-size:.85rem;font-weight:700;cursor:pointer">Scan Now</button>
+<!-- ── Welcome / auth modal (shown on first visit when not logged in) ── -->
+<div id="first-run-modal" style="display:none;position:fixed;inset:0;z-index:200;align-items:center;justify-content:center">
+  <div style="position:absolute;inset:0;background:rgba(0,0,0,.75)" onclick="dismissFirstRun()"></div>
+  <div style="position:relative;background:#1a1a1a;border:1px solid #2e2e2e;border-radius:12px;padding:32px 36px;width:360px;max-width:92vw;z-index:1">
+    <h2 style="color:#fff;font-size:1.15rem;margin-bottom:6px">🎸 Welcome to Gear Tracker</h2>
+    <p style="color:#666;font-size:.82rem;margin-bottom:20px;line-height:1.5">Track Guitar Center used inventory. Create an account to save your watch list, want list, and favorites across all your devices.</p>
+    <!-- Auth tabs -->
+    <div style="display:flex;border-bottom:1px solid #2e2e2e;margin-bottom:20px">
+      <button id="welcome-tab-login" onclick="_welcomeTab('login')" style="flex:1;padding:8px;background:none;border:none;border-bottom:2px solid #c00;color:#ff5555;font-size:.85rem;font-weight:600;cursor:pointer;margin-bottom:-1px">Sign In</button>
+      <button id="welcome-tab-register" onclick="_welcomeTab('register')" style="flex:1;padding:8px;background:none;border:none;border-bottom:2px solid transparent;color:#666;font-size:.85rem;font-weight:600;cursor:pointer;margin-bottom:-1px">Create Account</button>
+    </div>
+    <!-- Login form -->
+    <div id="welcome-form-login">
+      <input class="auth-field" type="text" id="welcome-login-user" placeholder="Username" autocomplete="username">
+      <input class="auth-field" type="password" id="welcome-login-pw" placeholder="Password" autocomplete="current-password">
+      <div class="auth-err" id="welcome-login-err"></div>
+      <button class="auth-submit" onclick="_welcomeLogin()">Sign In</button>
+    </div>
+    <!-- Register form -->
+    <div id="welcome-form-register" style="display:none">
+      <input class="auth-field" type="text" id="welcome-reg-user" placeholder="Choose a username" autocomplete="username" maxlength="30">
+      <input class="auth-field" type="password" id="welcome-reg-pw" placeholder="Password (8+ characters)" autocomplete="new-password">
+      <input class="auth-field" type="password" id="welcome-reg-pw2" placeholder="Confirm password" autocomplete="new-password">
+      <div class="auth-err" id="welcome-reg-err"></div>
+      <button class="auth-submit" onclick="_welcomeRegister()">Create Account &amp; Start Scanning</button>
+    </div>
+    <!-- Guest option -->
+    <div style="text-align:center;margin-top:16px">
+      <button onclick="dismissFirstRun()" style="background:none;border:none;color:#555;font-size:.78rem;cursor:pointer;text-decoration:underline">Use as guest</button>
     </div>
   </div>
 </div>
@@ -4000,7 +4000,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.6.0</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.6.1</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -4023,7 +4023,7 @@ tr.fav-row td:last-child{color:#4ade80}
     </div>
     <!-- Login form -->
     <div id="auth-form-login">
-      <input class="auth-field" type="email" id="auth-login-email" placeholder="Email address" autocomplete="email">
+      <input class="auth-field" type="text" id="auth-login-user" placeholder="Username" autocomplete="username">
       <input class="auth-field" type="password" id="auth-login-pw" placeholder="Password" autocomplete="current-password">
       <div class="auth-err" id="auth-login-err"></div>
       <button class="auth-submit" onclick="_authLogin()">Sign In</button>
@@ -4031,8 +4031,7 @@ tr.fav-row td:last-child{color:#4ade80}
     </div>
     <!-- Register form -->
     <div id="auth-form-register" style="display:none">
-      <input class="auth-field" type="text" id="auth-reg-username" placeholder="Username (e.g. guitargod69)" autocomplete="username" maxlength="30">
-      <input class="auth-field" type="email" id="auth-reg-email" placeholder="Email address" autocomplete="email">
+      <input class="auth-field" type="text" id="auth-reg-username" placeholder="Choose a username" autocomplete="username" maxlength="30">
       <input class="auth-field" type="password" id="auth-reg-pw" placeholder="Password (8+ characters)" autocomplete="new-password">
       <input class="auth-field" type="password" id="auth-reg-pw2" placeholder="Confirm password" autocomplete="new-password">
       <div class="auth-err" id="auth-reg-err"></div>
@@ -4368,10 +4367,19 @@ document.addEventListener('keydown', e => {
 // Enter key submits forms
 document.addEventListener('keydown', e => {
   if (e.key !== 'Enter') return;
+  // Header auth modal
   const modal = document.getElementById('auth-modal');
-  if (!modal || !modal.classList.contains('open')) return;
-  if (document.getElementById('auth-form-login').style.display !== 'none')    _authLogin();
-  else if (document.getElementById('auth-form-register').style.display !== 'none') _authRegister();
+  if (modal && modal.classList.contains('open')) {
+    if (document.getElementById('auth-form-login').style.display !== 'none')         _authLogin();
+    else if (document.getElementById('auth-form-register').style.display !== 'none') _authRegister();
+    return;
+  }
+  // Welcome modal
+  const welcome = document.getElementById('first-run-modal');
+  if (welcome && welcome.style.display === 'flex') {
+    if (document.getElementById('welcome-form-login').style.display !== 'none')         _welcomeLogin();
+    else if (document.getElementById('welcome-form-register').style.display !== 'none') _welcomeRegister();
+  }
 });
 
 function _setAuthUI(username, email) {
@@ -4454,27 +4462,39 @@ async function _syncToServer(immediate) {
   } catch(e) { /* sync failure is non-fatal — data is still in localStorage */ }
 }
 
+// ── Shared auth helper — called after any successful login or register ─────────
+async function _onAuthSuccess(d, isNew) {
+  window._authUser = {username: d.username};
+  _setAuthUI(d.username, '');
+  _closeAuthModal();
+  document.getElementById('first-run-modal').style.display = 'none';
+  await _loadAndMergeServerData(d.data || {});
+  _updateRelativeTime();
+  // Auto-trigger baseline scan on first-ever login (no prior scan history)
+  if (!window._lastRunISO) {
+    appendLog('🎸 Welcome! Building the inventory database for the first time — this takes a few minutes…', 'log-dim');
+    setTimeout(() => startRun({stores: [], baseline: true}, true), 400);
+  } else if (_browseMode === 'server') {
+    _fetchBrowsePage(1);
+  }
+}
+
 async function _authLogin() {
-  const email = document.getElementById('auth-login-email').value.trim();
-  const pw    = document.getElementById('auth-login-pw').value;
-  const errEl = document.getElementById('auth-login-err');
+  const username = document.getElementById('auth-login-user').value.trim();
+  const pw       = document.getElementById('auth-login-pw').value;
+  const errEl    = document.getElementById('auth-login-err');
   errEl.textContent = '';
-  if (!email || !pw) { errEl.textContent = 'Please fill in both fields.'; return; }
+  if (!username || !pw) { errEl.textContent = 'Please fill in both fields.'; return; }
   const btn = document.querySelector('#auth-form-login .auth-submit');
   btn.disabled = true; btn.textContent = 'Signing in…';
   try {
     const r = await fetch('/api/login', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({email, password: pw}),
+      body: JSON.stringify({username, password: pw}),
     });
     const d = await r.json();
     if (!r.ok) { errEl.textContent = d.error || 'Login failed.'; return; }
-    window._authUser = {email: d.email, username: d.username || ''};
-    _setAuthUI(d.username || d.email, d.email);
-    _closeAuthModal();
-    await _loadAndMergeServerData(d.data || {});
-    _updateRelativeTime();
-    if (_browseMode === 'server') _fetchBrowsePage(1);
+    await _onAuthSuccess(d, false);
   } catch(e) {
     errEl.textContent = 'Network error — please try again.';
   } finally {
@@ -4484,30 +4504,24 @@ async function _authLogin() {
 
 async function _authRegister() {
   const username = document.getElementById('auth-reg-username').value.trim();
-  const email    = document.getElementById('auth-reg-email').value.trim();
   const pw       = document.getElementById('auth-reg-pw').value;
   const pw2      = document.getElementById('auth-reg-pw2').value;
   const errEl    = document.getElementById('auth-reg-err');
   errEl.textContent = '';
-  if (!username || !email || !pw) { errEl.textContent = 'Please fill in all fields.'; return; }
-  if (username.length < 3)  { errEl.textContent = 'Username must be at least 3 characters.'; return; }
-  if (pw.length < 8)        { errEl.textContent = 'Password must be at least 8 characters.'; return; }
-  if (pw !== pw2)           { errEl.textContent = 'Passwords do not match.'; return; }
+  if (!username || !pw) { errEl.textContent = 'Please fill in all fields.'; return; }
+  if (username.length < 3) { errEl.textContent = 'Username must be at least 3 characters.'; return; }
+  if (pw.length < 8)       { errEl.textContent = 'Password must be at least 8 characters.'; return; }
+  if (pw !== pw2)          { errEl.textContent = 'Passwords do not match.'; return; }
   const btn = document.querySelector('#auth-form-register .auth-submit');
   btn.disabled = true; btn.textContent = 'Creating account…';
   try {
     const r = await fetch('/api/register', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({username, email, password: pw}),
+      body: JSON.stringify({username, password: pw}),
     });
     const d = await r.json();
     if (!r.ok) { errEl.textContent = d.error || 'Registration failed.'; return; }
-    window._authUser = {email: d.email, username: d.username || ''};
-    _setAuthUI(d.username || d.email, d.email);
-    _closeAuthModal();
-    // New account — upload any existing localStorage data to the server
-    await _syncToServer(true);
-    _updateRelativeTime();
+    await _onAuthSuccess(d, true);
   } catch(e) {
     errEl.textContent = 'Network error — please try again.';
   } finally {
@@ -4519,6 +4533,72 @@ async function _authLogout() {
   await fetch('/api/logout', {method: 'POST'});
   window._authUser = null;
   _setAuthUI(null, null);
+}
+
+// ── Welcome modal tab switching & form submission ─────────────────────────────
+function _welcomeTab(tab) {
+  const loginForm = document.getElementById('welcome-form-login');
+  const regForm   = document.getElementById('welcome-form-register');
+  const loginTab  = document.getElementById('welcome-tab-login');
+  const regTab    = document.getElementById('welcome-tab-register');
+  loginForm.style.display = tab === 'login' ? '' : 'none';
+  regForm.style.display   = tab === 'register' ? '' : 'none';
+  loginTab.style.color    = tab === 'login' ? '#ff5555' : '#666';
+  loginTab.style.borderBottomColor = tab === 'login' ? '#c00' : 'transparent';
+  regTab.style.color      = tab === 'register' ? '#ff5555' : '#666';
+  regTab.style.borderBottomColor   = tab === 'register' ? '#c00' : 'transparent';
+  document.getElementById('welcome-login-err').textContent = '';
+  document.getElementById('welcome-reg-err').textContent   = '';
+}
+
+async function _welcomeLogin() {
+  const username = document.getElementById('welcome-login-user').value.trim();
+  const pw       = document.getElementById('welcome-login-pw').value;
+  const errEl    = document.getElementById('welcome-login-err');
+  errEl.textContent = '';
+  if (!username || !pw) { errEl.textContent = 'Please fill in both fields.'; return; }
+  const btn = document.querySelector('#welcome-form-login .auth-submit');
+  btn.disabled = true; btn.textContent = 'Signing in…';
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username, password: pw}),
+    });
+    const d = await r.json();
+    if (!r.ok) { errEl.textContent = d.error || 'Login failed.'; return; }
+    await _onAuthSuccess(d, false);
+  } catch(e) {
+    errEl.textContent = 'Network error — please try again.';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Sign In';
+  }
+}
+
+async function _welcomeRegister() {
+  const username = document.getElementById('welcome-reg-user').value.trim();
+  const pw       = document.getElementById('welcome-reg-pw').value;
+  const pw2      = document.getElementById('welcome-reg-pw2').value;
+  const errEl    = document.getElementById('welcome-reg-err');
+  errEl.textContent = '';
+  if (!username || !pw) { errEl.textContent = 'Please fill in all fields.'; return; }
+  if (username.length < 3) { errEl.textContent = 'Username must be at least 3 characters.'; return; }
+  if (pw.length < 8)       { errEl.textContent = 'Password must be at least 8 characters.'; return; }
+  if (pw !== pw2)          { errEl.textContent = 'Passwords do not match.'; return; }
+  const btn = document.querySelector('#welcome-form-register .auth-submit');
+  btn.disabled = true; btn.textContent = 'Creating account…';
+  try {
+    const r = await fetch('/api/register', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username, password: pw}),
+    });
+    const d = await r.json();
+    if (!r.ok) { errEl.textContent = d.error || 'Registration failed.'; return; }
+    await _onAuthSuccess(d, true);
+  } catch(e) {
+    errEl.textContent = 'Network error — please try again.';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Create Account &amp; Start Scanning';
+  }
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
@@ -4543,17 +4623,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   try { localStorage.removeItem('gt_prev_snapshot'); localStorage.removeItem('gt_prev_fp_set'); } catch(e) {}
   clRenderCities(true);  // Select all cities on initial load
   // Check if already logged in (session cookie persists across page loads)
+  let alreadyLoggedIn = false;
   try {
     const meR = await fetch('/api/me');
     const meD = await meR.json();
     if (meD.logged_in) {
-      window._authUser = {email: meD.email, username: meD.username || ''};
-      _setAuthUI(meD.username || meD.email, meD.email);
+      alreadyLoggedIn = true;
+      window._authUser = {username: meD.username};
+      _setAuthUI(meD.username, '');
       await _loadAndMergeServerData(meD.data || {});
     }
   } catch(e) { /* not logged in or network error — continue with localStorage */ }
   await loadData();
-  await loadState();
+  await loadState(alreadyLoggedIn);
 });
 
 async function loadData() {
@@ -4601,16 +4683,16 @@ function _fmtDropDate(iso) {
 function _updateRelativeTime() {
   document.getElementById('s-last').textContent = _timeAgo(window._lastRunISO);
   const btn = document.getElementById('check-now-btn');
-  if (btn) btn.textContent = window._lastRunISO ? 'Check Now' : 'Run Initial Scan';
+  if (btn) btn.textContent = 'Check Now';
   clearInterval(_relTimeTimer);
   _relTimeTimer = setInterval(() => {
     document.getElementById('s-last').textContent = _timeAgo(window._lastRunISO);
   }, 30000); // Update every 30s
 }
 
-async function loadState() {
-  // Per-user timing from localStorage
-  window._lastRunISO = _lsGet('last_run', null);
+async function loadState(alreadyLoggedIn) {
+  // Per-user timing from localStorage (may already be set from server merge)
+  if (!window._lastRunISO) window._lastRunISO = _lsGet('last_run', null);
 
   // Shared state from server
   const r = await fetch('/api/state');
@@ -4619,12 +4701,11 @@ async function loadState() {
   document.getElementById('s-known').textContent = _baseItemCount.toLocaleString();
   if (s.excel_exists) document.getElementById('s-excel').style.display = 'inline';
 
-  // Display is based on user's own last_run only (no nightly scan)
-
   _updateRelativeTime();
   document.getElementById('check-now-btn').style.display = 'inline';
 
-  if (s.is_first_run && !_lsGet('last_run', null)) {
+  // Show welcome/auth modal if not logged in
+  if (!alreadyLoggedIn && !window._authUser) {
     document.getElementById('first-run-modal').style.display = 'flex';
   }
   // Check for updates
@@ -5741,7 +5822,7 @@ function showResults(msg, isBaseline) {
     }
   }
 
-  appendLog(`\\n✓ Done${stoppedNote} — ${isFirstRun ? 'initial database built' : freshNewCount.toLocaleString() + ' new this scan'}.`, 'log-dim');
+  appendLog(`\\n✓ ${isFirstRun ? 'Initial scan complete' : 'Done' + stoppedNote + ' — ' + freshNewCount.toLocaleString() + ' new this scan'}.`, 'log-dim');
 
   window._lastRunISO = msg.scan_time || new Date().toISOString();
   _lsSet('last_run', window._lastRunISO);
@@ -6949,7 +7030,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.6.0"
+APP_VERSION = "2.6.1"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
