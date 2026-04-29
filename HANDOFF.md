@@ -1,11 +1,11 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-04-29 · Current version: v2.6.1 · Status: CLEAN — feature/user-accounts branch ready to merge*
+*Last updated: 2026-04-29 · Current version: v2.6.1 · Status: LIVE on main*
 
 ---
 
 ## What This Is
 
-A Flask web app deployed on Render that tracks Guitar Center used inventory. Users create accounts (username + password) and see items flagged NEW since their last scan. Watch list, want list, and favorites sync across all devices via server-side user accounts. Supports a Craigslist (CL) search tab, watchlist, want list (keyword alerts), server-side browsing, and mobile card/list views.
+A Flask web app deployed on Railway that tracks Guitar Center used inventory. Users create accounts (username + password) and see items flagged NEW since their last scan. Watch list, want list, and favorites sync across all devices via server-side user accounts. Supports a Craigslist (CL) search tab, watchlist, want list (keyword alerts), server-side browsing, and mobile card/list views.
 
 ---
 
@@ -13,10 +13,10 @@ A Flask web app deployed on Render that tracks Guitar Center used inventory. Use
 
 | Thing | Detail |
 |---|---|
-| Platform | Render (`cboehmig-lab/gc-tracker` GitHub repo) |
-| Auto-deploy | Every push to `main` triggers a Render redeploy |
+| Platform | Railway (`cboehmig-lab/gc-tracker` GitHub repo) |
+| Auto-deploy | Every push to `main` triggers a Railway redeploy |
 | Branch protection | Force-pushes blocked on `main` (set in GitHub → Settings → Branches) |
-| Data dir | Set via `DATA_DIR` env var on Render — **must be a persistent volume**, not ephemeral storage |
+| Data dir | Set via `DATA_DIR` env var on Railway — **must be a persistent volume**, not ephemeral storage |
 | Python entry | `gc_tracker_app.py` (single file, ~6900+ lines) |
 
 ### Critical env vars
