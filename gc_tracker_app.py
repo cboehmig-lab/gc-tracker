@@ -3947,7 +3947,7 @@ tr.fav-row td:last-child{color:#4ade80}
   <div style="position:absolute;inset:0;background:rgba(0,0,0,.75)" onclick="dismissFirstRun()"></div>
   <div style="position:relative;background:#1a1a1a;border:1px solid #2e2e2e;border-radius:12px;padding:32px 36px;width:360px;max-width:92vw;z-index:1">
     <h2 style="color:#fff;font-size:1.15rem;margin-bottom:6px">🎸 Welcome to Gear Tracker</h2>
-    <p style="color:#666;font-size:.82rem;margin-bottom:20px;line-height:1.5">Track Guitar Center used inventory. Create an account to save your watch list, want list, and favorites across all your devices.</p>
+    <p style="color:#aaa;font-size:.82rem;margin-bottom:20px;line-height:1.5">Track Guitar Center used inventory. Create an account to save your watch list, want list, and favorites across all your devices.</p>
     <!-- Auth tabs -->
     <div style="display:flex;border-bottom:1px solid #2e2e2e;margin-bottom:20px">
       <button id="welcome-tab-login" onclick="_welcomeTab('login')" style="flex:1;padding:8px;background:none;border:none;border-bottom:2px solid #c00;color:#ff5555;font-size:.85rem;font-weight:600;cursor:pointer;margin-bottom:-1px">Sign In</button>
