@@ -3789,6 +3789,7 @@ tr.fav-row td:last-child{color:#4ade80}
    MOBILE RESPONSIVE — all changes scoped inside @media so desktop is untouched
    ══════════════════════════════════════════════════════════════════════════════ */
 @media(max-width:820px){
+  #dev-footer{display:none}
 
   /* ── Base font bump + iOS tap highlight removal ── */
   body{font-size:1rem;overflow:hidden}
@@ -4110,7 +4111,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.6.1</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.6.2</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -7171,7 +7172,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.6.1"
+APP_VERSION = "2.6.2"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 

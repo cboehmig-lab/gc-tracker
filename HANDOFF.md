@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-04-29 · Current version: v2.6.1 · Status: LIVE on main*
+*Last updated: 2026-04-29 · Current version: v2.6.2 · Status: pending deploy (Railway outage)*
 
 ---
 
@@ -240,6 +240,15 @@ Update both places when bumping:
 **Nominatim geocoding failures**
 - Must use a clean `requests.Session()` (not the shared `_http` session which has browser-impersonation headers)
 - Fixed in v2.1.3: `nom_session = http.Session()` with clean User-Agent and Accept headers
+
+---
+
+## Recent Changes (v2.6.1 → v2.6.2)
+
+### v2.6.2
+- **Dropdown counts: italic + comma-formatted**: All filter dropdowns (brand, condition, category, subcategory) now show item counts in italic, non-bold, with comma separators (e.g. `1,234`). CSS class `.bcount` updated; JS uses `.toLocaleString()`.
+- **Dev footer links**: Fixed bottom-right footer (desktop only — hidden on mobile via `@media(max-width:820px)`) with PayPal, Venmo, and animalsintrees.com links. Dim by default, brightens on hover. Uses inline SVG icons.
+- **HANDOFF platform fix**: corrected platform from Render → Railway throughout.
 
 ---
 
