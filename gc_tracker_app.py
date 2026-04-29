@@ -1299,10 +1299,12 @@ def write_excel(new_items: list[dict]):
 app             = Flask(__name__)
 app.secret_key  = os.environ.get("SECRET_KEY", "gc-tracker-default-key-change-me")
 _q              = queue.Queue()        # legacy fallback (kept for non-run endpoints)
-_run_queues: dict[str, queue.Queue] = {}   # per-run queues keyed by run_id
+_run_queues: dict[str, list[queue.Queue]] = {}  # run_id → list of subscriber queues (fan-out)
 _run_queues_lock = threading.Lock()
 _lock           = threading.Lock()
 _stop_event     = threading.Event()
+_current_run_id: str   = ""   # run_id of the scan currently in progress (empty if none)
+_current_run_time: str = ""   # run_time of the current scan
 
 import uuid as _uuid
 
@@ -1345,20 +1347,56 @@ def _track_device(response):
     return response
 
 def _create_run_queue() -> tuple[str, queue.Queue]:
-    """Create a new per-run message queue and return (run_id, queue)."""
+    """Start a new run: create a fan-out entry and return (run_id, first_subscriber_queue)."""
+    global _current_run_id
     run_id = _uuid.uuid4().hex[:12]
     q = queue.Queue()
     with _run_queues_lock:
-        _run_queues[run_id] = q
+        _run_queues[run_id] = [q]
+        _current_run_id = run_id
     return run_id, q
 
-def _get_run_queue(run_id: str) -> queue.Queue | None:
+def _subscribe_to_run(run_id: str) -> queue.Queue | None:
+    """Join an in-progress run. Returns a new subscriber queue, or None if run is gone."""
+    q = queue.Queue()
     with _run_queues_lock:
-        return _run_queues.get(run_id)
+        if run_id not in _run_queues:
+            return None
+        _run_queues[run_id].append(q)
+    return q
+
+def _broadcast(run_id: str, msg):
+    """Send a message to all subscriber queues for a run."""
+    with _run_queues_lock:
+        subscribers = list(_run_queues.get(run_id, []))
+    for q in subscribers:
+        q.put(msg)
+
+def _get_run_queue(run_id: str) -> queue.Queue | None:
+    """Return the first subscriber queue (legacy helper, unused by _run directly)."""
+    with _run_queues_lock:
+        subs = _run_queues.get(run_id)
+        return subs[0] if subs else None
+
+def _cleanup_subscriber(run_id: str, q: queue.Queue):
+    """Remove one subscriber queue. If it's the last, remove the whole run."""
+    global _current_run_id
+    with _run_queues_lock:
+        subs = _run_queues.get(run_id)
+        if subs and q in subs:
+            subs.remove(q)
+        if not subs:
+            _run_queues.pop(run_id, None)
+            if _current_run_id == run_id:
+                _current_run_id = ""
 
 def _cleanup_run_queue(run_id: str):
+    """Remove all subscribers for a run (called when scan finishes)."""
+    global _current_run_id
     with _run_queues_lock:
         _run_queues.pop(run_id, None)
+        if _current_run_id == run_id:
+            _current_run_id = ""
 
 
 def login_required(f):
@@ -2351,8 +2389,15 @@ def api_state():
 @app.route("/api/run", methods=["POST"])
 @login_required
 def api_run():
+    global _current_run_time
     if not _lock.acquire(blocking=False):
-        return jsonify({"error": "A run is already in progress."}), 409
+        # A scan is already running — subscribe this client to it instead of rejecting
+        joined_id = _current_run_id
+        joined_time = _current_run_time
+        if joined_id and _subscribe_to_run(joined_id) is not None:
+            return jsonify({"status": "joined", "run_id": joined_id, "run_time": joined_time})
+        # Race: scan just finished between the lock check and subscribe — tell client to retry
+        return jsonify({"error": "Scan just finished, please try again."}), 409
     _stop_event.clear()
     data     = request.json
     selected = data.get("stores", [])
@@ -2364,12 +2409,9 @@ def api_run():
         device_last_run = _get_user_data(user_id).get("last_run", "")
     else:
         device_last_run = (data.get("device_last_run") or "").strip()
-    # Empty stores = nationwide scan (used by both baseline and Check for New)
-    # Create a per-run queue so each client gets its own message stream
     # Compute run_time here so we can return it to the client immediately.
-    # The client stores it for use in SSE error recovery, ensuring _lastRunISO
-    # is set to the actual scan start time even if the SSE stream drops.
     run_time_now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    _current_run_time = run_time_now
     run_id, run_q = _create_run_queue()
     # Also mirror to legacy _q for any other endpoints that read it
     while not _q.empty():
@@ -3040,20 +3082,31 @@ def api_fill_gaps():
 @login_required
 def api_progress():
     run_id = request.args.get("run_id", "")
-    run_q = _get_run_queue(run_id) if run_id else None
-    # Fall back to legacy global queue for non-run endpoints (populate, validate, etc.)
-    q = run_q or _q
+    # Each SSE connection gets its own subscriber queue so fan-out works correctly.
+    # For non-run endpoints (populate, validate, etc.) fall back to the legacy global queue.
+    if run_id:
+        my_q = _subscribe_to_run(run_id)
+        if my_q is None:
+            # Run already finished or never existed — send an empty done so client recovers
+            def _empty():
+                yield f"data: {json.dumps({'type':'done','new_count':0,'new_items':[],'scanned':0})}\n\n"
+            return Response(stream_with_context(_empty()), mimetype="text/event-stream",
+                            headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+    else:
+        my_q = _q
     def generate():
-        while True:
-            try:
-                msg = q.get(timeout=30)
-                yield f"data: {json.dumps(msg)}\n\n"
-                if msg.get("type") == "done":
-                    if run_id:
-                        _cleanup_run_queue(run_id)
-                    break
-            except queue.Empty:
-                yield f"data: {json.dumps({'type':'ping'})}\n\n"
+        try:
+            while True:
+                try:
+                    msg = my_q.get(timeout=30)
+                    yield f"data: {json.dumps(msg)}\n\n"
+                    if msg.get("type") == "done":
+                        break
+                except queue.Empty:
+                    yield f"data: {json.dumps({'type':'ping'})}\n\n"
+        finally:
+            if run_id and my_q is not _q:
+                _cleanup_subscriber(run_id, my_q)
     return Response(stream_with_context(generate()), mimetype="text/event-stream",
                     headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
@@ -3220,11 +3273,10 @@ def _fill_gaps(selected_stores: list[str]):
 
 
 def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_last_run: str = "", run_time: str = ""):
-    run_q = _get_run_queue(run_id) if run_id else None
     def send(msg):
-        if run_q:
-            run_q.put(msg)
-        _q.put(msg)  # also send to legacy queue for backwards compat
+        if run_id:
+            _broadcast(run_id, msg)   # fan-out to all subscribers
+        _q.put(msg)                   # also send to legacy queue for backwards compat
     try:
         # Use the run_time passed in from api_run (computed before thread start)
         # so the client and server share the exact same timestamp.
@@ -5848,19 +5900,17 @@ async function startRun(payload, isBaseline) {
   if (!resp.ok) {
     const e = await resp.json();
     running = false; stopBtn.style.display = 'none'; updateCount();
-    if (resp.status === 409) {
-      appendLog('⏳ Another scan is already in progress — if this is stale, use /admin/clear-lock?pw=… to reset.', 'log-dim');
-    } else {
-      appendLog('Error: ' + (e.error || resp.statusText), 'log-err');
-    }
+    appendLog('Error: ' + (e.error || resp.statusText), 'log-err');
     return;
   }
   // Get run_id and run_time from start response.
-  // run_time is the server's scan start timestamp — used in SSE error recovery so
-  // _lastRunISO is set to the actual scan time even when the SSE stream drops.
+  // status "joined" means another user's scan is already running — we subscribe to it.
   const runData = await resp.json();
   const runId = runData.run_id || '';
   const scanRunTime = runData.run_time || '';
+  if (runData.status === 'joined') {
+    appendLog('⏳ Scan already in progress — joining…', 'log-dim');
+  }
 
   const es = new EventSource('/api/progress' + (runId ? '?run_id=' + encodeURIComponent(runId) : ''));
   es.onmessage = e => {
