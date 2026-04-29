@@ -1683,6 +1683,99 @@ def admin_validate_stores():
     return Response(html, content_type="text/html")
 
 
+@app.route("/admin/users")
+def admin_users():
+    """Password-protected user account summary page."""
+    pw       = request.args.get("pw", "")
+    admin_pw = os.environ.get("RESET_PASSWORD", "Beatle909!")
+    if pw != admin_pw:
+        return Response(
+            '<html><body style="background:#111;color:#eee;font-family:monospace;padding:40px">'
+            '<h2>🔒 Access denied</h2>'
+            '<form><input name="pw" type="password" placeholder="Password" autofocus '
+            'style="padding:8px;background:#222;border:1px solid #444;color:#eee;border-radius:4px">'
+            '<button type="submit" style="padding:8px 16px;background:#c00;color:#fff;border:none;'
+            'border-radius:4px;cursor:pointer;margin-left:8px">Enter</button></form>'
+            '</body></html>', 401, {"Content-Type": "text/html"}
+        )
+
+    # Load all users + their data
+    with _user_db() as conn:
+        users = [dict(r) for r in conn.execute(
+            "SELECT u.id, u.username, u.email, u.created_at, "
+            "       d.last_run, d.updated_at "
+            "FROM users u "
+            "LEFT JOIN user_data d ON d.user_id = u.id "
+            "ORDER BY u.created_at DESC"
+        ).fetchall()]
+
+        # Count watchlist/keyword items per user
+        for u in users:
+            row = conn.execute(
+                "SELECT watchlist, keywords, favorites FROM user_data WHERE user_id=?",
+                (u["id"],)
+            ).fetchone()
+            if row:
+                try: u["wl_count"]  = len(json.loads(row["watchlist"] or "{}"))
+                except: u["wl_count"] = 0
+                try: u["kw_count"]  = len(json.loads(row["keywords"]  or "[]"))
+                except: u["kw_count"] = 0
+                try: u["fav_count"] = len(json.loads(row["favorites"] or "[]"))
+                except: u["fav_count"] = 0
+            else:
+                u["wl_count"] = u["kw_count"] = u["fav_count"] = 0
+
+    def _fmt(ts):
+        if not ts: return "—"
+        try:
+            dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+            return dt.strftime("%b %d, %Y  %H:%M UTC")
+        except: return ts
+
+    rows_html = ""
+    for u in users:
+        email_cell = u.get("email") or '<span style="color:#444">not set</span>'
+        last_scan  = _fmt(u.get("last_run"))
+        joined     = _fmt(u.get("created_at"))
+        rows_html += (
+            f'<tr>'
+            f'<td>{u["username"]}</td>'
+            f'<td>{email_cell}</td>'
+            f'<td>{joined}</td>'
+            f'<td>{last_scan}</td>'
+            f'<td style="text-align:center">{u["wl_count"]}</td>'
+            f'<td style="text-align:center">{u["kw_count"]}</td>'
+            f'<td style="text-align:center">{u["fav_count"]}</td>'
+            f'</tr>'
+        )
+
+    html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+<title>Users</title>
+<style>
+body{{background:#111;color:#ddd;font-family:monospace;padding:24px;font-size:.88rem}}
+h1{{color:#fff;margin-bottom:4px}}
+.sub{{color:#666;margin-bottom:24px;font-size:.82rem}}
+table{{border-collapse:collapse;width:100%;max-width:900px}}
+th{{background:#1e1e1e;padding:8px 14px;text-align:left;border-bottom:2px solid #333;color:#aaa}}
+td{{padding:7px 14px;border-bottom:1px solid #222}}
+tr:hover td{{background:#1a1a1a}}
+a{{color:#888;text-decoration:none;font-size:.78rem}}
+</style></head><body>
+<h1>👤 User Accounts</h1>
+<div class="sub">{len(users)} account{"s" if len(users)!=1 else ""} &nbsp;·&nbsp;
+<a href="/admin/devices?pw={pw}">→ Device log</a></div>
+<table>
+<tr>
+  <th>Username</th><th>Email</th><th>Joined</th><th>Last scan</th>
+  <th>Watch</th><th>Want</th><th>Favs</th>
+</tr>
+{rows_html if rows_html else '<tr><td colspan="7" style="color:#555;padding:20px">No accounts yet.</td></tr>'}
+</table>
+</body></html>"""
+
+    return Response(html, mimetype="text/html")
+
+
 @app.route("/admin/clear-lock")
 def admin_clear_lock():
     """Force-release the global scan lock if it's stuck after a crash.
@@ -3974,13 +4067,13 @@ tr.fav-row td:last-child{color:#4ade80}
       <input class="auth-field" type="password" id="welcome-reg-pw" placeholder="Password (8+ characters)" autocomplete="new-password">
       <input class="auth-field" type="password" id="welcome-reg-pw2" placeholder="Confirm password" autocomplete="new-password">
       <input class="auth-field" type="email" id="welcome-reg-email" placeholder="Email (optional)" autocomplete="email" style="margin-bottom:4px">
-      <div style="color:#555;font-size:.72rem;margin-bottom:12px;line-height:1.4">Optional — required only if you ever need to recover a forgotten password.</div>
+      <div style="color:#aaa;font-size:.72rem;margin-bottom:12px;line-height:1.4">Optional — only used for password recovery. Never shared.</div>
       <div class="auth-err" id="welcome-reg-err"></div>
       <button class="auth-submit" onclick="_welcomeRegister()">Create Account &amp; Start Scanning</button>
     </div>
     <!-- Guest option -->
     <div style="text-align:center;margin-top:16px">
-      <button onclick="dismissFirstRun()" style="background:none;border:none;color:#555;font-size:.78rem;cursor:pointer;text-decoration:underline">Use as guest</button>
+      <button onclick="dismissFirstRun()" style="background:none;border:none;color:#aaa;font-size:.78rem;cursor:pointer;text-decoration:underline">Use as guest</button>
     </div>
   </div>
 </div>
@@ -4045,7 +4138,7 @@ tr.fav-row td:last-child{color:#4ade80}
       <input class="auth-field" type="password" id="auth-reg-pw" placeholder="Password (8+ characters)" autocomplete="new-password">
       <input class="auth-field" type="password" id="auth-reg-pw2" placeholder="Confirm password" autocomplete="new-password">
       <input class="auth-field" type="email" id="auth-reg-email" placeholder="Email (optional)" autocomplete="email" style="margin-bottom:4px">
-      <div class="auth-note" style="margin-bottom:12px;margin-top:0">Optional — required only if you ever need to recover a forgotten password.</div>
+      <div class="auth-note" style="margin-bottom:12px;margin-top:0;color:#aaa">Optional — only used for password recovery. Never shared.</div>
       <div class="auth-err" id="auth-reg-err"></div>
       <button class="auth-submit" onclick="_authRegister()">Create Account</button>
     </div>
