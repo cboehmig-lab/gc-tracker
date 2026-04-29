@@ -69,6 +69,7 @@ def _init_user_db():
             CREATE TABLE IF NOT EXISTS users (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 username      TEXT    UNIQUE NOT NULL COLLATE NOCASE,
+                email         TEXT    UNIQUE COLLATE NOCASE,
                 password_hash TEXT    NOT NULL,
                 created_at    TEXT    NOT NULL
             )
@@ -1425,12 +1426,19 @@ def api_register():
         return jsonify({"error": "Password must be at least 8 characters."}), 400
     if _user_by_username(username):
         return jsonify({"error": "That username is already taken."}), 409
+    email = (data.get("email") or "").strip().lower() or None
+    if email and ("@" not in email or "." not in email.split("@")[-1]):
+        return jsonify({"error": "Please enter a valid email address, or leave it blank."}), 400
+    if email:
+        with _user_db() as conn:
+            if conn.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone():
+                return jsonify({"error": "That email is already linked to another account."}), 409
     pw_hash = generate_password_hash(password)
     now     = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     with _user_db() as conn:
         cur     = conn.execute(
-            "INSERT INTO users (username, password_hash, created_at) VALUES (?,?,?)",
-            (username, pw_hash, now)
+            "INSERT INTO users (username, email, password_hash, created_at) VALUES (?,?,?,?)",
+            (username, email, pw_hash, now)
         )
         user_id = cur.lastrowid
         conn.commit()
@@ -3965,6 +3973,8 @@ tr.fav-row td:last-child{color:#4ade80}
       <input class="auth-field" type="text" id="welcome-reg-user" placeholder="Choose a username" autocomplete="username" maxlength="30">
       <input class="auth-field" type="password" id="welcome-reg-pw" placeholder="Password (8+ characters)" autocomplete="new-password">
       <input class="auth-field" type="password" id="welcome-reg-pw2" placeholder="Confirm password" autocomplete="new-password">
+      <input class="auth-field" type="email" id="welcome-reg-email" placeholder="Email (optional)" autocomplete="email" style="margin-bottom:4px">
+      <div style="color:#555;font-size:.72rem;margin-bottom:12px;line-height:1.4">Optional — required only if you ever need to recover a forgotten password.</div>
       <div class="auth-err" id="welcome-reg-err"></div>
       <button class="auth-submit" onclick="_welcomeRegister()">Create Account &amp; Start Scanning</button>
     </div>
@@ -4034,9 +4044,10 @@ tr.fav-row td:last-child{color:#4ade80}
       <input class="auth-field" type="text" id="auth-reg-username" placeholder="Choose a username" autocomplete="username" maxlength="30">
       <input class="auth-field" type="password" id="auth-reg-pw" placeholder="Password (8+ characters)" autocomplete="new-password">
       <input class="auth-field" type="password" id="auth-reg-pw2" placeholder="Confirm password" autocomplete="new-password">
+      <input class="auth-field" type="email" id="auth-reg-email" placeholder="Email (optional)" autocomplete="email" style="margin-bottom:4px">
+      <div class="auth-note" style="margin-bottom:12px;margin-top:0">Optional — required only if you ever need to recover a forgotten password.</div>
       <div class="auth-err" id="auth-reg-err"></div>
       <button class="auth-submit" onclick="_authRegister()">Create Account</button>
-      <div class="auth-note">Passwords are securely hashed — never stored in plain text.</div>
     </div>
   </div>
 </div>
@@ -4515,9 +4526,10 @@ async function _authRegister() {
   const btn = document.querySelector('#auth-form-register .auth-submit');
   btn.disabled = true; btn.textContent = 'Creating account…';
   try {
+    const email = (document.getElementById('auth-reg-email').value || '').trim();
     const r = await fetch('/api/register', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({username, password: pw}),
+      body: JSON.stringify({username, password: pw, email: email || ''}),
     });
     const d = await r.json();
     if (!r.ok) { errEl.textContent = d.error || 'Registration failed.'; return; }
@@ -4587,9 +4599,10 @@ async function _welcomeRegister() {
   const btn = document.querySelector('#welcome-form-register .auth-submit');
   btn.disabled = true; btn.textContent = 'Creating account…';
   try {
+    const email = (document.getElementById('welcome-reg-email').value || '').trim();
     const r = await fetch('/api/register', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({username, password: pw}),
+      body: JSON.stringify({username, password: pw, email: email || ''}),
     });
     const d = await r.json();
     if (!r.ok) { errEl.textContent = d.error || 'Registration failed.'; return; }
