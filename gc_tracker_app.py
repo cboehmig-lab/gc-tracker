@@ -3601,6 +3601,11 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #zip-sort-btn:hover{border-color:#555;color:#bbb}
 
 .empty-msg{padding:24px 16px;color:#555;font-size:.85rem;text-align:center}
+#dev-footer{position:fixed;bottom:10px;right:12px;display:flex;flex-direction:column;align-items:flex-end;gap:5px;z-index:50;pointer-events:none}
+#dev-footer a{display:flex;align-items:center;gap:6px;font-size:.72rem;color:#444;text-decoration:none;pointer-events:all;transition:color .2s;white-space:nowrap}
+#dev-footer a:hover{color:#aaa}
+#dev-footer svg{flex-shrink:0;opacity:.6;transition:opacity .2s}
+#dev-footer a:hover svg{opacity:1}
 
 .left-footer{padding:12px;border-top:1px solid #2e2e2e;flex-shrink:0;background:#1a1a1a;position:relative;z-index:2}
 #sel-count{font-size:.78rem;color:#666;margin-bottom:8px}
@@ -7130,6 +7135,34 @@ function clToggleWatch(id, name, url, price, location, btn) {
   btn.title = isWatched ? 'Add to watch list' : 'Remove from watch list';
 }
 </script>
+
+<div id="dev-footer">
+  <a href="https://paypal.me/smurfco" target="_blank" rel="noopener" title="Buy the developer a pack of strings">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M19.5 8.5c.3-2-1.2-3.5-3.5-3.5H9.5L7 20h3l.7-4.5h2.3c3.5 0 6-2 6.5-5.5l.5-1.5z" fill="#009cde"/>
+      <path d="M16 10.5c.2-1.5-.8-2.5-2.5-2.5H9l-1.5 9h2.5l.5-3h2c2.5 0 4-1.5 4.3-3.5l.2-.5z" fill="#003087"/>
+    </svg>
+    Buy the developer a pack of strings
+  </a>
+  <a href="https://account.venmo.com/u/charles-boehmig" target="_blank" rel="noopener" title="Buy the developer a pack of strings">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect width="24" height="24" rx="4" fill="#3D95CE"/>
+      <path d="M17 5.5c.5 1 .7 2 .7 3.3 0 4-3.4 9.2-6.2 12.7H7.3L5 6.3l4-.4 1.3 10.2C11.6 14 13 10.8 13 8.3c0-1.3-.2-2.3-.6-3L17 5.5z" fill="#fff"/>
+    </svg>
+    Buy the developer a pack of strings (Venmo)
+  </a>
+  <a href="https://animalsintrees.com" target="_blank" rel="noopener" title="Listen to the developer's original music">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="12" cy="12" r="10" stroke="#888" stroke-width="1.5"/>
+      <circle cx="12" cy="12" r="3" fill="#888"/>
+      <path d="M9 8V5l8-2v3L9 8z" fill="#888"/>
+      <line x1="9" y1="8" x2="9" y2="14" stroke="#888" stroke-width="1.5"/>
+      <line x1="17" y1="6" x2="17" y2="9" stroke="#888" stroke-width="1.5"/>
+    </svg>
+    Listen to the developer's original music
+  </a>
+</div>
+
 </body>
 </html>"""
 
