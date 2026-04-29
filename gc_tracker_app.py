@@ -6,7 +6,7 @@ Run with:  python3 gc_tracker_app.py
 Then open: http://localhost:5050
 """
 
-import json, os, re, sys, time, threading, queue, webbrowser, random
+import json, os, re, sys, time, threading, queue, webbrowser, random, sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from functools import wraps
@@ -20,6 +20,7 @@ def _sleep(base: float, jitter: float = 0.5):
 try:
     from flask import (Flask, request, jsonify, Response, stream_with_context,
                        session, redirect, send_file)
+    from werkzeug.security import generate_password_hash, check_password_hash
 except ImportError:
     sys.exit("Missing Flask. Run:  pip3 install flask requests openpyxl")
 
@@ -52,6 +53,91 @@ STORE_COORDS_FILE = DATA_DIR / "gc_store_coords.json"
 
 PORT        = int(os.environ.get("PORT", 5050))
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+
+# ── User accounts (SQLite) ────────────────────────────────────────────────────
+USER_DB = DATA_DIR / "gc_users.db"
+
+def _user_db():
+    """Open a connection to the user database."""
+    conn = sqlite3.connect(str(USER_DB))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def _init_user_db():
+    with _user_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                email         TEXT    UNIQUE NOT NULL COLLATE NOCASE,
+                username      TEXT    UNIQUE NOT NULL COLLATE NOCASE,
+                password_hash TEXT    NOT NULL,
+                created_at    TEXT    NOT NULL
+            )
+        """)
+        # Migration: add username column to existing databases that predate this field
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN username TEXT NOT NULL DEFAULT '' COLLATE NOCASE")
+            conn.commit()
+        except Exception:
+            pass  # Column already exists
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_data (
+                user_id   INTEGER PRIMARY KEY REFERENCES users(id),
+                watchlist TEXT    DEFAULT '{}',
+                keywords  TEXT    DEFAULT '[]',
+                favorites TEXT    DEFAULT '[]',
+                last_run  TEXT    DEFAULT '',
+                new_ids   TEXT    DEFAULT '[]',
+                updated_at TEXT   DEFAULT ''
+            )
+        """)
+        conn.commit()
+
+def _user_by_email(email: str) -> dict | None:
+    with _user_db() as conn:
+        row = conn.execute("SELECT * FROM users WHERE email=?", (email.lower().strip(),)).fetchone()
+        return dict(row) if row else None
+
+def _user_by_id(user_id: int) -> dict | None:
+    with _user_db() as conn:
+        row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        return dict(row) if row else None
+
+def _get_user_data(user_id: int) -> dict:
+    with _user_db() as conn:
+        row = conn.execute("SELECT * FROM user_data WHERE user_id=?", (user_id,)).fetchone()
+    if not row:
+        return {"watchlist": {}, "keywords": [], "favorites": [], "last_run": "", "new_ids": []}
+    return {
+        "watchlist": json.loads(row["watchlist"] or "{}"),
+        "keywords":  json.loads(row["keywords"]  or "[]"),
+        "favorites": json.loads(row["favorites"] or "[]"),
+        "last_run":  row["last_run"] or "",
+        "new_ids":   json.loads(row["new_ids"]   or "[]"),
+    }
+
+def _set_user_data(user_id: int, **kwargs):
+    """Update one or more user_data fields. Valid keys: watchlist, keywords, favorites, last_run, new_ids"""
+    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _user_db() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO user_data (user_id, updated_at) VALUES (?,?)",
+            (user_id, now)
+        )
+        for field, value in kwargs.items():
+            if field in ("watchlist", "keywords", "favorites", "new_ids"):
+                conn.execute(
+                    f"UPDATE user_data SET {field}=?, updated_at=? WHERE user_id=?",
+                    (json.dumps(value), now, user_id)
+                )
+            elif field == "last_run":
+                conn.execute(
+                    "UPDATE user_data SET last_run=?, updated_at=? WHERE user_id=?",
+                    (value, now, user_id)
+                )
+        conn.commit()
+
+_init_user_db()
 
 # ── HTTP session ──────────────────────────────────────────────────────────────
 _USER_AGENTS = [
@@ -1330,6 +1416,95 @@ def logout():
     session.clear()
     return redirect("/login")
 
+
+# ── User account API ──────────────────────────────────────────────────────────
+
+@app.route("/api/register", methods=["POST"])
+def api_register():
+    data     = request.json or {}
+    email    = (data.get("email") or "").strip().lower()
+    username = re.sub(r'[^A-Za-z0-9_\-]', '', (data.get("username") or "").strip())
+    password = (data.get("password") or "").strip()
+    if not email or "@" not in email or "." not in email.split("@")[-1]:
+        return jsonify({"error": "Please enter a valid email address."}), 400
+    if not username or len(username) < 3:
+        return jsonify({"error": "Username must be at least 3 characters (letters, numbers, _ -)"}), 400
+    if len(username) > 30:
+        return jsonify({"error": "Username must be 30 characters or fewer."}), 400
+    if len(password) < 8:
+        return jsonify({"error": "Password must be at least 8 characters."}), 400
+    if _user_by_email(email):
+        return jsonify({"error": "An account with this email already exists."}), 409
+    with _user_db() as conn:
+        existing = conn.execute(
+            "SELECT id FROM users WHERE username=?", (username,)
+        ).fetchone()
+    if existing:
+        return jsonify({"error": "That username is already taken."}), 409
+    pw_hash = generate_password_hash(password)
+    now     = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _user_db() as conn:
+        cur     = conn.execute(
+            "INSERT INTO users (email, username, password_hash, created_at) VALUES (?,?,?,?)",
+            (email, username, pw_hash, now)
+        )
+        user_id = cur.lastrowid
+        conn.commit()
+    session.permanent = True
+    session["user_id"]       = user_id
+    session["user_email"]    = email
+    session["user_username"] = username
+    return jsonify({"status": "registered", "email": email, "username": username, "data": _get_user_data(user_id)})
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    data     = request.json or {}
+    email    = (data.get("email") or "").strip().lower()
+    password = (data.get("password") or "").strip()
+    user     = _user_by_email(email)
+    if not user or not check_password_hash(user["password_hash"], password):
+        return jsonify({"error": "Incorrect email or password."}), 401
+    username = user.get("username") or email.split("@")[0]
+    session.permanent = True
+    session["user_id"]       = user["id"]
+    session["user_email"]    = email
+    session["user_username"] = username
+    return jsonify({"status": "ok", "email": email, "username": username, "data": _get_user_data(user["id"])})
+
+@app.route("/api/logout", methods=["POST"])
+def api_logout():
+    session.pop("user_id",    None)
+    session.pop("user_email", None)
+    return jsonify({"status": "logged_out"})
+
+@app.route("/api/me")
+def api_me():
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"logged_in": False})
+    return jsonify({
+        "logged_in": True,
+        "email":     session.get("user_email", ""),
+        "username":  session.get("user_username", ""),
+        "data":      _get_user_data(user_id),
+    })
+
+@app.route("/api/sync", methods=["POST"])
+def api_sync():
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Not logged in."}), 401
+    data   = request.json or {}
+    kwargs = {}
+    for field in ("watchlist", "keywords", "favorites", "new_ids"):
+        if field in data:
+            kwargs[field] = data[field]
+    if "last_run" in data:
+        kwargs["last_run"] = data["last_run"]
+    if kwargs:
+        _set_user_data(user_id, **kwargs)
+    return jsonify({"status": "synced"})
+
 @app.route("/admin/devices")
 def admin_devices():
     """Password-protected device access summary page."""
@@ -2101,9 +2276,13 @@ def api_run():
     data     = request.json
     selected = data.get("stores", [])
     baseline = data.get("baseline", False)
-    # Device's own last-run timestamp (ISO string from localStorage) — used so
-    # each device gets its own NEW window rather than sharing gc_last_scan.txt
-    device_last_run = (data.get("device_last_run") or "").strip()
+    # If user is logged in, use their server-stored last_run (synced across devices).
+    # Otherwise fall back to the device's own localStorage value.
+    user_id = session.get("user_id")
+    if user_id:
+        device_last_run = _get_user_data(user_id).get("last_run", "")
+    else:
+        device_last_run = (data.get("device_last_run") or "").strip()
     # Empty stores = nationwide scan (used by both baseline and Check for New)
     # Create a per-run queue so each client gets its own message stream
     # Compute run_time here so we can return it to the client immediately.
@@ -3269,6 +3448,33 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #stop-btn:hover{background:#ffe0e0}
 #stop-btn:disabled{opacity:.6;cursor:not-allowed}
 #hdr-status{font-size:.8rem;color:#ffbbbb;margin-left:auto}
+/* ── Auth header widget ── */
+#auth-widget{display:flex;align-items:center;gap:8px;flex-shrink:0}
+#auth-login-btn{padding:6px 14px;background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.35);border-radius:5px;font-size:.78rem;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s}
+#auth-login-btn:hover{background:rgba(255,255,255,.25)}
+#auth-user-info{display:none;align-items:center;gap:8px}
+#auth-email{font-size:.75rem;color:#ffdddd;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#auth-logout-btn{padding:5px 10px;background:rgba(0,0,0,.25);color:#ffcccc;border:1px solid rgba(255,255,255,.2);border-radius:4px;font-size:.72rem;cursor:pointer;white-space:nowrap}
+#auth-logout-btn:hover{background:rgba(0,0,0,.4)}
+#auth-sync-dot{width:7px;height:7px;border-radius:50%;background:#4ade80;display:none;flex-shrink:0;title:"Synced"}
+/* ── Auth modal ── */
+#auth-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9999;align-items:center;justify-content:center}
+#auth-modal.open{display:flex}
+.auth-box{background:#1a1a1a;border:1px solid #2e2e2e;border-radius:12px;padding:32px 36px;width:340px;max-width:90vw}
+.auth-box h2{color:#fff;font-size:1.1rem;margin-bottom:4px}
+.auth-box p{color:#666;font-size:.82rem;margin-bottom:22px}
+.auth-tabs{display:flex;gap:0;margin-bottom:22px;border-bottom:1px solid #2e2e2e}
+.auth-tab{flex:1;padding:8px;background:none;border:none;border-bottom:2px solid transparent;color:#666;font-size:.85rem;font-weight:600;cursor:pointer;margin-bottom:-1px;transition:color .15s}
+.auth-tab.active{color:#ff5555;border-bottom-color:#c00}
+.auth-field{width:100%;padding:10px 12px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#eee;font-size:.92rem;outline:none;margin-bottom:12px;box-sizing:border-box}
+.auth-field:focus{border-color:#c00}
+.auth-submit{width:100%;padding:10px;background:#c00;color:#fff;border:none;border-radius:5px;font-size:.95rem;font-weight:700;cursor:pointer;margin-top:4px}
+.auth-submit:hover{background:#e00}
+.auth-submit:disabled{opacity:.5;cursor:not-allowed}
+.auth-err{color:#f88;font-size:.8rem;margin-bottom:10px;min-height:18px}
+.auth-note{font-size:.75rem;color:#555;margin-top:14px;text-align:center}
+.auth-close{position:absolute;top:12px;right:14px;background:none;border:none;color:#666;font-size:1.2rem;cursor:pointer}
+#auth-modal .auth-box{position:relative}
 
 /* ── Top tabs ── */
 .app-tabs{display:flex;background:#0d0d0d;border-bottom:1px solid #2e2e2e;flex-shrink:0}
@@ -3794,10 +4000,47 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.5.2</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.6.0</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
+  <div id="auth-widget">
+    <span id="auth-sync-dot" title="Synced to account"></span>
+    <div id="auth-user-info">
+      <span id="auth-email"></span>
+      <button id="auth-logout-btn" onclick="_authLogout()">Sign out</button>
+    </div>
+    <button id="auth-login-btn" onclick="_openAuthModal('login')">Sign in</button>
+  </div>
 </header>
+
+<!-- ── Auth modal ── -->
+<div id="auth-modal">
+  <div class="auth-box">
+    <button class="auth-close" onclick="_closeAuthModal()">✕</button>
+    <div class="auth-tabs">
+      <button class="auth-tab active" id="auth-tab-login" onclick="_switchAuthTab('login')">Sign In</button>
+      <button class="auth-tab" id="auth-tab-register" onclick="_switchAuthTab('register')">Create Account</button>
+    </div>
+    <!-- Login form -->
+    <div id="auth-form-login">
+      <input class="auth-field" type="email" id="auth-login-email" placeholder="Email address" autocomplete="email">
+      <input class="auth-field" type="password" id="auth-login-pw" placeholder="Password" autocomplete="current-password">
+      <div class="auth-err" id="auth-login-err"></div>
+      <button class="auth-submit" onclick="_authLogin()">Sign In</button>
+      <div class="auth-note">Your watch list, want list &amp; favorites sync across all your devices.</div>
+    </div>
+    <!-- Register form -->
+    <div id="auth-form-register" style="display:none">
+      <input class="auth-field" type="text" id="auth-reg-username" placeholder="Username (e.g. guitargod69)" autocomplete="username" maxlength="30">
+      <input class="auth-field" type="email" id="auth-reg-email" placeholder="Email address" autocomplete="email">
+      <input class="auth-field" type="password" id="auth-reg-pw" placeholder="Password (8+ characters)" autocomplete="new-password">
+      <input class="auth-field" type="password" id="auth-reg-pw2" placeholder="Confirm password" autocomplete="new-password">
+      <div class="auth-err" id="auth-reg-err"></div>
+      <button class="auth-submit" onclick="_authRegister()">Create Account</button>
+      <div class="auth-note">Passwords are securely hashed — never stored in plain text.</div>
+    </div>
+  </div>
+</div>
 
 <div id="update-banner" style="display:none;background:#1a3a1a;border-bottom:1px solid #2a6a2a;padding:8px 24px;align-items:center;gap:12px;font-size:.82rem;color:#8fc98f">
   ⬆ Update available: v<span id="update-version"></span> —
@@ -4088,6 +4331,196 @@ function _lsSetVerified(key, val) {
 }
 
 
+// ── Auth & server sync ────────────────────────────────────────────────────────
+window._authUser = null;  // null = not logged in, {email} = logged in
+let _syncTimer = null;
+
+function _openAuthModal(tab) {
+  tab = tab || 'login';
+  _switchAuthTab(tab);
+  document.getElementById('auth-modal').classList.add('open');
+  setTimeout(() => {
+    const el = document.getElementById(tab === 'login' ? 'auth-login-email' : 'auth-reg-email');
+    if (el) el.focus();
+  }, 80);
+}
+function _closeAuthModal() {
+  document.getElementById('auth-modal').classList.remove('open');
+}
+function _switchAuthTab(tab) {
+  document.getElementById('auth-form-login').style.display     = tab === 'login'    ? '' : 'none';
+  document.getElementById('auth-form-register').style.display  = tab === 'register' ? '' : 'none';
+  document.getElementById('auth-tab-login').classList.toggle('active',    tab === 'login');
+  document.getElementById('auth-tab-register').classList.toggle('active', tab === 'register');
+  document.getElementById('auth-login-err').textContent = '';
+  document.getElementById('auth-reg-err').textContent   = '';
+}
+
+// Close modal on backdrop click
+document.addEventListener('click', e => {
+  const modal = document.getElementById('auth-modal');
+  if (modal && modal.classList.contains('open') && e.target === modal) _closeAuthModal();
+});
+// Close modal on Escape
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') _closeAuthModal();
+});
+// Enter key submits forms
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  const modal = document.getElementById('auth-modal');
+  if (!modal || !modal.classList.contains('open')) return;
+  if (document.getElementById('auth-form-login').style.display !== 'none')    _authLogin();
+  else if (document.getElementById('auth-form-register').style.display !== 'none') _authRegister();
+});
+
+function _setAuthUI(username, email) {
+  const loginBtn  = document.getElementById('auth-login-btn');
+  const userInfo  = document.getElementById('auth-user-info');
+  const emailSpan = document.getElementById('auth-email');
+  const syncDot   = document.getElementById('auth-sync-dot');
+  if (username || email) {
+    loginBtn.style.display  = 'none';
+    userInfo.style.display  = 'flex';
+    emailSpan.textContent   = username || email;
+    emailSpan.title         = email || '';
+    syncDot.style.display   = 'block';
+  } else {
+    loginBtn.style.display  = '';
+    userInfo.style.display  = 'none';
+    syncDot.style.display   = 'none';
+  }
+}
+
+async function _loadAndMergeServerData(serverData) {
+  // Merge server data with whatever's already in localStorage.
+  // Strategy: union for sets (watchlist, keywords, favorites),
+  // most-recent-wins for last_run / new_ids.
+  const sWl  = serverData.watchlist || {};
+  const sKw  = serverData.keywords  || [];
+  const sFav = serverData.favorites || [];
+  const sLr  = serverData.last_run  || '';
+  const sNid = serverData.new_ids   || [];
+
+  const mergedWl  = Object.assign({}, sWl, window._watchlist);
+  const mergedKw  = [...new Set([...sKw, ...window._keywords])].sort();
+  const mergedFav = [...new Set([...sFav, ...favorites])];
+  const localLr   = window._lastRunISO || '';
+  let mergedLr, mergedNid;
+  if (sLr && localLr) {
+    if (sLr >= localLr) { mergedLr = sLr;  mergedNid = sNid; }
+    else                { mergedLr = localLr; mergedNid = [...(window._newIds || [])]; }
+  } else {
+    mergedLr  = sLr || localLr;
+    mergedNid = sLr ? sNid : [...(window._newIds || [])];
+  }
+
+  window._watchlist   = mergedWl;
+  window._keywords    = mergedKw;
+  favorites           = mergedFav;
+  window._lastRunISO  = mergedLr || null;
+  window._newIds      = new Set(mergedNid);
+
+  _lsSet('watchlist', window._watchlist);
+  _lsSet('keywords',  window._keywords);
+  _lsSet('favorites', favorites);
+  if (window._lastRunISO) _lsSet('last_run', window._lastRunISO);
+  _lsSet('new_ids', [...window._newIds]);
+
+  // Push merged state back to server
+  await _syncToServer(true);
+}
+
+async function _syncToServer(immediate) {
+  if (!window._authUser) return;   // no-op when not logged in
+  if (!immediate) {
+    // Debounce rapid changes (e.g. adding many keywords)
+    clearTimeout(_syncTimer);
+    _syncTimer = setTimeout(() => _syncToServer(true), 600);
+    return;
+  }
+  try {
+    await fetch('/api/sync', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        watchlist: window._watchlist || {},
+        keywords:  window._keywords  || [],
+        favorites: favorites          || [],
+        last_run:  window._lastRunISO || '',
+        new_ids:   window._newIds instanceof Set ? [...window._newIds] : (window._newIds || []),
+      }),
+    });
+  } catch(e) { /* sync failure is non-fatal — data is still in localStorage */ }
+}
+
+async function _authLogin() {
+  const email = document.getElementById('auth-login-email').value.trim();
+  const pw    = document.getElementById('auth-login-pw').value;
+  const errEl = document.getElementById('auth-login-err');
+  errEl.textContent = '';
+  if (!email || !pw) { errEl.textContent = 'Please fill in both fields.'; return; }
+  const btn = document.querySelector('#auth-form-login .auth-submit');
+  btn.disabled = true; btn.textContent = 'Signing in…';
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email, password: pw}),
+    });
+    const d = await r.json();
+    if (!r.ok) { errEl.textContent = d.error || 'Login failed.'; return; }
+    window._authUser = {email: d.email, username: d.username || ''};
+    _setAuthUI(d.username || d.email, d.email);
+    _closeAuthModal();
+    await _loadAndMergeServerData(d.data || {});
+    _updateRelativeTime();
+    if (_browseMode === 'server') _fetchBrowsePage(1);
+  } catch(e) {
+    errEl.textContent = 'Network error — please try again.';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Sign In';
+  }
+}
+
+async function _authRegister() {
+  const username = document.getElementById('auth-reg-username').value.trim();
+  const email    = document.getElementById('auth-reg-email').value.trim();
+  const pw       = document.getElementById('auth-reg-pw').value;
+  const pw2      = document.getElementById('auth-reg-pw2').value;
+  const errEl    = document.getElementById('auth-reg-err');
+  errEl.textContent = '';
+  if (!username || !email || !pw) { errEl.textContent = 'Please fill in all fields.'; return; }
+  if (username.length < 3)  { errEl.textContent = 'Username must be at least 3 characters.'; return; }
+  if (pw.length < 8)        { errEl.textContent = 'Password must be at least 8 characters.'; return; }
+  if (pw !== pw2)           { errEl.textContent = 'Passwords do not match.'; return; }
+  const btn = document.querySelector('#auth-form-register .auth-submit');
+  btn.disabled = true; btn.textContent = 'Creating account…';
+  try {
+    const r = await fetch('/api/register', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username, email, password: pw}),
+    });
+    const d = await r.json();
+    if (!r.ok) { errEl.textContent = d.error || 'Registration failed.'; return; }
+    window._authUser = {email: d.email, username: d.username || ''};
+    _setAuthUI(d.username || d.email, d.email);
+    _closeAuthModal();
+    // New account — upload any existing localStorage data to the server
+    await _syncToServer(true);
+    _updateRelativeTime();
+  } catch(e) {
+    errEl.textContent = 'Network error — please try again.';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Create Account';
+  }
+}
+
+async function _authLogout() {
+  await fetch('/api/logout', {method: 'POST'});
+  window._authUser = null;
+  _setAuthUI(null, null);
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('search').addEventListener('input', filterList);
@@ -4109,6 +4542,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Clean up legacy localStorage keys from fingerprint-based detection (no longer used)
   try { localStorage.removeItem('gt_prev_snapshot'); localStorage.removeItem('gt_prev_fp_set'); } catch(e) {}
   clRenderCities(true);  // Select all cities on initial load
+  // Check if already logged in (session cookie persists across page loads)
+  try {
+    const meR = await fetch('/api/me');
+    const meD = await meR.json();
+    if (meD.logged_in) {
+      window._authUser = {email: meD.email, username: meD.username || ''};
+      _setAuthUI(meD.username || meD.email, meD.email);
+      await _loadAndMergeServerData(meD.data || {});
+    }
+  } catch(e) { /* not logged in or network error — continue with localStorage */ }
   await loadData();
   await loadState();
 });
@@ -4384,6 +4827,7 @@ function toggleFav(e, name, btn) {
   }
   favorites.sort();
   _lsSet('favorites', favorites);
+  _syncToServer();
   btn.classList.toggle('active', adding);
   btn.title = (adding ? 'Remove from' : 'Add to') + ' favorites';
   if (favsOnly) renderList();
@@ -4914,6 +5358,7 @@ function toggleWatch(id, btn) {
   btn.classList.toggle('wl-on',  !isWatched);
   btn.textContent = isWatched ? '☆' : '★';
   btn.title = isWatched ? 'Add to watch list' : 'Remove from watch list';
+  _syncToServer();
 }
 
 function toggleWatchFilter() {
@@ -5014,6 +5459,7 @@ function addKeyword() {
     window._keywords.push(word);
     window._keywords.sort();
     _lsSet('keywords', window._keywords);
+    _syncToServer();
   }
   input.value = '';
   renderKeywordList();
@@ -5023,6 +5469,7 @@ function addKeyword() {
 function removeKeyword(word) {
   window._keywords = window._keywords.filter(k => k.toLowerCase() !== word.toLowerCase());
   _lsSet('keywords', window._keywords);
+  _syncToServer();
   renderKeywordList();
 }
 
@@ -5030,6 +5477,7 @@ function removeKeywordAt(i) {
   // Index-based removal — safe for keywords containing any characters (quotes, etc.)
   window._keywords.splice(i, 1);
   _lsSet('keywords', window._keywords);
+  _syncToServer();
   renderKeywordList();
 }
 
@@ -5038,6 +5486,7 @@ function clearAllKeywords() {
   if (!confirm(`Clear all ${window._keywords.length} want list item${window._keywords.length !== 1 ? 's' : ''}? This cannot be undone.`)) return;
   window._keywords = [];
   _lsSet('keywords', window._keywords);
+  _syncToServer();
   renderKeywordList();
 }
 
@@ -5248,6 +5697,7 @@ async function startRun(payload, isBaseline) {
       // from the right place rather than an arbitrary "now".
       window._lastRunISO = scanRunTime || new Date().toISOString();
       _lsSet('last_run', window._lastRunISO);
+      _syncToServer(true);
       _updateRelativeTime();
       // Fall back to browse mode to show whatever data was saved
       setTimeout(() => {
@@ -5295,6 +5745,8 @@ function showResults(msg, isBaseline) {
 
   window._lastRunISO = msg.scan_time || new Date().toISOString();
   _lsSet('last_run', window._lastRunISO);
+  // Sync scan results to server so they follow the user to other devices
+  _syncToServer(true);
   _updateRelativeTime();
   document.getElementById('check-now-btn').style.display = 'inline';
 
@@ -6497,7 +6949,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.5.2"
+APP_VERSION = "2.6.0"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
