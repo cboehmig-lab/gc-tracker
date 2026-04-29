@@ -3632,11 +3632,13 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .brand-dd-item{display:flex;align-items:center;padding:6px 12px;cursor:pointer;font-size:.82rem;color:#ccc;gap:6px}
 .brand-dd-item:hover{background:#252525}
 .brand-dd-item.active{background:#c00;color:#fff}
-.brand-dd-item .bcount{margin-left:auto;color:#555;font-size:.72rem}
-.brand-dd-item.active .bcount{color:rgba(255,255,255,.7)}
+.brand-dd-item .bcount{margin-left:auto;color:#555;font-size:.72rem;font-style:italic;font-weight:normal}
+.brand-dd-item.active .bcount{color:rgba(255,255,255,.7);font-style:italic;font-weight:normal}
 .cond-dd-item{display:flex;align-items:center;padding:6px 12px;cursor:pointer;font-size:.82rem;color:#ccc;gap:8px}
 .cond-dd-item:hover{background:#252525}
 .cond-dd-item.active{color:#fff}
+.cond-dd-item .bcount{margin-left:auto;color:#666;font-size:.72rem;font-style:italic;font-weight:normal}
+.cond-dd-item.active .bcount{color:rgba(255,255,255,.7);font-style:italic;font-weight:normal}
 .cond-dd-check{width:14px;height:14px;border:1px solid #555;border-radius:3px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;font-size:.7rem}
 .cond-dd-item.active .cond-dd-check{background:#c00;border-color:#c00;color:#fff}
 #res-search-wrap{margin-left:auto;display:flex;align-items:center;gap:6px}
@@ -6345,7 +6347,7 @@ function _renderBrandList() {
     const esc = b.name.replace(/"/g,'&quot;');
     html += '<div class="brand-dd-item' + (isActive ? ' active' : '') + '" data-brand="' + esc + '">'
          + '<span class="cond-dd-check">' + (isActive ? '✓' : '') + '</span>'
-         + esc + '<span class="bcount">' + b.count + '</span></div>';
+         + esc + '<span class="bcount">' + b.count.toLocaleString() + '</span></div>';
   });
   list.innerHTML = html;
   list.onclick = function(e) {
@@ -6423,7 +6425,7 @@ function _renderCondList() {
     const esc = name.replace(/"/g,'&quot;');
     html += '<div class="cond-dd-item' + (isActive ? ' active' : '') + '" data-cond="' + esc + '">'
          + '<span class="cond-dd-check">' + (isActive ? '✓' : '') + '</span>'
-         + esc + (count !== '' ? '<span class="bcount">' + count + '</span>' : '') + '</div>';
+         + esc + (count !== '' ? '<span class="bcount">' + Number(count).toLocaleString() + '</span>' : '') + '</div>';
   });
   panel.innerHTML = html;
   panel.onclick = function(e) {
@@ -6491,7 +6493,7 @@ function _renderCatList() {
     const esc = name.replace(/"/g,'&quot;');
     html += '<div class="cond-dd-item' + (isActive ? ' active' : '') + '" data-val="' + esc + '">'
          + '<span class="cond-dd-check">' + (isActive ? '✓' : '') + '</span>' + esc
-         + (count !== '' ? '<span class="bcount">' + count + '</span>' : '') + '</div>';
+         + (count !== '' ? '<span class="bcount">' + Number(count).toLocaleString() + '</span>' : '') + '</div>';
   });
   panel.innerHTML = html;
   panel.onclick = function(e) {
@@ -6551,7 +6553,7 @@ function _renderSubList() {
     const esc = name.replace(/"/g,'&quot;');
     html += '<div class="cond-dd-item' + (isActive ? ' active' : '') + '" data-val="' + esc + '">'
          + '<span class="cond-dd-check">' + (isActive ? '✓' : '') + '</span>' + name
-         + (count !== '' ? '<span class="bcount">' + count + '</span>' : '') + '</div>';
+         + (count !== '' ? '<span class="bcount">' + Number(count).toLocaleString() + '</span>' : '') + '</div>';
   });
   panel.innerHTML = html;
   panel.onclick = function(e) {
