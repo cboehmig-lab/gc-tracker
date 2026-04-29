@@ -1,11 +1,11 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-04-28 · Current version: v2.5.2 · Status: CLEAN — no in-flight work*
+*Last updated: 2026-04-29 · Current version: v2.6.1 · Status: CLEAN — feature/user-accounts branch ready to merge*
 
 ---
 
 ## What This Is
 
-A Flask web app deployed on Railway that tracks Guitar Center used inventory. Users select stores, run a scan, and see items flagged NEW since their last scan. Supports a Craigslist (CL) search tab, watchlist, want list (keyword alerts), server-side browsing, and mobile card/list views.
+A Flask web app deployed on Render that tracks Guitar Center used inventory. Users create accounts (username + password) and see items flagged NEW since their last scan. Watch list, want list, and favorites sync across all devices via server-side user accounts. Supports a Craigslist (CL) search tab, watchlist, want list (keyword alerts), server-side browsing, and mobile card/list views.
 
 ---
 
@@ -13,19 +13,18 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 
 | Thing | Detail |
 |---|---|
-| Platform | Railway (`cboehmig-lab/gc-tracker` GitHub repo) |
-| Auto-deploy | Every push to `main` triggers a Railway redeploy |
+| Platform | Render (`cboehmig-lab/gc-tracker` GitHub repo) |
+| Auto-deploy | Every push to `main` triggers a Render redeploy |
 | Branch protection | Force-pushes blocked on `main` (set in GitHub → Settings → Branches) |
-| Data dir | Set via `DATA_DIR` env var on Railway — **must be a persistent volume**, not ephemeral storage |
-| Python entry | `gc_tracker_app.py` (single file, ~6400+ lines) |
+| Data dir | Set via `DATA_DIR` env var on Render — **must be a persistent volume**, not ephemeral storage |
+| Python entry | `gc_tracker_app.py` (single file, ~6900+ lines) |
 
 ### Critical env vars
 | Var | Purpose |
 |---|---|
 | `DATA_DIR` | Where data files live — set to mounted volume path |
-| `SECRET_KEY` | Flask session secret |
-| `APP_PASSWORD` | Site-wide login (currently bypassed — see Auth section) |
-| `RESET_PASSWORD` | Password for `/api/reset` and `/admin/devices` — default `Beatle909!` |
+| `SECRET_KEY` | Flask session secret — **must be set** for user login sessions to survive restarts |
+| `RESET_PASSWORD` | Password for admin pages and `/api/reset` — default `Beatle909!` |
 | `ALGOLIA_APP_ID` / `ALGOLIA_API_KEY` | GC inventory API |
 
 ### Git push auth
@@ -40,58 +39,98 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 
 | File | Purpose |
 |---|---|
+| `gc_users.db` | SQLite user database — accounts, passwords (hashed), per-user watch/want/favorites/scan state |
 | `gc_category_cache.json` | Main inventory store — all scanned items keyed by SKU |
-| `gc_last_scan.txt` | Global last-scan timestamp (ISO, UTC) — fallback for new devices |
+| `gc_last_scan.txt` | Global last-scan timestamp (ISO, UTC) — fallback for guest users |
 | `gc_device_log.jsonl` | Unique device access log (append-only, one line per device per day) |
-| `gc_state.json` | Legacy — no longer used by advanced app |
+| `gc_state.json` | Legacy — no longer used |
 | `gc_invalid_stores.json` | Blocklisted store names (auto-managed) |
 
 ---
 
 ## Architecture
 
-### Scan flow
-1. Client POST `/api/run` with `{stores, baseline, device_last_run}`
-2. Server acquires `_lock` (rejects concurrent scans with 409)
-3. Scan runs in background thread, streams progress via SSE (`/api/progress?run_id=...`)
-4. On completion, server returns `{new_ids, scan_time}` — client saves to localStorage
+### User accounts
+- SQLite database (`gc_users.db`) with two tables:
+  - `users`: id, username (unique), email (optional, for password recovery), password_hash (bcrypt via Werkzeug), created_at
+  - `user_data`: user_id, watchlist (JSON), keywords (JSON), favorites (JSON), last_run (ISO), new_ids (JSON)
+- `_init_user_db()` runs at startup and creates tables if missing
+- Passwords are hashed with PBKDF2/SHA-256 — never stored in plaintext, not visible even to admin
+- Sessions use Flask's signed cookie (`SECRET_KEY`) — permanent sessions survive browser restarts
+- Guest mode: users can dismiss the welcome modal and use the app without an account (data stays in localStorage only)
 
-### NEW detection (per-device) — HYBRID approach (v2.5.0+)
-- Each device has its own `last_run` and `new_ids` in **localStorage**
+### Auth endpoints
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/register` | POST | Create account — username, password, optional email |
+| `/api/login` | POST | Login with username + password |
+| `/api/logout` | POST | Clear session |
+| `/api/me` | GET | Check session state; returns username + full user data |
+| `/api/sync` | POST | Save watchlist/keywords/favorites/last_run/new_ids to user record |
+
+### Scan flow
+1. Client POST `/api/run` with `{stores, baseline}`
+2. If user is logged in, server uses their stored `last_run` as the comparison window (not localStorage)
+3. Server acquires `_lock` (rejects concurrent scans with 409)
+4. Scan runs in background thread, streams progress via SSE (`/api/progress?run_id=...`)
+5. On completion, client receives `{new_ids, scan_time}` via SSE, syncs to server via `/api/sync`
+6. New users get a baseline scan triggered automatically on first login (no prior `last_run`)
+
+### NEW detection (per-user) — HYBRID approach (v2.5.0+)
+- Each **user account** has its own `last_run` and `new_ids` stored server-side
+- Guest users fall back to localStorage (same as pre-v2.6.0 behavior)
 - On scan: server uses **two signals** to detect NEW items:
-  1. **date_listed > prev_scan_time** — Algolia's `creationDate` is after the device's previous scan
+  1. **date_listed > prev_scan_time** — Algolia's `creationDate` is after the user's previous scan
   2. **first_seen > prev_scan_time AND date_listed > prev_scan_time - 24h** — item is new to our cache AND was listed within the last 24 hours
-- Rule 2 handles the **Algolia indexing delay**: GC sets `creationDate` when a listing record is created, but the item may not appear in Algolia search results for **6-12+ hours**. An item created at 7 AM may not be searchable until 5 PM. Its `date_listed` (7 AM) is before `prev_scan_time` (the scan at 3 PM), but `first_seen` catches it because it wasn't in the cache during the previous scan. The 24h date cutoff prevents old pagination-instability misses from being tagged.
-- Phone scan **does not** affect desktop's NEW tags — fully independent per localStorage
+- Rule 2 handles the **Algolia indexing delay**: GC sets `creationDate` when a listing record is created, but the item may not appear in Algolia search results for **6-12+ hours**.
 - `new_ids` are sent from client to server on every browse request; server marks `isNew` accordingly
 - Each scan replaces `_newIds` entirely — 0 new = clean slate
+
+### Data sync flow
+- On page load: `/api/me` is called; if logged in, server data is merged with localStorage
+- Merge strategy: union for watchlist/keywords/favorites; most-recent-wins for last_run/new_ids
+- Auto-sync triggers: watchlist toggle, keyword add/remove, favorites toggle, scan completion
+- Sync is debounced (600ms) for rapid changes like keyword edits
 
 ### Algolia date fields (investigated 2026-04-28)
 - Only two top-level date fields exist: `startDate` (Unix seconds, can be 0) and `creationDate` (Unix ms, always set)
 - `startDate = 0` is the norm on fresh used items; fallback to `creationDate / 1000` kicks in
-- **Critical finding**: `creationDate` reflects when GC internally creates the listing record, NOT when the item becomes searchable in Algolia. There is a **6-12+ hour indexing pipeline delay**. This is why pure date-based NEW detection fails — items can have `creationDate` from the morning but only appear in search results in the afternoon.
+- **Critical finding**: `creationDate` reflects when GC internally creates the listing record, NOT when the item becomes searchable in Algolia. There is a **6-12+ hour indexing pipeline delay**.
 - Our comparison is apples-to-apples: both sides are `YYYY-MM-DDTHH:MM:SSZ` UTC strings
 - GC lists items in real-time (item-by-item), peak volume 1–4am UTC = store closing times across US time zones
 
 ### Browse flow (server-side pagination)
 - Client POST `/api/browse` with filters, sort, page, `new_ids`, `user_last_scan`
 - Server reads `gc_category_cache.json`, applies filters, returns 50 items/page
-- `user_last_scan` gates visibility: items with `first_seen > user_last_scan` are hidden (not yet "seen" by this device)
+- `user_last_scan` gates visibility: items with `first_seen > user_last_scan` are hidden
 
 ### Concurrency
 - Single global `threading.Lock()` — only one scan at a time
-- Second user hitting Run gets HTTP 409 → friendly UI message: "Another scan is already in progress — try again in a moment"
+- Second user hitting Run gets HTTP 409 → friendly UI message
 - `_stop_event` is global — if someone hits Stop it cancels whoever is scanning
 
 ---
 
 ## Auth
 
-- Site is **open** — `login_required` decorator is a pass-through (no password to enter the site)
+- Site shows a **Welcome modal** on page load for non-logged-in users (login / create account / use as guest)
+- Logged-in state shown in header: username + green sync dot + "Sign out" button
+- "Sign in" button in header also opens auth modal for users who dismissed the welcome screen
+- `login_required` decorator is still a pass-through — all pages are accessible; auth is opt-in
 - `/api/reset` requires `RESET_PASSWORD` in POST body
-- `/admin/devices` requires `?pw=RESET_PASSWORD` query param
-- `/admin/listing-patterns` requires `?pw=RESET_PASSWORD` — shows GC listing timestamp analysis
-- `/login` and `/logout` routes exist but are inert
+- `/admin/*` pages require `?pw=RESET_PASSWORD` query param
+
+---
+
+## Admin Pages
+
+| URL | Purpose |
+|---|---|
+| `/admin/users?pw=Beatle909!` | User account list — username, email, join date, last scan, watch/want/fav counts |
+| `/admin/devices?pw=Beatle909!` | Device access log — unique devices, platform, first/last seen, daily active chart |
+| `/admin/clear-lock?pw=Beatle909!` | Force-release stuck scan lock without restarting |
+| `/admin/listing-patterns?pw=Beatle909!` | GC listing timestamp analysis |
+| `/admin/build-coords?pw=Beatle909!` | Re-geocode store locations |
 
 ---
 
@@ -111,35 +150,31 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 **Semantic versioning: `MAJOR.MINOR.PATCH`**
 
 - `PATCH` bump — bug fixes (most pushes)
-- `MINOR` bump — new feature ships (e.g. `2.1.0`)
+- `MINOR` bump — new feature ships (e.g. `2.6.0`)
 - `MAJOR` bump — Chuck says so (e.g. `3.0.0`)
 
 Update both places when bumping:
 1. `APP_VERSION = "x.y.z"` near the bottom of `gc_tracker_app.py`
-2. The `v{x.y.z}` span in the `<h1>` tag in the HTML (~line 3468)
+2. The `v{x.y.z}` span in the `<h1>` tag in the HTML
 
 ---
 
 ## Device Tracking
 
 - Every device gets a `gt_device_id` UUID cookie (2-year lifetime, set via `@app.after_request`)
-- First visit each day appends one line to `gc_device_log.jsonl`:
-  ```json
-  {"date":"2026-04-15","time":"14:32:11Z","device_id":"abc-123...","ua":"Mozilla/5.0...","ip":"98.1.2.3"}
-  ```
-- **Admin dashboard**: `https://your-app.railway.app/admin/devices?pw=Beatle909!`
-  - Shows unique device count, platform guess, first/last seen, days active, daily active chart
+- First visit each day appends one line to `gc_device_log.jsonl`
+- **Admin dashboard**: `/admin/devices?pw=Beatle909!`
 
 ---
 
 ## Want List Architecture
 
-- Keywords stored in `localStorage` key `keywords` as `window._keywords` (array of strings)
-- `renderKeywordList()` renders them as a **sorted A–Z pill cloud** in the modal; each pill has an embedded ✕ button
+- Keywords stored in `window._keywords` (array of strings), synced server-side for logged-in users
+- `renderKeywordList()` renders them as a **sorted A–Z pill cloud**; each pill has an embedded ✕ button
 - `removeKeywordAt(i)` — index-based removal (safe for keywords with quotes or special chars)
-- **Toolbar count badge** (`#wl-count-badge`): shows "X want list items available" in bold green between the 🎯 Want List button and All Brands dropdown. Clickable — triggers `searchWantList()`. Fetched in background via `_updateWantListCount()` after each page-1 browse.
-- `_watchFilterActive` — filters current store browse to watched (★) items; separate from want list keywords
-- `_wantListSearchActive` — filters browse to keyword matches; uses current `_srvStores` (not truly nationwide)
+- **Toolbar count badge** (`#wl-count-badge`): shows "X want list items available" in bold green. Clickable — triggers `searchWantList()`.
+- `_watchFilterActive` — filters current store browse to watched (★) items
+- `_wantListSearchActive` — filters browse to keyword matches
 - `filter_want_list_only: true` in `/api/browse` body triggers keyword filtering server-side
 
 ---
@@ -156,11 +191,12 @@ Update both places when bumping:
 
 | Variable | Where | Purpose |
 |---|---|---|
-| `window._lastRunISO` | localStorage `last_run` | This device's last scan time (ISO UTC) |
-| `window._newIds` | localStorage `new_ids` | Set of SKUs flagged NEW on last scan |
-| `window._watchlist` | localStorage `watchlist` | Watched items `{id: {name, store, ...}}` |
-| `window._keywords` | localStorage `keywords` | Want list keywords |
-| `favorites` | localStorage `favorites` | Favorited store names |
+| `window._authUser` | JS var | `null` = guest, `{username}` = logged in |
+| `window._lastRunISO` | localStorage + server | Last scan time (ISO UTC) — server is authoritative for logged-in users |
+| `window._newIds` | localStorage + server | Set of SKUs flagged NEW on last scan |
+| `window._watchlist` | localStorage + server | Watched items `{id: {name, store, ...}}` |
+| `window._keywords` | localStorage + server | Want list keywords |
+| `favorites` | localStorage + server | Favorited store names |
 | `gt_mobile_view` | localStorage | `'cards'` or `'list'` |
 | `_browseMode` | JS var | `'server'` or `'local'` |
 | `_srvLoading` | JS var | Prevents concurrent browse fetches |
@@ -168,31 +204,38 @@ Update both places when bumping:
 | `_watchFilterActive` | JS var | True when filtering browse to watchlist items |
 | `_wantListSearchActive` | JS var | True when filtering browse to want list keywords |
 | `_priceDropFilterActive` | JS var | True when filtering to price-dropped items |
-| `_wlCountTimer` | JS var | Debounce timer for `_updateWantListCount()` |
+| `_syncTimer` | JS var | Debounce timer for `_syncToServer()` |
 
 ---
 
 ## Common Debugging
 
-**Items not showing as NEW**
-- The most common cause is the **Algolia indexing delay** — items can have `creationDate` 6-12 hours before they appear in search results. The hybrid detection (v2.5.0) handles this by also checking `first_seen`.
-- Check `window._newIds` in browser console — should be a Set of SKU strings
-- Check `window._lastRunISO` — should be the ISO time of last scan on this device
-- If `_lastRunISO` is null/empty, localStorage may have been cleared (Safari does this aggressively on mobile) — `prev_scan_time` falls back to global `gc_last_scan.txt` which may be very recent from another device's scan
+**User can't log in**
+- Check username spelling (case-insensitive) and password
+- If they forgot their password and have no email on file, account must be reset manually via SQLite on the server
+
+**Items not showing as NEW after login on a new device**
+- Check `/api/me` response — `data.last_run` should be set
+- If `last_run` is empty on server, the scan will use `gc_last_scan.txt` as fallback
+- Guest users: `window._lastRunISO` comes from localStorage — may be empty if Safari cleared it
+
+**Sync not working**
+- Open browser DevTools → Network tab → look for `/api/sync` calls after watchlist/keyword changes
+- If 401: session cookie expired — user needs to log in again
+- `SECRET_KEY` env var must be set on Render, or sessions reset on every deploy
 
 **Sandbox git lock files**
-- The Cowork sandbox sometimes leaves stale `.git/*.lock` files after commits
-- Fix: `rm ~/Desktop/gc_tracker/.git/index.lock ~/Desktop/gc_tracker/.git/HEAD.lock ~/Desktop/gc_tracker/.git/objects/maintenance.lock 2>/dev/null; true` then retry
+- The Cowork sandbox sometimes leaves stale `.git/*.lock` files
+- Fix: `rm ~/Desktop/gc_tracker/.git/index.lock 2>/dev/null; true` then retry
 - The sandbox cannot push to GitHub (proxy 403) — always push from Mac terminal
 
 **Scan hangs / 409 forever**
-- Something crashed while holding `_lock` without releasing it
-- Hit `/admin/clear-lock?pw=Beatle909!` to force-release without a Railway restart
-- As a last resort, restart the Railway service to reset the process
+- Hit `/admin/clear-lock?pw=Beatle909!` to force-release without a Render restart
 
 **No data after redeploy**
-- Likely ephemeral storage — Railway wipes files on redeploy unless a volume is mounted
-- Fix: attach a Railway volume, set `DATA_DIR` to its mount path
+- Likely ephemeral storage — Render wipes files on redeploy unless a volume is mounted
+- Fix: attach a Render disk, set `DATA_DIR` to its mount path
+- `gc_users.db` lives in `DATA_DIR` — **must be on persistent volume** or all accounts are lost on redeploy
 
 **Nominatim geocoding failures**
 - Must use a clean `requests.Session()` (not the shared `_http` session which has browser-impersonation headers)
@@ -200,142 +243,50 @@ Update both places when bumping:
 
 ---
 
+## Recent Changes (v2.6.0 → v2.6.1)
+
+### v2.6.1
+- **Username-only auth**: removed email as a required field. Login is username + password. Email is now optional (stored if provided, for future password recovery).
+- **Welcome modal on page load**: replaces the old "Run Initial Scan" first-run popup. Shows login / create account / use as guest with a note about cross-device sync. "Use as guest" dismisses modal and continues with localStorage-only mode.
+- **Auto baseline scan**: new accounts (or logins with no prior scan history) automatically trigger a nationwide baseline scan — no button to click.
+- **"Initial scan complete"** log message for baseline scans instead of "0 new this scan".
+- **Admin `/admin/users` page**: shows all accounts with username, email, join date, last scan, watch/want/favorites counts.
+- **Optional email field**: registration forms include an email field with note: "Optional — only used for password recovery. Never shared."
+- **Modal text colors**: all helper text in the welcome modal brought up to `#aaa` minimum — nothing darker than the explainer text.
+
+### v2.6.0
+- **User accounts**: SQLite-backed username + password auth. Watch list, want list, favorites, last_run, and new_ids all sync server-side per user. Logged-in users get consistent NEW detection across all devices.
+- **Server-side last_run**: `api_run` uses the user's stored `last_run` when logged in, so scan windows are consistent regardless of which device ran the last scan.
+- **`/api/sync`**: client syncs all personal state to server after any change (debounced 600ms). Called immediately after scan completion.
+- **`/api/me`**: called on every page load to restore session state silently.
+- **Data merge on login**: server data merged with localStorage on login — union for sets, most-recent-wins for timestamps.
+- **Header auth widget**: username + green sync dot when logged in; "Sign in" button when not.
+
+---
+
 ## Recent Changes (v2.5.0 → v2.5.2)
 
 ### v2.5.2
-- **Desktop table layout overhaul**: Switched from `table-layout:fixed` (Item column absorbed all leftover space, leaving data columns cramped/truncated) to `table-layout:auto`. Data columns (Brand, Price, Condition, Category, Subcategory, Date, Location) now auto-size to their content with `white-space:nowrap` so nothing truncates. Item column capped at 420px max-width so it doesn't hog screen space. JS dynamic-sizing updated to use `maxWidth` instead of `width` with a 420px cap (was 260px).
+- **Desktop table layout overhaul**: Switched from `table-layout:fixed` to `table-layout:auto`. Data columns auto-size to content. Item column capped at 420px max-width.
 
 ### v2.5.0
-- **NEW detection rewritten — hybrid date + first_seen**: Root cause of persistent "0 new items" bug identified: Algolia's `creationDate` is set when GC internally creates a listing record, but the item may not appear in search results for 6-12+ hours (indexing pipeline delay). Pure date comparison (`date_listed > prev_scan_time`) fails because the date is from hours before the item became searchable. Fix: dual detection — item is NEW if `date_listed > prev_scan_time` OR (`first_seen > prev_scan_time` AND `date_listed > prev_scan_time - 24h`). The 24h buffer catches delayed items while preventing old pagination misses from being tagged.
-- **Price drop display reordered**: New price shows first (`↓ $84.99 $139.99`), old strikethrough price after. If column truncates, only the less-important old price is clipped.
-- **Price column widened**: 90px → 140px to better fit price drop display.
+- **NEW detection rewritten — hybrid date + first_seen**: dual detection — item is NEW if `date_listed > prev_scan_time` OR (`first_seen > prev_scan_time` AND `date_listed > prev_scan_time - 24h`).
+- **Price drop display reordered**: New price shows first (`↓ $84.99 $139.99`).
+- **Price column widened**: 90px → 140px.
 
 ### v2.5.1
-- **Price Drops is now a stackable filter**: No longer resets watch list/want list when toggled. Layers on top of whatever view is active.
-- **Price column left-justified**: Better alignment now that new price shows first.
-- **Debug logging removed**: Scan progress no longer shows `[DEBUG]` lines.
+- **Price Drops is now a stackable filter**.
+- **Price column left-justified**.
+- **Debug logging removed**.
 
 ---
 
 ## Recent Changes (v2.3.3 → v2.4.8)
 
-### v2.3.3
-- **0-new scan now clears NEW tags**: Changed philosophy — scan result is always source of truth. If scan returns 0 new items, `_newIds` is cleared (previously was preserved). Clean slate each scan.
+*(See previous HANDOFF for full details on v2.3.x–v2.4.x)*
 
-### v2.3.4
-- **Instant NEW tag clear**: Clicking "Clear NEW tags" now clears immediately without re-browse
-- **Location column fix**: desktop table location column now displays correctly
-- **Confirm clear want list**: Added confirmation dialog before clearing all want list keywords
-- **Mobile card**: shows location + date fields
-
-### v2.3.5
-- **First-visit UX**: Check Now button says "Run Initial Scan" when no prior scan exists; status bar shows "Ready" instead of blank
-
-### v2.3.6
-- **Removed `user_last_scan` browse gating**: Was hiding items from mobile that desktop had already seen (different localStorage), causing confusing cross-device inconsistency. Items now always show regardless of when device first saw them.
-
-### v2.3.7
-- **Restored `user_last_scan` gating** (reverted v2.3.6): Removing it caused unintended side-effects. Brought back with targeted fix instead.
-- **Mobile SSE disconnect fix**: Mobile was losing `lastRunISO` when SSE connection dropped during scan; now preserved correctly.
-
-### v2.3.9
-- **Table not updating after scan fix**: `displayNewCount` ReferenceError was preventing table from re-rendering after scan completion.
-- **Scroll-to-top on desktop page nav**: Desktop result table now scrolls to top when paging through results.
-
-### v2.4.x series — Desktop table layout overhaul
-
-### v2.4.2
-- **Fixed-layout table**: Switched to `table-layout:fixed` with equal-width columns (min 65px each). Item/title column is `auto` with a 520px JS cap. Hides NEW and WANT columns when empty (no new items / no want list keywords).
-
-### v2.4.4
-- **Scroll-to-top fix**: Moved scroll call inside `_fetchBrowsePage` to run after `innerHTML` is set (was firing before DOM update).
-
-### v2.4.5
-- **Content-appropriate column widths**: Each column sized to its content (price, date, location each given appropriate fixed widths). Price column right-aligned. Title tooltips added (full text on hover for truncated titles).
-
-### v2.4.8
-- **SSE disconnect NEW-detection fix**: `/api/run` now returns `run_time` (the scan's start timestamp) in its JSON response. The SSE `onerror` handler now sets `_lastRunISO = scanRunTime` (from that response) instead of `new Date().toISOString()`. Previously, if SSE dropped mid-scan, `_lastRunISO` jumped to the client's current clock time, making items listed between the previous clean scan and the drop invisible to new detection on the next scan. Now it correctly anchors to the scan's actual start time.
-- **Filters preserved on store change**: `browseCache()` no longer resets brand/condition/category/subcategory/search/watch/price-drop/want-list filters when the store selection changes. Contextual facet counts (v2.4.7) update automatically to reflect what's available in the new store set, and zero-count options disappear. Users switching between Favorites and Select All, or toggling individual stores, keep their active filters.
-
-### v2.4.7
-- **Contextual (faceted) filter counts**: Brand, condition, category, and subcategory dropdowns now show counts scoped to all OTHER active filters. E.g. when "Bass" category is selected, Ibanez shows ~500 (Bass items only) not ~2100 (all items). Zero-count options are hidden automatically; currently-selected options always remain visible (showing 0) so they can be deselected. Implementation: `/api/browse` computes contextual counts server-side using a `_ctx_counts()` helper — for each facet, apply all other facet filters to the non-facet-filtered base set. Returns `{name, count}` objects for all four facets. Client-side `_renderCondList`, `_renderCatList`, `_renderSubList` updated to handle the new format and display counts.
-
-### v2.4.6
-- **Wider price/date/location columns**: Tuned column widths wider based on real content. Removed title tooltips (were cluttering the UI).
-
----
-
-## Recent Changes (v2.0.1 → v2.2.9)
-
-### v2.1.3
-- Nominatim geocoding fixed: was failing 298/298 because `_http` session carried `Sec-Fetch-*` headers that Nominatim rejected. Now uses a clean `nom_session`.
-
-### v2.1.4
-- `_srvLoading` guard added before `_fetchBrowsePage(1)` in large-scan `showResults` path (was getting stuck)
-- Auto-build done handler: restores saved ZIP and sort preference after `_loadStoreCoords` completes
-
-### v2.1.5
-- Want list keyword X buttons: switched from `removeKeyword(kw)` (broke on quotes) to `removeKeywordAt(i)` (index-based, safe for all chars)
-- NEW tags fix: `showResults` previously cleared `_newIds` even on 0-new scans. Now only replaces when `freshNewCount > 0`; preserves existing tags otherwise. Scan log shows carry-over note.
-- Small-scan path: uses `effectiveNewIds` (checks if `_newIds` is a Set before using)
-
-### v2.1.6
-- `/admin/listing-patterns` endpoint: password-protected page showing GC listing timestamp analysis (by day/hour/minute, clustering signals, 40 most recent)
-- `analyze_listings.py`: standalone CLI script to fetch ~2400 items from Algolia and analyze timestamp patterns
-
-### v2.1.7
-- Want list toolbar: count badge (`#wl-count-badge`) added between 🎯 Want List button and All Brands dropdown
-- Badge fetches count in background via `_updateWantListCount()`, shows "X want list items available"
-- Results header when want list filter active now shows "Want List — X items found"
-
-### v2.1.8 (may not be pushed as separate commit — rolled into v2.1.9)
-- "Filter to Want List" link hidden; count badge made bold + clickable (calls `searchWantList()`)
-- `.badge:empty { display:none }` CSS to prevent empty badge rendering as artifact
-
-### v2.1.9
-- Want list modal: keywords now display as A–Z sorted pill cloud (flex-wrap), each pill has embedded ✕
-- `res-badge` permanently hidden (`display:none!important`) — count badge in toolbar is the new NEW signal display
-- `renderKeywordList()` fully rewritten: sorted copy with original indices preserved for safe `removeKeywordAt(i)` calls
-
-### v2.2.x series — UI polish + admin tooling
-
-### v2.2.4
-- `.log-dim` color changed from `#555` (invisible dark grey) to `#6dba8d` (green) — all processing box text now readable
-- Done message shortened: removed "X items scanned," — now reads `✓ Done — 0 new this scan (850 still marked NEW from previous scan).`
-- `/admin/clear-lock?pw=…` endpoint added — force-releases stuck `_lock` without Railway restart
-- 409 UI message updated to mention the clear-lock URL
-
-### v2.2.5
-- **Store geocoding rewritten** to use Algolia's `storeName` field (e.g. `"South Austin, TX"`) as the Nominatim query instead of `"Guitar Center {store}"`. Fixes distance sort missing multi-store-city locations (South Austin, North Austin, West LA, Long Island, etc.).
-- `_build_store_coords` now: (1) pulls 1 Algolia hit per store to get storeName, (2) geocodes storeName via Nominatim, (3) for stores with no items (dead/closed), tries `"{store}, {state}"` as last-ditch. Each coords entry gets a `source` string for auditing.
-- `force=True` flag on `_build_store_coords` re-geocodes everything even if cached. Exposed via `/api/build-store-coords` body param and a "Force re-geocode all" checkbox on `/admin/build-coords`.
-- `_admin_task_page()` helper extended with `options_html` and `extra_body_js` params for per-page customisation (checkboxes etc).
-- Per-store Algolia errors now logged. Progress messages more detailed.
-
-### v2.3.2
-- **Geocoding fix**: `todo` list was built from `existing` (old coords file) instead of `coords` (which includes seed). So all 298 stores were re-queued even when 171 were already seeded. Fixed to `s not in coords` — seeded stores are always skipped, seed wins over force-flag.
-- **Button styles unified**: Price Drops and Watch List now use the same green border/font as Want List (`border-color:#2d6a2d;color:#4ade80`) so all three filter buttons look consistent.
-
-### v2.3.1
-- **Header counts reverted to static**: Items/Stores in status bar always show full catalog totals again.
-- **Live item count near filter buttons**: `<span id="filter-item-count">` sits to the left of the Price Drops button and updates to `_srvTotalCount` after every browse — reflects current view including store selection, want list, price drops, search, etc.
-- **ZIP-code seed for geocoding**: `seed_coords.py` script reads Gemini's CSV, geocodes each store ZIP via api.zippopotam.us, writes `gc_store_coords_seed.json`. `_build_store_coords` now loads this seed file first (skipping Algolia+Nominatim for those stores), then only geocodes the remainder. Seed file must be committed to git to deploy. **Next step**: run `python3 seed_coords.py Guitar_Center_Locations_US.csv` in ~/Desktop/gc_tracker, commit the output JSON, push, then run Force re-geocode from /admin/build-coords to fill the remaining ~130 stores.
-
-### v2.3.0
-- **Filter buttons all green when active**: Watch List and Price Drops now use the same green highlight as Want List (`#2d6a2d` bg / `#4ade80` border) instead of red. Buttons reordered to: Price Drops → Watch List → Want List.
-- **Dynamic Items/Stores counts**: status bar "Items: X · Stores: Y" now reflects the active filter. When any filter is active (want list, price drops, watch list, search, brand/condition/category), Items updates to the filtered count and Stores updates to the number of unique stores in those results. Clears back to catalog totals when no filter is active. Browse API now returns `store_count` (unique stores in filtered result set). Baseline counts stored in `_baseItemCount` / `_baseStoreCount` on page load.
-
-### v2.2.9
-- **Store geocoding fallback**: if Nominatim can't resolve a storeName like "Yonkers at Ridge Hill, NY", automatically strips "at <venue>" suffix and retries with "Yonkers, NY". Handles GC stores named after the shopping center they're in.
-- **ZIP sort**: still needs Force re-geocode run at `/admin/build-coords?pw=Beatle909!` (with Force checkbox) to populate South Austin and other previously-failed stores. After that run, paste the "Failed:" line from the log to address any remaining stragglers.
-
-### v2.2.8
-- **Want List button fixed**: two bugs from v2.2.7 — (1) `_wantListSearchActive` was being reset to `false` inside `searchWantList()` itself (copy-paste error from reset-path edits), so the toggle-off click never fired; (2) button was hijacking the global search box with "🎯 Want List Search" text. Both removed. Button now cleanly activates/deactivates like Watch List. Count badge removed entirely; "Edit Want List" link shows/hides based on whether keywords exist.
-
-### v2.2.7
-- **Want List button/link swapped**: 🎯 Want List button now filters to want list (toggles green when active, same pattern as Watch List and Price Drops). "Edit Want List" text link next to it opens the keyword editor modal. Match count shows as grey `(N matches)` next to the link. All reset paths updated to clear the want-list-toggle active state.
-
-### v2.2.6
-- **NEW detection fixed**: logic is `date_listed > prev_scan_time → NEW`. `date_listed` comes from Algolia's `startDate` (seconds) or `creationDate/1000` (ms) for each used-item record — this IS the listing date for that specific used item. `prev_scan_time` = this device's last scan time from localStorage (`gt_last_run`). Both timestamps are UTC ISO strings so string comparison is valid and correct.
-- Root cause of regression: an intermediate commit tried using `first_seen` (when our scanner first found the item) instead of `date_listed`. This caused old inventory to be flagged NEW if it was first-scanned recently, and new inventory (like 4/17 items) to be missed. Reverted.
-- Key insight: each used item is a distinct Algolia record with its own `creationDate` = when it was listed as used. Not related to the product's catalog age.
+Key highlights:
+- v2.4.8: SSE disconnect NEW-detection fix; filters preserved on store change
+- v2.4.7: Contextual (faceted) filter counts
+- v2.4.2: Fixed-layout desktop table
+- v2.3.x: Various NEW detection, geocoding, and UI fixes
