@@ -3804,9 +3804,12 @@ tr.fav-row td:last-child{color:#4ade80}
 .filter-sheet-title{display:none}
 .filter-done-btn{display:none}
 .filter-active-dot{display:none}
-/* On desktop the filter-collapsible wrapper is invisible to layout so its
-   children flow directly in the parent flex row (same as before the wrapper existed) */
+/* On desktop the filter-collapsible wrapper and inner zones are invisible to
+   layout so their children flow directly in the parent flex row */
 .filter-collapsible{display:contents}
+.filter-sheet-header{display:none}   /* header only meaningful in the sheet */
+.filter-scroll-body{display:contents} /* children flow inline on desktop */
+.filter-chip-row{display:contents}   /* chip buttons are inline flex items */
 
 /* ══════════════════════════════════════════════════════════════════════════════
    MOBILE RESPONSIVE — all changes scoped inside @media so desktop is untouched
@@ -3909,27 +3912,53 @@ tr.fav-row td:last-child{color:#4ade80}
     max-height:75vh;background:#161616;
     transform:translateY(150%);transition:transform .3s cubic-bezier(.32,.72,0,1);
     z-index:120;border-radius:14px 14px 0 0;border-top:1px solid #333;
-    display:flex!important;flex-direction:column;overflow-y:auto;gap:8px;
-    padding:0 14px 16px;flex-wrap:nowrap;align-items:stretch;
-    -webkit-overflow-scrolling:touch
+    display:flex!important;flex-direction:column;overflow:hidden
   }
   #gc-filter-collapsible.sheet-open{transform:translateY(0)}
   /* collapsed class no longer drives visibility — sheet-open does */
   .filter-collapsible.collapsed{display:flex!important}
-  /* Mobile-only sheet header elements */
-  .filter-sheet-handle{width:36px;height:4px;background:#3a3a3a;border-radius:2px;margin:10px auto 0;flex-shrink:0}
-  .filter-sheet-title{font-size:.88rem;font-weight:700;color:#aaa;letter-spacing:.2px;
-    padding:8px 0 10px;border-bottom:1px solid #2a2a2a;flex-shrink:0;text-align:center}
+  /* ── Filter sheet: 3-zone layout ── */
+  /* Zone 1: sticky header */
+  .filter-sheet-header{
+    display:flex!important;flex-direction:column;flex-shrink:0;
+    padding:0 16px;border-bottom:1px solid #2a2a2a
+  }
+  .filter-sheet-handle{
+    display:block;width:36px;height:4px;background:#3a3a3a;border-radius:2px;
+    margin:10px auto 6px;flex-shrink:0
+  }
+  .filter-sheet-hdr-row{
+    display:flex;align-items:center;justify-content:space-between;padding-bottom:10px
+  }
+  .filter-sheet-title{
+    display:block;font-size:.92rem;font-weight:700;color:#ccc;letter-spacing:.2px
+  }
+  .filter-clear-all-btn{
+    background:none;border:1px solid #444;color:#aaa;font-size:.78rem;
+    cursor:pointer;padding:4px 10px;border-radius:14px;letter-spacing:.1px;
+    -webkit-tap-highlight-color:transparent
+  }
+  .filter-clear-all-btn:active{background:#252525}
+  /* Zone 2: scrollable content */
+  .filter-scroll-body{
+    display:flex!important;flex-direction:column;gap:8px;
+    flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;
+    padding:12px 14px 8px;min-height:0
+  }
+  /* Chip row: quick toggle buttons side-by-side */
+  .filter-chip-row{display:flex!important;flex-wrap:wrap;gap:6px;flex-shrink:0}
   /* Filter buttons: full-width, larger tap targets in sheet */
-  #gc-filter-collapsible .cat-sel{width:100%;text-align:left;padding:11px 14px;font-size:.88rem;border-radius:8px;box-sizing:border-box}
-  #gc-filter-collapsible #res-search-wrap{width:100%;margin:0}
-  #gc-filter-collapsible #res-search{width:100%;font-size:.88rem;padding:10px 14px;border-radius:8px;box-sizing:border-box}
-  #gc-filter-collapsible #filter-item-count{display:none}
+  .filter-scroll-body .cat-sel{width:100%;text-align:left;padding:11px 14px;font-size:.88rem;border-radius:8px;box-sizing:border-box}
+  .filter-scroll-body #res-search-wrap{width:100%;margin:0}
+  .filter-scroll-body #res-search{width:100%;font-size:.88rem;padding:10px 14px;border-radius:8px;box-sizing:border-box}
+  .filter-scroll-body #filter-item-count{display:none}
+  /* Zone 3: pinned Show Results button */
   .filter-done-btn{
-    display:block;width:100%;padding:13px;margin-top:4px;
-    background:#c00;color:#fff;border:none;border-radius:8px;
+    display:block;width:100%;padding:14px;
+    background:#c00;color:#fff;border:none;border-radius:0;
     font-size:.95rem;font-weight:700;cursor:pointer;letter-spacing:.2px;
-    -webkit-tap-highlight-color:transparent;flex-shrink:0
+    -webkit-tap-highlight-color:transparent;flex-shrink:0;
+    border-top:1px solid #a00
   }
   .filter-done-btn:active{background:#a00}
   /* Dropdowns still appear above sheet */
@@ -4222,7 +4251,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.7.3</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.7.4</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -4333,58 +4362,74 @@ tr.fav-row td:last-child{color:#4ade80}
           <span class="filter-active-dot" id="gc-filter-dot"></span>
         </button>
         <div id="gc-filter-collapsible" class="filter-collapsible">
-        <div class="filter-sheet-handle"></div>
-        <div class="filter-sheet-title">Filters</div>
-        <span id="filter-item-count" style="color:#888;font-size:.78rem;white-space:nowrap;margin-right:6px"></span>
-        <button id="price-drop-toggle" onclick="togglePriceDropFilter()"
-          class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
-          ↓ Price Drops
-        </button>
-        <button id="watchlist-toggle" onclick="toggleWatchFilter()"
-          class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
-          ★ Watch List
-        </button>
-        <button id="want-list-toggle" onclick="searchWantList()"
-          class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
-          🎯 Want List
-        </button>
-        <a id="search-wl-link" onclick="openKeywords()" style="display:none;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Edit Want List</a>
-        <div id="brand-dropdown" class="brand-dd" style="display:none;position:relative">
-          <button id="brand-dd-btn" class="cat-sel" onclick="toggleBrandDropdown()" style="cursor:pointer;white-space:nowrap">All Brands ▾</button>
-          <div id="brand-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:260px;max-height:320px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
-            <div style="padding:6px">
-              <input id="brand-dd-search" type="text" placeholder="Search brands…"
-                style="width:100%;padding:6px 10px;background:#252525;border:1px solid #3a3a3a;border-radius:4px;color:#eee;font-size:.82rem;outline:none;box-sizing:border-box"
-                oninput="filterBrandDropdown()" autocomplete="off">
+          <!-- ── Mobile sheet header (hidden on desktop) ── -->
+          <div class="filter-sheet-header">
+            <div class="filter-sheet-handle"></div>
+            <div class="filter-sheet-hdr-row">
+              <span class="filter-sheet-title">Filters</span>
+              <button class="filter-clear-all-btn" onclick="clearFilters()">Clear All</button>
             </div>
-            <div id="brand-dd-list" style="overflow-y:auto;max-height:260px"></div>
           </div>
-        </div>
-        <div id="cond-dropdown" class="cond-dd" style="display:none;position:relative">
-          <button id="cond-dd-btn" class="cat-sel" onclick="toggleCondDropdown()" style="cursor:pointer;white-space:nowrap">All Conditions ▾</button>
-          <div id="cond-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:220px;max-height:300px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:4px 0">
+          <!-- ── Scrollable filter content ── -->
+          <div class="filter-scroll-body">
+            <span id="filter-item-count" style="color:#888;font-size:.78rem;white-space:nowrap;margin-right:6px"></span>
+            <!-- Quick toggles -->
+            <div class="filter-chip-row">
+              <button id="price-drop-toggle" onclick="togglePriceDropFilter()"
+                class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
+                ↓ Price Drops
+              </button>
+              <button id="watchlist-toggle" onclick="toggleWatchFilter()"
+                class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
+                ★ Watch List
+              </button>
+              <button id="want-list-toggle" onclick="searchWantList()"
+                class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
+                🎯 Want List
+              </button>
+              <a id="search-wl-link" onclick="openKeywords()" style="display:none;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Edit Want List</a>
+            </div>
+            <!-- Dropdown filters -->
+            <div id="brand-dropdown" class="brand-dd" style="display:none;position:relative">
+              <button id="brand-dd-btn" class="cat-sel" onclick="toggleBrandDropdown()" style="cursor:pointer;white-space:nowrap">All Brands ▾</button>
+              <div id="brand-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:260px;max-height:320px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
+                <div style="padding:6px">
+                  <input id="brand-dd-search" type="text" placeholder="Search brands…"
+                    style="width:100%;padding:6px 10px;background:#252525;border:1px solid #3a3a3a;border-radius:4px;color:#eee;font-size:.82rem;outline:none;box-sizing:border-box"
+                    oninput="filterBrandDropdown()" autocomplete="off">
+                </div>
+                <div id="brand-dd-list" style="overflow-y:auto;max-height:260px"></div>
+              </div>
+            </div>
+            <div id="cond-dropdown" class="cond-dd" style="display:none;position:relative">
+              <button id="cond-dd-btn" class="cat-sel" onclick="toggleCondDropdown()" style="cursor:pointer;white-space:nowrap">All Conditions ▾</button>
+              <div id="cond-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:220px;max-height:300px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:4px 0">
+              </div>
+            </div>
+            <div id="cat-dropdown" class="cond-dd" style="display:none;position:relative">
+              <button id="cat-dd-btn" class="cat-sel" onclick="toggleCatDropdown()" style="cursor:pointer;white-space:nowrap">All Categories ▾</button>
+              <div id="cat-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:240px;max-height:300px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:4px 0">
+              </div>
+            </div>
+            <div id="subcat-dropdown" class="cond-dd" style="display:none;position:relative">
+              <button id="subcat-dd-btn" class="cat-sel" onclick="toggleSubcatDropdown()" style="cursor:pointer;white-space:nowrap">All Subcategories ▾</button>
+              <div id="subcat-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:240px;max-height:300px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:4px 0">
+              </div>
+            </div>
+            <!-- Keyword search -->
+            <div id="res-search-wrap">
+              <input id="res-search" type="text" placeholder="Search results by keyword…" oninput="filterResults();_updateResSearchClear()" autocomplete="off">
+              <button id="res-search-clear" onclick="clearResSearch()" title="Clear search" style="display:none;background:none;border:none;color:#888;font-size:.85rem;cursor:pointer;padding:0 4px;line-height:1">✕</button>
+              <span id="res-search-count"></span>
+            </div>
+            <!-- Desktop-only clear button -->
+            <button id="clear-filters-btn" onclick="clearFilters()"
+              style="display:none;padding:5px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #c00;color:#f88;font-size:.78rem;cursor:pointer;white-space:nowrap">
+              ✕ Clear Filters
+            </button>
           </div>
-        </div>
-        <div id="cat-dropdown" class="cond-dd" style="display:none;position:relative">
-          <button id="cat-dd-btn" class="cat-sel" onclick="toggleCatDropdown()" style="cursor:pointer;white-space:nowrap">All Categories ▾</button>
-          <div id="cat-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:240px;max-height:300px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:4px 0">
-          </div>
-        </div>
-        <div id="subcat-dropdown" class="cond-dd" style="display:none;position:relative">
-          <button id="subcat-dd-btn" class="cat-sel" onclick="toggleSubcatDropdown()" style="cursor:pointer;white-space:nowrap">All Subcategories ▾</button>
-          <div id="subcat-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:240px;max-height:300px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:4px 0">
-          </div>
-        </div>
-        <button id="clear-filters-btn" onclick="clearFilters()"
-          style="display:none;padding:5px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #c00;color:#f88;font-size:.78rem;cursor:pointer;white-space:nowrap">
-          ✕ Clear Filters
-        </button>
-        <div id="res-search-wrap">
-          <input id="res-search" type="text" placeholder="Search results by keyword…" oninput="filterResults();_updateResSearchClear()" autocomplete="off">
-          <button id="res-search-clear" onclick="clearResSearch()" title="Clear search" style="display:none;background:none;border:none;color:#888;font-size:.85rem;cursor:pointer;padding:0 4px;line-height:1">✕</button>
-          <span id="res-search-count"></span>
-        </div>
-        <button class="filter-done-btn" onclick="_closeAllSheets()">Show Results</button>
+          <!-- ── Pinned Show Results (mobile only) ── -->
+          <button class="filter-done-btn" onclick="_closeAllSheets()">Show Results</button>
         </div>
       </div>
       <div id="res-body"></div>
@@ -5822,7 +5867,6 @@ function toggleWatchFilter() {
   const btn = document.getElementById('watchlist-toggle');
   btn.classList.toggle('wl-active', _watchFilterActive);
   _updateFilterDot();
-  if (_isMobile()) _closeAllSheets();
 
   if (_browseMode === 'server') {
     _srvPage = 1;
@@ -5843,7 +5887,6 @@ function togglePriceDropFilter() {
   const btn = document.getElementById('price-drop-toggle');
   btn.classList.toggle('wl-active', _priceDropFilterActive);
   _updateFilterDot();
-  if (_isMobile()) _closeAllSheets();
   _srvPage = 1;
   _fetchBrowsePage(1);
 }
@@ -6042,7 +6085,6 @@ function searchWantList() {
   _priceDropFilterActive = false;
   document.getElementById('price-drop-toggle').classList.remove('wl-active');
   document.getElementById('want-list-toggle').classList.add('wl-active');
-  if (_isMobile()) _closeAllSheets();
   _fetchBrowsePage(1);
 }
 
@@ -6578,9 +6620,17 @@ function autoSizeItemColumn() {
 window._selectedBrands = [];
 window._brandList = [];
 
+function _closeAllDropdowns() {
+  _closeBrandDropdown();
+  _closeCondDropdown();
+  _closeCatDropdown();
+  _closeSubcatDropdown();
+}
+
 function toggleBrandDropdown() {
   const panel = document.getElementById('brand-dd-panel');
   if (panel.style.display === 'none') {
+    _closeAllDropdowns();
     panel.style.display = '';
     document.getElementById('brand-dd-search').value = '';
     _renderBrandList();
@@ -6663,6 +6713,7 @@ window._condList = [];
 function toggleCondDropdown() {
   const panel = document.getElementById('cond-dd-panel');
   if (panel.style.display === 'none') {
+    _closeAllDropdowns();
     panel.style.display = '';
     _renderCondList();
     setTimeout(() => document.addEventListener('click', _closeCondOnOutside, true), 0);
@@ -6737,6 +6788,7 @@ window._catList = [];
 function toggleCatDropdown() {
   const panel = document.getElementById('cat-dd-panel');
   if (panel.style.display === 'none') {
+    _closeAllDropdowns();
     panel.style.display = '';
     _renderCatList();
     setTimeout(() => document.addEventListener('click', _closeCatOnOutside, true), 0);
@@ -6797,6 +6849,7 @@ window._subList = [];
 function toggleSubcatDropdown() {
   const panel = document.getElementById('subcat-dd-panel');
   if (panel.style.display === 'none') {
+    _closeAllDropdowns();
     panel.style.display = '';
     _renderSubList();
     setTimeout(() => document.addEventListener('click', _closeSubOnOutside, true), 0);
@@ -7430,7 +7483,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.7.3"
+APP_VERSION = "2.7.4"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 

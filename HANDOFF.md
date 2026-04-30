@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-04-29 · Current version: v2.6.2 · Status: pending deploy (Railway outage)*
+*Last updated: 2026-04-29 · Current version: v2.6.2 · Status: pending deploy (Railway outage) · Branch: feature/scan-subscription ready to merge*
 
 ---
 
@@ -105,9 +105,10 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 - `user_last_scan` gates visibility: items with `first_seen > user_last_scan` are hidden
 
 ### Concurrency
-- Single global `threading.Lock()` — only one scan at a time
-- Second user hitting Run gets HTTP 409 → friendly UI message
-- `_stop_event` is global — if someone hits Stop it cancels whoever is scanning
+- Single global `threading.Lock()` — only one scan at a time (the cache is shared, parallel scans would race)
+- **Scan subscription** (`feature/scan-subscription`, not yet merged): second user hitting Run joins the in-progress scan instead of getting a 409 — they see "Scan already in progress — joining…" and receive the same SSE stream. Fan-out implemented via `_run_queues: dict[str, list[queue.Queue]]`; each subscriber gets their own queue. `_broadcast(run_id, msg)` sends to all of them.
+- `_stop_event` is global — if someone hits Stop it cancels the scan for all subscribers
+- `/admin/clear-lock` force-releases a stuck lock without a restart
 
 ---
 
@@ -222,7 +223,7 @@ Update both places when bumping:
 **Sync not working**
 - Open browser DevTools → Network tab → look for `/api/sync` calls after watchlist/keyword changes
 - If 401: session cookie expired — user needs to log in again
-- `SECRET_KEY` env var must be set on Render, or sessions reset on every deploy
+- `SECRET_KEY` env var must be set on Railway, or sessions reset on every deploy
 
 **Sandbox git lock files**
 - The Cowork sandbox sometimes leaves stale `.git/*.lock` files
@@ -230,11 +231,11 @@ Update both places when bumping:
 - The sandbox cannot push to GitHub (proxy 403) — always push from Mac terminal
 
 **Scan hangs / 409 forever**
-- Hit `/admin/clear-lock?pw=Beatle909!` to force-release without a Render restart
+- Hit `/admin/clear-lock?pw=Beatle909!` to force-release without a Railway restart
 
 **No data after redeploy**
-- Likely ephemeral storage — Render wipes files on redeploy unless a volume is mounted
-- Fix: attach a Render disk, set `DATA_DIR` to its mount path
+- Likely ephemeral storage — Railway wipes files on redeploy unless a volume is mounted
+- Fix: attach a Railway volume, set `DATA_DIR` to its mount path
 - `gc_users.db` lives in `DATA_DIR` — **must be on persistent volume** or all accounts are lost on redeploy
 
 **Nominatim geocoding failures**
@@ -245,10 +246,20 @@ Update both places when bumping:
 
 ## Recent Changes (v2.6.1 → v2.6.2)
 
-### v2.6.2
+### v2.6.2 (pending Railway deploy)
 - **Dropdown counts: italic + comma-formatted**: All filter dropdowns (brand, condition, category, subcategory) now show item counts in italic, non-bold, with comma separators (e.g. `1,234`). CSS class `.bcount` updated; JS uses `.toLocaleString()`.
-- **Dev footer links**: Fixed bottom-right footer (desktop only — hidden on mobile via `@media(max-width:820px)`) with PayPal, Venmo, and animalsintrees.com links. Dim by default, brightens on hover. Uses inline SVG icons.
+- **Dev footer links**: Fixed bottom-right footer (desktop only — hidden on mobile via `@media(max-width:820px)`) with PayPal (`paypal.me/smurfco`), Venmo, and `animalsintrees.com` links. Dim by default, brightens on hover. Inline SVG icons.
+- **Session lifetime**: Flask `PERMANENT_SESSION_LIFETIME` set to 31 days (default) — users stay logged in across browser restarts without re-authenticating.
 - **HANDOFF platform fix**: corrected platform from Render → Railway throughout.
+
+### feature/scan-subscription (branch, not yet merged)
+- **Scan fan-out**: second user hitting Run now joins the in-progress scan instead of getting a 409 error. Shows "Scan already in progress — joining…" and receives the live SSE stream.
+- `_run_queues` changed from `dict[str, Queue]` to `dict[str, list[Queue]]` — each subscriber gets their own queue.
+- `_broadcast(run_id, msg)` replaces direct `run_q.put(msg)` in `_run()`.
+- `_subscribe_to_run(run_id)` / `_cleanup_subscriber(run_id, q)` manage per-subscriber lifecycle.
+- `_current_run_id` / `_current_run_time` globals track the active scan so late joiners get the right timestamps.
+- `api_run()` returns `{"status": "joined", "run_id": ..., "run_time": ...}` instead of 409 when locked.
+- `api_progress()` uses `_subscribe_to_run()` instead of `_get_run_queue()` — cleans up just the individual subscriber on disconnect.
 
 ---
 
