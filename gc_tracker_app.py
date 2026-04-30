@@ -3500,46 +3500,13 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             }
 
         # ── Per-device new-item detection ─────────────────────────────────────
-        # An item is NEW if:
-        #   1. date_listed > prev_scan_time  (Algolia date is after last scan), OR
-        #   2. first_seen > prev_scan_time AND date_listed > date_cutoff
-        #      (item is new to our cache AND was listed within the last 24h)
-        #
-        # Rule 2 handles the Algolia indexing delay: GC sets creationDate when
-        # a listing record is created, but the item may not appear in search
-        # results for 6-12+ hours.  So an item created at 7 AM may not show
-        # up until 5 PM — its date_listed is before prev_scan_time but it's
-        # genuinely new.  first_seen catches it because it wasn't in our cache.
-        # The 24h date_cutoff prevents old pagination misses from being tagged.
-        #
+        # An item is NEW if date_listed > prev_scan_time.
         # Both sides are YYYY-MM-DDTHH:MM:SSZ UTC so string comparison is valid.
-        _DL_BUFFER_HOURS = 24
-        try:
-            _prev_dt = datetime.strptime(prev_scan_time, "%Y-%m-%dT%H:%M:%SZ")
-            _date_cutoff = (_prev_dt - timedelta(hours=_DL_BUFFER_HOURS)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        except Exception:
-            _date_cutoff = prev_scan_time  # fallback: no buffer
         new_ids_list = []
-        _new_by_date = 0
-        _new_by_first_seen = 0
-        _new_by_hybrid = 0
-        _no_date_count = 0
         if not baseline and prev_scan_time:
             for p in all_products:
                 item_date = p.get("date_listed") or _cat_cache.get(p["id"], {}).get("date_listed", "")
-                first_seen = _cat_cache.get(p["id"], {}).get("first_seen", "")
-                by_date = bool(item_date and item_date > prev_scan_time)
-                by_fs   = bool(first_seen and first_seen > prev_scan_time)
-                by_hybrid = bool(by_fs and item_date and item_date > _date_cutoff)
-                if by_date:
-                    _new_by_date += 1
-                if by_fs:
-                    _new_by_first_seen += 1
-                if by_hybrid and not by_date:
-                    _new_by_hybrid += 1
-                if not item_date:
-                    _no_date_count += 1
-                if by_date or by_hybrid:
+                if item_date and item_date > prev_scan_time:
                     new_ids_list.append(p["id"])
 
         send({"type":"progress","msg":f"  {len(new_ids_list):,} new items since last scan."})
@@ -4164,7 +4131,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.6.2</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.6.3</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -7221,7 +7188,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.6.2"
+APP_VERSION = "2.6.3"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
