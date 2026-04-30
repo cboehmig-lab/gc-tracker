@@ -3836,17 +3836,27 @@ tr.fav-row td:last-child{color:#4ade80}
   .layout{flex-direction:column;overflow:hidden;flex:1;min-height:0}
   .app-panel.active{display:flex;flex-direction:column;overflow:hidden}
 
-  /* ── GC Left sidebar: collapsible on mobile ── */
-  .left{width:100%;min-width:0;max-height:none;border-right:none;border-bottom:1px solid #2e2e2e;overflow:hidden;flex-shrink:0}
-  .left.collapsed .search-wrap,
-  .left.collapsed #store-list,
-  .left.collapsed .left-footer{display:none}
-  #store-list{max-height:220px;overflow-y:auto}
+  /* ── Store panel: bottom sheet on mobile ── */
+  .store-sheet-backdrop{
+    display:none;position:fixed;inset:0;z-index:119;
+    background:rgba(0,0,0,.6);opacity:0;transition:opacity .25s
+  }
+  .store-sheet-backdrop.visible{display:block;opacity:1}
+  .sheet-handle{width:36px;height:4px;background:#3a3a3a;border-radius:2px;margin:10px auto 4px;flex-shrink:0;cursor:grab}
+  .left{
+    position:fixed!important;bottom:calc(56px + env(safe-area-inset-bottom));left:0;right:0;
+    width:100%!important;max-height:75vh;min-width:0;background:#161616;
+    transform:translateY(150%);transition:transform .3s cubic-bezier(.32,.72,0,1);
+    z-index:120;border-radius:14px 14px 0 0;border-top:1px solid #333;
+    border-right:none;border-bottom:none!important;
+    display:flex!important;flex-direction:column;overflow:hidden;flex-shrink:0
+  }
+  .left.sheet-open{transform:translateY(0)}
+  #store-list{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;max-height:none}
   .store-row{padding:10px 14px;gap:10px}
   .store-row label{font-size:.95rem}
-  .left-footer{padding:10px 12px}
+  .left-footer{padding:10px 12px;flex-shrink:0}
   #sel-count{font-size:.82rem}
-  #reset-btn{font-size:.78rem}
 
   /* ── GC Right panel: flex column, results is the ONLY scroller ── */
   .right{overflow:hidden;flex:1;min-height:0;display:flex;flex-direction:column}
@@ -3925,16 +3935,27 @@ tr.fav-row td:last-child{color:#4ade80}
   .no-res{font-size:.92rem;padding:28px 20px}
 
   /* ── Paginator ── */
-  .paginator{padding:10px 8px;gap:3px;flex-wrap:wrap;justify-content:center;position:static}
+  /* Paginator: sticky just above the bottom bar, solid background to seal the gap */
+  .paginator{padding:10px 8px;gap:3px;flex-wrap:wrap;justify-content:center;
+    position:sticky;bottom:calc(56px + env(safe-area-inset-bottom));
+    background:#111;border-top:1px solid #1e1e1e;z-index:10}
   .paginator button{min-width:40px;height:40px;font-size:.88rem;border-radius:8px}
   .paginator .pg-info{font-size:.8rem;margin-right:8px;width:100%;text-align:center;margin-bottom:4px}
+  /* Extra padding so last row can scroll above paginator + bottom bar */
+  #res-body{padding-bottom:calc(120px + env(safe-area-inset-bottom))}
 
   /* ── CL Layout: stack vertically ── */
   #cl-panel{flex-direction:column;overflow:hidden}
-  .cl-left{width:100%;min-width:0;border-right:none;border-bottom:1px solid #2e2e2e;overflow:hidden;flex-shrink:0}
-  .cl-left.collapsed .search-wrap,
-  .cl-left.collapsed #cl-city-list{display:none}
-  #cl-city-list{max-height:220px;overflow-y:auto}
+  .cl-left{
+    position:fixed!important;bottom:calc(56px + env(safe-area-inset-bottom));left:0;right:0;
+    width:100%!important;max-height:75vh;min-width:0;background:#161616;
+    transform:translateY(150%);transition:transform .3s cubic-bezier(.32,.72,0,1);
+    z-index:120;border-radius:14px 14px 0 0;border-top:1px solid #333;
+    border-right:none;border-bottom:none!important;
+    display:flex!important;flex-direction:column;overflow:hidden;flex-shrink:0
+  }
+  .cl-left.sheet-open{transform:translateY(0)}
+  #cl-city-list{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;max-height:none}
   .cl-city-row{padding:10px 14px;gap:10px}
   .cl-city-row label{font-size:.95rem}
 
@@ -4168,7 +4189,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.6.5</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.6.6</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -4226,6 +4247,7 @@ tr.fav-row td:last-child{color:#4ade80}
 <div class="layout">
 
   <div class="left" id="gc-left">
+    <div class="sheet-handle"></div>
     <button class="mobile-sidebar-toggle" id="gc-sidebar-toggle" onclick="toggleMobileSidebar('gc')">
       <span class="toggle-arrow" id="gc-toggle-arrow">▶</span>
       Stores
@@ -4341,6 +4363,7 @@ tr.fav-row td:last-child{color:#4ade80}
 
   <!-- Left sidebar: city list -->
   <div class="cl-left" id="cl-left">
+    <div class="sheet-handle"></div>
     <button class="mobile-sidebar-toggle" id="cl-sidebar-toggle" onclick="toggleMobileSidebar('cl')">
       <span class="toggle-arrow" id="cl-toggle-arrow">▶</span>
       Cities
@@ -4385,6 +4408,9 @@ tr.fav-row td:last-child{color:#4ade80}
 
 </div>
 
+<!-- ── Store sheet backdrop (mobile only) ── -->
+<div class="store-sheet-backdrop" id="store-sheet-backdrop" onclick="_closeStoreSheet()"></div>
+
 <!-- ── Mobile bottom action bar (hidden on desktop via CSS) ── -->
 <div class="mobile-bottom-bar" id="mobile-bottom-bar">
   <button class="mbb-btn" id="mbb-stores" onclick="_mbbStores()">
@@ -4405,15 +4431,37 @@ tr.fav-row td:last-child{color:#4ade80}
 <script>
 let allStores = [], favorites = [], running = false;
 
-// ── Mobile sidebar toggle ────────────────────────────────────────────────────
+// ── Mobile sidebar / store sheet ─────────────────────────────────────────────
 function _isMobile() { return window.innerWidth <= 820; }
 
 function toggleMobileSidebar(which) {
+  if (_isMobile()) {
+    const panel = document.getElementById(which === 'gc' ? 'gc-left' : 'cl-left');
+    const isOpen = panel.classList.toggle('sheet-open');
+    const backdrop = document.getElementById('store-sheet-backdrop');
+    if (backdrop) {
+      backdrop.classList.toggle('visible', isOpen);
+    }
+    return;
+  }
+  // Desktop: collapse/expand in layout
   const panel = document.getElementById(which === 'gc' ? 'gc-left' : 'cl-left');
   const arrow = document.getElementById(which + '-toggle-arrow');
   const isCollapsed = panel.classList.toggle('collapsed');
   arrow.classList.toggle('open', !isCollapsed);
 }
+
+function _closeStoreSheet() {
+  ['gc-left', 'cl-left'].forEach(id => {
+    document.getElementById(id)?.classList.remove('sheet-open');
+  });
+  const backdrop = document.getElementById('store-sheet-backdrop');
+  if (backdrop) backdrop.classList.remove('visible');
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') _closeStoreSheet();
+});
 
 function _updateMobileToggleCounts() {
   const gcCount = document.getElementById('gc-toggle-count');
@@ -4457,7 +4505,7 @@ function _updateFilterDot() {
 function _mbbStores() {
   const which = document.querySelector('.app-tab.active')?.classList.contains('cl-tab') ? 'cl' : 'gc';
   const panel = document.getElementById(which === 'gc' ? 'gc-left' : 'cl-left');
-  const willOpen = panel.classList.contains('collapsed');
+  const willOpen = !panel.classList.contains('sheet-open');
   // Close filters first if we're opening stores
   if (willOpen) {
     const filters = document.getElementById('gc-filter-collapsible');
@@ -4473,17 +4521,8 @@ function _mbbStores() {
 function _mbbFilters() {
   const filters = document.getElementById('gc-filter-collapsible');
   const willOpen = filters && filters.classList.contains('collapsed');
-  // Close stores first if we're opening filters
-  if (willOpen) {
-    ['gc-left', 'cl-left'].forEach(id => {
-      const el = document.getElementById(id);
-      if (el && !el.classList.contains('collapsed')) {
-        el.classList.add('collapsed');
-        const arrow = document.getElementById(id === 'gc-left' ? 'gc-toggle-arrow' : 'cl-toggle-arrow');
-        if (arrow) arrow.classList.remove('open');
-      }
-    });
-  }
+  // Close store sheet first if we're opening filters
+  if (willOpen) _closeStoreSheet();
   toggleMobileFilters('gc');
 }
 
@@ -4522,24 +4561,27 @@ function _updateMobileBottomBar() {
   }
 }
 
-// Auto-collapse sidebars and filters on mobile on page load
+// Init sidebar/filter state on page load
 document.addEventListener('DOMContentLoaded', () => {
   if (_isMobile()) {
-    document.getElementById('gc-left').classList.add('collapsed');
-    document.getElementById('cl-left').classList.add('collapsed');
+    // Store panels start closed (sheet-open absent = off-screen via CSS transform)
     const gcFilters = document.getElementById('gc-filter-collapsible');
     if (gcFilters) gcFilters.classList.add('collapsed');
     _updateMobileBottomBar();
+  } else {
+    // Desktop: ensure sidebars are expanded
+    document.getElementById('gc-left').classList.remove('collapsed');
+    document.getElementById('cl-left').classList.remove('collapsed');
   }
 });
-// Re-check on resize (e.g. rotating phone)
+// Handle orientation change / resize
 window.addEventListener('resize', () => {
-  const gcLeft = document.getElementById('gc-left');
-  const clLeft = document.getElementById('cl-left');
   const gcFilters = document.getElementById('gc-filter-collapsible');
   if (!_isMobile()) {
-    gcLeft.classList.remove('collapsed');
-    clLeft.classList.remove('collapsed');
+    // Switching to desktop: reset sheet state, show sidebars
+    _closeStoreSheet();
+    document.getElementById('gc-left').classList.remove('collapsed');
+    document.getElementById('cl-left').classList.remove('collapsed');
     if (gcFilters) gcFilters.classList.remove('collapsed');
   }
 });
@@ -7309,7 +7351,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.6.5"
+APP_VERSION = "2.6.6"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
