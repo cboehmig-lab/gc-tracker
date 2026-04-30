@@ -3800,6 +3800,8 @@ tr.fav-row td:last-child{color:#4ade80}
 /* ── Mobile toggle buttons (hidden on desktop) ── */
 .mobile-sidebar-toggle{display:none}
 .mobile-filter-toggle{display:none}
+.filter-sheet-handle{display:none}
+.filter-sheet-title{display:none}
 .filter-active-dot{display:none}
 /* On desktop the filter-collapsible wrapper is invisible to layout so its
    children flow directly in the parent flex row (same as before the wrapper existed) */
@@ -3899,9 +3901,30 @@ tr.fav-row td:last-child{color:#4ade80}
   .filter-active-dot{display:none;width:6px;height:6px;background:#c00;border-radius:50%;flex-shrink:0}
   .filter-active-dot.visible{display:inline-block}
 
-  /* ── Collapsible filter body ── */
-  .filter-collapsible{display:flex;flex-wrap:wrap;gap:5px;width:100%;align-items:center}
-  .filter-collapsible.collapsed{display:none}
+  /* ── Filter section → bottom sheet on mobile ── */
+  #gc-filter-collapsible{
+    position:fixed!important;bottom:calc(56px + env(safe-area-inset-bottom));left:0;right:0;
+    max-height:75vh;background:#161616;
+    transform:translateY(150%);transition:transform .3s cubic-bezier(.32,.72,0,1);
+    z-index:120;border-radius:14px 14px 0 0;border-top:1px solid #333;
+    display:flex!important;flex-direction:column;overflow-y:auto;gap:8px;
+    padding:0 14px 16px;flex-wrap:nowrap;align-items:stretch;
+    -webkit-overflow-scrolling:touch
+  }
+  #gc-filter-collapsible.sheet-open{transform:translateY(0)}
+  /* collapsed class no longer drives visibility — sheet-open does */
+  .filter-collapsible.collapsed{display:flex!important}
+  /* Mobile-only sheet header elements */
+  .filter-sheet-handle{width:36px;height:4px;background:#3a3a3a;border-radius:2px;margin:10px auto 0;flex-shrink:0}
+  .filter-sheet-title{font-size:.88rem;font-weight:700;color:#aaa;letter-spacing:.2px;
+    padding:8px 0 10px;border-bottom:1px solid #2a2a2a;flex-shrink:0;text-align:center}
+  /* Filter buttons: full-width, larger tap targets in sheet */
+  #gc-filter-collapsible .cat-sel{width:100%;text-align:left;padding:11px 14px;font-size:.88rem;border-radius:8px;box-sizing:border-box}
+  #gc-filter-collapsible #res-search-wrap{width:100%;margin:0}
+  #gc-filter-collapsible #res-search{width:100%;font-size:.88rem;padding:10px 14px;border-radius:8px;box-sizing:border-box}
+  #gc-filter-collapsible #filter-item-count{display:none}
+  /* Dropdowns still appear above sheet */
+  #brand-dd-panel,#cond-dd-panel,#cat-dd-panel,#subcat-dd-panel{z-index:200!important}
 
   /* ── Filter dropdown panels: full-width overlay on mobile ── */
   #brand-dropdown,#cond-dropdown,#cat-dropdown,#subcat-dropdown{position:static}
@@ -4190,7 +4213,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.6.8</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.6.9</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -4301,6 +4324,8 @@ tr.fav-row td:last-child{color:#4ade80}
           <span class="filter-active-dot" id="gc-filter-dot"></span>
         </button>
         <div id="gc-filter-collapsible" class="filter-collapsible">
+        <div class="filter-sheet-handle"></div>
+        <div class="filter-sheet-title">Filters</div>
         <span id="filter-item-count" style="color:#888;font-size:.78rem;white-space:nowrap;margin-right:6px"></span>
         <button id="price-drop-toggle" onclick="togglePriceDropFilter()"
           class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
@@ -4452,16 +4477,19 @@ function toggleMobileSidebar(which) {
   arrow.classList.toggle('open', !isCollapsed);
 }
 
-function _closeStoreSheet() {
+function _closeAllSheets() {
   ['gc-left', 'cl-left'].forEach(id => {
     document.getElementById(id)?.classList.remove('sheet-open');
   });
+  document.getElementById('gc-filter-collapsible')?.classList.remove('sheet-open');
   const backdrop = document.getElementById('store-sheet-backdrop');
   if (backdrop) backdrop.classList.remove('visible');
 }
+// Keep old name as alias so any other callers still work
+const _closeStoreSheet = _closeAllSheets;
 
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') _closeStoreSheet();
+  if (e.key === 'Escape') _closeAllSheets();
 });
 
 function _updateMobileToggleCounts() {
@@ -4481,10 +4509,17 @@ function _updateMobileToggleCounts() {
 // ── Mobile filter toggle ─────────────────────────────────────────────────────
 function toggleMobileFilters(which) {
   const body = document.getElementById(which + '-filter-collapsible');
-  const arrow = document.getElementById(which + '-filter-arrow');
   if (!body) return;
+  if (_isMobile()) {
+    const isOpen = body.classList.toggle('sheet-open');
+    const backdrop = document.getElementById('store-sheet-backdrop');
+    if (backdrop) backdrop.classList.toggle('visible', isOpen);
+    return;
+  }
+  // Desktop: collapse/expand inline
+  const arrow = document.getElementById(which + '-filter-arrow');
   const isCollapsed = body.classList.toggle('collapsed');
-  arrow.classList.toggle('open', !isCollapsed);
+  if (arrow) arrow.classList.toggle('open', !isCollapsed);
 }
 
 function _updateFilterDot() {
@@ -4507,23 +4542,22 @@ function _mbbStores() {
   const which = document.querySelector('.app-tab.active')?.classList.contains('cl-tab') ? 'cl' : 'gc';
   const panel = document.getElementById(which === 'gc' ? 'gc-left' : 'cl-left');
   const willOpen = !panel.classList.contains('sheet-open');
-  // Close filters first if we're opening stores
+  // Close filter sheet first if we're opening stores
   if (willOpen) {
-    const filters = document.getElementById('gc-filter-collapsible');
-    if (filters && !filters.classList.contains('collapsed')) {
-      filters.classList.add('collapsed');
-      const arrow = document.getElementById('gc-filter-arrow');
-      if (arrow) arrow.classList.remove('open');
-    }
+    document.getElementById('gc-filter-collapsible')?.classList.remove('sheet-open');
   }
   toggleMobileSidebar(which);
 }
 
 function _mbbFilters() {
   const filters = document.getElementById('gc-filter-collapsible');
-  const willOpen = filters && filters.classList.contains('collapsed');
+  const willOpen = filters && !filters.classList.contains('sheet-open');
   // Close store sheet first if we're opening filters
-  if (willOpen) _closeStoreSheet();
+  if (willOpen) {
+    ['gc-left', 'cl-left'].forEach(id => {
+      document.getElementById(id)?.classList.remove('sheet-open');
+    });
+  }
   toggleMobileFilters('gc');
 }
 
@@ -4565,9 +4599,7 @@ function _updateMobileBottomBar() {
 // Init sidebar/filter state on page load
 document.addEventListener('DOMContentLoaded', () => {
   if (_isMobile()) {
-    // Store panels start closed (sheet-open absent = off-screen via CSS transform)
-    const gcFilters = document.getElementById('gc-filter-collapsible');
-    if (gcFilters) gcFilters.classList.add('collapsed');
+    // Store panels and filter sheet start closed — CSS transform handles it, no class needed
     _updateMobileBottomBar();
   } else {
     // Desktop: ensure sidebars are expanded
@@ -7352,7 +7384,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.6.8"
+APP_VERSION = "2.6.9"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
