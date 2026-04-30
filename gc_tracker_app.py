@@ -3802,6 +3802,7 @@ tr.fav-row td:last-child{color:#4ade80}
 .mobile-filter-toggle{display:none}
 .filter-sheet-handle{display:none}
 .filter-sheet-title{display:none}
+#mobile-auth-wrap{display:none}
 .filter-active-dot{display:none}
 /* On desktop the filter-collapsible wrapper is invisible to layout so its
    children flow directly in the parent flex row (same as before the wrapper existed) */
@@ -3861,7 +3862,8 @@ tr.fav-row td:last-child{color:#4ade80}
   #sel-count{font-size:.82rem}
 
   /* ── GC Right panel: flex column, results is the ONLY scroller ── */
-  .right{overflow:hidden;flex:1;min-height:0;display:flex;flex-direction:column}
+  /* z-index:auto prevents a stacking context so fixed filter sheet escapes to root */
+  .right{overflow:hidden;flex:1;min-height:0;display:flex;flex-direction:column;z-index:auto}
 
   /* ── Status bar: single compact row ── */
   .status-bar{flex-direction:row;flex-wrap:wrap;gap:6px 14px;padding:6px 12px;align-items:center;font-size:.78rem;flex-shrink:0}
@@ -3869,6 +3871,10 @@ tr.fav-row td:last-child{color:#4ade80}
   /* Hide Items and Stores counts on mobile */
   .status-bar > span:nth-child(2),
   .status-bar > span:nth-child(3){display:none}
+  #mobile-auth-wrap{display:flex;align-items:center;gap:6px;margin-left:auto;flex-shrink:0}
+  #mobile-auth-username{font-size:.72rem;color:#888;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #mobile-auth-btn{padding:4px 10px;border-radius:4px;font-size:.72rem;font-weight:600;cursor:pointer;white-space:nowrap;border:1px solid #3a3a3a;background:#1e1e1e;color:#aaa}
+  #mobile-auth-btn.signed-in{color:#f88;border-color:#5a2a2a;background:#1a1010}
   #global-search-wrap{margin-left:0;flex:1 1 100%;min-width:0;display:flex;align-items:center;gap:6px}
   #global-search{flex:1;min-width:0;font-size:.88rem;padding:9px 16px;border-radius:22px;background:#1e1e1e}
   #global-search-btn{font-size:.82rem;padding:7px 12px;flex-shrink:0;border-radius:8px}
@@ -4213,7 +4219,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.6.9</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.7.1</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -4303,6 +4309,10 @@ tr.fav-row td:last-child{color:#4ade80}
   <div class="right">
     <div class="status-bar">
       <span id="s-last-wrap">Last checked for new gear: <b id="s-last">—</b> <button id="check-now-btn" onclick="runTracker()" style="padding:2px 10px;background:#c00;color:#fff;border:none;border-radius:4px;font-size:.72rem;font-weight:700;cursor:pointer;margin-left:4px;display:none">Scan For New</button> <button id="view-toggle-btn" class="view-toggle-btn" onclick="toggleMobileView()" title="Switch card / list view"><span id="view-toggle-icon">⊞</span></button></span>
+      <div id="mobile-auth-wrap">
+        <span id="mobile-auth-username"></span>
+        <button id="mobile-auth-btn" onclick="_mobileAuthToggle()">Sign in</button>
+      </div>
       <span>Items: <b id="s-known">—</b></span>
       <span>Stores: <b id="s-stores">—</b></span>
       <div id="global-search-wrap">
@@ -4725,6 +4735,28 @@ function _setAuthUI(username, email) {
     loginBtn.style.display  = '';
     userInfo.style.display  = 'none';
     syncDot.style.display   = 'none';
+  }
+  // Mobile status bar auth button
+  const mBtn  = document.getElementById('mobile-auth-btn');
+  const mName = document.getElementById('mobile-auth-username');
+  if (mBtn && mName) {
+    if (username || email) {
+      mName.textContent = username || email;
+      mBtn.textContent  = 'Sign out';
+      mBtn.classList.add('signed-in');
+    } else {
+      mName.textContent = '';
+      mBtn.textContent  = 'Sign in';
+      mBtn.classList.remove('signed-in');
+    }
+  }
+}
+
+function _mobileAuthToggle() {
+  if (window._authUser) {
+    _authLogout();
+  } else {
+    _openAuthModal('login');
   }
 }
 
@@ -7384,7 +7416,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.6.9"
+APP_VERSION = "2.7.1"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
