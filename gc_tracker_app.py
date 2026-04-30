@@ -3647,7 +3647,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .log-dim{color:#6dba8d}
 .log-err{color:#f88}
 
-.results{flex:1;overflow-y:auto}
+.results{flex:1;overflow-y:auto;background:#1a1a1a}
 .results-hdr{padding:8px 16px;font-size:.88rem;font-weight:600;color:#ccc;background:#111;position:sticky;top:0;z-index:1;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;gap:8px;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,.5)}
 .badge{background:#c00;color:#fff;font-size:.7rem;font-weight:700;padding:2px 7px;border-radius:10px}.badge:empty{display:none}
 .cat-sel{padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer}
@@ -3935,14 +3935,15 @@ tr.fav-row td:last-child{color:#4ade80}
   .no-res{font-size:.92rem;padding:28px 20px}
 
   /* ── Paginator ── */
-  /* Paginator: sticky just above the bottom bar, solid background to seal the gap */
-  .paginator{padding:10px 8px;gap:3px;flex-wrap:wrap;justify-content:center;
-    position:sticky;bottom:calc(56px + env(safe-area-inset-bottom));
-    background:#111;border-top:1px solid #1e1e1e;z-index:10}
+  /* Paginator: fixed directly above the bottom bar — no gap, no bleed-through */
+  .paginator{position:fixed!important;bottom:calc(56px + env(safe-area-inset-bottom));
+    left:0;right:0;z-index:100;
+    padding:10px 8px;gap:3px;flex-wrap:wrap;justify-content:center;
+    background:#111;border-top:1px solid #2e2e2e}
   .paginator button{min-width:40px;height:40px;font-size:.88rem;border-radius:8px}
   .paginator .pg-info{font-size:.8rem;margin-right:8px;width:100%;text-align:center;margin-bottom:4px}
-  /* Extra padding so last row can scroll above paginator + bottom bar */
-  #res-body{padding-bottom:calc(120px + env(safe-area-inset-bottom))}
+  /* Padding so last row scrolls clear of paginator + bottom bar (~56 bar + ~56 paginator) */
+  #res-body{padding-bottom:calc(130px + env(safe-area-inset-bottom))}
 
   /* ── CL Layout: stack vertically ── */
   #cl-panel{flex-direction:column;overflow:hidden}
@@ -4060,7 +4061,7 @@ tr.fav-row td:last-child{color:#4ade80}
 
   /* ── Card grid ── */
   .card-grid{display:flex;flex-direction:column;gap:0}
-  .item-card{display:flex;align-items:stretch;gap:0;padding:10px 12px;border-bottom:1px solid #1e1e1e;background:#111;cursor:default;-webkit-tap-highlight-color:transparent}
+  .item-card{display:flex;align-items:stretch;gap:0;padding:10px 12px;border-bottom:1px solid #232323;background:#1a1a1a;cursor:default;-webkit-tap-highlight-color:transparent}
   .item-card:active{background:#1a1a1a}
   .item-card.is-new{border-left:3px solid #c00}
   .item-card.is-want{border-left:3px solid #2d6a2d}
@@ -4081,7 +4082,7 @@ tr.fav-row td:last-child{color:#4ade80}
 
   /* ── Compact list view ── */
   .compact-list{display:flex;flex-direction:column;gap:0}
-  .compact-row{display:flex;align-items:center;padding:10px 12px;border-bottom:1px solid #1a1a1a;gap:8px}
+  .compact-row{display:flex;align-items:center;padding:10px 12px;border-bottom:1px solid #232323;gap:8px;background:#1a1a1a}
   .compact-row.is-new{border-left:3px solid #c00}
   .compact-row-left{flex:1;min-width:0;display:flex;align-items:center;gap:6px}
   .compact-row-name{font-size:.84rem;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -4189,7 +4190,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.6.6</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.6.8</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -4278,7 +4279,7 @@ tr.fav-row td:last-child{color:#4ade80}
 
   <div class="right">
     <div class="status-bar">
-      <span id="s-last-wrap">Last checked for new gear: <b id="s-last">—</b> <button id="check-now-btn" onclick="runTracker()" style="padding:2px 10px;background:#c00;color:#fff;border:none;border-radius:4px;font-size:.72rem;font-weight:700;cursor:pointer;margin-left:4px;display:none">Check Now</button> <button id="view-toggle-btn" class="view-toggle-btn" onclick="toggleMobileView()" title="Switch card / list view"><span id="view-toggle-icon">⊞</span></button></span>
+      <span id="s-last-wrap">Last checked for new gear: <b id="s-last">—</b> <button id="check-now-btn" onclick="runTracker()" style="padding:2px 10px;background:#c00;color:#fff;border:none;border-radius:4px;font-size:.72rem;font-weight:700;cursor:pointer;margin-left:4px;display:none">Scan For New</button> <button id="view-toggle-btn" class="view-toggle-btn" onclick="toggleMobileView()" title="Switch card / list view"><span id="view-toggle-icon">⊞</span></button></span>
       <span>Items: <b id="s-known">—</b></span>
       <span>Stores: <b id="s-stores">—</b></span>
       <div id="global-search-wrap">
@@ -4419,7 +4420,7 @@ tr.fav-row td:last-child{color:#4ade80}
   </button>
   <button class="mbb-btn mbb-check" id="mbb-check" onclick="_mbbCheck()">
     <span class="mbb-icon" id="mbb-check-icon">▶</span>
-    <span class="mbb-label" id="mbb-check-label">Check Now</span>
+    <span class="mbb-label" id="mbb-check-label">Scan For New</span>
   </button>
   <button class="mbb-btn" id="mbb-filters" onclick="_mbbFilters()">
     <span class="mbb-icon">🎛</span>
@@ -4556,7 +4557,7 @@ function _updateMobileBottomBar() {
     } else {
       btn.classList.remove('scanning');
       icon.textContent = '▶';
-      label.textContent = 'Check Now';
+      label.textContent = 'Scan For New';
     }
   }
 }
@@ -4980,7 +4981,7 @@ function _fmtDropDate(iso) {
 function _updateRelativeTime() {
   document.getElementById('s-last').textContent = _timeAgo(window._lastRunISO);
   const btn = document.getElementById('check-now-btn');
-  if (btn) btn.textContent = 'Check Now';
+  if (btn) btn.textContent = 'Scan For New';
   clearInterval(_relTimeTimer);
   _relTimeTimer = setInterval(() => {
     document.getElementById('s-last').textContent = _timeAgo(window._lastRunISO);
@@ -5301,7 +5302,7 @@ async function _fetchBrowsePage(page) {
       document.getElementById('res-title').textContent = 'No Browse Data Yet';
       document.getElementById('res-badge').textContent = '';
       document.getElementById('res-body').innerHTML =
-        '<div class="no-res">Select stores on the left, then click <b>Check Now</b> to scan for inventory.</div>';
+        '<div class="no-res">Select stores on the left, then click <b>Scan For New</b> to scan for inventory.</div>';
       ['cond-dropdown','cat-dropdown','subcat-dropdown'].forEach(id => document.getElementById(id).style.display = 'none');
       return;
     }
@@ -7351,7 +7352,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.6.6"
+APP_VERSION = "2.6.8"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
