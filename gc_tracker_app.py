@@ -3978,6 +3978,51 @@ tr.fav-row td:last-child{color:#4ade80}
   /* ── Alternating row stripes for readability ── */
   tr:nth-child(even) td{background:rgba(255,255,255,.02)}
   #cl-body tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+
+  /* ── Hide elements replaced by the bottom action bar ── */
+  .mobile-sidebar-toggle{display:none!important}
+  .mobile-filter-toggle{display:none!important}
+  #check-now-btn{display:none!important}
+  #view-toggle-btn{display:none!important}
+  /* Collapsed left panel: no stray border when button is hidden */
+  .left.collapsed{border-bottom:none}
+
+  /* ── Pad scroll areas so bottom bar doesn't cover last row ── */
+  #res-body{padding-bottom:calc(60px + env(safe-area-inset-bottom))}
+  #cl-body{padding-bottom:calc(60px + env(safe-area-inset-bottom))}
+
+  /* ── Mobile bottom action bar ── */
+  .mobile-bottom-bar{
+    display:flex;position:fixed;bottom:0;left:0;right:0;z-index:150;
+    background:#161616;border-top:1px solid #2e2e2e;
+    padding-bottom:env(safe-area-inset-bottom)
+  }
+  .mbb-btn{
+    flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    padding:10px 4px;background:none;border:none;color:#888;cursor:pointer;
+    position:relative;-webkit-tap-highlight-color:transparent;gap:4px;min-height:56px;
+    border-radius:0;font-family:inherit
+  }
+  .mbb-btn:active{background:#1e1e1e}
+  .mbb-icon{font-size:1.25rem;line-height:1}
+  .mbb-label{font-size:.6rem;font-weight:700;letter-spacing:.4px;text-transform:uppercase}
+  /* Check Now: prominent red center button */
+  .mbb-btn.mbb-check{color:#ff4444}
+  .mbb-btn.mbb-check.scanning{color:#555;pointer-events:none}
+  /* Stores count badge */
+  .mbb-count{
+    position:absolute;top:7px;left:50%;transform:translateX(6px);
+    background:#c00;color:#fff;font-size:.58rem;font-weight:700;
+    border-radius:8px;padding:1px 5px;min-width:16px;text-align:center;
+    display:none;line-height:1.4
+  }
+  .mbb-count.visible{display:block}
+  /* Active-filter dot */
+  .mbb-dot{
+    position:absolute;top:8px;left:50%;transform:translateX(6px);
+    width:7px;height:7px;background:#c00;border-radius:50%;display:none
+  }
+  .mbb-dot.visible{display:block}
 }
 
 /* ── Extra small screens (phones in portrait) ── */
@@ -4131,7 +4176,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.6.3</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.6.4</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -4353,6 +4398,24 @@ tr.fav-row td:last-child{color:#4ade80}
 
 </div>
 
+<!-- ── Mobile bottom action bar (hidden on desktop via CSS) ── -->
+<div class="mobile-bottom-bar" id="mobile-bottom-bar">
+  <button class="mbb-btn" id="mbb-stores" onclick="_mbbStores()">
+    <span class="mbb-icon">🏪</span>
+    <span class="mbb-label">Stores</span>
+    <span class="mbb-count" id="mbb-stores-count"></span>
+  </button>
+  <button class="mbb-btn mbb-check" id="mbb-check" onclick="_mbbCheck()">
+    <span class="mbb-icon" id="mbb-check-icon">▶</span>
+    <span class="mbb-label" id="mbb-check-label">Check Now</span>
+  </button>
+  <button class="mbb-btn" id="mbb-filters" onclick="_mbbFilters()">
+    <span class="mbb-icon">🎛</span>
+    <span class="mbb-label">Filters</span>
+    <span class="mbb-dot" id="mbb-filter-dot"></span>
+  </button>
+</div>
+
 <script>
 let allStores = [], favorites = [], running = false;
 
@@ -4377,6 +4440,7 @@ function _updateMobileToggleCounts() {
     const n = document.querySelectorAll('.cl-city-row input:checked').length;
     clCount.textContent = n > 0 ? n + ' selected' : '';
   }
+  _updateMobileBottomBar();
 }
 
 // ── Mobile filter toggle ─────────────────────────────────────────────────────
@@ -4400,6 +4464,61 @@ function _updateFilterDot() {
     _priceDropFilterActive ||
     (document.getElementById('res-search').value.trim().length > 0);
   dot.classList.toggle('visible', !!hasFilters);
+  _updateMobileBottomBar();
+}
+
+// ── Mobile bottom action bar ─────────────────────────────────────────────────
+function _mbbStores() {
+  // Toggle the sidebar for whichever tab is active
+  const which = document.querySelector('.app-tab.active')?.classList.contains('cl-tab') ? 'cl' : 'gc';
+  toggleMobileSidebar(which);
+}
+
+function _mbbFilters() {
+  toggleMobileFilters('gc');
+}
+
+function _mbbCheck() {
+  if (running) return;
+  runTracker();
+}
+
+function _updateMobileBottomBar() {
+  if (!_isMobile()) return;
+
+  // Stores count badge
+  const n = document.querySelectorAll('.store-row input:checked').length;
+  const countEl = document.getElementById('mbb-stores-count');
+  if (countEl) {
+    countEl.textContent = n > 0 ? n : '';
+    countEl.classList.toggle('visible', n > 0);
+  }
+
+  // Filters active dot
+  const hasFilters = (window._selectedBrands && window._selectedBrands.length) ||
+    (window._selectedConds && window._selectedConds.length) ||
+    (window._selectedCats && window._selectedCats.length) ||
+    (window._selectedSubs && window._selectedSubs.length) ||
+    _watchFilterActive || _priceDropFilterActive ||
+    (document.getElementById('res-search')?.value.trim().length > 0);
+  const dot = document.getElementById('mbb-filter-dot');
+  if (dot) dot.classList.toggle('visible', !!hasFilters);
+
+  // Check Now button state
+  const btn = document.getElementById('mbb-check');
+  const icon = document.getElementById('mbb-check-icon');
+  const label = document.getElementById('mbb-check-label');
+  if (btn && icon && label) {
+    if (running) {
+      btn.classList.add('scanning');
+      icon.textContent = '⏳';
+      label.textContent = 'Scanning…';
+    } else {
+      btn.classList.remove('scanning');
+      icon.textContent = '▶';
+      label.textContent = 'Check Now';
+    }
+  }
 }
 
 // Auto-collapse sidebars and filters on mobile on page load
@@ -4409,6 +4528,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('cl-left').classList.add('collapsed');
     const gcFilters = document.getElementById('gc-filter-collapsible');
     if (gcFilters) gcFilters.classList.add('collapsed');
+    _updateMobileBottomBar();
   }
 });
 // Re-check on resize (e.g. rotating phone)
@@ -5847,7 +5967,7 @@ async function stopRun() {
 }
 
 async function startRun(payload, isBaseline) {
-  running = true; updateCount();
+  running = true; updateCount(); _updateMobileBottomBar();
   const stopBtn = document.getElementById('stop-btn');
   stopBtn.style.display = 'inline-block';
   stopBtn.disabled = false;
@@ -5866,7 +5986,7 @@ async function startRun(payload, isBaseline) {
   });
   if (!resp.ok) {
     const e = await resp.json();
-    running = false; stopBtn.style.display = 'none'; updateCount();
+    running = false; stopBtn.style.display = 'none'; updateCount(); _updateMobileBottomBar();
     appendLog('Error: ' + (e.error || resp.statusText), 'log-err');
     return;
   }
@@ -5892,7 +6012,7 @@ async function startRun(payload, isBaseline) {
       es.close(); running = false;
       stopBtn.style.display = 'none';
       _skipBrowse = true;  // Prevent browseCache from overwriting scan results
-      updateCount(); loadState(); showResults(msg, isBaseline);
+      updateCount(); _updateMobileBottomBar(); loadState(); showResults(msg, isBaseline);
     }
   };
   es.onerror = () => {
@@ -7188,7 +7308,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.6.3"
+APP_VERSION = "2.6.4"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
