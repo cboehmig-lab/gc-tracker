@@ -3812,7 +3812,7 @@ tr.fav-row td:last-child{color:#4ade80}
   #dev-footer{display:none}
 
   /* ── Base font bump + iOS tap highlight removal ── */
-  body{font-size:1rem;overflow:hidden}
+  body{font-size:1rem;overflow:hidden;height:100dvh}
   a,button,input,label,.store-row,.cl-city-row,.app-tab,.mobile-sidebar-toggle,.mobile-filter-toggle,.paginator button{-webkit-tap-highlight-color:transparent}
 
   /* ── Mobile sidebar toggle button — compact ── */
@@ -3925,7 +3925,7 @@ tr.fav-row td:last-child{color:#4ade80}
   .no-res{font-size:.92rem;padding:28px 20px}
 
   /* ── Paginator ── */
-  .paginator{padding:10px 8px;gap:3px;flex-wrap:wrap;justify-content:center}
+  .paginator{padding:10px 8px;gap:3px;flex-wrap:wrap;justify-content:center;position:static}
   .paginator button{min-width:40px;height:40px;font-size:.88rem;border-radius:8px}
   .paginator .pg-info{font-size:.8rem;margin-right:8px;width:100%;text-align:center;margin-bottom:4px}
 
@@ -4009,14 +4009,6 @@ tr.fav-row td:last-child{color:#4ade80}
   /* Check Now: prominent red center button */
   .mbb-btn.mbb-check{color:#ff4444}
   .mbb-btn.mbb-check.scanning{color:#555;pointer-events:none}
-  /* Stores count badge */
-  .mbb-count{
-    position:absolute;top:7px;left:50%;transform:translateX(6px);
-    background:#c00;color:#fff;font-size:.58rem;font-weight:700;
-    border-radius:8px;padding:1px 5px;min-width:16px;text-align:center;
-    display:none;line-height:1.4
-  }
-  .mbb-count.visible{display:block}
   /* Active-filter dot */
   .mbb-dot{
     position:absolute;top:8px;left:50%;transform:translateX(6px);
@@ -4176,7 +4168,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.6.4</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.6.5</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -4259,11 +4251,6 @@ tr.fav-row td:last-child{color:#4ade80}
 
     <div class="left-footer">
       <div id="sel-count">0 stores selected</div>
-      <button id="reset-btn" onclick="resetData()"
-        style="margin-top:6px;width:100%;padding:7px;background:#1a1a1a;border:1px solid #5a2a2a;border-radius:5px;color:#a05050;font-size:.75rem;cursor:pointer"
-        title="Delete all cached data and start fresh">
-        🗑 Reset All Inventory
-      </button>
     </div>
   </div>
 
@@ -4403,7 +4390,6 @@ tr.fav-row td:last-child{color:#4ade80}
   <button class="mbb-btn" id="mbb-stores" onclick="_mbbStores()">
     <span class="mbb-icon">🏪</span>
     <span class="mbb-label">Stores</span>
-    <span class="mbb-count" id="mbb-stores-count"></span>
   </button>
   <button class="mbb-btn mbb-check" id="mbb-check" onclick="_mbbCheck()">
     <span class="mbb-icon" id="mbb-check-icon">▶</span>
@@ -4469,12 +4455,35 @@ function _updateFilterDot() {
 
 // ── Mobile bottom action bar ─────────────────────────────────────────────────
 function _mbbStores() {
-  // Toggle the sidebar for whichever tab is active
   const which = document.querySelector('.app-tab.active')?.classList.contains('cl-tab') ? 'cl' : 'gc';
+  const panel = document.getElementById(which === 'gc' ? 'gc-left' : 'cl-left');
+  const willOpen = panel.classList.contains('collapsed');
+  // Close filters first if we're opening stores
+  if (willOpen) {
+    const filters = document.getElementById('gc-filter-collapsible');
+    if (filters && !filters.classList.contains('collapsed')) {
+      filters.classList.add('collapsed');
+      const arrow = document.getElementById('gc-filter-arrow');
+      if (arrow) arrow.classList.remove('open');
+    }
+  }
   toggleMobileSidebar(which);
 }
 
 function _mbbFilters() {
+  const filters = document.getElementById('gc-filter-collapsible');
+  const willOpen = filters && filters.classList.contains('collapsed');
+  // Close stores first if we're opening filters
+  if (willOpen) {
+    ['gc-left', 'cl-left'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el && !el.classList.contains('collapsed')) {
+        el.classList.add('collapsed');
+        const arrow = document.getElementById(id === 'gc-left' ? 'gc-toggle-arrow' : 'cl-toggle-arrow');
+        if (arrow) arrow.classList.remove('open');
+      }
+    });
+  }
   toggleMobileFilters('gc');
 }
 
@@ -4485,14 +4494,6 @@ function _mbbCheck() {
 
 function _updateMobileBottomBar() {
   if (!_isMobile()) return;
-
-  // Stores count badge
-  const n = document.querySelectorAll('.store-row input:checked').length;
-  const countEl = document.getElementById('mbb-stores-count');
-  if (countEl) {
-    countEl.textContent = n > 0 ? n : '';
-    countEl.classList.toggle('visible', n > 0);
-  }
 
   // Filters active dot
   const hasFilters = (window._selectedBrands && window._selectedBrands.length) ||
@@ -7308,7 +7309,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.6.4"
+APP_VERSION = "2.6.5"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
