@@ -3536,7 +3536,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>Gear Tracker</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -3802,6 +3802,7 @@ tr.fav-row td:last-child{color:#4ade80}
 .mobile-filter-toggle{display:none}
 .filter-sheet-handle{display:none}
 .filter-sheet-title{display:none}
+.filter-done-btn{display:none}
 .filter-active-dot{display:none}
 /* On desktop the filter-collapsible wrapper is invisible to layout so its
    children flow directly in the parent flex row (same as before the wrapper existed) */
@@ -3924,6 +3925,13 @@ tr.fav-row td:last-child{color:#4ade80}
   #gc-filter-collapsible #res-search-wrap{width:100%;margin:0}
   #gc-filter-collapsible #res-search{width:100%;font-size:.88rem;padding:10px 14px;border-radius:8px;box-sizing:border-box}
   #gc-filter-collapsible #filter-item-count{display:none}
+  .filter-done-btn{
+    display:block;width:100%;padding:13px;margin-top:4px;
+    background:#c00;color:#fff;border:none;border-radius:8px;
+    font-size:.95rem;font-weight:700;cursor:pointer;letter-spacing:.2px;
+    -webkit-tap-highlight-color:transparent;flex-shrink:0
+  }
+  .filter-done-btn:active{background:#a00}
   /* Dropdowns still appear above sheet */
   #brand-dd-panel,#cond-dd-panel,#cat-dd-panel,#subcat-dd-panel{z-index:200!important}
 
@@ -4214,7 +4222,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.7.2</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.7.3</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -4376,6 +4384,7 @@ tr.fav-row td:last-child{color:#4ade80}
           <button id="res-search-clear" onclick="clearResSearch()" title="Clear search" style="display:none;background:none;border:none;color:#888;font-size:.85rem;cursor:pointer;padding:0 4px;line-height:1">✕</button>
           <span id="res-search-count"></span>
         </div>
+        <button class="filter-done-btn" onclick="_closeAllSheets()">Show Results</button>
         </div>
       </div>
       <div id="res-body"></div>
@@ -4440,10 +4449,6 @@ tr.fav-row td:last-child{color:#4ade80}
 
 <!-- ── Mobile bottom action bar (hidden on desktop via CSS) ── -->
 <div class="mobile-bottom-bar" id="mobile-bottom-bar">
-  <button class="mbb-btn" id="mbb-stores" onclick="_mbbStores()">
-    <span class="mbb-icon">🏪</span>
-    <span class="mbb-label">Stores</span>
-  </button>
   <button class="mbb-btn mbb-check" id="mbb-check" onclick="_mbbCheck()">
     <span class="mbb-icon" id="mbb-check-icon">▶</span>
     <span class="mbb-label" id="mbb-check-label">Scan For New</span>
@@ -4452,6 +4457,10 @@ tr.fav-row td:last-child{color:#4ade80}
     <span class="mbb-icon">🎛</span>
     <span class="mbb-label">Filters</span>
     <span class="mbb-dot" id="mbb-filter-dot"></span>
+  </button>
+  <button class="mbb-btn" id="mbb-stores" onclick="_mbbStores()">
+    <span class="mbb-icon">🏪</span>
+    <span class="mbb-label">Stores</span>
   </button>
   <button class="mbb-btn" id="mbb-auth" onclick="_mobileAuthToggle()">
     <span class="mbb-icon" id="mbb-auth-icon">👤</span>
@@ -4886,7 +4895,18 @@ async function _authRegister() {
 async function _authLogout() {
   await fetch('/api/logout', {method: 'POST'});
   window._authUser = null;
+  // Clear all per-user state from memory and localStorage
+  window._watchlist   = {};
+  window._keywords    = [];
+  window._newIds      = new Set();
+  window._lastRunISO  = null;
+  favorites           = [];
+  ['watchlist','keywords','new_ids','last_run','favorites'].forEach(k => _lsSet(k, k === 'watchlist' ? {} : []));
   _setAuthUI(null, null);
+  // Re-render to reflect cleared state
+  updateCount();
+  renderKeywordList?.();
+  if (typeof renderTable === 'function') renderTable();
 }
 
 // ── Welcome modal tab switching & form submission ─────────────────────────────
@@ -5802,6 +5822,7 @@ function toggleWatchFilter() {
   const btn = document.getElementById('watchlist-toggle');
   btn.classList.toggle('wl-active', _watchFilterActive);
   _updateFilterDot();
+  if (_isMobile()) _closeAllSheets();
 
   if (_browseMode === 'server') {
     _srvPage = 1;
@@ -5821,10 +5842,8 @@ function togglePriceDropFilter() {
   _priceDropFilterActive = !_priceDropFilterActive;
   const btn = document.getElementById('price-drop-toggle');
   btn.classList.toggle('wl-active', _priceDropFilterActive);
-  // Price drops is a stackable filter — it layers on top of whatever
-  // view is active (watch list, want list, brand filter, etc.).
-  // Don't reset sort or deactivate other filters.
   _updateFilterDot();
+  if (_isMobile()) _closeAllSheets();
   _srvPage = 1;
   _fetchBrowsePage(1);
 }
@@ -5846,6 +5865,7 @@ window._keywords = [];
 // loadKeywords no longer needed — loaded from localStorage in init
 
 function openKeywords() {
+  _closeAllSheets();
   document.getElementById('kw-modal').style.display = 'flex';
   document.getElementById('kw-input').value = '';
   renderKeywordList();
@@ -6022,6 +6042,7 @@ function searchWantList() {
   _priceDropFilterActive = false;
   document.getElementById('price-drop-toggle').classList.remove('wl-active');
   document.getElementById('want-list-toggle').classList.add('wl-active');
+  if (_isMobile()) _closeAllSheets();
   _fetchBrowsePage(1);
 }
 
@@ -7409,7 +7430,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.7.2"
+APP_VERSION = "2.7.3"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
