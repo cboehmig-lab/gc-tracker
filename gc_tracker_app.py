@@ -3664,9 +3664,10 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .cond-dd-item.active .bcount{color:rgba(255,255,255,.7);font-style:italic;font-weight:normal}
 .cond-dd-check{width:14px;height:14px;border:1px solid #555;border-radius:3px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;font-size:.7rem}
 .cond-dd-item.active .cond-dd-check{background:#c00;border-color:#c00;color:#fff}
-#res-search-wrap{margin-left:auto;display:flex;align-items:center;gap:6px}
+#res-search-wrap{margin-left:auto;display:flex;align-items:center;gap:6px;position:relative}
 #res-search{padding:5px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.8rem;width:180px;outline:none}
 #res-search:focus{border-color:#c00;box-shadow:0 0 0 3px rgba(204,0,0,.15)}
+.res-search-icon{display:none;position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:.9rem;pointer-events:none;opacity:.5}
 #res-search-count{font-size:.75rem;color:#555;white-space:nowrap}
 
 table{width:100%;border-collapse:collapse;font-size:.83rem;table-layout:auto}
@@ -3948,7 +3949,8 @@ tr.fav-row td:last-child{color:#4ade80}
   /* Filter buttons: full-width, larger tap targets in sheet */
   .filter-scroll-body .cat-sel{width:100%;text-align:left;padding:11px 14px;font-size:.88rem;border-radius:8px;box-sizing:border-box}
   .filter-scroll-body #res-search-wrap{width:100%;margin:0}
-  .filter-scroll-body #res-search{width:100%;font-size:.88rem;padding:10px 14px;border-radius:8px;box-sizing:border-box}
+  .filter-scroll-body #res-search{width:100%;font-size:.88rem;padding:10px 14px 10px 36px;border-radius:8px;box-sizing:border-box}
+  .filter-scroll-body .res-search-icon{display:block}
   .filter-scroll-body #filter-item-count{display:none}
   /* Zone 3: pinned Show Results button */
   .filter-done-btn{
@@ -4403,6 +4405,7 @@ tr.fav-row td:last-child{color:#4ade80}
             <span id="filter-item-count" style="color:#888;font-size:.78rem;white-space:nowrap;margin-right:6px"></span>
             <!-- Keyword search — at top of sheet, searches all stores globally -->
             <div id="res-search-wrap">
+              <span class="res-search-icon">🔍</span>
               <input id="res-search" type="text" placeholder="Search all stores…" oninput="_globalKeywordSearch();_updateResSearchClear()" autocomplete="off">
               <button id="res-search-clear" onclick="clearResSearch()" title="Clear search" style="display:none;background:none;border:none;color:#888;font-size:.85rem;cursor:pointer;padding:0 4px;line-height:1">✕</button>
               <span id="res-search-count"></span>
@@ -5868,8 +5871,6 @@ async function browseCache() {
     _browseMode = 'server';
     _globalSearchActive = false;
     _globalSearchQuery = '';
-    document.getElementById('global-search').value = '';
-    document.getElementById('global-search-clear').style.display = 'none';
     _resetWantListLink();
     _srvStores = stores;
     _srvPage = 1;
@@ -6063,41 +6064,20 @@ function _itemMatchesKeyword(item) {
   });
 }
 
-// ── Global search (all stores) ───────────────────────────────────────────────
+// ── Global search (all stores) — now driven by #res-search in filter sheet ───
 function globalSearch() {
-  const q = document.getElementById('global-search').value.trim();
+  // Legacy entry point — now search is handled by _globalKeywordSearch() via #res-search
+  const el = document.getElementById('res-search');
+  const q = el ? el.value.trim() : '';
   if (!q) return;
-  _globalSearchActive = true;
-  _wantListSearchActive = false;
-  _globalSearchQuery = q;
-  _browseMode = 'server';
-  _srvPage = 1;
-  _srvSortField = 'date';
-  _srvSortDir = 'desc';
-  window._sortCol = null; window._sortDir = 1;
-  // Reset filters
-  document.getElementById('res-search').value = '';
-  document.getElementById('res-search-count').textContent = '';
-  window._selectedBrands = []; _updateBrandBtn();
-  window._selectedConds = []; _updateCondBtn();
-  window._selectedCats = []; _updateCatBtn();
-  window._selectedSubs = []; _updateSubcatBtn(); _setSubList([]);
-  _watchFilterActive = false;
-  document.getElementById('watchlist-toggle').classList.remove('wl-active');
-  _priceDropFilterActive = false;
-  document.getElementById('price-drop-toggle').classList.remove('wl-active');
-  _wantListSearchActive = false;
-  document.getElementById('want-list-toggle').classList.remove('wl-active');
-  // Show the clear button
-  document.getElementById('global-search-clear').style.display = '';
-  _fetchBrowsePage(1);
+  _globalKeywordSearch();
 }
 
 function clearGlobalSearch() {
   _globalSearchActive = false; _wantListSearchActive = false;
   _globalSearchQuery = '';
-  document.getElementById('global-search').value = '';
-  document.getElementById('global-search-clear').style.display = 'none';
+  const el = document.getElementById('res-search');
+  if (el) { el.value = ''; _updateResSearchClear(); }
   _resetWantListLink();
   // Go back to whatever stores are selected — bypass browseCache debounce
   // and force-clear any stuck loading flag so the fetch always fires
