@@ -3648,6 +3648,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .qf-chip.wl-active{background:#2d6a2d;border-color:#4ade80;color:#fff}
 .qf-edit-link{color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;text-decoration:none}
 .qf-edit-link:hover{text-decoration:underline}
+.view-toggle-chip-btn{display:none;margin-left:auto}  /* mobile only — shown in mobile block */
 .badge{background:#c00;color:#fff;font-size:.7rem;font-weight:700;padding:2px 7px;border-radius:10px}.badge:empty{display:none}
 .cat-sel{padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer}
 .cat-sel:focus{border-color:#c00}
@@ -4102,6 +4103,7 @@ tr.fav-row td:last-child{color:#4ade80}
   .mobile-filter-toggle{display:none!important}
   #check-now-btn{display:none!important}
   #view-toggle-btn{display:none!important}
+  .view-toggle-chip-btn{display:inline-flex!important}
   /* Collapsed left panel: no stray border when button is hidden */
   .left.collapsed{border-bottom:none}
 
@@ -4384,12 +4386,13 @@ tr.fav-row td:last-child{color:#4ade80}
         <button id="price-drop-toggle" onclick="togglePriceDropFilter()" class="qf-chip">↓ Price Drops</button>
         <button id="watchlist-toggle"  onclick="toggleWatchFilter()"      class="qf-chip">★ Watch List</button>
         <button id="want-list-toggle"  onclick="searchWantList()"         class="qf-chip">🎯 Want List</button>
-        <a id="search-wl-link" onclick="openKeywords()" class="qf-edit-link" style="display:none">Edit Want List</a>
+        <button id="view-toggle-chip"  onclick="toggleMobileView()"       class="qf-chip view-toggle-chip-btn" title="Switch list / card view">☰</button>
       </div>
 
       <div class="results-hdr">
         <span id="res-title" style="display:none"></span>
         <span class="badge" id="res-badge" style="display:none!important"></span>
+        <a id="search-wl-link" onclick="openKeywords()" class="qf-edit-link" style="display:none;margin-left:auto;font-size:.75rem">✏︎ Edit Want List</a>
         <button class="mobile-filter-toggle" id="gc-filter-toggle" onclick="toggleMobileFilters('gc')">
           <span class="toggle-arrow" id="gc-filter-arrow">▶</span> Filters
           <span class="filter-active-dot" id="gc-filter-dot"></span>
@@ -4774,6 +4777,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (_isMobile()) {
     // Store panels and filter sheet start closed — CSS transform handles it, no class needed
     _updateMobileBottomBar();
+    _updateViewToggleBtn();
   } else {
     // Desktop: ensure sidebars are expanded
     document.getElementById('gc-left').classList.remove('collapsed');
@@ -5805,17 +5809,23 @@ function _updateViewToggleBtn() {
   const view = localStorage.getItem('gt_mobile_view') || 'cards';
   const btn  = document.getElementById('view-toggle-btn');
   const icon = document.getElementById('view-toggle-icon');
-  if (!btn) return;
-  // ⊞ = grid/card view icon, ☰ = list view icon
-  // Show the icon for the OTHER view (what you'll switch TO)
-  if (view === 'list') {
-    icon.textContent = '⊞';   // tap to go back to cards
-    btn.title = 'Switch to card view';
-    btn.classList.add('active');
-  } else {
-    icon.textContent = '☰';   // tap to go to compact list
-    btn.title = 'Switch to compact list view';
-    btn.classList.remove('active');
+  if (btn && icon) {
+    if (view === 'list') {
+      icon.textContent = '⊞';
+      btn.title = 'Switch to card view';
+      btn.classList.add('active');
+    } else {
+      icon.textContent = '☰';
+      btn.title = 'Switch to compact list view';
+      btn.classList.remove('active');
+    }
+  }
+  // Also sync the chip bar button
+  const chip = document.getElementById('view-toggle-chip');
+  if (chip) {
+    chip.textContent = view === 'list' ? '⊞' : '☰';
+    chip.title = view === 'list' ? 'Switch to card view' : 'Switch to compact list view';
+    chip.classList.toggle('wl-active', view === 'list');
   }
 }
 
@@ -6176,21 +6186,22 @@ function searchWantList() {
   _priceDropFilterActive = false;
   document.getElementById('price-drop-toggle').classList.remove('wl-active');
   document.getElementById('want-list-toggle').classList.add('wl-active');
+  _updateWantListCount();
   _fetchBrowsePage(1);
 }
 
 function _resetWantListLink() {
   const btn = document.getElementById('want-list-toggle');
   if (btn) btn.classList.remove('wl-active');
+  _updateWantListCount();
 }
 
-// Show/hide Edit Want List link based on whether keywords exist
+// Show/hide Edit Want List link — visible only when want list filter is active
 let _wlCountTimer = null;
 function _updateWantListCount() {
   const editLink = document.getElementById('search-wl-link');
   if (!editLink) return;
-  const hasKeywords = window._keywords && window._keywords.length;
-  editLink.style.display = hasKeywords ? 'inline' : 'none';
+  editLink.style.display = _wantListSearchActive ? 'inline' : 'none';
 }
 
 function cancelReset() {
