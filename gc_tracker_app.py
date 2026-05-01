@@ -3537,7 +3537,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>Gear Tracker</title>
+<title>GC Used Inventory Tracker</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#111;color:#eee;height:100vh;display:flex;flex-direction:column}
@@ -3575,15 +3575,6 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .auth-note{font-size:.75rem;color:#555;margin-top:14px;text-align:center}
 .auth-close{position:absolute;top:12px;right:14px;background:none;border:none;color:#666;font-size:1.2rem;cursor:pointer}
 #auth-modal .auth-box{position:relative}
-
-/* ── Top tabs ── */
-.app-tabs{display:flex;background:#0d0d0d;border-bottom:1px solid #2e2e2e;flex-shrink:0}
-.app-tab{padding:11px 28px;font-size:.85rem;font-weight:600;color:#666;cursor:pointer;border:none;background:none;border-bottom:3px solid transparent;margin-bottom:-1px;letter-spacing:.2px;transition:color .15s}
-.app-tab:hover{color:#ccc}
-.app-tab.gc-tab.active{color:#ff4444;border-bottom-color:#c00}
-.app-tab.cl-tab.active{color:#c7d2fe;border-bottom-color:#a5b4fc}
-.app-panel{display:none;flex:1;overflow:hidden}
-.app-panel.active{display:flex}
 
 .layout{display:flex;flex:1;overflow:hidden}
 
@@ -3828,7 +3819,7 @@ tr.fav-row td:last-child{color:#4ade80}
 
   /* ── Base font bump + iOS tap highlight removal ── */
   body{font-size:1rem;overflow:hidden;height:100dvh}
-  a,button,input,label,.store-row,.cl-city-row,.app-tab,.mobile-sidebar-toggle,.mobile-filter-toggle,.paginator button{-webkit-tap-highlight-color:transparent}
+  a,button,input,label,.store-row,.cl-city-row,.mobile-sidebar-toggle,.mobile-filter-toggle,.paginator button{-webkit-tap-highlight-color:transparent}
 
   /* ── Mobile sidebar toggle button — compact ── */
   .mobile-sidebar-toggle{display:flex;align-items:center;gap:8px;padding:11px 16px;background:linear-gradient(180deg,#1e1e1e,#1a1a1a);border:none;border-bottom:1px solid #2e2e2e;cursor:pointer;font-size:.9rem;color:#ccc;font-weight:600;width:100%;text-align:left;flex-shrink:0;letter-spacing:.1px}
@@ -3840,16 +3831,11 @@ tr.fav-row td:last-child{color:#4ade80}
   /* ── Header: HIDDEN on mobile to save space (stop btn still works via JS) ── */
   header{display:none!important}
 
-  /* ── Tabs: compact ── */
-  .app-tabs{overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
-  .app-tabs::-webkit-scrollbar{display:none}
-  .app-tab{padding:10px 14px;font-size:.84rem;white-space:nowrap;flex-shrink:0}
-
   /* ── GC Layout: stack vertically ── */
   /* CRITICAL: proper flex height chain so #res-body / #cl-body can scroll.
      Every ancestor must constrain height: flex:1 + min-height:0 + overflow:hidden */
   .layout{flex-direction:column;overflow:hidden;flex:1;min-height:0}
-  .app-panel.active{display:flex;flex-direction:column;overflow:hidden}
+  .layout{display:flex;flex-direction:column;overflow:hidden}
 
   /* ── Store panel: bottom sheet on mobile ── */
   .store-sheet-backdrop{
@@ -4240,7 +4226,7 @@ tr.fav-row td:last-child{color:#4ade80}
 <div id="first-run-modal" style="display:none;position:fixed;inset:0;z-index:200;align-items:center;justify-content:center">
   <div style="position:absolute;inset:0;background:rgba(0,0,0,.75)" onclick="dismissFirstRun()"></div>
   <div style="position:relative;background:#1a1a1a;border:1px solid #2e2e2e;border-radius:12px;padding:32px 36px;width:360px;max-width:92vw;z-index:1">
-    <h2 style="color:#fff;font-size:1.15rem;margin-bottom:6px">🎸 Welcome to Gear Tracker</h2>
+    <h2 style="color:#fff;font-size:1.15rem;margin-bottom:6px">Welcome to GC Used Inventory Tracker</h2>
     <p style="color:#aaa;font-size:.82rem;margin-bottom:20px;line-height:1.5">Track Guitar Center used inventory. Create an account to save your watch list, want list, and favorites across all your devices.</p>
     <!-- Auth tabs -->
     <div style="display:flex;border-bottom:1px solid #2e2e2e;margin-bottom:20px">
@@ -4296,7 +4282,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.7.9</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.8.0</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -4344,13 +4330,7 @@ tr.fav-row td:last-child{color:#4ade80}
   <button onclick="document.getElementById('update-banner').style.display='none'" style="padding:4px 8px;background:none;color:#666;border:none;cursor:pointer;font-size:.8rem">✕</button>
 </div>
 
-<div class="app-tabs">
-  <button class="app-tab gc-tab active" onclick="switchTab('gc')">🎸 GC Used Inventory</button>
-  <button class="app-tab cl-tab" onclick="switchTab('cl')">🟣 CL National Musical Instruments Search</button>
-</div>
-
 <!-- ══ GC PANEL ══ -->
-<div class="app-panel active" id="gc-panel">
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -4388,12 +4368,7 @@ tr.fav-row td:last-child{color:#4ade80}
       <span id="s-last-wrap">Last checked for new gear: <b id="s-last">—</b> <button id="check-now-btn" onclick="runTracker()" style="padding:2px 10px;background:#c00;color:#fff;border:none;border-radius:4px;font-size:.72rem;font-weight:700;cursor:pointer;margin-left:4px;display:none">Scan For New</button> <button id="view-toggle-btn" class="view-toggle-btn" onclick="toggleMobileView()" title="Switch card / list view"><span id="view-toggle-icon">⊞</span></button></span>
       <span>Items: <b id="s-known">—</b></span>
       <span>Stores: <b id="s-stores">—</b></span>
-      <div id="global-search-wrap">
-        <input id="global-search" type="text" placeholder="Search all stores…"
-               onkeydown="if(event.key==='Enter')globalSearch()" autocomplete="off">
-        <button id="global-search-btn" onclick="globalSearch()" title="Search all stores">🔍</button>
-        <button id="global-search-clear" onclick="clearGlobalSearch()" title="Clear search results" style="display:none">✕</button>
-      </div>
+      <!-- global-search moved into filter sheet -->
       <span id="s-excel" style="display:none"><a style="color:#6ab0f5" href="/download/excel">Download Excel ↗</a></span>
       <span id="s-want-match" style="display:none;color:#4caf50;font-weight:600;font-size:.82rem;cursor:pointer" onclick="searchWantList()" title="Click to view want list matches"></span>
     </div>
@@ -4426,6 +4401,12 @@ tr.fav-row td:last-child{color:#4ade80}
           <!-- ── Scrollable filter content ── -->
           <div class="filter-scroll-body">
             <span id="filter-item-count" style="color:#888;font-size:.78rem;white-space:nowrap;margin-right:6px"></span>
+            <!-- Keyword search — at top of sheet, searches all stores globally -->
+            <div id="res-search-wrap">
+              <input id="res-search" type="text" placeholder="Search all stores…" oninput="_globalKeywordSearch();_updateResSearchClear()" autocomplete="off">
+              <button id="res-search-clear" onclick="clearResSearch()" title="Clear search" style="display:none;background:none;border:none;color:#888;font-size:.85rem;cursor:pointer;padding:0 4px;line-height:1">✕</button>
+              <span id="res-search-count"></span>
+            </div>
             <!-- ── Mobile accordion sections (hidden on desktop) ── -->
             <div class="filter-accordion" id="acc-brand">
               <button class="acc-header" onclick="_accToggle('brand')">
@@ -4500,12 +4481,6 @@ tr.fav-row td:last-child{color:#4ade80}
                 <div style="overflow-y:auto;max-height:260px;padding:4px 0" id="subcat-dd-inner"></div>
               </div>
             </div>
-            <!-- Keyword search — searches all items globally -->
-            <div id="res-search-wrap">
-              <input id="res-search" type="text" placeholder="Search all items…" oninput="_globalKeywordSearch();_updateResSearchClear()" autocomplete="off">
-              <button id="res-search-clear" onclick="clearResSearch()" title="Clear search" style="display:none;background:none;border:none;color:#888;font-size:.85rem;cursor:pointer;padding:0 4px;line-height:1">✕</button>
-              <span id="res-search-count"></span>
-            </div>
             <!-- Desktop-only clear button -->
             <button id="clear-filters-btn" onclick="clearFilters()"
               style="display:none;padding:5px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #c00;color:#f88;font-size:.78rem;cursor:pointer;white-space:nowrap">
@@ -4521,16 +4496,13 @@ tr.fav-row td:last-child{color:#4ade80}
   </div>
 
 </div>
-</div><!-- end gc-panel -->
 
-<!-- ══ CL PANEL ══ -->
-<div class="app-panel" id="cl-panel">
-
-  <!-- Left sidebar: city list -->
+<!-- ══ CL PANEL (moved to /cl route) ══ -->
+<!-- placeholder: cl-left, cl-sidebar-toggle etc kept for JS refs -->
+<div id="cl-panel" style="display:none">
   <div class="cl-left" id="cl-left">
-    <div class="sheet-handle"></div>
-    <button class="mobile-sidebar-toggle" id="cl-sidebar-toggle" onclick="toggleMobileSidebar('cl')">
-      <span class="toggle-arrow" id="cl-toggle-arrow">▶</span>
+    <button class="mobile-sidebar-toggle" id="cl-sidebar-toggle" style="display:none">
+      <span class="toggle-arrow" id="cl-toggle-arrow"></span>
       Cities
       <span class="toggle-count" id="cl-toggle-count"></span>
     </button>
@@ -7703,7 +7675,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.7.9"
+APP_VERSION = "2.8.0"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
