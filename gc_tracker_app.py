@@ -3810,6 +3810,7 @@ tr.fav-row td:last-child{color:#4ade80}
 .filter-sheet-header{display:none}   /* header only meaningful in the sheet */
 .filter-scroll-body{display:contents} /* children flow inline on desktop */
 .filter-chip-row{display:contents}   /* chip buttons are inline flex items */
+.dd-done-bar{display:none}           /* done bar only needed on mobile */
 
 /* ══════════════════════════════════════════════════════════════════════════════
    MOBILE RESPONSIVE — all changes scoped inside @media so desktop is untouched
@@ -3963,6 +3964,18 @@ tr.fav-row td:last-child{color:#4ade80}
   .filter-done-btn:active{background:#a00}
   /* Dropdowns still appear above sheet */
   #brand-dd-panel,#cond-dd-panel,#cat-dd-panel,#subcat-dd-panel{z-index:200!important}
+  /* ✓ Done bar — sticky at top of dropdown so it's always reachable */
+  .dd-done-bar{
+    position:sticky;top:0;z-index:1;
+    background:#1e1e1e;border-bottom:1px solid #333;
+    padding:0;text-align:center
+  }
+  .dd-done-bar button{
+    width:100%;padding:11px;background:none;border:none;
+    color:#4ade80;font-size:.88rem;font-weight:700;cursor:pointer;
+    letter-spacing:.2px;-webkit-tap-highlight-color:transparent
+  }
+  .dd-done-bar button:active{background:#252525}
 
   /* ── Filter dropdown panels: full-width overlay on mobile ── */
   #brand-dropdown,#cond-dropdown,#cat-dropdown,#subcat-dropdown{position:static}
@@ -4251,7 +4264,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.7.4</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.7.5</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -4393,6 +4406,7 @@ tr.fav-row td:last-child{color:#4ade80}
             <div id="brand-dropdown" class="brand-dd" style="display:none;position:relative">
               <button id="brand-dd-btn" class="cat-sel" onclick="toggleBrandDropdown()" style="cursor:pointer;white-space:nowrap">All Brands ▾</button>
               <div id="brand-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:260px;max-height:320px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
+                <div class="dd-done-bar"><button onclick="_closeBrandDropdown()">✓ Done</button></div>
                 <div style="padding:6px">
                   <input id="brand-dd-search" type="text" placeholder="Search brands…"
                     style="width:100%;padding:6px 10px;background:#252525;border:1px solid #3a3a3a;border-radius:4px;color:#eee;font-size:.82rem;outline:none;box-sizing:border-box"
@@ -4403,17 +4417,23 @@ tr.fav-row td:last-child{color:#4ade80}
             </div>
             <div id="cond-dropdown" class="cond-dd" style="display:none;position:relative">
               <button id="cond-dd-btn" class="cat-sel" onclick="toggleCondDropdown()" style="cursor:pointer;white-space:nowrap">All Conditions ▾</button>
-              <div id="cond-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:220px;max-height:300px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:4px 0">
+              <div id="cond-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:220px;max-height:300px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
+                <div class="dd-done-bar"><button onclick="_closeCondDropdown()">✓ Done</button></div>
+                <div style="overflow-y:auto;max-height:260px;padding:4px 0" id="cond-dd-inner"></div>
               </div>
             </div>
             <div id="cat-dropdown" class="cond-dd" style="display:none;position:relative">
               <button id="cat-dd-btn" class="cat-sel" onclick="toggleCatDropdown()" style="cursor:pointer;white-space:nowrap">All Categories ▾</button>
-              <div id="cat-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:240px;max-height:300px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:4px 0">
+              <div id="cat-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:240px;max-height:300px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
+                <div class="dd-done-bar"><button onclick="_closeCatDropdown()">✓ Done</button></div>
+                <div style="overflow-y:auto;max-height:260px;padding:4px 0" id="cat-dd-inner"></div>
               </div>
             </div>
             <div id="subcat-dropdown" class="cond-dd" style="display:none;position:relative">
               <button id="subcat-dd-btn" class="cat-sel" onclick="toggleSubcatDropdown()" style="cursor:pointer;white-space:nowrap">All Subcategories ▾</button>
-              <div id="subcat-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:240px;max-height:300px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:4px 0">
+              <div id="subcat-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:240px;max-height:300px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
+                <div class="dd-done-bar"><button onclick="_closeSubDropdown()">✓ Done</button></div>
+                <div style="overflow-y:auto;max-height:260px;padding:4px 0" id="subcat-dd-inner"></div>
               </div>
             </div>
             <!-- Keyword search -->
@@ -6732,7 +6752,7 @@ function _closeCondOnOutside(e) {
 }
 
 function _renderCondList() {
-  const panel = document.getElementById('cond-dd-panel');
+  const inner = document.getElementById('cond-dd-inner') || document.getElementById('cond-dd-panel');
   let html = '';
   window._condList.forEach(c => {
     const name = (c && c.name !== undefined) ? c.name : c;
@@ -6744,8 +6764,8 @@ function _renderCondList() {
          + '<span class="cond-dd-check">' + (isActive ? '✓' : '') + '</span>'
          + esc + (count !== '' ? '<span class="bcount">' + Number(count).toLocaleString() + '</span>' : '') + '</div>';
   });
-  panel.innerHTML = html;
-  panel.onclick = function(e) {
+  inner.innerHTML = html;
+  inner.onclick = function(e) {
     const item = e.target.closest('.cond-dd-item');
     if (!item) return;
     _toggleCond(item.dataset.cond);
@@ -6801,7 +6821,7 @@ function _closeCatDropdown() {
 function _closeCatOnOutside(e) { if (!e.target.closest('#cat-dropdown')) _closeCatDropdown(); }
 
 function _renderCatList() {
-  const panel = document.getElementById('cat-dd-panel');
+  const inner = document.getElementById('cat-dd-inner') || document.getElementById('cat-dd-panel');
   let html = '';
   window._catList.forEach(c => {
     const name = (c && c.name !== undefined) ? c.name : c;
@@ -6813,8 +6833,8 @@ function _renderCatList() {
          + '<span class="cond-dd-check">' + (isActive ? '✓' : '') + '</span>' + esc
          + (count !== '' ? '<span class="bcount">' + Number(count).toLocaleString() + '</span>' : '') + '</div>';
   });
-  panel.innerHTML = html;
-  panel.onclick = function(e) {
+  inner.innerHTML = html;
+  inner.onclick = function(e) {
     const item = e.target.closest('.cond-dd-item');
     if (!item) return;
     _toggleCat(item.dataset.val);
@@ -6862,7 +6882,7 @@ function _closeSubDropdown() {
 function _closeSubOnOutside(e) { if (!e.target.closest('#subcat-dropdown')) _closeSubDropdown(); }
 
 function _renderSubList() {
-  const panel = document.getElementById('subcat-dd-panel');
+  const inner = document.getElementById('subcat-dd-inner') || document.getElementById('subcat-dd-panel');
   let html = '';
   window._subList.forEach(s => {
     const name = (s && s.name !== undefined) ? s.name : s;
@@ -6874,8 +6894,8 @@ function _renderSubList() {
          + '<span class="cond-dd-check">' + (isActive ? '✓' : '') + '</span>' + name
          + (count !== '' ? '<span class="bcount">' + Number(count).toLocaleString() + '</span>' : '') + '</div>';
   });
-  panel.innerHTML = html;
-  panel.onclick = function(e) {
+  inner.innerHTML = html;
+  inner.onclick = function(e) {
     const item = e.target.closest('.cond-dd-item');
     if (!item) return;
     _toggleSub(item.dataset.val);
@@ -7483,7 +7503,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.7.4"
+APP_VERSION = "2.7.5"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
