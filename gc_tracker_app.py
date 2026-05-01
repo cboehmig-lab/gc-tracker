@@ -3811,6 +3811,7 @@ tr.fav-row td:last-child{color:#4ade80}
 .filter-scroll-body{display:contents} /* children flow inline on desktop */
 .filter-chip-row{display:contents}   /* chip buttons are inline flex items */
 .dd-done-bar{display:none}           /* done bar only needed on mobile */
+.filter-accordion{display:none}      /* accordion only shown on mobile */
 
 /* ══════════════════════════════════════════════════════════════════════════════
    MOBILE RESPONSIVE — all changes scoped inside @media so desktop is untouched
@@ -3962,28 +3963,48 @@ tr.fav-row td:last-child{color:#4ade80}
     border-top:1px solid #a00
   }
   .filter-done-btn:active{background:#a00}
-  /* Dropdowns still appear above sheet */
-  #brand-dd-panel,#cond-dd-panel,#cat-dd-panel,#subcat-dd-panel{z-index:200!important}
-  /* ✓ Done bar — pinned at top of each dropdown on mobile */
-  .dd-done-bar{
-    display:block!important;flex-shrink:0;
-    background:#1e1e1e;border-bottom:1px solid #333;
-    padding:0;text-align:center
-  }
-  .dd-done-bar button{
-    width:100%;padding:11px;background:none;border:none;
-    color:#4ade80;font-size:.88rem;font-weight:700;cursor:pointer;
-    letter-spacing:.2px;-webkit-tap-highlight-color:transparent
-  }
-  .dd-done-bar button:active{background:#252525}
+  /* ── Hide desktop dropdowns on mobile; accordion replaces them ── */
+  #brand-dropdown,#cond-dropdown,#cat-dropdown,#subcat-dropdown{display:none!important}
 
-  /* ── Filter dropdown panels: full-width overlay on mobile ── */
-  #brand-dropdown,#cond-dropdown,#cat-dropdown,#subcat-dropdown{position:static}
-  #brand-dd-panel,#cond-dd-panel,#cat-dd-panel,#subcat-dd-panel{position:fixed!important;left:8px!important;right:8px!important;top:12vh!important;bottom:auto!important;width:auto!important;max-height:65vh!important;z-index:200!important;border-radius:12px!important;margin-top:0!important;display:flex!important;flex-direction:column!important;overflow:hidden!important}
-  #brand-dd-list,#cond-dd-inner,#cat-dd-inner,#subcat-dd-inner{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
-  .brand-dd-item{padding:10px 14px;font-size:.9rem}
-  .brand-dd-item .bcount{font-size:.8rem}
-  .cond-dd-item{padding:10px 14px;font-size:.9rem}
+  /* ── Mobile filter accordion ── */
+  .filter-accordion{
+    display:block;border:1px solid #2a2a2a;border-radius:8px;
+    overflow:hidden;flex-shrink:0;background:#1a1a1a
+  }
+  .acc-header{
+    display:flex;align-items:center;gap:8px;width:100%;
+    padding:13px 14px;background:#1a1a1a;border:none;color:#ddd;
+    font-size:.9rem;font-weight:600;cursor:pointer;text-align:left;
+    -webkit-tap-highlight-color:transparent
+  }
+  .acc-header:active{background:#222}
+  .acc-title{flex:1}
+  .acc-summary{
+    font-size:.76rem;color:#4ade80;font-weight:400;
+    max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap
+  }
+  .acc-arrow{font-size:.72rem;color:#555;flex-shrink:0;transition:transform .2s}
+  .acc-arrow.open{transform:rotate(180deg)}
+  .acc-body{max-height:0;overflow:hidden;transition:max-height .3s ease;background:#161616}
+  .acc-body.open{border-top:1px solid #2a2a2a}
+  .acc-search-wrap{padding:8px 12px 4px}
+  .acc-search-wrap input{
+    width:100%;padding:7px 12px;background:#252525;
+    border:1px solid #3a3a3a;border-radius:6px;
+    color:#eee;font-size:.84rem;outline:none;box-sizing:border-box
+  }
+  .acc-list{overflow-y:auto;-webkit-overflow-scrolling:touch;max-height:220px}
+  .acc-item{
+    display:flex;align-items:center;gap:10px;padding:11px 14px;
+    cursor:pointer;-webkit-tap-highlight-color:transparent;
+    border-bottom:1px solid #1e1e1e
+  }
+  .acc-item:active{background:#1e1e1e}
+  .acc-item.acc-active .acc-label{color:#4ade80}
+  .acc-check{width:16px;text-align:center;font-size:.82rem;color:#4ade80;flex-shrink:0;font-weight:700}
+  .acc-label{flex:1;font-size:.88rem;color:#ccc}
+  .acc-count{font-size:.74rem;color:#555;font-style:italic}
+  .acc-empty{padding:12px 14px;color:#555;font-size:.84rem}
 
   /* ── GC Table: .results is a flex column; only #res-body scrolls.
      JS sets display:block via inline style — override to flex when visible ── */
@@ -4265,7 +4286,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.7.6</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.7.7</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -4403,11 +4424,54 @@ tr.fav-row td:last-child{color:#4ade80}
               </button>
               <a id="search-wl-link" onclick="openKeywords()" style="display:none;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Edit Want List</a>
             </div>
-            <!-- Dropdown filters -->
+            <!-- ── Mobile accordion sections (hidden on desktop) ── -->
+            <div class="filter-accordion" id="acc-brand">
+              <button class="acc-header" onclick="_accToggle('brand')">
+                <span class="acc-title">Brand</span>
+                <span class="acc-summary" id="acc-brand-summary"></span>
+                <span class="acc-arrow" id="acc-brand-arrow">▾</span>
+              </button>
+              <div class="acc-body" id="acc-brand-body">
+                <div class="acc-search-wrap">
+                  <input id="acc-brand-search" type="text" placeholder="Search brands…" oninput="_accRenderBrand(this.value)" autocomplete="off">
+                </div>
+                <div class="acc-list" id="acc-brand-list"></div>
+              </div>
+            </div>
+            <div class="filter-accordion" id="acc-cond">
+              <button class="acc-header" onclick="_accToggle('cond')">
+                <span class="acc-title">Condition</span>
+                <span class="acc-summary" id="acc-cond-summary"></span>
+                <span class="acc-arrow" id="acc-cond-arrow">▾</span>
+              </button>
+              <div class="acc-body" id="acc-cond-body">
+                <div class="acc-list" id="acc-cond-list"></div>
+              </div>
+            </div>
+            <div class="filter-accordion" id="acc-cat" style="display:none">
+              <button class="acc-header" onclick="_accToggle('cat')">
+                <span class="acc-title">Category</span>
+                <span class="acc-summary" id="acc-cat-summary"></span>
+                <span class="acc-arrow" id="acc-cat-arrow">▾</span>
+              </button>
+              <div class="acc-body" id="acc-cat-body">
+                <div class="acc-list" id="acc-cat-list"></div>
+              </div>
+            </div>
+            <div class="filter-accordion" id="acc-sub" style="display:none">
+              <button class="acc-header" onclick="_accToggle('sub')">
+                <span class="acc-title">Subcategory</span>
+                <span class="acc-summary" id="acc-sub-summary"></span>
+                <span class="acc-arrow" id="acc-sub-arrow">▾</span>
+              </button>
+              <div class="acc-body" id="acc-sub-body">
+                <div class="acc-list" id="acc-sub-list"></div>
+              </div>
+            </div>
+            <!-- ── Desktop dropdown filters (hidden on mobile) ── -->
             <div id="brand-dropdown" class="brand-dd" style="display:none;position:relative">
               <button id="brand-dd-btn" class="cat-sel" onclick="toggleBrandDropdown()" style="cursor:pointer;white-space:nowrap">All Brands ▾</button>
               <div id="brand-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:260px;max-height:320px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
-                <div class="dd-done-bar"><button onclick="_closeBrandDropdown()">✓ Done</button></div>
                 <div style="padding:6px">
                   <input id="brand-dd-search" type="text" placeholder="Search brands…"
                     style="width:100%;padding:6px 10px;background:#252525;border:1px solid #3a3a3a;border-radius:4px;color:#eee;font-size:.82rem;outline:none;box-sizing:border-box"
@@ -4419,27 +4483,24 @@ tr.fav-row td:last-child{color:#4ade80}
             <div id="cond-dropdown" class="cond-dd" style="display:none;position:relative">
               <button id="cond-dd-btn" class="cat-sel" onclick="toggleCondDropdown()" style="cursor:pointer;white-space:nowrap">All Conditions ▾</button>
               <div id="cond-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:220px;max-height:300px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
-                <div class="dd-done-bar"><button onclick="_closeCondDropdown()">✓ Done</button></div>
                 <div style="overflow-y:auto;max-height:260px;padding:4px 0" id="cond-dd-inner"></div>
               </div>
             </div>
             <div id="cat-dropdown" class="cond-dd" style="display:none;position:relative">
               <button id="cat-dd-btn" class="cat-sel" onclick="toggleCatDropdown()" style="cursor:pointer;white-space:nowrap">All Categories ▾</button>
               <div id="cat-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:240px;max-height:300px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
-                <div class="dd-done-bar"><button onclick="_closeCatDropdown()">✓ Done</button></div>
                 <div style="overflow-y:auto;max-height:260px;padding:4px 0" id="cat-dd-inner"></div>
               </div>
             </div>
             <div id="subcat-dropdown" class="cond-dd" style="display:none;position:relative">
               <button id="subcat-dd-btn" class="cat-sel" onclick="toggleSubcatDropdown()" style="cursor:pointer;white-space:nowrap">All Subcategories ▾</button>
               <div id="subcat-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:240px;max-height:300px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
-                <div class="dd-done-bar"><button onclick="_closeSubDropdown()">✓ Done</button></div>
                 <div style="overflow-y:auto;max-height:260px;padding:4px 0" id="subcat-dd-inner"></div>
               </div>
             </div>
-            <!-- Keyword search -->
+            <!-- Keyword search (bottom of sheet on mobile, inline on desktop) -->
             <div id="res-search-wrap">
-              <input id="res-search" type="text" placeholder="Search results by keyword…" oninput="filterResults();_updateResSearchClear()" autocomplete="off">
+              <input id="res-search" type="text" placeholder="Search by keyword…" oninput="filterResults();_updateResSearchClear()" autocomplete="off">
               <button id="res-search-clear" onclick="clearResSearch()" title="Clear search" style="display:none;background:none;border:none;color:#888;font-size:.85rem;cursor:pointer;padding:0 4px;line-height:1">✕</button>
               <span id="res-search-count"></span>
             </div>
@@ -4520,8 +4581,8 @@ tr.fav-row td:last-child{color:#4ade80}
     <span class="mbb-label" id="mbb-check-label">Scan For New</span>
   </button>
   <button class="mbb-btn" id="mbb-filters" onclick="_mbbFilters()">
-    <span class="mbb-icon">🎛</span>
-    <span class="mbb-label">Filters</span>
+    <span class="mbb-icon">🔍</span>
+    <span class="mbb-label">Search & Filter</span>
     <span class="mbb-dot" id="mbb-filter-dot"></span>
   </button>
   <button class="mbb-btn" id="mbb-stores" onclick="_mbbStores()">
@@ -6641,6 +6702,149 @@ function autoSizeItemColumn() {
 window._selectedBrands = [];
 window._brandList = [];
 
+// ── Mobile filter accordion ───────────────────────────────────────────────────
+let _accOpenSection = null;
+
+function _accToggle(section) {
+  const body = document.getElementById('acc-' + section + '-body');
+  const arrow = document.getElementById('acc-' + section + '-arrow');
+  if (!body) return;
+  if (_accOpenSection === section) {
+    body.style.maxHeight = '0';
+    body.classList.remove('open');
+    arrow.classList.remove('open');
+    _accOpenSection = null;
+  } else {
+    if (_accOpenSection) {
+      const prev = document.getElementById('acc-' + _accOpenSection + '-body');
+      const prevArrow = document.getElementById('acc-' + _accOpenSection + '-arrow');
+      if (prev) { prev.style.maxHeight = '0'; prev.classList.remove('open'); }
+      if (prevArrow) prevArrow.classList.remove('open');
+    }
+    _accOpenSection = section;
+    if (section === 'brand') _accRenderBrand();
+    else if (section === 'cond') _accRenderCond();
+    else if (section === 'cat') _accRenderCat();
+    else if (section === 'sub') _accRenderSub();
+    body.classList.add('open');
+    arrow.classList.add('open');
+    body.style.maxHeight = body.scrollHeight + 'px';
+  }
+}
+
+function _accExpandHeight(section) {
+  const body = document.getElementById('acc-' + section + '-body');
+  if (body && _accOpenSection === section) body.style.maxHeight = body.scrollHeight + 'px';
+}
+
+function _accRenderBrand(query) {
+  const list = document.getElementById('acc-brand-list');
+  if (!list) return;
+  const q = (query !== undefined ? query : (document.getElementById('acc-brand-search')?.value || '')).toLowerCase();
+  let html = '';
+  (window._brandList || []).forEach(b => {
+    const name = (b && b.name !== undefined) ? b.name : b;
+    const count = (b && b.count !== undefined) ? b.count : '';
+    const isActive = (window._selectedBrands || []).includes(name);
+    if (count === 0 && !isActive) return;
+    if (q && !name.toLowerCase().includes(q)) return;
+    const esc = name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    html += '<div class="acc-item' + (isActive ? ' acc-active' : '') + '" onclick="_toggleBrand(\'' + esc + '\')">'
+      + '<span class="acc-check">' + (isActive ? '✓' : '') + '</span>'
+      + '<span class="acc-label">' + name + '</span>'
+      + (count !== '' ? '<span class="acc-count">' + Number(count).toLocaleString() + '</span>' : '')
+      + '</div>';
+  });
+  list.innerHTML = html || '<div class="acc-empty">No brands found</div>';
+  _accExpandHeight('brand');
+}
+
+function _accRenderCond() {
+  const list = document.getElementById('acc-cond-list');
+  if (!list) return;
+  let html = '';
+  (window._condList || []).forEach(c => {
+    const name = (c && c.name !== undefined) ? c.name : c;
+    const count = (c && c.count !== undefined) ? c.count : '';
+    const isActive = (window._selectedConds || []).includes(name);
+    if (count === 0 && !isActive) return;
+    const esc = name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    html += '<div class="acc-item' + (isActive ? ' acc-active' : '') + '" onclick="_toggleCond(\'' + esc + '\')">'
+      + '<span class="acc-check">' + (isActive ? '✓' : '') + '</span>'
+      + '<span class="acc-label">' + name + '</span>'
+      + (count !== '' ? '<span class="acc-count">' + Number(count).toLocaleString() + '</span>' : '')
+      + '</div>';
+  });
+  list.innerHTML = html || '<div class="acc-empty">No conditions</div>';
+  _accExpandHeight('cond');
+}
+
+function _accRenderCat() {
+  const list = document.getElementById('acc-cat-list');
+  if (!list) return;
+  let html = '';
+  (window._catList || []).forEach(c => {
+    const name = (c && c.name !== undefined) ? c.name : c;
+    const count = (c && c.count !== undefined) ? c.count : '';
+    const isActive = (window._selectedCats || []).includes(name);
+    if (count === 0 && !isActive) return;
+    const esc = name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    html += '<div class="acc-item' + (isActive ? ' acc-active' : '') + '" onclick="_toggleCat(\'' + esc + '\')">'
+      + '<span class="acc-check">' + (isActive ? '✓' : '') + '</span>'
+      + '<span class="acc-label">' + name + '</span>'
+      + (count !== '' ? '<span class="acc-count">' + Number(count).toLocaleString() + '</span>' : '')
+      + '</div>';
+  });
+  list.innerHTML = html || '<div class="acc-empty">No categories</div>';
+  _accExpandHeight('cat');
+}
+
+function _accRenderSub() {
+  const list = document.getElementById('acc-sub-list');
+  if (!list) return;
+  let html = '';
+  (window._subList || []).forEach(s => {
+    const name = (s && s.name !== undefined) ? s.name : s;
+    const count = (s && s.count !== undefined) ? s.count : '';
+    const isActive = (window._selectedSubs || []).includes(name);
+    if (count === 0 && !isActive) return;
+    const esc = name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    html += '<div class="acc-item' + (isActive ? ' acc-active' : '') + '" onclick="_toggleSub(\'' + esc + '\')">'
+      + '<span class="acc-check">' + (isActive ? '✓' : '') + '</span>'
+      + '<span class="acc-label">' + name + '</span>'
+      + (count !== '' ? '<span class="acc-count">' + Number(count).toLocaleString() + '</span>' : '')
+      + '</div>';
+  });
+  list.innerHTML = html || '<div class="acc-empty">No subcategories</div>';
+  _accExpandHeight('sub');
+}
+
+function _accUpdateSummaries() {
+  const fmt = (arr) => !arr.length ? '' : arr.length === 1 ? arr[0] : arr[0] + ' +' + (arr.length - 1);
+  const set = (id, arr) => { const el = document.getElementById(id); if (el) el.textContent = fmt(arr); };
+  set('acc-brand-summary', window._selectedBrands || []);
+  set('acc-cond-summary',  window._selectedConds  || []);
+  set('acc-cat-summary',   window._selectedCats   || []);
+  set('acc-sub-summary',   window._selectedSubs   || []);
+}
+
+function _accCloseAll() {
+  ['brand','cond','cat','sub'].forEach(s => {
+    const body = document.getElementById('acc-' + s + '-body');
+    const arrow = document.getElementById('acc-' + s + '-arrow');
+    if (body) { body.style.maxHeight = '0'; body.classList.remove('open'); }
+    if (arrow) arrow.classList.remove('open');
+  });
+  _accOpenSection = null;
+}
+
+function _accUpdateVisibility() {
+  const catAcc = document.getElementById('acc-cat');
+  const subAcc = document.getElementById('acc-sub');
+  if (catAcc) catAcc.style.display = (window._catList && window._catList.length) ? '' : 'none';
+  if (subAcc) subAcc.style.display = (window._subList && window._subList.length) ? '' : 'none';
+}
+
 function _closeAllDropdowns() {
   _closeBrandDropdown();
   _closeCondDropdown();
@@ -6700,6 +6904,7 @@ function _toggleBrand(brand) {
   else window._selectedBrands.push(brand);
   _updateBrandBtn();
   _renderBrandList();
+  if (_isMobile()) { _accRenderBrand(); _accUpdateSummaries(); }
   filterResults();
 }
 
@@ -6782,6 +6987,7 @@ function _toggleCond(cond) {
   }
   _updateCondBtn();
   _renderCondList();
+  if (_isMobile()) { _accRenderCond(); _accUpdateSummaries(); }
   filterResults();
 }
 
@@ -6850,6 +7056,7 @@ function _toggleCat(cat) {
   // When categories change, reset subcategories
   window._selectedSubs = [];
   _updateSubcatBtn();
+  if (_isMobile()) { _accRenderCat(); _accRenderSub(); _accUpdateSummaries(); }
   filterResults();
 }
 function _updateCatBtn() {
@@ -6861,6 +7068,7 @@ function _updateCatBtn() {
 function _setCatList(categories) {
   window._catList = categories || [];
   document.getElementById('cat-dropdown').style.display = categories && categories.length ? '' : 'none';
+  _accUpdateVisibility();
 }
 
 // ── Subcategory multi-select dropdown ────────────────────────────────────────
@@ -6908,6 +7116,7 @@ function _toggleSub(sub) {
   else window._selectedSubs.push(sub);
   _updateSubcatBtn();
   _renderSubList();
+  if (_isMobile()) { _accRenderSub(); _accUpdateSummaries(); }
   filterResults();
 }
 function _updateSubcatBtn() {
@@ -6919,6 +7128,7 @@ function _updateSubcatBtn() {
 function _setSubList(subcategories) {
   window._subList = subcategories || [];
   document.getElementById('subcat-dropdown').style.display = subcategories && subcategories.length ? '' : 'none';
+  _accUpdateVisibility();
 }
 
 // ── Results filter ────────────────────────────────────────────────────────────
@@ -6930,6 +7140,7 @@ function clearFilters() {
   window._selectedCats = []; _updateCatBtn();
   window._selectedSubs = []; _updateSubcatBtn(); _setSubList([]);
   document.getElementById('clear-filters-btn').style.display = 'none';
+  _accCloseAll(); _accUpdateSummaries();
   // Clear keyword search box too
   const resSearch = document.getElementById('res-search');
   if (resSearch) { resSearch.value = ''; }
@@ -7504,7 +7715,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.7.6"
+APP_VERSION = "2.7.7"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
