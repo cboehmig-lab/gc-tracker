@@ -3964,9 +3964,9 @@ tr.fav-row td:last-child{color:#4ade80}
   .filter-done-btn:active{background:#a00}
   /* Dropdowns still appear above sheet */
   #brand-dd-panel,#cond-dd-panel,#cat-dd-panel,#subcat-dd-panel{z-index:200!important}
-  /* ✓ Done bar — sticky at top of dropdown so it's always reachable */
+  /* ✓ Done bar — pinned at top of each dropdown on mobile */
   .dd-done-bar{
-    position:sticky;top:0;z-index:1;
+    display:block!important;flex-shrink:0;
     background:#1e1e1e;border-bottom:1px solid #333;
     padding:0;text-align:center
   }
@@ -3979,7 +3979,8 @@ tr.fav-row td:last-child{color:#4ade80}
 
   /* ── Filter dropdown panels: full-width overlay on mobile ── */
   #brand-dropdown,#cond-dropdown,#cat-dropdown,#subcat-dropdown{position:static}
-  #brand-dd-panel,#cond-dd-panel,#cat-dd-panel,#subcat-dd-panel{position:fixed!important;left:8px!important;right:8px!important;top:auto!important;bottom:8px!important;width:auto!important;max-height:50vh!important;z-index:200!important;border-radius:12px!important;margin-top:0!important}
+  #brand-dd-panel,#cond-dd-panel,#cat-dd-panel,#subcat-dd-panel{position:fixed!important;left:8px!important;right:8px!important;top:12vh!important;bottom:auto!important;width:auto!important;max-height:65vh!important;z-index:200!important;border-radius:12px!important;margin-top:0!important;display:flex!important;flex-direction:column!important;overflow:hidden!important}
+  #brand-dd-list,#cond-dd-inner,#cat-dd-inner,#subcat-dd-inner{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
   .brand-dd-item{padding:10px 14px;font-size:.9rem}
   .brand-dd-item .bcount{font-size:.8rem}
   .cond-dd-item{padding:10px 14px;font-size:.9rem}
@@ -4264,7 +4265,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.7.5</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.7.6</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -7503,7 +7504,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.7.5"
+APP_VERSION = "2.7.6"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
