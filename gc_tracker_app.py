@@ -1967,6 +1967,547 @@ def api_clear_blocklist():
 def index():
     return HTML_TEMPLATE
 
+@app.route("/cl")
+def cl_page():
+    return CL_TEMPLATE
+
+CL_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>CL Used Gear Search</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;height:100dvh;background:#111;color:#ddd;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overflow:hidden}
+/* ── Header ── */
+header{background:#1a1a2e;border-bottom:2px solid #a5b4fc;padding:10px 20px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+header h1{font-size:.95rem;font-weight:700;color:#c7d2fe;letter-spacing:.02em;flex:1}
+header h1 span{font-size:.6rem;font-weight:400;opacity:.55;margin-left:4px}
+#hdr-user{font-size:.75rem;color:#888}
+#hdr-signout{padding:4px 10px;background:none;border:1px solid #3a3a3a;border-radius:4px;color:#888;font-size:.72rem;cursor:pointer}
+#hdr-signout:hover{border-color:#a5b4fc;color:#c7d2fe}
+/* ── Layout ── */
+.cl-wrap{display:flex;height:calc(100% - 44px);overflow:hidden}
+/* ── City sidebar ── */
+.cl-left{width:220px;min-width:200px;background:#1a1a1a;border-right:1px solid #2e2e2e;display:flex;flex-direction:column;flex-shrink:0}
+.cl-left .search-wrap{padding:10px 12px;border-bottom:1px solid #2e2e2e;flex-shrink:0}
+#cl-city-search{width:100%;padding:7px 11px;border-radius:5px;background:#252525;border:1px solid #3a3a3a;color:#eee;font-size:.875rem;outline:none}
+#cl-city-search:focus{border-color:#a5b4fc;box-shadow:0 0 0 3px rgba(165,180,252,.15)}
+.cl-sel-btns{display:flex;gap:6px;margin-top:8px}
+.cl-sel-btn{flex:1;padding:5px;background:#252525;border:1px solid #3a3a3a;border-radius:4px;color:#aaa;font-size:.75rem;cursor:pointer}
+.cl-sel-btn:hover{border-color:#a5b4fc;color:#fff}
+.cl-sel-btn.active{border-color:#a5b4fc;color:#c7d2fe;background:#1a1f35}
+#cl-city-list{flex:1;overflow-y:auto;padding:4px 0}
+.cl-city-row{display:flex;align-items:center;padding:6px 12px;gap:8px;cursor:pointer}
+.cl-city-row:hover{background:#222}
+.cl-city-row input[type=checkbox]{accent-color:#a5b4fc;flex-shrink:0;cursor:pointer}
+.cl-city-row label{flex:1;font-size:.855rem;cursor:pointer}
+.cl-fav-btn{background:none;border:none;cursor:pointer;font-size:1rem;line-height:1;padding:0 4px;color:#444;flex-shrink:0;transition:color .15s}
+.cl-fav-btn.active,.cl-fav-btn:hover{color:#f5c518}
+/* ── Right panel ── */
+.cl-right{display:flex;flex-direction:column;flex:1;overflow:hidden}
+.cl-search-bar{padding:12px 16px;border-bottom:1px solid #2e2e2e;display:flex;gap:10px;align-items:center;flex-shrink:0;background:#111}
+#cl-query{flex:1;padding:9px 14px;border-radius:6px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.95rem;outline:none}
+#cl-query:focus{border-color:#a5b4fc;box-shadow:0 0 0 3px rgba(165,180,252,.15)}
+#cl-search-btn{padding:9px 20px;background:#a5b4fc;color:#111;border:none;border-radius:6px;font-size:.88rem;font-weight:700;cursor:pointer;white-space:nowrap}
+#cl-search-btn:hover{background:#818cf8;color:#fff}
+#cl-search-btn:disabled{opacity:.6;cursor:not-allowed}
+#cl-status{font-size:.8rem;color:#c7d2fe;padding:0 4px}
+.cl-results-hdr{padding:10px 16px;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;gap:10px;flex-shrink:0;background:#141414}
+#cl-count{font-size:.85rem;color:#c7d2fe;font-weight:600}
+.cl-chip{padding:5px 10px;border-radius:14px;background:#1e1e1e;border:1px solid #3a3a3a;color:#aaa;font-size:.78rem;cursor:pointer;white-space:nowrap}
+.cl-chip:hover{border-color:#555;color:#ccc}
+.cl-chip.wl-active{background:#1a1f35;border-color:#a5b4fc;color:#c7d2fe}
+#cl-wl-link{color:#4ade80;cursor:pointer;font-size:.78rem;text-decoration:none;margin-left:auto}
+#cl-wl-link:hover{text-decoration:underline}
+#cl-res-search{padding:5px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;width:200px}
+#cl-res-search:focus{border-color:#a5b4fc}
+#cl-body{flex:1;overflow-y:auto}
+#cl-body table{width:100%;border-collapse:collapse;font-size:.83rem;table-layout:auto}
+#cl-body th{background:#161616;color:#666;font-weight:600;text-align:left;padding:7px 10px;font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:0;cursor:pointer;user-select:none;white-space:nowrap}
+#cl-body th:hover{color:#ccc}
+#cl-body th.sort-asc::after{content:" ▲";color:#a5b4fc;font-size:.6rem}
+#cl-body th.sort-desc::after{content:" ▼";color:#a5b4fc;font-size:.6rem}
+#cl-body td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0}
+#cl-body td:nth-child(1){width:30px;min-width:30px;max-width:30px;text-align:center;overflow:visible}
+#cl-body td:nth-child(2){width:52px;min-width:52px;max-width:52px;text-align:center;overflow:visible}
+#cl-body td:nth-child(3){width:50%;max-width:none}
+#cl-body td:nth-child(4){width:90px}
+#cl-body td:nth-child(5){width:160px}
+#cl-body td:nth-child(6){width:90px}
+#cl-body tr:hover td{background:#161616}
+#cl-body tr.cl-fav-result td{background:#1a1f35}
+#cl-body tr.cl-fav-result:hover td{background:#252b45}
+#cl-body td a{color:#c7d2fe;text-decoration:none}
+#cl-body td a:hover{text-decoration:underline}
+.cl-empty{padding:40px;color:#555;font-size:.9rem;text-align:center;line-height:1.7}
+.cl-fav-star{color:#f5c518;margin-right:4px;font-size:.8rem}
+.watch-btn{background:none;border:none;cursor:pointer;font-size:1rem;color:#444;padding:0;line-height:1;transition:color .15s}
+.watch-btn.active{color:#f5c518}
+.watch-btn:hover{color:#f5c518}
+.tag-kw{display:inline-block;background:#14532d;color:#4ade80;font-size:.6rem;font-weight:700;padding:1px 5px;border-radius:3px;letter-spacing:.5px;vertical-align:middle}
+/* ── Auth modal ── */
+#auth-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:500;align-items:center;justify-content:center}
+#auth-modal.open{display:flex}
+.auth-box{background:#1a1a1a;border:1px solid #2e2e2e;border-radius:12px;padding:32px;width:340px;max-width:92vw}
+.auth-box h2{color:#c7d2fe;font-size:1.1rem;margin-bottom:6px}
+.auth-box p{color:#888;font-size:.82rem;margin-bottom:20px;line-height:1.5}
+.auth-field{margin-bottom:14px}
+.auth-field label{display:block;font-size:.78rem;color:#888;margin-bottom:5px}
+.auth-field input{width:100%;padding:9px 12px;background:#252525;border:1px solid #3a3a3a;border-radius:6px;color:#eee;font-size:.9rem;outline:none}
+.auth-field input:focus{border-color:#a5b4fc}
+.auth-submit{width:100%;padding:10px;background:#a5b4fc;color:#111;border:none;border-radius:6px;font-size:.9rem;font-weight:700;cursor:pointer;margin-top:4px}
+.auth-submit:hover{background:#818cf8;color:#fff}
+.auth-err{color:#f87171;font-size:.78rem;margin-top:8px;display:none}
+/* ── Mobile ── */
+@media(max-width:700px){
+  header{padding:8px 14px}
+  header h1{font-size:.82rem}
+  .cl-wrap{flex-direction:column;height:calc(100% - 40px)}
+  .cl-left{width:100%;min-width:0;max-height:42vh;border-right:none;border-bottom:1px solid #2e2e2e}
+  .cl-right{flex:1;min-height:0}
+  .cl-search-bar{padding:8px 12px;gap:8px;flex-wrap:wrap}
+  #cl-query{flex:1 1 100%;font-size:.9rem;padding:8px 12px}
+  #cl-search-btn{flex:1;font-size:.85rem;padding:8px 12px}
+  #cl-body{overflow:auto;-webkit-overflow-scrolling:touch}
+  #cl-body table{min-width:500px}
+  #cl-res-search{width:100%;margin-left:0}
+  .cl-results-hdr{flex-wrap:wrap;gap:6px;padding:6px 12px}
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>CL Used Gear Search <span>craigslist aggregator</span></h1>
+  <span id="hdr-user"></span>
+  <button id="hdr-signout" style="display:none" onclick="clSignOut()">Sign Out</button>
+</header>
+
+<div class="cl-wrap">
+  <!-- City sidebar -->
+  <div class="cl-left">
+    <div class="search-wrap">
+      <input id="cl-city-search" type="text" placeholder="Search cities…" autocomplete="off" oninput="clFilterCities()">
+      <div class="cl-sel-btns">
+        <button class="cl-sel-btn" id="cl-favs-btn" onclick="clToggleFavs()">★ Favorites</button>
+        <button class="cl-sel-btn" onclick="clSelectAll()">Select All</button>
+        <button class="cl-sel-btn" onclick="clClearAll()">Clear All</button>
+      </div>
+    </div>
+    <div id="cl-city-list"></div>
+  </div>
+
+  <!-- Search + results -->
+  <div class="cl-right">
+    <div class="cl-search-bar">
+      <input id="cl-query" type="text" placeholder="e.g. telecaster, les paul, fender twin…"
+        autocomplete="off" onkeydown="if(event.key==='Enter') clSearch()">
+      <span id="cl-status"></span>
+      <button id="cl-search-btn" onclick="clSearch()">Search</button>
+    </div>
+
+    <div class="cl-results-hdr" id="cl-toolbar">
+      <button id="cl-watchlist-toggle" class="cl-chip" onclick="clToggleWatchFilter()">★ Watch List</button>
+      <button id="cl-wantlist-btn" class="cl-chip" onclick="clSearchWantList()">🎯 Want List</button>
+      <a id="cl-wl-link" style="display:none" onclick="clSearchWantList()">Clear Want List Search</a>
+    </div>
+
+    <div class="cl-results-hdr" id="cl-results-hdr" style="display:none">
+      <span id="cl-count"></span>
+      <input id="cl-res-search" type="text" placeholder="Filter results…" oninput="clFilterResults()" autocomplete="off">
+    </div>
+
+    <div id="cl-body">
+      <div class="cl-empty">Select cities on the left, enter a search term, and press Search.<br><br>
+        Searches all selected Craigslist markets simultaneously for used musical gear.</div>
+    </div>
+  </div>
+</div>
+
+<!-- Auth modal -->
+<div id="auth-modal" class="open">
+  <div class="auth-box">
+    <h2>Sign In</h2>
+    <p>Sign in with your GC Tracker account to search Craigslist.</p>
+    <div class="auth-field"><label>Username</label><input id="auth-user" type="text" autocomplete="username"></div>
+    <div class="auth-field"><label>Password</label><input id="auth-pw" type="password" autocomplete="current-password"
+      onkeydown="if(event.key==='Enter') clDoLogin()"></div>
+    <button class="auth-submit" onclick="clDoLogin()">Sign In</button>
+    <div class="auth-err" id="auth-err"></div>
+  </div>
+</div>
+
+<script>
+// ── localStorage helpers ──────────────────────────────────────────────────────
+function _lsGet(key, fallback) {
+  try { const v = localStorage.getItem('gt_' + key); return v ? JSON.parse(v) : fallback; }
+  catch(e) { return fallback; }
+}
+function _lsSet(key, val) {
+  try { localStorage.setItem('gt_' + key, JSON.stringify(val)); } catch(e) {}
+}
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+async function clDoLogin() {
+  const user = document.getElementById('auth-user').value.trim();
+  const pw   = document.getElementById('auth-pw').value;
+  const err  = document.getElementById('auth-err');
+  err.style.display = 'none';
+  if (!user || !pw) { err.textContent = 'Please fill in both fields.'; err.style.display = 'block'; return; }
+  const btn = document.querySelector('#auth-modal .auth-submit');
+  btn.disabled = true; btn.textContent = 'Signing in…';
+  try {
+    const r = await fetch('/api/login', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:user,password:pw})});
+    const d = await r.json();
+    if (d.success) {
+      document.getElementById('auth-modal').classList.remove('open');
+      document.getElementById('hdr-user').textContent = user;
+      document.getElementById('hdr-signout').style.display = '';
+      window._keywords = _lsGet('keywords', []);
+      window._clWatchlist = _lsGet('cl_watchlist', {});
+    } else {
+      err.textContent = d.error || 'Login failed.'; err.style.display = 'block';
+    }
+  } catch(e) { err.textContent = 'Network error.'; err.style.display = 'block'; }
+  btn.disabled = false; btn.textContent = 'Sign In';
+}
+
+async function clSignOut() {
+  await fetch('/api/logout', {method:'POST'});
+  document.getElementById('hdr-user').textContent = '';
+  document.getElementById('hdr-signout').style.display = 'none';
+  document.getElementById('auth-modal').classList.add('open');
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+window._keywords    = [];
+window._clWatchlist = {};
+
+document.addEventListener('DOMContentLoaded', async () => {
+  window._keywords    = _lsGet('keywords', []);
+  window._clWatchlist = _lsGet('cl_watchlist', {});
+  let _clFavsStore = [];
+  try { _clFavsStore = JSON.parse(localStorage.getItem('cl_favs') || '[]'); } catch(e) {}
+  _clFavs = _clFavsStore;
+
+  clRenderCities(true);
+
+  try {
+    const r = await fetch('/api/me');
+    const d = await r.json();
+    if (d.logged_in) {
+      document.getElementById('auth-modal').classList.remove('open');
+      document.getElementById('hdr-user').textContent = d.username;
+      document.getElementById('hdr-signout').style.display = '';
+    }
+  } catch(e) {}
+});
+
+// ── City list ─────────────────────────────────────────────────────────────────
+const CL_CITIES = [
+  {id:'albuquerque',label:'Albuquerque'}, {id:'atlanta',label:'Atlanta'},
+  {id:'austin',label:'Austin'},           {id:'baltimore',label:'Baltimore'},
+  {id:'boise',label:'Boise'},             {id:'boston',label:'Boston'},
+  {id:'buffalo',label:'Buffalo'},         {id:'charlotte',label:'Charlotte'},
+  {id:'chicago',label:'Chicago'},         {id:'cincinnati',label:'Cincinnati'},
+  {id:'cleveland',label:'Cleveland'},     {id:'columbus',label:'Columbus'},
+  {id:'dallas',label:'Dallas'},           {id:'denver',label:'Denver'},
+  {id:'desmoines',label:'Des Moines'},    {id:'detroit',label:'Detroit'},
+  {id:'elpaso',label:'El Paso'},          {id:'fortworth',label:'Fort Worth'},
+  {id:'fresno',label:'Fresno'},           {id:'grandrapids',label:'Grand Rapids'},
+  {id:'greensboro',label:'Greensboro'},   {id:'hartford',label:'Hartford'},
+  {id:'honolulu',label:'Honolulu'},       {id:'houston',label:'Houston'},
+  {id:'indianapolis',label:'Indianapolis'},{id:'jacksonville',label:'Jacksonville'},
+  {id:'kansascity',label:'Kansas City'},  {id:'knoxville',label:'Knoxville'},
+  {id:'lasvegas',label:'Las Vegas'},      {id:'losangeles',label:'Los Angeles'},
+  {id:'louisville',label:'Louisville'},   {id:'madison',label:'Madison'},
+  {id:'memphis',label:'Memphis'},         {id:'miami',label:'Miami'},
+  {id:'milwaukee',label:'Milwaukee'},     {id:'minneapolis',label:'Minneapolis'},
+  {id:'nashville',label:'Nashville'},     {id:'neworleans',label:'New Orleans'},
+  {id:'newyork',label:'New York'},        {id:'norfolk',label:'Norfolk'},
+  {id:'oklahomacity',label:'Oklahoma City'},{id:'omaha',label:'Omaha'},
+  {id:'orlando',label:'Orlando'},         {id:'philadelphia',label:'Philadelphia'},
+  {id:'phoenix',label:'Phoenix'},         {id:'pittsburgh',label:'Pittsburgh'},
+  {id:'portland',label:'Portland'},       {id:'providence',label:'Providence'},
+  {id:'raleigh',label:'Raleigh'},         {id:'richmond',label:'Richmond'},
+  {id:'riverside',label:'Riverside'},     {id:'rochester',label:'Rochester'},
+  {id:'sacramento',label:'Sacramento'},   {id:'saltlakecity',label:'Salt Lake City'},
+  {id:'sanantonio',label:'San Antonio'},  {id:'sandiego',label:'San Diego'},
+  {id:'sfbay',label:'SF Bay Area'},       {id:'seattle',label:'Seattle'},
+  {id:'spokane',label:'Spokane'},         {id:'stlouis',label:'St. Louis'},
+  {id:'syracuse',label:'Syracuse'},       {id:'tampabay',label:'Tampa Bay'},
+  {id:'toledo',label:'Toledo'},           {id:'tucson',label:'Tucson'},
+  {id:'tulsa',label:'Tulsa'},             {id:'virginiabeach',label:'Virginia Beach'},
+  {id:'washingtondc',label:'Washington DC'},{id:'wichita',label:'Wichita'},
+];
+
+let _clFavs = [];
+let _clFavsOnly = false;
+let _clData = [];
+let _clSortCol = null, _clSortDir = 1;
+const _clCols = ['title','price','location','date','relevance'];
+
+function clSaveFavs() {
+  try { localStorage.setItem('cl_favs', JSON.stringify(_clFavs)); } catch(e) {}
+}
+
+function clRenderCities(selectAll) {
+  const q = (document.getElementById('cl-city-search').value || '').toLowerCase();
+  const list = document.getElementById('cl-city-list');
+  const cities = _clFavsOnly
+    ? CL_CITIES.filter(c => _clFavs.includes(c.id))
+    : (q ? CL_CITIES.filter(c => c.label.toLowerCase().includes(q)) : CL_CITIES);
+  list.innerHTML = '';
+  cities.forEach(c => {
+    const isFav = _clFavs.includes(c.id);
+    const div = document.createElement('div');
+    div.className = 'cl-city-row';
+    const cbId = 'cl_cb_' + c.id;
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.id = cbId; cb.value = c.id;
+    if (selectAll) cb.checked = true;
+    const lbl = document.createElement('label');
+    lbl.htmlFor = cbId; lbl.textContent = c.label;
+    const btn = document.createElement('button');
+    btn.className = 'cl-fav-btn' + (isFav ? ' active' : '');
+    btn.title = (isFav ? 'Remove from' : 'Add to') + ' favorites';
+    btn.textContent = '★';
+    btn.addEventListener('click', e => { e.stopPropagation(); clToggleFav(c.id, btn); });
+    div.appendChild(cb); div.appendChild(lbl); div.appendChild(btn);
+    list.appendChild(div);
+  });
+}
+
+function clFilterCities() { clRenderCities(); }
+function clSelectAll() { document.querySelectorAll('#cl-city-list input[type=checkbox]').forEach(cb => cb.checked = true); }
+function clClearAll()  { document.querySelectorAll('#cl-city-list input[type=checkbox]').forEach(cb => cb.checked = false); }
+function clGetSelected() { return [...document.querySelectorAll('#cl-city-list input[type=checkbox]:checked')].map(cb => cb.value); }
+
+function clToggleFavs() {
+  _clFavsOnly = !_clFavsOnly;
+  document.getElementById('cl-favs-btn').classList.toggle('active', _clFavsOnly);
+  document.getElementById('cl-city-search').value = '';
+  clRenderCities();
+}
+
+function clToggleFav(id, btn) {
+  if (_clFavs.includes(id)) { _clFavs = _clFavs.filter(f => f !== id); btn.classList.remove('active'); }
+  else { _clFavs.push(id); btn.classList.add('active'); }
+  clSaveFavs();
+  if (_clFavsOnly) clRenderCities();
+}
+
+// ── Search ────────────────────────────────────────────────────────────────────
+async function clSearch() {
+  const q = document.getElementById('cl-query').value.trim();
+  if (!q) return;
+  const selected = clGetSelected();
+  const btn = document.getElementById('cl-search-btn');
+  const status = document.getElementById('cl-status');
+  btn.disabled = true; btn.textContent = 'Searching…';
+  const cityCount = selected.length || CL_CITIES.length;
+  status.textContent = 'Searching ' + cityCount + ' markets…';
+  document.getElementById('cl-results-hdr').style.display = 'none';
+  document.getElementById('cl-body').innerHTML = '<div class="cl-empty">Searching…</div>';
+  try {
+    const cities = selected.length ? selected.join(',') : '';
+    const r = await fetch('/api/cl-search?q=' + encodeURIComponent(q) + (cities ? '&cities=' + encodeURIComponent(cities) : ''));
+    if (!r.ok) { document.getElementById('cl-body').innerHTML = '<div class="cl-empty" style="color:#f88">Search failed (HTTP ' + r.status + '). Try selecting fewer cities.</div>'; return; }
+    let d;
+    try { d = await r.json(); }
+    catch(e) { document.getElementById('cl-body').innerHTML = '<div class="cl-empty" style="color:#f88">Server returned an invalid response — the request may have timed out. Try fewer cities.</div>'; return; }
+    if (d.error) { document.getElementById('cl-body').innerHTML = '<div class="cl-empty" style="color:#f88">' + d.error + '</div>'; return; }
+    _clData = d.results || [];
+    const rawQ = q.trim();
+    if (rawQ) {
+      let matchFn;
+      if (rawQ.startsWith('"') && rawQ.endsWith('"') && rawQ.length > 2) {
+        const phrase = rawQ.slice(1,-1).toLowerCase();
+        matchFn = item => (item.title||'').toLowerCase().includes(phrase);
+      } else {
+        const words = rawQ.toLowerCase().split(/\\s+/).filter(Boolean);
+        matchFn = item => { const t=(item.title||'').toLowerCase(); return words.every(w=>t.includes(w)); };
+      }
+      _clData = _clData.filter(matchFn);
+    }
+    status.textContent = '';
+    clRenderResults();
+  } catch(e) {
+    document.getElementById('cl-body').innerHTML = '<div class="cl-empty" style="color:#f88">Search failed: ' + e.message + '</div>';
+  } finally { btn.disabled = false; btn.textContent = 'Search'; }
+}
+
+function clFilterResults() {
+  const q = (document.getElementById('cl-res-search').value || '').toLowerCase();
+  const selectedCities = new Set(clGetSelected());
+  const rows = document.querySelectorAll('#cl-body tbody tr');
+  let visible = 0;
+  rows.forEach(row => {
+    const textMatch  = !q || row.textContent.toLowerCase().includes(q);
+    const favMatch   = !_clFavsOnly || _clFavs.includes(row.dataset.city || '');
+    const watchMatch = !_clWatchFilterActive || !!(window._clWatchlist||{})[row.dataset.clId||''];
+    const wantMatch  = !_clWantListFilterActive || _clMatchesWantList(row.querySelector('td:nth-child(3)')?.textContent || '');
+    const show = textMatch && favMatch && watchMatch && wantMatch;
+    row.style.display = show ? '' : 'none';
+    if (show) visible++;
+  });
+  document.getElementById('cl-count').textContent =
+    (q||_clFavsOnly||_clWatchFilterActive||_clWantListFilterActive) ? (visible+' of '+_clData.length+' listings') : (_clData.length+' listings');
+}
+
+function _clMatchesWantList(title) {
+  if (!window._keywords || !window._keywords.length) return false;
+  const text = (title||'').toLowerCase();
+  return window._keywords.some(kw => {
+    kw = kw.trim();
+    if (kw.startsWith('"') && kw.endsWith('"') && kw.length>2) return text.includes(kw.slice(1,-1).toLowerCase());
+    if (kw.includes(',')) return kw.split(',').map(t=>t.trim().toLowerCase()).filter(Boolean).every(t=>text.includes(t));
+    return text.includes(kw.toLowerCase());
+  });
+}
+
+function clRenderResults() {
+  const hdr  = document.getElementById('cl-results-hdr');
+  const body = document.getElementById('cl-body');
+  if (!_clData.length) {
+    body.innerHTML = '<div class="cl-empty">No listings found. Try a different search or select more cities.</div>';
+    hdr.style.display = 'none'; return;
+  }
+  document.getElementById('cl-count').textContent = _clData.length + ' listings';
+  document.getElementById('cl-res-search').value = '';
+  hdr.style.display = 'flex';
+  const labels = ['','Want','Item','Price','Location','Date'];
+  let html = '<table><thead><tr>';
+  labels.forEach((l,i) => {
+    if (i===0) { html += '<th style="width:30px"></th>'; return; }
+    if (i===1) { html += '<th style="width:62px;text-align:center">Want</th>'; return; }
+    const si = i-2;
+    const cls = _clSortCol===si ? (_clSortDir===1?'sort-asc':'sort-desc') : '';
+    html += '<th class="'+cls+'" onclick="clSort('+si+')">' + l + '</th>';
+  });
+  html += '</tr></thead><tbody>';
+  const rawQ = (document.getElementById('cl-query').value||'').trim().toLowerCase();
+  const qWords = rawQ.split(/\\s+/).filter(Boolean);
+  function relevance(title) {
+    const t=(title||'').toLowerCase();
+    if (!rawQ) return 0;
+    if (t.includes(rawQ)) return 3;
+    if (qWords.every(w=>t.includes(w))) return 2;
+    if (qWords.some(w=>t.includes(w))) return 1;
+    return 0;
+  }
+  let sorted = [..._clData];
+  if (_clSortCol !== null) {
+    const key = _clCols[_clSortCol];
+    sorted.sort((a,b) => {
+      if (key==='relevance') return _clSortDir*(relevance(b.title)-relevance(a.title));
+      const av=a[key]||'', bv=b[key]||'';
+      if (key==='price') return _clSortDir*((parseFloat(String(av).replace(/[^0-9.]/g,''))||0)-(parseFloat(String(bv).replace(/[^0-9.]/g,''))||0));
+      return _clSortDir*String(av).localeCompare(String(bv));
+    });
+  }
+  const isFavR = r => _clFavs.includes(r.cityId);
+  let final;
+  if (_clSortCol===null) {
+    const sc = r=>relevance(r.title);
+    final = [...sorted.filter(r=>isFavR(r)).sort((a,b)=>sc(b)-sc(a)), ...sorted.filter(r=>!isFavR(r)).sort((a,b)=>sc(b)-sc(a))];
+  } else { final = sorted; }
+  final.forEach(r => {
+    const isFav = isFavR(r);
+    const clId  = 'cl:' + (r.url||r.title||'');
+    const isWatched = !!(window._clWatchlist||{})[clId];
+    const watchBtn = '<button class="watch-btn'+(isWatched?' active':'')+'" onclick="clToggleWatch('+JSON.stringify(clId)+','+JSON.stringify(r.title||'')+','+JSON.stringify(r.url||'')+','+JSON.stringify(r.price||'')+','+JSON.stringify(r.location||'')+',this)" title="'+(isWatched?'Remove from':'Add to')+' watch list">'+(isWatched?'★':'☆')+'</button>';
+    const wantMatch = _clMatchesWantList(r.title||'');
+    const titleCell = r.url ? (isFav?'<span class="cl-fav-star">★</span>':'')+' <a href="'+r.url+'" target="_blank" rel="noopener">'+(r.title||'(no title)')+'</a>'
+                             : (isFav?'<span class="cl-fav-star">★</span>':'')+' '+(r.title||'(no title)');
+    html += '<tr class="'+(isFav?'cl-fav-result':'')+'" data-city="'+(r.cityId||'')+'" data-cl-id="'+clId.replace(/"/g,'&quot;')+'">'
+      + '<td>'+watchBtn+'</td>'
+      + '<td style="text-align:center">'+(wantMatch?'<span class="tag-kw">WANT</span>':'')+'</td>'
+      + '<td title="'+(r.title||'').replace(/"/g,'&quot;')+'">'+titleCell+'</td>'
+      + '<td>'+(r.price||'')+'</td>'
+      + '<td>'+(r.location||'')+'</td>'
+      + '<td>'+(r.date||'')+'</td></tr>';
+  });
+  html += '</tbody></table>';
+  body.innerHTML = html;
+}
+
+function clSort(col) {
+  if (_clSortCol===col) { _clSortDir*=-1; } else { _clSortCol=col; _clSortDir=1; }
+  clRenderResults();
+}
+
+let _clWatchFilterActive = false;
+let _clWantListFilterActive = false;
+
+function clToggleWatchFilter() {
+  _clWatchFilterActive = !_clWatchFilterActive;
+  document.getElementById('cl-watchlist-toggle').classList.toggle('wl-active', _clWatchFilterActive);
+  clFilterResults();
+}
+
+async function clSearchWantList() {
+  if (_clWantListFilterActive) {
+    _clWantListFilterActive = false;
+    document.getElementById('cl-wl-link').style.display = 'none';
+    document.getElementById('cl-wantlist-btn').classList.remove('wl-active');
+    clFilterResults(); return;
+  }
+  if (!window._keywords || !window._keywords.length) {
+    alert('No want list keywords saved. Add keywords on the main GC Tracker page first.');
+    return;
+  }
+  const wlBtn = document.getElementById('cl-wantlist-btn');
+  const status = document.getElementById('cl-status');
+  wlBtn.classList.add('wl-active');
+  status.textContent = 'Searching want list…';
+  document.getElementById('cl-results-hdr').style.display = 'none';
+  document.getElementById('cl-body').innerHTML = '<div class="cl-empty">Searching want list across all markets…</div>';
+  try {
+    const allResults = [], seenKeys = new Set();
+    for (const kw of window._keywords) {
+      let q = kw.trim();
+      if (q.startsWith('"') && q.endsWith('"') && q.length>2) q = q.slice(1,-1);
+      if (!q) continue;
+      try {
+        const r = await fetch('/api/cl-search?q='+encodeURIComponent(q)+'&title_only=1');
+        if (r.ok) {
+          const d = await r.json();
+          for (const item of (d.results||[])) {
+            const key = (item.title||'').toLowerCase().trim()+'|'+(item.price||'')+'|'+(item.cityId||'');
+            if (!seenKeys.has(key)) { seenKeys.add(key); allResults.push(item); }
+          }
+        }
+      } catch(e) {}
+      status.textContent = 'Searched "'+q+'"… ('+allResults.length+' results so far)';
+    }
+    _clData = allResults.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+    _clWantListFilterActive = true;
+    document.getElementById('cl-wl-link').style.display = 'inline';
+    status.textContent = '';
+    clRenderResults();
+  } catch(e) {
+    document.getElementById('cl-body').innerHTML = '<div class="cl-empty" style="color:#f88">Want list search failed: '+e.message+'</div>';
+    wlBtn.classList.remove('wl-active');
+    status.textContent = '';
+  }
+}
+
+function clToggleWatch(id, name, url, price, location, btn) {
+  const isWatched = !!(window._clWatchlist[id]);
+  if (isWatched) { delete window._clWatchlist[id]; }
+  else { window._clWatchlist[id] = {name,url,store:location,price,date_added:new Date().toISOString().slice(0,10)}; }
+  _lsSet('cl_watchlist', window._clWatchlist);
+  btn.classList.toggle('active', !isWatched);
+  btn.textContent = isWatched ? '☆' : '★';
+  btn.title = isWatched ? 'Add to watch list' : 'Remove from watch list';
+}
+</script>
+</body>
+</html>"""
+
 @app.route("/download/excel")
 @login_required
 def download_excel():
