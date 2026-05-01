@@ -3543,6 +3543,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#111;color:#eee;height:100vh;display:flex;flex-direction:column}
 
 header{background:#c00;padding:12px 24px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+.mobile-title-bar{display:none}
 header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #stop-btn{display:none;padding:7px 14px;background:#fff;color:#c00;border:none;border-radius:5px;font-size:.82rem;font-weight:700;cursor:pointer;white-space:nowrap}
 #stop-btn:hover{background:#ffe0e0}
@@ -3831,6 +3832,7 @@ tr.fav-row td:last-child{color:#4ade80}
 
   /* ── Header: HIDDEN on mobile to save space (stop btn still works via JS) ── */
   header{display:none!important}
+  .mobile-title-bar{display:flex;align-items:center;justify-content:center;background:#c00;color:#fff;font-size:.95rem;font-weight:700;letter-spacing:.02em;padding:10px 16px;flex-shrink:0;text-align:center}
 
   /* ── GC Layout: stack vertically ── */
   /* CRITICAL: proper flex height chain so #res-body / #cl-body can scroll.
@@ -4333,6 +4335,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
+<div class="mobile-title-bar">GC Used Inventory Tracker</div>
 <div class="layout">
 
   <div class="left" id="gc-left">
