@@ -3544,6 +3544,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgrou
 
 header{background:#c00;padding:12px 24px;display:flex;align-items:center;gap:12px;flex-shrink:0}
 .mobile-title-bar{display:none}
+.mobile-bottom-bar{display:none}
 header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #stop-btn{display:none;padding:7px 14px;background:#fff;color:#c00;border:none;border-radius:5px;font-size:.82rem;font-weight:700;cursor:pointer;white-space:nowrap}
 #stop-btn:hover{background:#ffe0e0}
