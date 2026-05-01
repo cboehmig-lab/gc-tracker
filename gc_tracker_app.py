@@ -4375,7 +4375,7 @@ tr.fav-row td:last-child{color:#4ade80}
 
   /* ── Header: HIDDEN on mobile to save space (stop btn still works via JS) ── */
   header{display:none!important}
-  .mobile-title-bar{display:flex;align-items:center;justify-content:center;gap:6px;background:#c00;color:#fff;font-size:.8rem;font-weight:700;letter-spacing:.02em;padding:8px 16px;flex-shrink:0;text-align:center}
+  .mobile-title-bar{display:flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#4a0000,#7a0000);color:#ffcccc;font-size:.8rem;font-weight:700;letter-spacing:.02em;padding:8px 16px;flex-shrink:0;text-align:center;border-bottom:1px solid #5c0000}
 
   /* ── GC Layout: stack vertically ── */
   /* CRITICAL: proper flex height chain so #res-body / #cl-body can scroll.
