@@ -6624,7 +6624,7 @@ function _closeAllDropdowns() {
   _closeBrandDropdown();
   _closeCondDropdown();
   _closeCatDropdown();
-  _closeSubcatDropdown();
+  _closeSubDropdown();
 }
 
 function toggleBrandDropdown() {

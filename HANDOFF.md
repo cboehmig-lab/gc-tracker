@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-04-29 · Current version: v2.6.2 · Status: pending deploy (Railway outage) · Branch: feature/scan-subscription ready to merge*
+*Last updated: 2026-04-30 · Current version: v2.7.4 · Status: deployed on Railway · Branch: main*
 
 ---
 
@@ -76,13 +76,11 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 5. On completion, client receives `{new_ids, scan_time}` via SSE, syncs to server via `/api/sync`
 6. New users get a baseline scan triggered automatically on first login (no prior `last_run`)
 
-### NEW detection (per-user) — HYBRID approach (v2.5.0+)
+### NEW detection (per-user) — date_listed only (v2.6.3+)
 - Each **user account** has its own `last_run` and `new_ids` stored server-side
-- Guest users fall back to localStorage (same as pre-v2.6.0 behavior)
-- On scan: server uses **two signals** to detect NEW items:
-  1. **date_listed > prev_scan_time** — Algolia's `creationDate` is after the user's previous scan
-  2. **first_seen > prev_scan_time AND date_listed > prev_scan_time - 24h** — item is new to our cache AND was listed within the last 24 hours
-- Rule 2 handles the **Algolia indexing delay**: GC sets `creationDate` when a listing record is created, but the item may not appear in Algolia search results for **6-12+ hours**.
+- Guest users fall back to localStorage
+- On scan: item is NEW if `date_listed > prev_scan_time` (Algolia's `creationDate` in ISO UTC)
+- Simplified from hybrid first_seen approach (v2.5.0–v2.6.2) — was pulling in too many false positives
 - `new_ids` are sent from client to server on every browse request; server marks `isNew` accordingly
 - Each scan replaces `_newIds` entirely — 0 new = clean slate
 
@@ -140,9 +138,52 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 - `_isMobile()` = `window.innerWidth <= 820px`
 - On mobile, `_renderServerTable()` dispatches to either `_renderMobileCards()` (default) or `_renderMobileList()`
 - View preference saved in `localStorage` key `gt_mobile_view` (`'cards'` or `'list'`)
-- Toggle button (⊞/☰) lives in the status bar next to "Check Now"
-- Sidebars auto-collapse on mobile load
-- Desktop layout is unchanged
+- Sidebars auto-collapse on mobile load; desktop layout is unchanged
+- Pinch zoom / rotation disabled via `<meta name="viewport" content="...,maximum-scale=1,user-scalable=no">`
+
+### Mobile bottom action bar (v2.7.x)
+Fixed bar at bottom of screen (`position:fixed; bottom:0; z-index:150; height:56px`). Four buttons left-to-right:
+
+| Button | Action |
+|---|---|
+| **Scan For New** (▶) | Starts/stops scan — same as desktop "Scan For New" button |
+| **Filters** (🎛) | Opens filter bottom sheet; red dot when any filter is active |
+| **Stores** (🏪) | Opens store-picker bottom sheet |
+| **Sign In / Sign Out** (👤) | Opens auth modal if guest; signs out if logged in |
+
+### Bottom sheet pattern
+Both the store panel (`.left`) and filter panel (`#gc-filter-collapsible`) use the same pattern:
+- `position:fixed; bottom:calc(56px + env(safe-area-inset-bottom)); transform:translateY(150%)` when closed
+- `.sheet-open { transform:translateY(0) }` slides up
+- Shared backdrop (`#store-sheet-backdrop / .store-sheet-backdrop`) dims everything behind — `z-index:119`
+- `_closeAllSheets()` removes `sheet-open` from both panels and clears backdrop
+- **Stacking context gotcha**: `.right { z-index:auto }` on mobile — if it were `z-index:1` it would trap fixed children below the backdrop
+
+### Filter sheet — 3-zone layout (v2.7.4)
+```
+┌─────────────────────────────────┐
+│  ── handle ──                   │  ← .filter-sheet-header (flex-shrink:0)
+│  Filters            [Clear All] │
+├─────────────────────────────────┤
+│  ↓ Price Drops  ★ Watch  🎯 Want│  ← .filter-scroll-body (flex:1, overflow-y:auto)
+│  [All Brands ▾]                 │
+│  [All Conditions ▾]             │
+│  [All Categories ▾]             │
+│  [Search results…]              │
+├─────────────────────────────────┤
+│         Show Results            │  ← .filter-done-btn (flex-shrink:0, pinned)
+└─────────────────────────────────┘
+```
+- Sheet container is `overflow:hidden` — only the scroll-body scrolls
+- On desktop: `.filter-sheet-header{display:none}`, `.filter-scroll-body{display:contents}`, `.filter-chip-row{display:contents}` — filter controls flow inline as before
+- **No auto-close on chip taps** — Watch List, Price Drops, Want List do NOT call `_closeAllSheets()`; user hits "Show Results" explicitly
+- **Mutually exclusive dropdowns** — `_closeAllDropdowns()` runs before any dropdown opens; calls `_closeBrandDropdown / _closeCondDropdown / _closeCatDropdown / _closeSubDropdown` (note: subcat close fn is `_closeSubDropdown`, NOT `_closeSubcatDropdown`)
+
+### Paginator (mobile)
+`position:fixed!important; bottom:calc(56px + env(safe-area-inset-bottom))` — `position:sticky` is unreliable in iOS Safari overflow:auto containers.
+
+### Sign-out state clearing
+`_authLogout()` clears all JS state explicitly: `_authUser`, `_watchlist`, `_keywords`, `_newIds`, `_lastRunISO`, `favorites`, plus corresponding localStorage keys. Prevents stale want/watch lists persisting after sign-out.
 
 ---
 
@@ -244,9 +285,42 @@ Update both places when bumping:
 
 ---
 
+## Recent Changes (v2.6.3 → v2.7.4)
+
+### v2.7.4
+- **Filter sheet 3-zone layout**: `#gc-filter-collapsible` restructured into sticky header / scrollable body / pinned "Show Results" button. Container is `overflow:hidden`; only the scroll body scrolls.
+- **Mutually exclusive dropdowns**: `_closeAllDropdowns()` helper closes all four dropdowns before opening any one. Prevents visual stacking glitches when switching between Brand/Condition/Category/Subcategory.
+- **No auto-close on chip taps**: `toggleWatchFilter`, `togglePriceDropFilter`, `searchWantList` no longer call `_closeAllSheets()` — sheet stays open so multiple filters can be stacked before hitting "Show Results".
+- **Desktop passthrough**: `.filter-sheet-header{display:none}`, `.filter-scroll-body / .filter-chip-row{display:contents}` — desktop filter bar unchanged.
+- **Bug**: `_closeAllDropdowns` initially called `_closeSubcatDropdown()` (non-existent) instead of `_closeSubDropdown()` — fixed in same version, broke all dropdowns briefly.
+
+### v2.7.3
+- **Filter sheet as bottom sheet**: `#gc-filter-collapsible` now uses the same `position:fixed; transform:translateY(150%)` pattern as the store panel. Opened via Filters button in bottom bar.
+- **Sign In / Sign Out as 4th bottom bar button**: `_mobileAuthToggle()` opens auth modal if guest, signs out if logged in. Icon updates to 🔓 when logged in.
+- **Bottom bar button order**: Scan For New | Filters | Stores | Sign In
+- **Sign-out clears client state**: `_authLogout()` now explicitly clears `_authUser`, `_watchlist`, `_keywords`, `_newIds`, `_lastRunISO`, `favorites`, and matching localStorage keys.
+- **Filter sheet backdrop**: shares the same `#store-sheet-backdrop` — `_closeAllSheets()` handles both panels.
+- **Stacking context fix**: `.right { z-index:auto }` on mobile prevents filter sheet from being trapped below backdrop.
+
+### v2.7.2
+- **Store panel as bottom sheet**: `.left` panel uses `position:fixed; bottom:calc(56px + env(safe-area-inset-bottom)); transform:translateY(150%)`. `.sheet-open` slides it up. Backdrop at z-index:119.
+- **Paginator fixed**: `position:fixed!important` instead of `position:sticky` — sticky unreliable in iOS Safari overflow containers. `#res-body` gets `padding-bottom` to compensate.
+- **Results background**: dark grey (`#161616`) instead of pure black.
+- **"Scan For New"**: renamed from "Check Now" on both desktop and mobile.
+
+### v2.7.1
+- **Mobile bottom action bar**: `position:fixed; bottom:0; z-index:150; height:56px`. Three buttons: Scan For New | Filters | Stores.
+- **`100dvh` body height**: prevents iOS Safari tab bar from pushing content off-screen.
+- **Pinch zoom disabled**: `maximum-scale=1,user-scalable=no` in viewport meta.
+
+### v2.6.3
+- **NEW detection simplified**: dropped hybrid `first_seen` rule. Item is NEW only if `date_listed > prev_scan_time`. Reduces false positives from the Algolia indexing delay window.
+
+---
+
 ## Recent Changes (v2.6.1 → v2.6.2)
 
-### v2.6.2 (pending Railway deploy)
+### v2.6.2
 - **Dropdown counts: italic + comma-formatted**: All filter dropdowns (brand, condition, category, subcategory) now show item counts in italic, non-bold, with comma separators (e.g. `1,234`). CSS class `.bcount` updated; JS uses `.toLocaleString()`.
 - **Dev footer links**: Fixed bottom-right footer (desktop only — hidden on mobile via `@media(max-width:820px)`) with PayPal (`paypal.me/smurfco`), Venmo, and `animalsintrees.com` links. Dim by default, brightens on hover. Inline SVG icons.
 - **Session lifetime**: Flask `PERMANENT_SESSION_LIFETIME` set to 31 days (default) — users stay logged in across browser restarts without re-authenticating.
