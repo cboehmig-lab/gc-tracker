@@ -5865,12 +5865,19 @@ function _renderMobileCards(items) {
     const wantBadge = item.kwMatch  ? '<span class="tag-kw">WANT</span>' : '';
     const soldBadge = item.sold     ? '<span class="tag-sold">SOLD</span>' : '';
 
-    const price   = item.price || '—';
     const store   = esc(item.store_name || item.store || '');
     const loc     = esc(item.location   || '');
     const cond    = esc(item.condition  || '');
     const name    = esc(item.name       || '');
     const url     = item.url || '#';
+
+    const hasDrop = item.price_drop > 0;
+    const dropLabel = hasDrop && item.price_drop_since ? ` · dropped ${_fmtDropDate(item.price_drop_since)}` : '';
+    const priceHtml = hasDrop
+      ? `<span class="price-drop-val" title="Price drop! Down $${item.price_drop.toFixed(2)}${dropLabel}">` +
+        (item.list_price_raw > item.price_raw ? `<span class="price-orig">$${item.list_price_raw.toFixed(2)}</span> ` : '') +
+        `↓ ${item.price || '—'}</span>`
+      : (item.price || '—');
 
     html += `<div class="item-card${isNew}${isWant}${isSold}">`;
 
@@ -5887,7 +5894,7 @@ function _renderMobileCards(items) {
     html += '<div class="card-body">';
     html += `<div class="card-badges">${newBadge}${wantBadge}${soldBadge}</div>`;
     html += `<div class="card-name"><a href="${url}" target="_blank" rel="noopener">${name}</a></div>`;
-    html += `<div class="card-price">${price}</div>`;
+    html += `<div class="card-price">${priceHtml}</div>`;
     html += `<div class="card-meta">${store}${item.date ? ' · ' + esc(item.date) : ''}</div>`;
     html += `<div class="card-actions">`;
     html += `<button class="card-watch-btn${watchCls}" onclick="toggleWatch('${item.id}',this)" data-id="${item.id}">${watched ? '★' : '☆'}</button>`;
@@ -5911,15 +5918,22 @@ function _renderMobileList(items) {
     const watched  = window._watchlist && window._watchlist[item.id];
     const watchCls = watched ? ' wl-on' : '';
     const newBadge = item.isNew ? '<span class="tag">NEW</span>' : '';
-    const price    = item.price || '—';
     const url      = item.url || '#';
     const name     = esc(item.name || '');
+
+    const hasDrop2 = item.price_drop > 0;
+    const dropLabel2 = hasDrop2 && item.price_drop_since ? ` · dropped ${_fmtDropDate(item.price_drop_since)}` : '';
+    const priceHtml2 = hasDrop2
+      ? `<span class="price-drop-val" title="Price drop! Down $${item.price_drop.toFixed(2)}${dropLabel2}">` +
+        (item.list_price_raw > item.price_raw ? `<span class="price-orig">$${item.list_price_raw.toFixed(2)}</span> ` : '') +
+        `↓ ${item.price || '—'}</span>`
+      : (item.price || '—');
 
     html += `<div class="compact-row${isNew}${isWant}">`;
     html += `<div class="compact-row-left">`;
     html += `<span class="compact-row-name">${newBadge}<a href="${url}" target="_blank" rel="noopener">${name}</a></span>`;
     html += `</div>`;
-    html += `<span class="compact-row-price">${price}</span>`;
+    html += `<span class="compact-row-price">${priceHtml2}</span>`;
     html += `<button class="compact-row-watch${watchCls}" onclick="toggleWatch('${item.id}',this)" data-id="${item.id}">${watched ? '★' : '☆'}</button>`;
     html += `</div>`;
   });
