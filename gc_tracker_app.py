@@ -4286,7 +4286,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.7.7</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.7.8</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -6737,85 +6737,59 @@ function _accExpandHeight(section) {
   if (body && _accOpenSection === section) body.style.maxHeight = body.scrollHeight + 'px';
 }
 
-function _accRenderBrand(query) {
-  const list = document.getElementById('acc-brand-list');
-  if (!list) return;
-  const q = (query !== undefined ? query : (document.getElementById('acc-brand-search')?.value || '')).toLowerCase();
+function _accBuildItems(dataList, selectedArr) {
   let html = '';
-  (window._brandList || []).forEach(b => {
-    const name = (b && b.name !== undefined) ? b.name : b;
-    const count = (b && b.count !== undefined) ? b.count : '';
-    const isActive = (window._selectedBrands || []).includes(name);
+  dataList.forEach(item => {
+    const name = (item && item.name !== undefined) ? item.name : item;
+    const count = (item && item.count !== undefined) ? item.count : '';
+    const isActive = selectedArr.includes(name);
     if (count === 0 && !isActive) return;
-    if (q && !name.toLowerCase().includes(q)) return;
-    const esc = name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-    html += '<div class="acc-item' + (isActive ? ' acc-active' : '') + '" onclick="_toggleBrand(\'' + esc + '\')">'
+    const esc = name.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+    html += '<div class="acc-item' + (isActive ? ' acc-active' : '') + '" data-val="' + esc + '">'
       + '<span class="acc-check">' + (isActive ? '✓' : '') + '</span>'
       + '<span class="acc-label">' + name + '</span>'
       + (count !== '' ? '<span class="acc-count">' + Number(count).toLocaleString() + '</span>' : '')
       + '</div>';
   });
-  list.innerHTML = html || '<div class="acc-empty">No brands found</div>';
+  return html;
+}
+
+function _accRenderBrand(query) {
+  const list = document.getElementById('acc-brand-list');
+  if (!list) return;
+  const q = (query !== undefined ? query : (document.getElementById('acc-brand-search') ? document.getElementById('acc-brand-search').value : '') || '').toLowerCase();
+  const data = (window._brandList || []).filter(b => {
+    const name = (b && b.name !== undefined) ? b.name : b;
+    const count = (b && b.count !== undefined) ? b.count : '';
+    if (count === 0 && !(window._selectedBrands || []).includes(name)) return false;
+    return !q || name.toLowerCase().includes(q);
+  });
+  list.innerHTML = _accBuildItems(data, window._selectedBrands || []) || '<div class="acc-empty">No brands found</div>';
+  list.onclick = function(e) { const el = e.target.closest('.acc-item'); if (el) _toggleBrand(el.dataset.val); };
   _accExpandHeight('brand');
 }
 
 function _accRenderCond() {
   const list = document.getElementById('acc-cond-list');
   if (!list) return;
-  let html = '';
-  (window._condList || []).forEach(c => {
-    const name = (c && c.name !== undefined) ? c.name : c;
-    const count = (c && c.count !== undefined) ? c.count : '';
-    const isActive = (window._selectedConds || []).includes(name);
-    if (count === 0 && !isActive) return;
-    const esc = name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-    html += '<div class="acc-item' + (isActive ? ' acc-active' : '') + '" onclick="_toggleCond(\'' + esc + '\')">'
-      + '<span class="acc-check">' + (isActive ? '✓' : '') + '</span>'
-      + '<span class="acc-label">' + name + '</span>'
-      + (count !== '' ? '<span class="acc-count">' + Number(count).toLocaleString() + '</span>' : '')
-      + '</div>';
-  });
-  list.innerHTML = html || '<div class="acc-empty">No conditions</div>';
+  list.innerHTML = _accBuildItems(window._condList || [], window._selectedConds || []) || '<div class="acc-empty">No conditions</div>';
+  list.onclick = function(e) { const el = e.target.closest('.acc-item'); if (el) _toggleCond(el.dataset.val); };
   _accExpandHeight('cond');
 }
 
 function _accRenderCat() {
   const list = document.getElementById('acc-cat-list');
   if (!list) return;
-  let html = '';
-  (window._catList || []).forEach(c => {
-    const name = (c && c.name !== undefined) ? c.name : c;
-    const count = (c && c.count !== undefined) ? c.count : '';
-    const isActive = (window._selectedCats || []).includes(name);
-    if (count === 0 && !isActive) return;
-    const esc = name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-    html += '<div class="acc-item' + (isActive ? ' acc-active' : '') + '" onclick="_toggleCat(\'' + esc + '\')">'
-      + '<span class="acc-check">' + (isActive ? '✓' : '') + '</span>'
-      + '<span class="acc-label">' + name + '</span>'
-      + (count !== '' ? '<span class="acc-count">' + Number(count).toLocaleString() + '</span>' : '')
-      + '</div>';
-  });
-  list.innerHTML = html || '<div class="acc-empty">No categories</div>';
+  list.innerHTML = _accBuildItems(window._catList || [], window._selectedCats || []) || '<div class="acc-empty">No categories</div>';
+  list.onclick = function(e) { const el = e.target.closest('.acc-item'); if (el) _toggleCat(el.dataset.val); };
   _accExpandHeight('cat');
 }
 
 function _accRenderSub() {
   const list = document.getElementById('acc-sub-list');
   if (!list) return;
-  let html = '';
-  (window._subList || []).forEach(s => {
-    const name = (s && s.name !== undefined) ? s.name : s;
-    const count = (s && s.count !== undefined) ? s.count : '';
-    const isActive = (window._selectedSubs || []).includes(name);
-    if (count === 0 && !isActive) return;
-    const esc = name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-    html += '<div class="acc-item' + (isActive ? ' acc-active' : '') + '" onclick="_toggleSub(\'' + esc + '\')">'
-      + '<span class="acc-check">' + (isActive ? '✓' : '') + '</span>'
-      + '<span class="acc-label">' + name + '</span>'
-      + (count !== '' ? '<span class="acc-count">' + Number(count).toLocaleString() + '</span>' : '')
-      + '</div>';
-  });
-  list.innerHTML = html || '<div class="acc-empty">No subcategories</div>';
+  list.innerHTML = _accBuildItems(window._subList || [], window._selectedSubs || []) || '<div class="acc-empty">No subcategories</div>';
+  list.onclick = function(e) { const el = e.target.closest('.acc-item'); if (el) _toggleSub(el.dataset.val); };
   _accExpandHeight('sub');
 }
 
@@ -7715,7 +7689,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.7.7"
+APP_VERSION = "2.7.8"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
