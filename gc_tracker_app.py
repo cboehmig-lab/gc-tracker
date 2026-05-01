@@ -4034,14 +4034,12 @@ tr.fav-row td:last-child{color:#4ade80}
 
   /* ── Paginator ── */
   /* Paginator: fixed directly above the bottom bar — no gap, no bleed-through */
-  .paginator{position:fixed!important;bottom:calc(56px + env(safe-area-inset-bottom));
-    left:0;right:0;z-index:100;
-    padding:10px 8px;gap:3px;flex-wrap:wrap;justify-content:center;
-    background:#111;border-top:1px solid #2e2e2e}
-  .paginator button{min-width:40px;height:40px;font-size:.88rem;border-radius:8px}
-  .paginator .pg-info{font-size:.8rem;margin-right:8px;width:100%;text-align:center;margin-bottom:4px}
-  /* Padding so last row scrolls clear of paginator + bottom bar (~56 bar + ~56 paginator) */
-  #res-body{padding-bottom:calc(130px + env(safe-area-inset-bottom))}
+  .paginator{position:static!important;padding:16px 8px 24px;gap:4px;flex-wrap:wrap;
+    justify-content:center;background:#111;border-top:1px solid #2e2e2e}
+  .paginator button{min-width:38px;height:38px;font-size:.85rem;border-radius:8px}
+  .paginator .pg-info{font-size:.78rem;margin-right:0;width:100%;text-align:center;margin-bottom:6px}
+  /* Padding so last row scrolls clear of the bottom action bar only */
+  #res-body{padding-bottom:calc(64px + env(safe-area-inset-bottom))}
 
   /* ── CL Layout: stack vertically ── */
   #cl-panel{flex-direction:column;overflow:hidden}
