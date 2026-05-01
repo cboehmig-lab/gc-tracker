@@ -3832,7 +3832,7 @@ tr.fav-row td:last-child{color:#4ade80}
 
   /* ── Header: HIDDEN on mobile to save space (stop btn still works via JS) ── */
   header{display:none!important}
-  .mobile-title-bar{display:flex;align-items:center;justify-content:center;background:#c00;color:#fff;font-size:.95rem;font-weight:700;letter-spacing:.02em;padding:10px 16px;flex-shrink:0;text-align:center}
+  .mobile-title-bar{display:flex;align-items:center;justify-content:center;gap:6px;background:#c00;color:#fff;font-size:.8rem;font-weight:700;letter-spacing:.02em;padding:8px 16px;flex-shrink:0;text-align:center}
 
   /* ── GC Layout: stack vertically ── */
   /* CRITICAL: proper flex height chain so #res-body / #cl-body can scroll.
@@ -4335,7 +4335,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar">GC Used Inventory Tracker</div>
+<div class="mobile-title-bar">GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.8.0</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -4611,6 +4611,58 @@ const _closeStoreSheet = _closeAllSheets;
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') _closeAllSheets();
+});
+
+// ── Swipe-to-dismiss for mobile bottom sheets ─────────────────────────────────
+function _initSwipeDismiss(sheetEl, closeFn, scrollBodySel) {
+  let startY = 0, startScrollTop = 0, dragging = false;
+  const getScrollBody = () => (scrollBodySel ? sheetEl.querySelector(scrollBodySel) : null);
+
+  sheetEl.addEventListener('touchstart', e => {
+    const sb = getScrollBody();
+    startScrollTop = sb ? sb.scrollTop : 0;
+    startY = e.touches[0].clientY;
+    dragging = false;
+  }, {passive: true});
+
+  sheetEl.addEventListener('touchmove', e => {
+    const dy = e.touches[0].clientY - startY;
+    if (!dragging) {
+      // Start drag only when swiping downward and scroll body is at the top
+      if (dy > 10 && startScrollTop <= 0) {
+        dragging = true;
+        sheetEl.style.transition = 'none';
+      } else {
+        return; // let normal scrolling happen
+      }
+    }
+    if (dragging) {
+      const offset = Math.max(0, dy);
+      sheetEl.style.transform = 'translateY(' + offset + 'px)';
+      e.preventDefault();
+    }
+  }, {passive: false});
+
+  sheetEl.addEventListener('touchend', e => {
+    if (!dragging) return;
+    dragging = false;
+    const dy = e.changedTouches[0].clientY - startY;
+    sheetEl.style.transition = '';
+    if (dy > 90) {
+      sheetEl.style.transform = '';  // let CSS class removal animate it out
+      closeFn();
+    } else {
+      sheetEl.style.transform = 'translateY(0)';  // snap back
+    }
+  }, {passive: true});
+}
+
+// Wire up swipe-dismiss once DOM is ready (only matters on mobile)
+document.addEventListener('DOMContentLoaded', () => {
+  const storeSheet  = document.getElementById('gc-left');
+  const filterSheet = document.getElementById('gc-filter-collapsible');
+  if (storeSheet)  _initSwipeDismiss(storeSheet,  _closeAllSheets, '#store-list');
+  if (filterSheet) _initSwipeDismiss(filterSheet, _closeAllSheets, '.filter-scroll-body');
 });
 
 function _updateMobileToggleCounts() {
