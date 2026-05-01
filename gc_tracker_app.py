@@ -3649,11 +3649,18 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 
 .results{flex:1;overflow-y:auto;background:#1a1a1a}
 .results-hdr{padding:8px 16px;font-size:.88rem;font-weight:600;color:#ccc;background:#111;position:sticky;top:0;z-index:1;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;gap:8px;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,.5)}
+/* ── Quick-filter chip bar (Price Drops / Watch List / Want List) ── */
+.quick-filter-bar{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:6px 16px;background:#111;border-bottom:1px solid #1e1e1e;flex-shrink:0}
+.qf-chip{padding:5px 10px;border-radius:16px;background:#1e1e1e;border:1px solid #3a3a3a;color:#aaa;font-size:.78rem;cursor:pointer;white-space:nowrap;-webkit-tap-highlight-color:transparent}
+.qf-chip:hover{border-color:#555;color:#ccc}
+.qf-chip.wl-active{background:#2d6a2d;border-color:#4ade80;color:#fff}
+.qf-edit-link{color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;text-decoration:none}
+.qf-edit-link:hover{text-decoration:underline}
 .badge{background:#c00;color:#fff;font-size:.7rem;font-weight:700;padding:2px 7px;border-radius:10px}.badge:empty{display:none}
 .cat-sel{padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer}
 .cat-sel:focus{border-color:#c00}
 #watchlist-toggle.wl-active,#cl-watchlist-toggle.wl-active,
-#price-drop-toggle.wl-active,#want-list-toggle.wl-active{background:#2d6a2d;border-color:#4ade80;color:#fff}
+#price-drop-toggle.wl-active,#want-list-toggle.wl-active{background:#2d6a2d;border-color:#4ade80;color:#fff!important}
 .brand-dd-item{display:flex;align-items:center;padding:6px 12px;cursor:pointer;font-size:.82rem;color:#ccc;gap:6px}
 .brand-dd-item:hover{background:#252525}
 .brand-dd-item.active{background:#c00;color:#fff}
@@ -3889,6 +3896,9 @@ tr.fav-row td:last-child{color:#4ade80}
   #log{padding:4px 12px;height:auto;min-height:28px;max-height:40px;font-size:.75rem;line-height:1.5;flex-shrink:0}
 
   /* ── Results header / filter toolbar: compact ── */
+  .quick-filter-bar{padding:8px 12px;gap:6px;flex-shrink:0;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+  .quick-filter-bar::-webkit-scrollbar{display:none}
+  .qf-chip{font-size:.82rem;padding:7px 12px;border-radius:18px}
   .results-hdr{padding:6px 10px;gap:5px;flex-wrap:wrap;align-items:center;position:relative;top:auto;z-index:auto;flex-shrink:0;border-bottom:1px solid #2e2e2e}
   .results-hdr > *{flex-shrink:0}
   #res-title{font-size:.88rem}
@@ -4286,7 +4296,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.7.8</span></h1>
+  <h1>🎸 Gear Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.7.9</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -4389,6 +4399,14 @@ tr.fav-row td:last-child{color:#4ade80}
     </div>
     <div id="log"><span class="log-dim">Ready</span></div>
     <div class="results" id="res-panel" style="display:none">
+      <!-- ── Persistent view-toggle chips (always visible, not in filter sheet) ── -->
+      <div class="quick-filter-bar">
+        <button id="price-drop-toggle" onclick="togglePriceDropFilter()" class="qf-chip">↓ Price Drops</button>
+        <button id="watchlist-toggle"  onclick="toggleWatchFilter()"      class="qf-chip">★ Watch List</button>
+        <button id="want-list-toggle"  onclick="searchWantList()"         class="qf-chip">🎯 Want List</button>
+        <a id="search-wl-link" onclick="openKeywords()" class="qf-edit-link" style="display:none">Edit Want List</a>
+      </div>
+
       <div class="results-hdr">
         <span id="res-title" style="display:none"></span>
         <span class="badge" id="res-badge" style="display:none!important"></span>
@@ -4408,22 +4426,6 @@ tr.fav-row td:last-child{color:#4ade80}
           <!-- ── Scrollable filter content ── -->
           <div class="filter-scroll-body">
             <span id="filter-item-count" style="color:#888;font-size:.78rem;white-space:nowrap;margin-right:6px"></span>
-            <!-- Quick toggles -->
-            <div class="filter-chip-row">
-              <button id="price-drop-toggle" onclick="togglePriceDropFilter()"
-                class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
-                ↓ Price Drops
-              </button>
-              <button id="watchlist-toggle" onclick="toggleWatchFilter()"
-                class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
-                ★ Watch List
-              </button>
-              <button id="want-list-toggle" onclick="searchWantList()"
-                class="cat-sel" style="border-color:#2d6a2d;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;padding:5px 10px">
-                🎯 Want List
-              </button>
-              <a id="search-wl-link" onclick="openKeywords()" style="display:none;color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Edit Want List</a>
-            </div>
             <!-- ── Mobile accordion sections (hidden on desktop) ── -->
             <div class="filter-accordion" id="acc-brand">
               <button class="acc-header" onclick="_accToggle('brand')">
@@ -4498,9 +4500,9 @@ tr.fav-row td:last-child{color:#4ade80}
                 <div style="overflow-y:auto;max-height:260px;padding:4px 0" id="subcat-dd-inner"></div>
               </div>
             </div>
-            <!-- Keyword search (bottom of sheet on mobile, inline on desktop) -->
+            <!-- Keyword search — searches all items globally -->
             <div id="res-search-wrap">
-              <input id="res-search" type="text" placeholder="Search by keyword…" oninput="filterResults();_updateResSearchClear()" autocomplete="off">
+              <input id="res-search" type="text" placeholder="Search all items…" oninput="_globalKeywordSearch();_updateResSearchClear()" autocomplete="off">
               <button id="res-search-clear" onclick="clearResSearch()" title="Clear search" style="display:none;background:none;border:none;color:#888;font-size:.85rem;cursor:pointer;padding:0 4px;line-height:1">✕</button>
               <span id="res-search-count"></span>
             </div>
@@ -7107,6 +7109,18 @@ function _setSubList(subcategories) {
 
 // ── Results filter ────────────────────────────────────────────────────────────
 let _filterTimer = null;
+let _kwSearchTimer = null;
+
+function _globalKeywordSearch() {
+  // Debounce — wait 400ms after user stops typing
+  clearTimeout(_kwSearchTimer);
+  const q = (document.getElementById('res-search').value || '').trim();
+  _kwSearchTimer = setTimeout(function() {
+    _browseMode = 'server';
+    _srvPage = 1;
+    _fetchBrowsePage(1);
+  }, 400);
+}
 
 function clearFilters() {
   window._selectedBrands = []; _updateBrandBtn();
@@ -7689,7 +7703,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.7.8"
+APP_VERSION = "2.7.9"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
