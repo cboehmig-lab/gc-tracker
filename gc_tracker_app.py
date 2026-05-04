@@ -2579,6 +2579,7 @@ def api_browse():
     f_watched = bool(data.get("filter_watched"))
     f_want_only = bool(data.get("filter_want_list_only"))
     f_price_drop_only = bool(data.get("filter_price_drop_only"))
+    f_strict = bool(data.get("filter_strict"))
     force_fav_sort = bool(data.get("force_fav_sort"))
 
     _load_cat_cache()
@@ -2595,7 +2596,11 @@ def api_browse():
     _kw_compiled = []
     for kw in keywords:
         kw_stripped = kw.strip()
-        if kw_stripped.startswith('"') and kw_stripped.endswith('"') and len(kw_stripped) > 2:
+        if kw_stripped.startswith('=') and len(kw_stripped) > 1:
+            # Strict whole-word match (= prefix)
+            word = kw_stripped[1:]
+            _kw_compiled.append(("word", _re.compile(r'\b' + _re.escape(word) + r'\b', _re.IGNORECASE)))
+        elif kw_stripped.startswith('"') and kw_stripped.endswith('"') and len(kw_stripped) > 2:
             # Exact substring match (quoted)
             _kw_compiled.append(("exact", kw_stripped[1:-1].lower()))
         elif "," in kw_stripped:
@@ -2610,7 +2615,9 @@ def api_browse():
     def _kw_match(name_l, brand_l):
         text = name_l + " " + brand_l
         for mode, val in _kw_compiled:
-            if mode == "exact" and val in text:
+            if mode == "word" and val.search(text):
+                return True
+            elif mode == "exact" and val in text:
                 return True
             elif mode == "all" and all(t in text for t in val):
                 return True
@@ -2692,6 +2699,14 @@ def api_browse():
                 phrase = fq[1:-1]
                 r = [i for i in r if phrase in (i["name"] or "").lower()
                      or phrase in (i["brand"] or "").lower()]
+            elif f_strict:
+                words = fq.split()
+                pats = [_re.compile(r'\b' + _re.escape(w) + r'\b', _re.IGNORECASE) for w in words]
+                r = [i for i in r if all(
+                    p.search(" ".join([i["name"] or "", i["brand"] or "",
+                                       i["store"] or "", i["location"] or "",
+                                       i["category"] or "", i["subcategory"] or ""]))
+                    for p in pats)]
             else:
                 words = fq.split()
                 r = [i for i in r if all(
@@ -4213,6 +4228,10 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #res-search:focus{border-color:#c00;box-shadow:0 0 0 3px rgba(204,0,0,.15)}
 .res-search-icon{display:none;position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:.9rem;pointer-events:none;opacity:.5}
 #res-search-count{font-size:.75rem;color:#555;white-space:nowrap}
+#strict-search-btn{background:none;border:1px solid #3a3a3a;border-radius:4px;color:#555;font-size:.78rem;cursor:pointer;padding:2px 6px;line-height:1.4;white-space:nowrap;flex-shrink:0}
+#strict-search-btn.active{color:#fbbf24;border-color:#fbbf24}
+.dd-clear-row{padding:7px 12px;color:#f88;font-size:.78rem;cursor:pointer;border-bottom:1px solid #2a2a2a;display:flex;align-items:center;gap:4px}
+.dd-clear-row:hover{background:#1e1e1e}
 
 table{width:100%;border-collapse:collapse;font-size:.83rem;table-layout:auto}
 th{background:#161616;color:#666;font-weight:600;text-align:left;padding:7px 10px;font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:40px;cursor:pointer;user-select:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -4550,6 +4569,8 @@ tr.fav-row td:last-child{color:#4ade80}
   .acc-label{flex:1;font-size:.88rem;color:#ccc}
   .acc-count{font-size:.74rem;color:#555;font-style:italic}
   .acc-empty{padding:12px 14px;color:#555;font-size:.84rem}
+  .acc-clear-row{padding:10px 14px;color:#f88;font-size:.82rem;cursor:pointer;border-bottom:1px solid #2a2a2a;display:flex;align-items:center;gap:4px;-webkit-tap-highlight-color:transparent}
+  .acc-clear-row:active{background:#1e1e1e}
 
   /* ── GC Table: .results is a flex column; only #res-body scrolls.
      JS sets display:block via inline style — override to flex when visible ── */
@@ -4830,7 +4851,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.8.0</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.9.0</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -4879,7 +4900,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><span></span><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.8.0</span></div>
+<div class="mobile-title-bar"><span></span><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.9.0</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -4956,6 +4977,7 @@ tr.fav-row td:last-child{color:#4ade80}
               <span class="res-search-icon">🔍</span>
               <input id="res-search" type="text" placeholder="Search all stores…" oninput="_globalKeywordSearch();_updateResSearchClear()" autocomplete="off">
               <button id="res-search-clear" onclick="clearResSearch()" title="Clear search" style="display:none;background:none;border:none;color:#888;font-size:.85rem;cursor:pointer;padding:0 4px;line-height:1">✕</button>
+              <button id="strict-search-btn" onclick="_toggleStrictSearch()" title="Fuzzy (contains) — click for strict whole-word">≈</button>
               <span id="res-search-count"></span>
             </div>
             <!-- ── Mobile accordion sections (hidden on desktop) ── -->
@@ -6031,6 +6053,7 @@ let _srvTotalPages = 1;
 let _srvLoading = false;
 let _baseItemCount = 0;   // full catalog count (set on load, reset target when filters clear)
 let _baseStoreCount = 0;  // full store count (set on load)
+window._strictSearch = false;  // Strict/whole-word search mode for the main search bar
 
 function _getBrowseFilters() {
   return {
@@ -6041,6 +6064,7 @@ function _getBrowseFilters() {
     filter_subcategories:  window._selectedSubs || [],
     filter_watched:         _watchFilterActive,
     filter_price_drop_only: _priceDropFilterActive,
+    filter_strict:          window._strictSearch || false,
   };
 }
 
@@ -6619,10 +6643,19 @@ function renderKeywordList() {
     .sort((a, b) => a.kw.toLowerCase().localeCompare(b.kw.toLowerCase()));
   el.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:7px;padding:10px 0">` +
     sorted.map(({kw, i}) => {
-      const safe = kw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-      return `<span style="display:inline-flex;align-items:center;gap:5px;background:#0a5c2a;color:#4ade80;border:1px solid #2d6a2d;border-radius:14px;padding:4px 7px 4px 11px;font-size:.78rem;font-weight:600;white-space:nowrap">` +
+      const isStrict = kw.startsWith('=');
+      const display = isStrict ? kw.slice(1) : kw;
+      const safe = display.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const chipBg = isStrict ? '#0a3c6e' : '#0a5c2a';
+      const chipColor = isStrict ? '#93c5fd' : '#4ade80';
+      const chipBorder = isStrict ? '#1e40af' : '#2d6a2d';
+      const modeColor = isStrict ? '#fbbf24' : '#555';
+      const modeChar = isStrict ? '=' : '≈';
+      const modeTitle = isStrict ? 'Strict (whole-word) — click for fuzzy' : 'Fuzzy (contains) — click for strict';
+      return `<span style="display:inline-flex;align-items:center;gap:3px;background:${chipBg};color:${chipColor};border:1px solid ${chipBorder};border-radius:14px;padding:4px 7px 4px 7px;font-size:.78rem;font-weight:600;white-space:nowrap">` +
+        `<button onclick="removeKeywordAt(${i})" style="background:none;border:none;color:${chipColor};opacity:.6;font-size:.75rem;cursor:pointer;padding:0 2px 0 0;line-height:1" title="Remove" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.6">&#10005;</button>` +
         `${safe}` +
-        `<button onclick="removeKeywordAt(${i})" style="background:none;border:none;color:#4ade80;opacity:.6;font-size:.75rem;cursor:pointer;padding:0 0 0 2px;line-height:1" title="Remove" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.6">&#10005;</button>` +
+        `<button onclick="_toggleKeywordStrict(${i})" style="background:none;border:none;color:${modeColor};font-size:.7rem;font-weight:700;cursor:pointer;padding:0 0 0 3px;line-height:1" title="${modeTitle}">${modeChar}</button>` +
         `</span>`;
     }).join('') +
   `</div>`;
@@ -6667,12 +6700,40 @@ function clearAllKeywords() {
   renderKeywordList();
 }
 
+function _toggleKeywordStrict(i) {
+  const kw = window._keywords[i];
+  if (kw === undefined) return;
+  window._keywords[i] = kw.startsWith('=') ? kw.slice(1) : '=' + kw;
+  _lsSet('keywords', window._keywords);
+  _syncToServer();
+  renderKeywordList();
+}
+
+function _toggleStrictSearch() {
+  window._strictSearch = !window._strictSearch;
+  const btn = document.getElementById('strict-search-btn');
+  if (btn) {
+    btn.textContent = window._strictSearch ? '=' : '≈';
+    btn.classList.toggle('active', window._strictSearch);
+    btn.title = window._strictSearch
+      ? 'Strict (whole-word) — click for fuzzy'
+      : 'Fuzzy (contains) — click for strict whole-word';
+  }
+  _srvLoading = false;
+  _srvPage = 1;
+  _fetchBrowsePage(1);
+}
+
 function _itemMatchesKeyword(item) {
   if (!window._keywords.length) return false;
   const text = ((item.name || '') + ' ' + (item.brand || '')).toLowerCase();
   return window._keywords.some(kw => {
     kw = kw.trim();
-    if (kw.startsWith('"') && kw.endsWith('"') && kw.length > 2) {
+    if (kw.startsWith('=') && kw.length > 1) {
+      // Strict whole-word match
+      const escaped = kw.slice(1).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp('\\b' + escaped + '\\b', 'i').test(text);
+    } else if (kw.startsWith('"') && kw.endsWith('"') && kw.length > 2) {
       // Exact substring match
       return text.includes(kw.slice(1, -1).toLowerCase());
     } else if (kw.includes(',')) {
@@ -7340,7 +7401,8 @@ function _accRenderBrand(query) {
     if (count === 0 && !(window._selectedBrands || []).includes(name)) return false;
     return !q || name.toLowerCase().includes(q);
   });
-  list.innerHTML = _accBuildItems(data, window._selectedBrands || []) || '<div class="acc-empty">No brands found</div>';
+  const _bClear = (window._selectedBrands || []).length > 0 ? '<div class="acc-clear-row" onclick="_clearBrandFilter()">✕ Clear Brand</div>' : '';
+  list.innerHTML = _bClear + (_accBuildItems(data, window._selectedBrands || []) || '<div class="acc-empty">No brands found</div>');
   list.onclick = function(e) { const el = e.target.closest('.acc-item'); if (el) _toggleBrand(el.dataset.val); };
   _accExpandHeight('brand');
 }
@@ -7348,7 +7410,8 @@ function _accRenderBrand(query) {
 function _accRenderCond() {
   const list = document.getElementById('acc-cond-list');
   if (!list) return;
-  list.innerHTML = _accBuildItems(window._condList || [], window._selectedConds || []) || '<div class="acc-empty">No conditions</div>';
+  const _cClear = (window._selectedConds || []).length > 0 ? '<div class="acc-clear-row" onclick="_clearCondFilter()">✕ Clear Condition</div>' : '';
+  list.innerHTML = _cClear + (_accBuildItems(window._condList || [], window._selectedConds || []) || '<div class="acc-empty">No conditions</div>');
   list.onclick = function(e) { const el = e.target.closest('.acc-item'); if (el) _toggleCond(el.dataset.val); };
   _accExpandHeight('cond');
 }
@@ -7356,7 +7419,8 @@ function _accRenderCond() {
 function _accRenderCat() {
   const list = document.getElementById('acc-cat-list');
   if (!list) return;
-  list.innerHTML = _accBuildItems(window._catList || [], window._selectedCats || []) || '<div class="acc-empty">No categories</div>';
+  const _catClear = (window._selectedCats || []).length > 0 ? '<div class="acc-clear-row" onclick="_clearCatFilter()">✕ Clear Category</div>' : '';
+  list.innerHTML = _catClear + (_accBuildItems(window._catList || [], window._selectedCats || []) || '<div class="acc-empty">No categories</div>');
   list.onclick = function(e) { const el = e.target.closest('.acc-item'); if (el) _toggleCat(el.dataset.val); };
   _accExpandHeight('cat');
 }
@@ -7364,7 +7428,8 @@ function _accRenderCat() {
 function _accRenderSub() {
   const list = document.getElementById('acc-sub-list');
   if (!list) return;
-  list.innerHTML = _accBuildItems(window._subList || [], window._selectedSubs || []) || '<div class="acc-empty">No subcategories</div>';
+  const _sClear = (window._selectedSubs || []).length > 0 ? '<div class="acc-clear-row" onclick="_clearSubFilter()">✕ Clear Subcategory</div>' : '';
+  list.innerHTML = _sClear + (_accBuildItems(window._subList || [], window._selectedSubs || []) || '<div class="acc-empty">No subcategories</div>');
   list.onclick = function(e) { const el = e.target.closest('.acc-item'); if (el) _toggleSub(el.dataset.val); };
   _accExpandHeight('sub');
 }
@@ -7430,7 +7495,8 @@ function filterBrandDropdown() { _renderBrandList(); }
 function _renderBrandList() {
   const q = (document.getElementById('brand-dd-search').value || '').toLowerCase();
   const list = document.getElementById('brand-dd-list');
-  let html = '';
+  let html = window._selectedBrands.length > 0
+    ? '<div class="dd-clear-row" onclick="_clearBrandFilter()">✕ Clear Brand</div>' : '';
   window._brandList.forEach(b => {
     if (q && !b.name.toLowerCase().includes(q)) return;
     const isActive = window._selectedBrands.includes(b.name);
@@ -7509,7 +7575,8 @@ function _closeCondOnOutside(e) {
 
 function _renderCondList() {
   const inner = document.getElementById('cond-dd-inner') || document.getElementById('cond-dd-panel');
-  let html = '';
+  let html = window._selectedConds.length > 0
+    ? '<div class="dd-clear-row" onclick="_clearCondFilter()">✕ Clear Condition</div>' : '';
   window._condList.forEach(c => {
     const name = (c && c.name !== undefined) ? c.name : c;
     const count = (c && c.count !== undefined) ? c.count : '';
@@ -7579,7 +7646,8 @@ function _closeCatOnOutside(e) { if (!e.target.closest('#cat-dropdown')) _closeC
 
 function _renderCatList() {
   const inner = document.getElementById('cat-dd-inner') || document.getElementById('cat-dd-panel');
-  let html = '';
+  let html = window._selectedCats.length > 0
+    ? '<div class="dd-clear-row" onclick="_clearCatFilter()">✕ Clear Category</div>' : '';
   window._catList.forEach(c => {
     const name = (c && c.name !== undefined) ? c.name : c;
     const count = (c && c.count !== undefined) ? c.count : '';
@@ -7642,7 +7710,8 @@ function _closeSubOnOutside(e) { if (!e.target.closest('#subcat-dropdown')) _clo
 
 function _renderSubList() {
   const inner = document.getElementById('subcat-dd-inner') || document.getElementById('subcat-dd-panel');
-  let html = '';
+  let html = window._selectedSubs.length > 0
+    ? '<div class="dd-clear-row" onclick="_clearSubFilter()">✕ Clear Subcategory</div>' : '';
   window._subList.forEach(s => {
     const name = (s && s.name !== undefined) ? s.name : s;
     const count = (s && s.count !== undefined) ? s.count : '';
@@ -7681,6 +7750,29 @@ function _setSubList(subcategories) {
   _accUpdateVisibility();
 }
 
+// ── Per-filter clear helpers ──────────────────────────────────────────────────
+function _clearBrandFilter() {
+  window._selectedBrands = []; _updateBrandBtn(); _renderBrandList();
+  if (_isMobile()) { _accRenderBrand(); _accUpdateSummaries(); }
+  _srvLoading = false; _srvPage = 1; _fetchBrowsePage(1);
+}
+function _clearCondFilter() {
+  window._selectedConds = []; _updateCondBtn(); _renderCondList();
+  if (_isMobile()) { _accRenderCond(); _accUpdateSummaries(); }
+  _srvLoading = false; _srvPage = 1; _fetchBrowsePage(1);
+}
+function _clearCatFilter() {
+  window._selectedCats = []; _updateCatBtn(); _renderCatList();
+  window._selectedSubs = []; _updateSubcatBtn(); _renderSubList();
+  if (_isMobile()) { _accRenderCat(); _accRenderSub(); _accUpdateSummaries(); }
+  _srvLoading = false; _srvPage = 1; _fetchBrowsePage(1);
+}
+function _clearSubFilter() {
+  window._selectedSubs = []; _updateSubcatBtn(); _renderSubList();
+  if (_isMobile()) { _accRenderSub(); _accUpdateSummaries(); }
+  _srvLoading = false; _srvPage = 1; _fetchBrowsePage(1);
+}
+
 // ── Results filter ────────────────────────────────────────────────────────────
 let _filterTimer = null;
 let _kwSearchTimer = null;
@@ -7703,11 +7795,14 @@ function clearFilters() {
   window._selectedSubs = []; _updateSubcatBtn(); _setSubList([]);
   document.getElementById('clear-filters-btn').style.display = 'none';
   _accCloseAll(); _accUpdateSummaries();
-  // Clear keyword search box too
+  // Clear keyword search box and reset strict mode
   const resSearch = document.getElementById('res-search');
   if (resSearch) { resSearch.value = ''; }
   document.getElementById('res-search-count').textContent = '';
   _updateResSearchClear();
+  window._strictSearch = false;
+  const _strictBtn = document.getElementById('strict-search-btn');
+  if (_strictBtn) { _strictBtn.textContent = '≈'; _strictBtn.classList.remove('active'); _strictBtn.title = 'Fuzzy (contains) — click for strict whole-word'; }
   // Also turn off watch/price-drop filters if active
   if (_watchFilterActive) {
     _watchFilterActive = false;
@@ -7739,6 +7834,9 @@ function clearResSearch() {
   if (el) el.value = '';
   document.getElementById('res-search-count').textContent = '';
   _updateResSearchClear();
+  window._strictSearch = false;
+  const _strictBtn = document.getElementById('strict-search-btn');
+  if (_strictBtn) { _strictBtn.textContent = '≈'; _strictBtn.classList.remove('active'); _strictBtn.title = 'Fuzzy (contains) — click for strict whole-word'; }
   _srvLoading = false;
   _srvPage = 1;
   _fetchBrowsePage(1);
@@ -8277,7 +8375,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.8.0"
+APP_VERSION = "2.9.0"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
