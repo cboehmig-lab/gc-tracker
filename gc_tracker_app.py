@@ -4200,6 +4200,9 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .results-hdr{padding:8px 16px;font-size:.88rem;font-weight:600;color:#ccc;background:#111;position:sticky;top:0;z-index:1;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;gap:8px;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,.5)}
 /* ── Quick-filter chip bar (Price Drops / Watch List / Want List) ── */
 .quick-filter-bar{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:6px 16px;background:#111;border-bottom:1px solid #1e1e1e;flex-shrink:0}
+#results-top-bar{display:flex;flex-direction:row;align-items:stretch;flex-shrink:0}
+#results-top-bar .quick-filter-bar{border-bottom:none;background:none;padding:4px 8px 4px 16px;flex-shrink:0}
+#results-top-bar .results-hdr{flex:1;border-bottom:none;background:none;box-shadow:none}
 .qf-chip{padding:5px 10px;border-radius:16px;background:#1e1e1e;border:1px solid #3a3a3a;color:#aaa;font-size:.78rem;cursor:pointer;white-space:nowrap;-webkit-tap-highlight-color:transparent}
 .qf-chip:hover{border-color:#555;color:#ccc}
 .qf-chip.wl-active{background:#2d6a2d;border-color:#4ade80;color:#fff}
@@ -4449,6 +4452,7 @@ tr.fav-row td:last-child{color:#4ade80}
   #log{padding:4px 12px;height:auto;min-height:28px;max-height:40px;font-size:.75rem;line-height:1.5;flex-shrink:0}
 
   /* ── Results header / filter toolbar: compact ── */
+  #results-top-bar{display:contents}
   .quick-filter-bar{padding:8px 12px;gap:6px;flex-shrink:0;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;scrollbar-width:none}
   .quick-filter-bar::-webkit-scrollbar{display:none}
   .qf-chip{font-size:.82rem;padding:7px 12px;border-radius:18px}
@@ -4947,17 +4951,17 @@ tr.fav-row td:last-child{color:#4ade80}
     <div id="log"><span class="log-dim">Ready</span></div>
     <div class="results" id="res-panel" style="display:none">
       <!-- ── Persistent view-toggle chips (always visible, not in filter sheet) ── -->
+      <div id="results-top-bar">
       <div class="quick-filter-bar">
         <button id="price-drop-toggle" onclick="togglePriceDropFilter()" class="qf-chip">↓ Price Drops</button>
         <button id="watchlist-toggle"  onclick="toggleWatchFilter()"      class="qf-chip">★ Watch List</button>
         <button id="want-list-toggle"  onclick="searchWantList()"         class="qf-chip">🎯 Want List</button>
+        <a id="search-wl-link" onclick="openKeywords()" class="qf-edit-link" style="display:none;font-size:.75rem">✏︎ Edit Want List</a>
         <button id="view-toggle-chip"  onclick="toggleMobileView()"       class="qf-chip view-toggle-chip-btn" title="Switch list / card view">☰</button>
       </div>
-
       <div class="results-hdr">
         <span id="res-title" style="display:none"></span>
         <span class="badge" id="res-badge" style="display:none!important"></span>
-        <a id="search-wl-link" onclick="openKeywords()" class="qf-edit-link" style="display:none;margin-left:auto;font-size:.75rem">✏︎ Edit Want List</a>
         <button class="mobile-filter-toggle" id="gc-filter-toggle" onclick="toggleMobileFilters('gc')">
           <span class="toggle-arrow" id="gc-filter-arrow">▶</span> Filters
           <span class="filter-active-dot" id="gc-filter-dot"></span>
@@ -5066,6 +5070,7 @@ tr.fav-row td:last-child{color:#4ade80}
           <button class="filter-done-btn" onclick="_closeAllSheets()">Show Results</button>
         </div>
       </div>
+      </div><!-- /results-top-bar -->
       <div id="res-body"></div>
     </div>
   </div>
