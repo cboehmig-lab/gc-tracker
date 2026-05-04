@@ -4830,11 +4830,13 @@ tr.fav-row td:last-child{color:#4ade80}
   <div style="position:absolute;inset:0;background:rgba(0,0,0,.7)" onclick="closeKeywords()"></div>
   <div style="position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:24px 24px 20px;width:420px;max-height:80vh;overflow-y:auto;z-index:1">
     <h2 style="color:#fff;font-size:1.05rem;margin-bottom:4px">🔑 Want List</h2>
-    <p style="color:#777;font-size:.82rem;margin-bottom:16px;line-height:1.5">Items matching your want list are highlighted in the results. New items that also match sort to the top.<br><br>
-      <span style="color:#999">Matching modes:</span><br>
-      <span style="color:#4ade80">Wangcaster</span> — matches any item containing "Wangcaster"<br>
+    <p style="color:#aaa;font-size:.82rem;margin-bottom:16px;line-height:1.6">Items matching your want list are highlighted in the results. New items that also match sort to the top.<br><br>
+      <span style="color:#ccc;font-weight:600">Matching modes:</span><br>
+      <span style="color:#4ade80">Wangcaster</span> — fuzzy: matches anything containing "Wangcaster"<br>
       <span style="color:#4ade80">Wang, Caster</span> — matches items containing both words<br>
-      <span style="color:#4ade80">"Wang Caster"</span> — exact phrase match only
+      <span style="color:#4ade80">"Wang Caster"</span> — exact phrase match only<br>
+      <span style="color:#93c5fd">=Wangcaster</span> — strict: whole-word match only (no "Wangcasters", no "Wang Casterbridge")<br><br>
+      <span style="color:#ccc">Tap the <span style="color:#555;font-weight:700">≈</span> / <span style="color:#fbbf24;font-weight:700">=</span> toggle on any chip to switch that keyword between fuzzy and strict.</span>
     </p>
     <div style="display:flex;gap:6px;margin-bottom:16px">
       <input id="kw-input" type="text" placeholder="Add an item to your want list…"
