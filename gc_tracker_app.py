@@ -5234,6 +5234,10 @@ document.addEventListener('DOMContentLoaded', () => {
   if (filterSheet) _initSwipeDismiss(filterSheet, _closeAllSheets, '.filter-scroll-body');
 });
 
+// Prevent pinch-zoom on iOS (Safari ignores user-scalable=no since iOS 10)
+document.addEventListener('gesturestart', function(e) { e.preventDefault(); }, { passive: false });
+document.addEventListener('touchmove', function(e) { if (e.touches && e.touches.length > 1) e.preventDefault(); }, { passive: false });
+
 function _updateMobileToggleCounts() {
   const gcCount = document.getElementById('gc-toggle-count');
   if (gcCount) {
@@ -5502,7 +5506,10 @@ async function _loadAndMergeServerData(serverData) {
   const sNid = serverData.new_ids   || [];
 
   const mergedWl  = Object.assign({}, sWl, window._watchlist);
-  const mergedKw  = [...new Set([...sKw, ...window._keywords])].sort();
+  // Keywords: server is authoritative when logged in so that deletions on one
+  // device propagate to all others. Only fall back to local if server record is
+  // empty (first-ever sync for this account).
+  const mergedKw  = sKw.length > 0 ? [...sKw].sort() : [...window._keywords].sort();
   const mergedFav = [...new Set([...sFav, ...favorites])];
   const localLr   = window._lastRunISO || '';
   let mergedLr, mergedNid;
@@ -6816,7 +6823,8 @@ let _wlCountTimer = null;
 function _updateWantListCount() {
   const editLink = document.getElementById('search-wl-link');
   if (!editLink) return;
-  editLink.style.display = _wantListSearchActive ? 'inline' : 'none';
+  // Desktop: always visible. Mobile: only when want list filter is active.
+  editLink.style.display = (!_isMobile() || _wantListSearchActive) ? 'inline' : 'none';
 }
 
 function cancelReset() {
