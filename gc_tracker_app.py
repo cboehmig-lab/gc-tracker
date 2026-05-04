@@ -4453,6 +4453,7 @@ tr.fav-row td:last-child{color:#4ade80}
 
   /* ── Results header / filter toolbar: compact ── */
   #results-top-bar{display:contents}
+  #results-top-bar .results-hdr{flex:none}
   .quick-filter-bar{padding:8px 12px;gap:6px;flex-shrink:0;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;scrollbar-width:none}
   .quick-filter-bar::-webkit-scrollbar{display:none}
   .qf-chip{font-size:.82rem;padding:7px 12px;border-radius:18px}
