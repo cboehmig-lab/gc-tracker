@@ -4834,9 +4834,9 @@ tr.fav-row td:last-child{color:#4ade80}
       <span style="color:#ccc;font-weight:600">Matching modes:</span><br>
       <span style="color:#4ade80">Wangcaster</span> — fuzzy: matches anything containing "Wangcaster"<br>
       <span style="color:#4ade80">Wang, Caster</span> — matches items containing both words<br>
-      <span style="color:#4ade80">"Wang Caster"</span> — exact phrase match only<br>
-      <span style="color:#93c5fd">=Wangcaster</span> — strict: whole-word match only (no "Wangcasters", no "Wang Casterbridge")<br><br>
-      <span style="color:#ccc">Tap the <span style="color:#555;font-weight:700">≈</span> / <span style="color:#fbbf24;font-weight:700">=</span> toggle on any chip to switch that keyword between fuzzy and strict.</span>
+      <span style="color:#4ade80">"Wang Caster"</span> — phrase match only<br>
+      <span style="color:#93c5fd">=Wangcaster</span> — strict: whole-word match only (won't match "Wangcasters" or "Wangcasterbridge")<br><br>
+      <span style="color:#ccc">Strict chips show a <span style="color:#fbbf24;font-weight:700">=</span> badge. To change mode, remove the keyword and re-add with or without the = prefix.</span>
     </p>
     <div style="display:flex;gap:6px;margin-bottom:16px">
       <input id="kw-input" type="text" placeholder="Add an item to your want list…"
@@ -6651,13 +6651,10 @@ function renderKeywordList() {
       const chipBg = isStrict ? '#0a3c6e' : '#0a5c2a';
       const chipColor = isStrict ? '#93c5fd' : '#4ade80';
       const chipBorder = isStrict ? '#1e40af' : '#2d6a2d';
-      const modeColor = isStrict ? '#fbbf24' : '#555';
-      const modeChar = isStrict ? '=' : '≈';
-      const modeTitle = isStrict ? 'Strict (whole-word) — click for fuzzy' : 'Fuzzy (contains) — click for strict';
-      return `<span style="display:inline-flex;align-items:center;gap:3px;background:${chipBg};color:${chipColor};border:1px solid ${chipBorder};border-radius:14px;padding:4px 7px 4px 7px;font-size:.78rem;font-weight:600;white-space:nowrap">` +
-        `<button onclick="removeKeywordAt(${i})" style="background:none;border:none;color:${chipColor};opacity:.6;font-size:.75rem;cursor:pointer;padding:0 2px 0 0;line-height:1" title="Remove" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.6">&#10005;</button>` +
-        `${safe}` +
-        `<button onclick="_toggleKeywordStrict(${i})" style="background:none;border:none;color:${modeColor};font-size:.7rem;font-weight:700;cursor:pointer;padding:0 0 0 3px;line-height:1" title="${modeTitle}">${modeChar}</button>` +
+      const badge = isStrict ? `<span style="font-size:.65rem;font-weight:700;color:#fbbf24;padding-right:2px" title="Strict whole-word match">=</span>` : '';
+      return `<span style="display:inline-flex;align-items:center;gap:3px;background:${chipBg};color:${chipColor};border:1px solid ${chipBorder};border-radius:14px;padding:4px 7px 4px 9px;font-size:.78rem;font-weight:600;white-space:nowrap">` +
+        `${badge}${safe}` +
+        `<button onclick="removeKeywordAt(${i})" style="background:none;border:none;color:${chipColor};opacity:.6;font-size:.75rem;cursor:pointer;padding:0 0 0 4px;line-height:1" title="Remove" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.6">&#10005;</button>` +
         `</span>`;
     }).join('') +
   `</div>`;
