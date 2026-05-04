@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-01 · Current version: v2.8.0 · Status: deployed on Railway · Branch: main*
+*Last updated: 2026-05-04 · Current version: v2.9.0 · Status: deployed on Railway · Branch: main*
 
 ---
 
@@ -123,7 +123,11 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 - On mobile, `_renderServerTable()` dispatches to `_renderMobileCards()` (default) or `_renderMobileList()`
 - View preference saved in `localStorage` key `gt_mobile_view` (`'cards'` or `'list'`)
 - `100dvh` body height prevents iOS Safari tab bar from pushing content off-screen
-- Pinch zoom / rotation disabled via `<meta name="viewport" content="...,maximum-scale=1,user-scalable=no">`
+- Pinch zoom / rotation disabled via `<meta name="viewport" content="...,maximum-scale=1,user-scalable=no">` **AND** via JS event listeners (iOS 10+ ignores `user-scalable=no` in the meta tag):
+  ```javascript
+  document.addEventListener('gesturestart', e => e.preventDefault(), { passive: false });
+  document.addEventListener('touchmove', e => { if (e.touches && e.touches.length > 1) e.preventDefault(); }, { passive: false });
+  ```
 
 ### Mobile title bar (v2.8.0)
 Dark maroon gradient header at very top of screen (desktop header is hidden on mobile):
@@ -199,8 +203,8 @@ Always visible above results (`.quick-filter-bar`):
 
 Price Drops, Watch List, and Want List do NOT auto-close the filter sheet — user must tap "Show Results".
 
-### Edit Want List (v2.8.0)
-`#search-wl-link` moved from chip bar to `.results-hdr`. Shows only when `_wantListSearchActive === true` (want list filter active). `_updateWantListCount()` checks this flag. Called from `searchWantList()` (show) and `_resetWantListLink()` (hide).
+### Edit Want List (v2.9.0)
+`#search-wl-link` lives in `.quick-filter-bar`, immediately after the Want List chip. On **desktop** it is always visible (`_isMobile()` check in `_updateWantListCount()`). On **mobile** it only shows when `_wantListSearchActive === true` (want list filter active) to conserve horizontal space. `_updateWantListCount()` enforces this. Called from `searchWantList()` (show) and `_resetWantListLink()` (hide).
 
 ### Paginator (v2.8.0)
 Mobile paginator is now `position:static!important` — lives inline at the bottom of the results list. Only visible when user scrolls to the bottom. Desktop paginator remains `position:sticky; bottom:0`.
@@ -365,3 +369,73 @@ When bumping version, update ALL FOUR of these:
 - Full CL search functionality: city sidebar, search, sortable results, watch list, want list, favorites
 - Indigo/purple accent colors, shares Flask session + localStorage with main app
 - No link from the main GC tracker to `/cl` — direct URL access only
+
+---
+
+## Recent Changes (v2.8.0 → v2.9.0)
+
+### v2.9.0 — Strict search, per-filter clear, desktop layout
+
+**Per-filter clear buttons**
+- Each filter dropdown (Brand, Condition, Category, Subcategory) now has a small ✕ Clear button inside its panel header
+- On mobile accordions: same clear buttons inside the accordion body header row
+- Functions: `_clearBrandFilter()`, `_clearCondFilter()`, `_clearCatFilter()`, `_clearSubFilter()` — each resets the relevant state array, re-renders, and re-fetches
+- The existing "Clear All" / "✕ Clear Filters" button remains unchanged
+
+**Strict / whole-word search (= prefix convention)**
+
+*Want list keywords* — per-keyword strict mode:
+- Prefix a keyword with `=` to make it a whole-word-only match (e.g. `=Carr` matches "Carr" but not "Carruthers")
+- No data model change — the `=` is stored as-is in the keywords array and syncs naturally
+- **Server-side** (`_compile_keywords()`): detects `=` prefix, builds `re.compile(r'\b' + re.escape(word) + r'\b', re.IGNORECASE)`, stored as `("word", pattern)`
+- **Client-side** (`_itemMatchesKeyword()`): `text.toLowerCase().split(/\W+/).includes(kw.slice(1).toLowerCase())`
+  - ⚠️ Uses **regex literal** `/\W+/` NOT a RegExp constructor — see Python escape gotcha below
+- Chip rendering: strict chips are dark blue (`#0a3c6e` / `#93c5fd`) with a yellow `=` badge; normal chips remain green
+- Keyword input help text: shows `=Carr` example for strict, `Wang Caster` for phrase match, `"exact phrase"` for quoted exact
+
+*Main search bar* — global strict toggle:
+- Small `≈` button (`#strict-search-btn`) next to the search input — click to toggle strict on/off (shows `=` when active)
+- Sends `filter_strict: true` in the browse payload
+- **Server-side** in `_apply_base()`: when `f_strict` is true and query isn't quoted, splits query into words and applies `\b...\b` regex to all searchable fields (name, brand, store, location, category, subcategory)
+
+**Want list deletion sync fix**
+- Changed merge strategy from union (additions only) to **server-wins**:
+  ```javascript
+  const mergedKw = sKw.length > 0 ? [...sKw].sort() : [...window._keywords].sort();
+  ```
+- Deletions on any device now propagate globally — server state overwrites local state on next `/api/me` sync
+
+**Desktop single-row layout**
+- `.quick-filter-bar` and `.results-hdr` (filter bar) are now wrapped in `<div id="results-top-bar">`
+- Global CSS: `#results-top-bar{display:flex;flex-direction:row;align-items:stretch;flex-shrink:0}` — chips and filter bar sit side by side
+- Mobile CSS: `#results-top-bar{display:contents}` — wrapper is invisible to the flex layout; its children flow as direct children of `#res-panel` exactly as before; **zero mobile change**
+- `#search-wl-link` (Edit Want List) moved into `.quick-filter-bar` immediately after `#want-list-toggle`
+- On desktop, Edit Want List is always visible; on mobile, only when want list filter is active
+
+**CSS gotcha: `flex:1` + `display:contents`**
+- `#results-top-bar .results-hdr{flex:1}` is correct on desktop (fills remaining horizontal space)
+- On mobile with `display:contents`, `.results-hdr` becomes a column-flex child of `#res-panel` — `flex:1` then expands it to fill ALL remaining vertical space, creating a giant blank gap below the chips
+- Fix: `#results-top-bar .results-hdr{flex:none}` in the mobile `@media` block
+- Key insight: `display:contents` is visual-only — CSS parent selectors (`#results-top-bar .results-hdr`) still match because the DOM parent relationship is unchanged
+
+**Mobile zoom re-locked**
+- iOS 10+ ignores `user-scalable=no` in the viewport meta tag
+- Fixed with two JS event listeners added in `DOMContentLoaded`:
+  - `gesturestart` → `preventDefault()` (blocks pinch-to-zoom on iOS Safari)
+  - `touchmove` with `touches.length > 1` → `preventDefault()` (blocks multi-touch zoom everywhere)
+  - Both registered with `{ passive: false }` (required for `preventDefault()` to work on touch events)
+
+---
+
+## ⚠️ Critical Python/JS Template Gotchas
+
+**Regex in Python triple-quoted template strings**
+- Python processes `\\` → `\` when the triple-quoted string is evaluated
+- `new RegExp('\\\\b' + word + '\\\\b')` in source → `new RegExp('\\b' + word + '\\b')` at runtime — OK
+- But `/[.*+?^${}()|[\]\\]/g` in source (a regex literal with a backslash char class) → the trailing `\\` becomes `\`, leaving an unclosed character class `/[...\]/g` — **SyntaxError, kills the entire page**
+- **Rule**: Never use `RegExp` constructor strings with backslash escapes in Python templates. Use regex **literals** (`/\W+/`, `/\b/`) instead — the literal slash-backslash is preserved as-is.
+- This burned us in v2.9.0: the `kw.slice(1).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')` approach produced a parse-time SyntaxError. Replaced with `text.split(/\W+/).includes(word)` — regex literal, no escaping issue.
+
+**Inline onclick strings with regex**
+- Don't build regex patterns inside `onclick="..."` attributes via Python string concatenation
+- Use `data-*` attributes + `addEventListener` instead (see accordion items)
