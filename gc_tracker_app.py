@@ -6730,9 +6730,8 @@ function _itemMatchesKeyword(item) {
   return window._keywords.some(kw => {
     kw = kw.trim();
     if (kw.startsWith('=') && kw.length > 1) {
-      // Strict whole-word match
-      const escaped = kw.slice(1).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      return new RegExp('\\b' + escaped + '\\b', 'i').test(text);
+      // Strict whole-word match — split text on non-word chars, check for exact match
+      return text.toLowerCase().split(/\W+/).includes(kw.slice(1).toLowerCase());
     } else if (kw.startsWith('"') && kw.endsWith('"') && kw.length > 2) {
       // Exact substring match
       return text.includes(kw.slice(1, -1).toLowerCase());
