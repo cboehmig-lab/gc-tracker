@@ -6803,7 +6803,7 @@ function _renderSavedSearchesDropdown() {
       '<div class="ss-empty">No saved searches yet.<br>Set filters then click <b>💾 Save Search</b>.</div>';
     return;
   }
-  let html = '<div class="ss-dropdown-hdr"><span>Saved Searches</span></div><div class="ss-list">';
+  let html = '<div class="ss-dropdown-hdr"><span>Saved Searches</span><button class="ss-clear-all-btn" data-ss-clear="1">Clear</button></div><div class="ss-list">';
   searches.forEach(function(ss) {
     html +=
       '<div class="ss-item" data-ss-id="' + _ssEsc(ss.id) + '">' +
@@ -6818,6 +6818,7 @@ function _renderSavedSearchesDropdown() {
   html += '</div>';
   dd.innerHTML = html;
   dd.addEventListener('click', function(e) {
+    if (e.target.closest('[data-ss-clear]')) { _closeSavedSearchesDropdown(); clearFilters(); return; }
     const delBtn = e.target.closest('[data-ss-del]');
     if (delBtn) { e.stopPropagation(); _deleteSavedSearch(delBtn.dataset.ssDel); return; }
     const item = e.target.closest('[data-ss-id]');
