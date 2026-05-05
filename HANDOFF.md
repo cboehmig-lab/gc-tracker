@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-04 · Current version: v2.9.0 · Status: deployed on Railway · Branch: main*
+*Last updated: 2026-05-05 · Current version: v2.10.0 · Status: deployed on Railway · Branch: main*
 
 ---
 
@@ -424,6 +424,61 @@ When bumping version, update ALL FOUR of these:
   - `gesturestart` → `preventDefault()` (blocks pinch-to-zoom on iOS Safari)
   - `touchmove` with `touches.length > 1` → `preventDefault()` (blocks multi-touch zoom everywhere)
   - Both registered with `{ passive: false }` (required for `preventDefault()` to work on touch events)
+
+---
+
+## Recent Changes (v2.9.0 → v2.10.0)
+
+### v2.10.0 — Saved Searches
+
+**Feature overview**
+- Logged-in users can save named combinations of filters + stores + search term for instant recall
+- Saves: `filter_q`, `filter_brands`, `filter_conditions`, `filter_categories`, `filter_subcategories`, `filter_strict`, `filter_price_drop_only`, `filter_watched`, and `_srvStores` (the selected stores)
+- Syncs to server via `/api/sync` — persists across devices
+
+**Data model**
+- New `saved_searches TEXT DEFAULT '[]'` column in `user_data` SQLite table
+- `_init_user_db()` adds the column via `ALTER TABLE` with try/except for existing databases
+- Schema: `[{id, name, filters: {...}, stores: [...], created_at}]` — `id` = `"ss_" + Date.now()`
+- `_get_user_data()`, `_set_user_data()`, `api_sync()` all updated to handle `saved_searches`
+- Server wins on merge (same strategy as `keywords`) — deletions on any device propagate everywhere
+
+**New API endpoint**
+- `POST /api/saved-search-counts` — takes `{"searches": [{filters, stores}, ...]}`, returns `{"counts": [n, ...]}`
+- Loads `gc_category_cache.json` once, applies all filter combos, returns match counts in one batch
+- Called when the Saved Searches dropdown opens; count badges update in-place
+
+**UI: Saved Searches chip button**
+- `#ss-wrap` in `.quick-filter-bar` — only visible when logged in (`_setAuthUI` controls this)
+- `#saved-searches-btn` opens/closes the dropdown; red count badge (`#ss-btn-count`) shows how many searches are saved
+- `#ss-dropdown` uses `position:fixed` in CSS — JS computes `top`/`left` from button's `getBoundingClientRect()` so it escapes `overflow-x:auto` on `.quick-filter-bar` without clipping
+- Outside-click listener on `document` closes the dropdown
+
+**UI: Save Search button**
+- `#save-search-btn` lives in `.results-hdr` (after `#gc-filter-collapsible` closing tag)
+- Green-bordered button: `border:1px solid #3a5a3a;color:#4ade80`
+- Only shown when logged in AND at least one filter/search is active (`_updateSaveSearchBtn()`)
+- `_updateSaveSearchBtn()` is called from `_updateFilterDot()` (which fires on every filter change)
+- Clicking opens a `prompt()` for the search name, then pushes to `window._savedSearches` and syncs
+
+**Dropdown rendering**
+- `_renderSavedSearchesDropdown()` builds HTML string and wires event delegation on `.ss-list`
+- Uses `data-ss-id` (apply) and `data-ss-del` (delete) attributes — no inline onclick (avoids Python escape gotcha)
+- Each item: name, short description line (`_ssDescription()`), count badge, delete ✕ button
+- `_ssEsc()` is a minimal HTML-escape helper used for user-supplied strings in the dropdown
+
+**Delete confirm**
+- `_deleteSavedSearch(id)` calls `confirm('Delete "name"? This cannot be undone.')` before removing
+- After delete: syncs to server, updates badge (`_updateSavedSearchesUI()`), re-renders dropdown
+
+**Applying a saved search**
+- `_applySavedSearch(id)` restores all filter state variables, updates dropdown/accordion UI, restores store checkboxes via `renderList(new Set(savedStores))`, then calls `_fetchBrowsePage(1)`
+- Also restores watch-filter and price-drop chip active states from the saved `filter_watched` / `filter_price_drop_only` flags
+
+**JS state**
+- `window._savedSearches` — array of saved search objects
+- Initialized to `[]` at startup; merged from server on login (server wins)
+- Reset to `[]` on logout alongside other per-user state
 
 ---
 

@@ -76,15 +76,21 @@ def _init_user_db():
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS user_data (
-                user_id   INTEGER PRIMARY KEY REFERENCES users(id),
-                watchlist TEXT    DEFAULT '{}',
-                keywords  TEXT    DEFAULT '[]',
-                favorites TEXT    DEFAULT '[]',
-                last_run  TEXT    DEFAULT '',
-                new_ids   TEXT    DEFAULT '[]',
-                updated_at TEXT   DEFAULT ''
+                user_id        INTEGER PRIMARY KEY REFERENCES users(id),
+                watchlist      TEXT    DEFAULT '{}',
+                keywords       TEXT    DEFAULT '[]',
+                favorites      TEXT    DEFAULT '[]',
+                last_run       TEXT    DEFAULT '',
+                new_ids        TEXT    DEFAULT '[]',
+                saved_searches TEXT    DEFAULT '[]',
+                updated_at     TEXT    DEFAULT ''
             )
         """)
+        # Migration: add saved_searches column for existing databases
+        try:
+            conn.execute("ALTER TABLE user_data ADD COLUMN saved_searches TEXT DEFAULT '[]'")
+        except Exception:
+            pass  # Column already exists
         conn.commit()
 
 def _user_by_username(username: str) -> dict | None:
@@ -101,17 +107,22 @@ def _get_user_data(user_id: int) -> dict:
     with _user_db() as conn:
         row = conn.execute("SELECT * FROM user_data WHERE user_id=?", (user_id,)).fetchone()
     if not row:
-        return {"watchlist": {}, "keywords": [], "favorites": [], "last_run": "", "new_ids": []}
+        return {"watchlist": {}, "keywords": [], "favorites": [], "last_run": "", "new_ids": [], "saved_searches": []}
+    try:
+        ss = json.loads(row["saved_searches"] or "[]")
+    except Exception:
+        ss = []
     return {
-        "watchlist": json.loads(row["watchlist"] or "{}"),
-        "keywords":  json.loads(row["keywords"]  or "[]"),
-        "favorites": json.loads(row["favorites"] or "[]"),
-        "last_run":  row["last_run"] or "",
-        "new_ids":   json.loads(row["new_ids"]   or "[]"),
+        "watchlist":      json.loads(row["watchlist"] or "{}"),
+        "keywords":       json.loads(row["keywords"]  or "[]"),
+        "favorites":      json.loads(row["favorites"] or "[]"),
+        "last_run":       row["last_run"] or "",
+        "new_ids":        json.loads(row["new_ids"]   or "[]"),
+        "saved_searches": ss,
     }
 
 def _set_user_data(user_id: int, **kwargs):
-    """Update one or more user_data fields. Valid keys: watchlist, keywords, favorites, last_run, new_ids"""
+    """Update one or more user_data fields. Valid keys: watchlist, keywords, favorites, last_run, new_ids, saved_searches"""
     now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     with _user_db() as conn:
         conn.execute(
@@ -119,7 +130,7 @@ def _set_user_data(user_id: int, **kwargs):
             (user_id, now)
         )
         for field, value in kwargs.items():
-            if field in ("watchlist", "keywords", "favorites", "new_ids"):
+            if field in ("watchlist", "keywords", "favorites", "new_ids", "saved_searches"):
                 conn.execute(
                     f"UPDATE user_data SET {field}=?, updated_at=? WHERE user_id=?",
                     (json.dumps(value), now, user_id)
@@ -1522,7 +1533,7 @@ def api_sync():
         return jsonify({"error": "Not logged in."}), 401
     data   = request.json or {}
     kwargs = {}
-    for field in ("watchlist", "keywords", "favorites", "new_ids"):
+    for field in ("watchlist", "keywords", "favorites", "new_ids", "saved_searches"):
         if field in data:
             kwargs[field] = data[field]
     if "last_run" in data:
@@ -2544,6 +2555,67 @@ def api_favorites():
         favs.remove(name)
     save_favorites(favs)
     return jsonify({"favorites": sorted(favs)})
+
+
+@app.route("/api/saved-search-counts", methods=["POST"])
+def api_saved_search_counts():
+    """Return match counts for each saved search in a single batch call."""
+    data     = request.json or {}
+    searches = data.get("searches", [])
+    if not searches:
+        return jsonify({"counts": []})
+    try:
+        with open(CAT_CACHE_FILE) as f:
+            cache = json.load(f)
+        all_items = list(cache.values())
+    except Exception:
+        return jsonify({"counts": [0] * len(searches)})
+
+    import re as _re2
+    counts = []
+    for search in searches:
+        stores   = set(search.get("stores") or [])
+        f        = search.get("filters") or {}
+        fq       = (f.get("filter_q") or "").lower().strip()
+        f_brands = set(f.get("filter_brands") or [])
+        f_conds  = set(f.get("filter_conditions") or [])
+        f_cats   = set(f.get("filter_categories") or [])
+        f_subs   = set(f.get("filter_subcategories") or [])
+        f_strict = bool(f.get("filter_strict"))
+        f_pdrop  = bool(f.get("filter_price_drop_only"))
+
+        items = [i for i in all_items if i.get("store") in stores] if stores else list(all_items)
+
+        if fq:
+            if fq.startswith('"') and fq.endswith('"') and len(fq) > 2:
+                phrase = fq[1:-1]
+                items = [i for i in items if phrase in (i.get("name") or "").lower()
+                         or phrase in (i.get("brand") or "").lower()]
+            elif f_strict:
+                words = fq.split()
+                pats  = [_re2.compile(r'\b' + _re2.escape(w) + r'\b', _re2.IGNORECASE) for w in words]
+                items = [i for i in items if all(
+                    p.search(" ".join([i.get("name") or "", i.get("brand") or "",
+                                       i.get("store") or "", i.get("location") or "",
+                                       i.get("category") or "", i.get("subcategory") or ""]))
+                    for p in pats)]
+            else:
+                words = fq.split()
+                items = [i for i in items if all(
+                    w in " ".join([i.get("name") or "", i.get("brand") or "",
+                                   i.get("store") or "", i.get("location") or "",
+                                   i.get("category") or "", i.get("subcategory") or ""]).lower()
+                    for w in words)]
+
+        if f_brands: items = [i for i in items if i.get("brand") in f_brands]
+        if f_conds:  items = [i for i in items if i.get("condition") in f_conds]
+        if f_cats:   items = [i for i in items if i.get("category") in f_cats]
+        if f_subs:   items = [i for i in items if i.get("subcategory") in f_subs]
+        if f_pdrop:  items = [i for i in items if (i.get("price_drop") or 0) > 0]
+
+        counts.append(len(items))
+
+    return jsonify({"counts": counts})
 
 
 @app.route("/api/browse", methods=["POST"])
@@ -4209,6 +4281,23 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .qf-edit-link{color:#4ade80;cursor:pointer;white-space:nowrap;font-size:.78rem;text-decoration:none}
 .qf-edit-link:hover{text-decoration:underline}
 .view-toggle-chip-btn{display:none;margin-left:auto}  /* mobile only — shown in mobile block */
+/* ── Saved Searches ── */
+#ss-wrap{position:relative}
+.ss-dropdown{position:fixed;z-index:500;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:8px;min-width:280px;max-width:380px;max-height:400px;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.7);display:none}
+.ss-dropdown-hdr{padding:10px 14px 6px;font-size:.72rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid #2a2a2a;display:flex;align-items:center;justify-content:space-between}
+.ss-empty{padding:20px 14px;color:#666;font-size:.82rem;text-align:center;line-height:1.5}
+.ss-item{display:flex;align-items:center;gap:8px;padding:9px 14px;cursor:pointer;border-bottom:1px solid #222;transition:background .12s}
+.ss-item:hover{background:#222}
+.ss-item:last-child{border-bottom:none}
+.ss-item-main{flex:1;min-width:0}
+.ss-item-name{font-size:.84rem;font-weight:600;color:#eee;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ss-item-desc{font-size:.72rem;color:#777;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ss-count-badge{background:#2a2a2a;color:#aaa;font-size:.68rem;font-weight:700;padding:2px 7px;border-radius:10px;white-space:nowrap;flex-shrink:0}
+.ss-count-badge.loaded{background:#1e3a1e;color:#4ade80}
+.ss-delete-btn{background:none;border:none;color:#555;font-size:.75rem;cursor:pointer;padding:3px 5px;border-radius:3px;flex-shrink:0;line-height:1}
+.ss-delete-btn:hover{color:#f88;background:#2a1a1a}
+#save-search-btn{padding:5px 10px;border-radius:4px;background:none;border:1px solid #3a5a3a;color:#4ade80;font-size:.78rem;cursor:pointer;white-space:nowrap;display:none}
+#save-search-btn:hover{background:#1e3a1e;border-color:#4ade80}
 .badge{background:#c00;color:#fff;font-size:.7rem;font-weight:700;padding:2px 7px;border-radius:10px}.badge:empty{display:none}
 .cat-sel{padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer}
 .cat-sel:focus{border-color:#c00}
@@ -4858,7 +4947,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.9.0</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.0</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -4907,7 +4996,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><span></span><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.9.0</span></div>
+<div class="mobile-title-bar"><span></span><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.0</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -4958,6 +5047,10 @@ tr.fav-row td:last-child{color:#4ade80}
         <button id="watchlist-toggle"  onclick="toggleWatchFilter()"      class="qf-chip">★ Watch List</button>
         <button id="want-list-toggle"  onclick="searchWantList()"         class="qf-chip">🎯 Want List</button>
         <a id="search-wl-link" onclick="openKeywords()" class="qf-edit-link" style="display:none;font-size:.75rem">✏︎ Edit Want List</a>
+        <div id="ss-wrap" style="display:none;position:relative">
+          <button id="saved-searches-btn" onclick="_toggleSavedSearchesDropdown()" class="qf-chip" title="Your saved filter combinations">🔖 Saved <span id="ss-btn-count" style="display:none;background:#c00;color:#fff;font-size:.65rem;font-weight:700;padding:1px 5px;border-radius:8px;margin-left:2px"></span></button>
+        </div>
+        <div id="ss-dropdown" class="ss-dropdown"></div>
         <button id="view-toggle-chip"  onclick="toggleMobileView()"       class="qf-chip view-toggle-chip-btn" title="Switch list / card view">☰</button>
       </div>
       <div class="results-hdr">
@@ -5070,6 +5163,7 @@ tr.fav-row td:last-child{color:#4ade80}
           <!-- ── Pinned Show Results (mobile only) ── -->
           <button class="filter-done-btn" onclick="_closeAllSheets()">Show Results</button>
         </div>
+        <button id="save-search-btn" onclick="_saveCurrentSearch()" title="Save current search + filters">💾 Save Search</button>
       </div>
       </div><!-- /results-top-bar -->
       <div id="res-body"></div>
@@ -5240,6 +5334,15 @@ document.addEventListener('DOMContentLoaded', () => {
   if (filterSheet) _initSwipeDismiss(filterSheet, _closeAllSheets, '.filter-scroll-body');
 });
 
+// Close saved-searches dropdown on outside click
+document.addEventListener('click', function(e) {
+  const dd  = document.getElementById('ss-dropdown');
+  const btn = document.getElementById('saved-searches-btn');
+  if (dd && dd.style.display === 'block' && !dd.contains(e.target) && e.target !== btn && !btn.contains(e.target)) {
+    _closeSavedSearchesDropdown();
+  }
+});
+
 // Prevent pinch-zoom on iOS (Safari ignores user-scalable=no since iOS 10)
 document.addEventListener('gesturestart', function(e) { e.preventDefault(); }, { passive: false });
 document.addEventListener('touchmove', function(e) { if (e.touches && e.touches.length > 1) e.preventDefault(); }, { passive: false });
@@ -5286,6 +5389,7 @@ function _updateFilterDot() {
     _priceDropFilterActive ||
     (document.getElementById('res-search').value.trim().length > 0);
   dot.classList.toggle('visible', !!hasFilters);
+  _updateSaveSearchBtn();
   _updateMobileBottomBar();
 }
 
@@ -5479,6 +5583,10 @@ function _setAuthUI(username, email) {
     userInfo.style.display  = 'none';
     syncDot.style.display   = 'none';
   }
+  // Saved searches chip — only meaningful when logged in
+  const ssWrap = document.getElementById('ss-wrap');
+  if (ssWrap) ssWrap.style.display = (username || email) ? '' : 'none';
+  if (!(username || email)) _closeSavedSearchesDropdown();
   // Mobile bottom bar auth button
   const mIcon  = document.getElementById('mbb-auth-icon');
   const mLabel = document.getElementById('mbb-auth-label');
@@ -5505,11 +5613,12 @@ async function _loadAndMergeServerData(serverData) {
   // Merge server data with whatever's already in localStorage.
   // Strategy: union for sets (watchlist, keywords, favorites),
   // most-recent-wins for last_run / new_ids.
-  const sWl  = serverData.watchlist || {};
-  const sKw  = serverData.keywords  || [];
-  const sFav = serverData.favorites || [];
-  const sLr  = serverData.last_run  || '';
-  const sNid = serverData.new_ids   || [];
+  const sWl  = serverData.watchlist      || {};
+  const sKw  = serverData.keywords       || [];
+  const sFav = serverData.favorites      || [];
+  const sLr  = serverData.last_run       || '';
+  const sNid = serverData.new_ids        || [];
+  const sSS  = serverData.saved_searches || [];
 
   const mergedWl  = Object.assign({}, sWl, window._watchlist);
   // Keywords: server is authoritative when logged in so that deletions on one
@@ -5527,11 +5636,15 @@ async function _loadAndMergeServerData(serverData) {
     mergedNid = sLr ? sNid : [...(window._newIds || [])];
   }
 
-  window._watchlist   = mergedWl;
-  window._keywords    = mergedKw;
-  favorites           = mergedFav;
-  window._lastRunISO  = mergedLr || null;
-  window._newIds      = new Set(mergedNid);
+  // Saved searches: server is authoritative (like keywords) so deletions propagate
+  const mergedSS = sSS.length > 0 ? sSS : (window._savedSearches || []);
+
+  window._watchlist      = mergedWl;
+  window._keywords       = mergedKw;
+  favorites              = mergedFav;
+  window._lastRunISO     = mergedLr || null;
+  window._newIds         = new Set(mergedNid);
+  window._savedSearches  = mergedSS;
 
   _lsSet('watchlist', window._watchlist);
   _lsSet('keywords',  window._keywords);
@@ -5541,6 +5654,7 @@ async function _loadAndMergeServerData(serverData) {
 
   // Push merged state back to server
   await _syncToServer(true);
+  _updateSavedSearchesUI();
 }
 
 async function _syncToServer(immediate) {
@@ -5556,11 +5670,12 @@ async function _syncToServer(immediate) {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        watchlist: window._watchlist || {},
-        keywords:  window._keywords  || [],
-        favorites: favorites          || [],
-        last_run:  window._lastRunISO || '',
-        new_ids:   window._newIds instanceof Set ? [...window._newIds] : (window._newIds || []),
+        watchlist:      window._watchlist     || {},
+        keywords:       window._keywords      || [],
+        favorites:      favorites              || [],
+        last_run:       window._lastRunISO    || '',
+        new_ids:        window._newIds instanceof Set ? [...window._newIds] : (window._newIds || []),
+        saved_searches: window._savedSearches || [],
       }),
     });
   } catch(e) { /* sync failure is non-fatal — data is still in localStorage */ }
@@ -5638,11 +5753,12 @@ async function _authLogout() {
   await fetch('/api/logout', {method: 'POST'});
   window._authUser = null;
   // Clear all per-user state from memory and localStorage
-  window._watchlist   = {};
-  window._keywords    = [];
-  window._newIds      = new Set();
-  window._lastRunISO  = null;
-  favorites           = [];
+  window._watchlist      = {};
+  window._keywords       = [];
+  window._newIds         = new Set();
+  window._lastRunISO     = null;
+  window._savedSearches  = [];
+  favorites              = [];
   ['watchlist','keywords','new_ids','last_run','favorites'].forEach(k => _lsSet(k, k === 'watchlist' ? {} : []));
   _setAuthUI(null, null);
   // Re-render to reflect cleared state
@@ -6617,6 +6733,214 @@ function getSelected() {
 
 function dismissFirstRun() {
   document.getElementById('first-run-modal').style.display = 'none';
+}
+
+// ── Saved Searches ────────────────────────────────────────────────────────────
+window._savedSearches = [];
+
+function _updateSaveSearchBtn() {
+  const btn = document.getElementById('save-search-btn');
+  if (!btn) return;
+  const f = _getBrowseFilters();
+  const hasAny = f.filter_q ||
+    (f.filter_brands      && f.filter_brands.length)      ||
+    (f.filter_conditions  && f.filter_conditions.length)  ||
+    (f.filter_categories  && f.filter_categories.length)  ||
+    (f.filter_subcategories && f.filter_subcategories.length) ||
+    f.filter_price_drop_only;
+  btn.style.display = (window._authUser && hasAny) ? '' : 'none';
+}
+
+function _updateSavedSearchesUI() {
+  const wrap = document.getElementById('ss-wrap');
+  if (!wrap) return;
+  const count = (window._savedSearches || []).length;
+  wrap.style.display = window._authUser ? '' : 'none';
+  const badge = document.getElementById('ss-btn-count');
+  if (badge) {
+    badge.textContent = count || '';
+    badge.style.display = count ? '' : 'none';
+  }
+}
+
+function _ssEsc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function _ssDescription(ss) {
+  const parts = [];
+  const f = ss.filters || {};
+  if (f.filter_q) parts.push('"' + f.filter_q + '"');
+  const brands = f.filter_brands || [];
+  if (brands.length) parts.push(brands.slice(0,2).join(', ') + (brands.length > 2 ? ' +' + (brands.length-2) : ''));
+  const conds = f.filter_conditions || [];
+  if (conds.length) parts.push(conds.join(', '));
+  const cats = f.filter_categories || [];
+  if (cats.length) parts.push(cats[0]);
+  const sc = (ss.stores || []).length;
+  if (sc) parts.push(sc + ' store' + (sc !== 1 ? 's' : ''));
+  return parts.join(' · ') || 'All items';
+}
+
+function _renderSavedSearchesDropdown() {
+  const dd = document.getElementById('ss-dropdown');
+  if (!dd) return;
+  const searches = window._savedSearches || [];
+  if (!searches.length) {
+    dd.innerHTML =
+      '<div class="ss-dropdown-hdr"><span>Saved Searches</span></div>' +
+      '<div class="ss-empty">No saved searches yet.<br>Set filters then click <b>💾 Save Search</b>.</div>';
+    return;
+  }
+  let html = '<div class="ss-dropdown-hdr"><span>Saved Searches</span></div><div class="ss-list">';
+  searches.forEach(function(ss) {
+    html +=
+      '<div class="ss-item" data-ss-id="' + _ssEsc(ss.id) + '">' +
+        '<div class="ss-item-main">' +
+          '<div class="ss-item-name">' + _ssEsc(ss.name) + '</div>' +
+          '<div class="ss-item-desc">' + _ssEsc(_ssDescription(ss)) + '</div>' +
+        '</div>' +
+        '<span class="ss-count-badge" id="ss-cnt-' + _ssEsc(ss.id) + '">…</span>' +
+        '<button class="ss-delete-btn" data-ss-del="' + _ssEsc(ss.id) + '" title="Delete this search">&#10005;</button>' +
+      '</div>';
+  });
+  html += '</div>';
+  dd.innerHTML = html;
+  const list = dd.querySelector('.ss-list');
+  if (list) {
+    list.addEventListener('click', function(e) {
+      const delBtn = e.target.closest('[data-ss-del]');
+      if (delBtn) { e.stopPropagation(); _deleteSavedSearch(delBtn.dataset.ssDel); return; }
+      const item = e.target.closest('[data-ss-id]');
+      if (item) _applySavedSearch(item.dataset.ssId);
+    });
+  }
+}
+
+function _toggleSavedSearchesDropdown() {
+  const dd = document.getElementById('ss-dropdown');
+  if (!dd) return;
+  if (dd.style.display === 'block') { _closeSavedSearchesDropdown(); return; }
+  const btn = document.getElementById('saved-searches-btn');
+  if (!btn) return;
+  const rect = btn.getBoundingClientRect();
+  dd.style.display = 'block';
+  dd.style.top  = (rect.bottom + 4) + 'px';
+  dd.style.left = rect.left + 'px';
+  requestAnimationFrame(function() {
+    const ddRect = dd.getBoundingClientRect();
+    if (ddRect.right > window.innerWidth - 8) {
+      dd.style.left = Math.max(8, window.innerWidth - ddRect.width - 8) + 'px';
+    }
+  });
+  _renderSavedSearchesDropdown();
+  _fetchSavedSearchCounts();
+}
+
+function _closeSavedSearchesDropdown() {
+  const dd = document.getElementById('ss-dropdown');
+  if (dd) dd.style.display = 'none';
+}
+
+async function _fetchSavedSearchCounts() {
+  const searches = window._savedSearches || [];
+  if (!searches.length) return;
+  try {
+    const r = await fetch('/api/saved-search-counts', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({searches: searches.map(function(ss) {
+        return {filters: ss.filters, stores: ss.stores};
+      })})
+    });
+    const d = await r.json();
+    if (!d.counts) return;
+    d.counts.forEach(function(n, i) {
+      const ss  = searches[i];
+      const el  = document.getElementById('ss-cnt-' + ss.id);
+      if (!el) return;
+      el.textContent = n.toLocaleString();
+      el.classList.toggle('loaded', true);
+    });
+  } catch(e) { /* non-fatal */ }
+}
+
+function _applySavedSearch(id) {
+  const ss = (window._savedSearches || []).find(function(s) { return s.id === id; });
+  if (!ss) return;
+  _closeSavedSearchesDropdown();
+  const f = ss.filters || {};
+  // Restore filter state
+  window._selectedBrands = f.filter_brands      || [];
+  window._selectedConds  = f.filter_conditions  || [];
+  window._selectedCats   = f.filter_categories  || [];
+  window._selectedSubs   = f.filter_subcategories || [];
+  window._strictSearch   = !!f.filter_strict;
+  const rsEl = document.getElementById('res-search');
+  if (rsEl) rsEl.value = f.filter_q || '';
+  _updateResSearchClear && _updateResSearchClear();
+  // Update filter button labels
+  _updateBrandBtn(); _updateCondBtn(); _updateCatBtn(); _updateSubcatBtn();
+  // Update accordion summaries
+  _accRenderBrand && _accRenderBrand();
+  _accRenderCond  && _accRenderCond();
+  _accRenderCat   && _accRenderCat();
+  _accRenderSub   && _accRenderSub();
+  _accUpdateSummaries && _accUpdateSummaries();
+  // Update strict button
+  const strictBtn = document.getElementById('strict-search-btn');
+  if (strictBtn) {
+    strictBtn.textContent = window._strictSearch ? '=' : '≈';
+    strictBtn.classList.toggle('active', window._strictSearch);
+    strictBtn.title = window._strictSearch
+      ? 'Strict whole-word — click for fuzzy'
+      : 'Fuzzy (contains) — click for strict whole-word';
+  }
+  // Restore watch / price-drop chip state
+  _watchFilterActive = !!f.filter_watched;
+  const wtBtn = document.getElementById('watchlist-toggle');
+  if (wtBtn) wtBtn.classList.toggle('wl-active', _watchFilterActive);
+  _priceDropFilterActive = !!f.filter_price_drop_only;
+  const pdBtn = document.getElementById('price-drop-toggle');
+  if (pdBtn) pdBtn.classList.toggle('wl-active', _priceDropFilterActive);
+  // Restore store selection
+  const savedStores = new Set(ss.stores || []);
+  renderList(savedStores);
+  _srvStores = ss.stores || [];
+  updateCount && updateCount();
+  _updateFilterDot();
+  _srvLoading = false;
+  _srvPage = 1;
+  _fetchBrowsePage(1);
+}
+
+function _saveCurrentSearch() {
+  if (!window._authUser) return;
+  const name = prompt('Name this search:');
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  const id = 'ss_' + Date.now();
+  window._savedSearches = window._savedSearches || [];
+  window._savedSearches.push({
+    id:         id,
+    name:       trimmed,
+    filters:    _getBrowseFilters(),
+    stores:     [...(_srvStores || [])],
+    created_at: new Date().toISOString(),
+  });
+  _syncToServer();
+  _updateSavedSearchesUI();
+}
+
+function _deleteSavedSearch(id) {
+  const ss = (window._savedSearches || []).find(function(s) { return s.id === id; });
+  const name = ss ? ss.name : 'this search';
+  if (!confirm('Delete "' + name + '"? This cannot be undone.')) return;
+  window._savedSearches = (window._savedSearches || []).filter(function(s) { return s.id !== id; });
+  _syncToServer();
+  _updateSavedSearchesUI();
+  _renderSavedSearchesDropdown();
 }
 
 // ── Want List ─────────────────────────────────────────────────────────────────
@@ -8387,7 +8711,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.9.0"
+APP_VERSION = "2.10.0"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
