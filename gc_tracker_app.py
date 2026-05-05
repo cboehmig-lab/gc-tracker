@@ -4299,6 +4299,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .ss-clear-all-btn{background:none;border:none;color:#888;font-size:.72rem;cursor:pointer;padding:2px 6px;border-radius:3px;white-space:nowrap}
 .ss-clear-all-btn:hover{color:#f88}
 #save-search-btn:hover{background:#1a3a1a!important}
+#filter-action-btns{display:contents}  /* desktop: wrapper invisible, children flow inline */
 .ss-save-mobile-btn{padding:4px 9px;border-radius:4px;background:#1e2e1e;border:1px solid #4ade80;color:#4ade80;font-size:.75rem;cursor:pointer;white-space:nowrap}
 .badge{background:#c00;color:#fff;font-size:.7rem;font-weight:700;padding:2px 7px;border-radius:10px}.badge:empty{display:none}
 .cat-sel{padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer}
@@ -5155,15 +5156,17 @@ tr.fav-row td:last-child{color:#4ade80}
                 <div style="overflow-y:auto;max-height:260px;padding:4px 0" id="subcat-dd-inner"></div>
               </div>
             </div>
-            <!-- Desktop-only action buttons -->
-            <button id="save-search-btn" onclick="_saveCurrentSearch()" title="Save current search + filters"
-              style="display:none;padding:5px 10px;border-radius:4px;background:#1e2e1e;border:1px solid #4ade80;color:#4ade80;font-size:.78rem;cursor:pointer;white-space:nowrap">
-              💾 Save Search
-            </button>
-            <button id="clear-filters-btn" onclick="clearFilters()"
-              style="display:none;padding:5px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #c00;color:#f88;font-size:.78rem;cursor:pointer;white-space:nowrap">
-              ✕ Clear Filters
-            </button>
+            <!-- Action buttons row (side-by-side on mobile, inline on desktop) -->
+            <div id="filter-action-btns" style="display:none;gap:8px">
+              <button id="save-search-btn" onclick="_saveCurrentSearch()" title="Save current search + filters"
+                style="flex:1;padding:7px 10px;border-radius:4px;background:#1e2e1e;border:1px solid #4ade80;color:#4ade80;font-size:.78rem;cursor:pointer;white-space:nowrap">
+                💾 Save Search
+              </button>
+              <button id="clear-filters-btn" onclick="clearFilters()"
+                style="flex:1;padding:7px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #c00;color:#f88;font-size:.78rem;cursor:pointer;white-space:nowrap">
+                ✕ Clear All
+              </button>
+            </div>
           </div>
           <!-- ── Pinned Show Results (mobile only) ── -->
           <button class="filter-done-btn" onclick="_closeAllSheets()">Show Results</button>
@@ -6310,7 +6313,7 @@ async function _fetchBrowsePage(page) {
       countEl.textContent = '';
     }
     const clearBtn = document.getElementById('clear-filters-btn');
-    if (clearBtn) clearBtn.style.display = ((filters.filter_brands && filters.filter_brands.length) || (filters.filter_conditions && filters.filter_conditions.length) || (filters.filter_categories && filters.filter_categories.length) || (filters.filter_subcategories && filters.filter_subcategories.length)) ? '' : 'none';
+    if (clearBtn) clearBtn.style.display = (filters.filter_q || (filters.filter_brands && filters.filter_brands.length) || (filters.filter_conditions && filters.filter_conditions.length) || (filters.filter_categories && filters.filter_categories.length) || (filters.filter_subcategories && filters.filter_subcategories.length) || filters.filter_strict || filters.filter_price_drop_only || filters.filter_watched) ? '' : 'none';
 
     // Populate filter dropdowns from server-provided options
     _populateFiltersFromServer(d.brands || [], d.conditions || [], d.categories || [], d.subcategories || [], filters);
@@ -6754,9 +6757,15 @@ function _updateSaveSearchBtn() {
     (f.filter_categories    && f.filter_categories.length)    ||
     (f.filter_subcategories && f.filter_subcategories.length) ||
     f.filter_price_drop_only;
-  const show = !!(window._authUser && hasAny);
-  const btn  = document.getElementById('save-search-btn');
-  if (btn) btn.style.display = show ? '' : 'none';
+  const showSave  = !!(window._authUser && hasAny);
+  const showClear = !!hasAny;
+  const btn   = document.getElementById('save-search-btn');
+  const clrBtn = document.getElementById('clear-filters-btn');
+  const wrap  = document.getElementById('filter-action-btns');
+  if (btn)    btn.style.display    = showSave  ? '' : 'none';
+  if (clrBtn) clrBtn.style.display = showClear ? '' : 'none';
+  // On mobile the wrapper needs display:flex; on desktop CSS keeps it as display:contents
+  if (wrap) wrap.style.display = (showSave || showClear) ? (_isMobile() ? 'flex' : '') : 'none';
 }
 
 function _updateSavedSearchesUI() {
@@ -6794,7 +6803,7 @@ function _renderSavedSearchesDropdown() {
       '<div class="ss-empty">No saved searches yet.<br>Set filters then click <b>💾 Save Search</b>.</div>';
     return;
   }
-  let html = '<div class="ss-dropdown-hdr"><span>Saved Searches</span><button class="ss-clear-all-btn" data-ss-clear="1">Clear All</button></div><div class="ss-list">';
+  let html = '<div class="ss-dropdown-hdr"><span>Saved Searches</span></div><div class="ss-list">';
   searches.forEach(function(ss) {
     html +=
       '<div class="ss-item" data-ss-id="' + _ssEsc(ss.id) + '">' +
@@ -6809,7 +6818,6 @@ function _renderSavedSearchesDropdown() {
   html += '</div>';
   dd.innerHTML = html;
   dd.addEventListener('click', function(e) {
-    if (e.target.closest('[data-ss-clear]')) { _clearAllSavedSearches(); return; }
     const delBtn = e.target.closest('[data-ss-del]');
     if (delBtn) { e.stopPropagation(); _deleteSavedSearch(delBtn.dataset.ssDel); return; }
     const item = e.target.closest('[data-ss-id]');
@@ -7524,7 +7532,7 @@ function renderTable() {
     countEl.textContent = '';
   }
   const clearBtn = document.getElementById('clear-filters-btn');
-  if (clearBtn) clearBtn.style.display = (brandArr.length || condArr.length || catArr.length || subArr.length) ? '' : 'none';
+  if (clearBtn) clearBtn.style.display = (q || brandArr.length || condArr.length || catArr.length || subArr.length) ? '' : 'none';
 
   if (window._sortCol !== null) {
     const th = document.querySelector(`#res-table th[data-col="${window._sortCol}"]`);
@@ -8162,6 +8170,9 @@ function clearFilters() {
     _wantListSearchActive = false;
     document.getElementById('want-list-toggle').classList.remove('wl-active');
   }
+  // Hide action button row immediately (will be confirmed by _updateSaveSearchBtn after browse)
+  const _fab = document.getElementById('filter-action-btns');
+  if (_fab) _fab.style.display = 'none';
   // Bypass debounce — force-clear loading flag and re-fetch immediately
   _srvLoading = false;
   _srvPage = 1;
