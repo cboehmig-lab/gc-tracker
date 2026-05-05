@@ -432,53 +432,59 @@ When bumping version, update ALL FOUR of these:
 ### v2.10.0 — Saved Searches
 
 **Feature overview**
-- Logged-in users can save named combinations of filters + stores + search term for instant recall
+- Logged-in users only (not guests). Save named combinations of filters + stores + search term for instant recall.
 - Saves: `filter_q`, `filter_brands`, `filter_conditions`, `filter_categories`, `filter_subcategories`, `filter_strict`, `filter_price_drop_only`, `filter_watched`, and `_srvStores` (the selected stores)
-- Syncs to server via `/api/sync` — persists across devices
+- Syncs to server via `/api/sync` — persists across devices. Server wins on merge so deletions propagate everywhere.
 
 **Data model**
 - New `saved_searches TEXT DEFAULT '[]'` column in `user_data` SQLite table
-- `_init_user_db()` adds the column via `ALTER TABLE` with try/except for existing databases
-- Schema: `[{id, name, filters: {...}, stores: [...], created_at}]` — `id` = `"ss_" + Date.now()`
+- `_init_user_db()` adds the column via `ALTER TABLE` with try/except for existing databases (migration-safe)
+- Schema per entry: `{id, name, filters: {...}, stores: [...], created_at}` — `id` = `"ss_" + Date.now()`
 - `_get_user_data()`, `_set_user_data()`, `api_sync()` all updated to handle `saved_searches`
-- Server wins on merge (same strategy as `keywords`) — deletions on any device propagate everywhere
 
 **New API endpoint**
 - `POST /api/saved-search-counts` — takes `{"searches": [{filters, stores}, ...]}`, returns `{"counts": [n, ...]}`
 - Loads `gc_category_cache.json` once, applies all filter combos, returns match counts in one batch
-- Called when the Saved Searches dropdown opens; count badges update in-place
+- Called when the Saved Searches dropdown opens; count badges (green when loaded) update in-place
 
-**UI: Saved Searches chip button**
-- `#ss-wrap` in `.quick-filter-bar` — only visible when logged in (`_setAuthUI` controls this)
-- `#saved-searches-btn` opens/closes the dropdown; red count badge (`#ss-btn-count`) shows how many searches are saved
-- `#ss-dropdown` uses `position:fixed` in CSS — JS computes `top`/`left` from button's `getBoundingClientRect()` so it escapes `overflow-x:auto` on `.quick-filter-bar` without clipping
-- Outside-click listener on `document` closes the dropdown
+**Chip button (`#saved-searches-btn`)**
+- Lives in `.quick-filter-bar`, between ↓ Price Drops and ★ Watch List
+- `#ss-wrap` wrapper is hidden when not logged in; `_setAuthUI()` controls visibility
+- `#ss-dropdown` is a sibling of `#results-top-bar` (NOT inside `.quick-filter-bar`) — this is intentional: iOS Safari has a bug where `position:fixed` children inside `-webkit-overflow-scrolling:touch` containers don't behave correctly. Moving it outside the scroll container fixes mobile.
+- JS computes `top`/`left` from `getBoundingClientRect()` when opening; clamps to right edge of viewport
+- Outside-click listener on `document` closes it (with null-guard on the button ref)
 
-**UI: Save Search button**
-- `#save-search-btn` lives in `.results-hdr` (after `#gc-filter-collapsible` closing tag)
-- Green-bordered button: `border:1px solid #3a5a3a;color:#4ade80`
-- Only shown when logged in AND at least one filter/search is active (`_updateSaveSearchBtn()`)
-- `_updateSaveSearchBtn()` is called from `_updateFilterDot()` (which fires on every filter change)
-- Clicking opens a `prompt()` for the search name, then pushes to `window._savedSearches` and syncs
+**Dropdown contents**
+- Header row: "SAVED SEARCHES" label + "Clear" button (`data-ss-clear`) — clears active filters via `clearFilters()`, does NOT delete saved searches
+- Each item: name (white), description summary (`_ssDescription()` — shows query, brands, conditions, store count), match count badge, ✕ delete button
+- Event delegation on `dd` handles all three: clear header, delete, apply — no inline onclick (avoids Python escape gotcha)
+- Uses `data-ss-id` (apply search), `data-ss-del` (delete), `data-ss-clear` (clear filters) attributes
+- `_ssEsc()` is a minimal HTML-escape helper for user-supplied strings
 
-**Dropdown rendering**
-- `_renderSavedSearchesDropdown()` builds HTML string and wires event delegation on `.ss-list`
-- Uses `data-ss-id` (apply) and `data-ss-del` (delete) attributes — no inline onclick (avoids Python escape gotcha)
-- Each item: name, short description line (`_ssDescription()`), count badge, delete ✕ button
-- `_ssEsc()` is a minimal HTML-escape helper used for user-supplied strings in the dropdown
+**Save Search button (`#save-search-btn`)**
+- Lives inside `#filter-action-btns` wrapper in `.filter-scroll-body`
+- On desktop: `#filter-action-btns` has `display:contents` (CSS) so buttons flow inline in the filter bar, next to ✕ Clear All
+- On mobile: `#filter-action-btns` is set to `display:flex` by JS (`_updateSaveSearchBtn()`), showing both buttons side-by-side above the red Show Results bar
+- Only shown when logged in AND at least one filter/search term is active
+- `_updateSaveSearchBtn()` called from `_updateFilterDot()` AND end of `_fetchBrowsePage()` — fires on every filter change and every browse result
+- Clicking opens `prompt()` for a name, pushes to `window._savedSearches`, syncs to server
 
-**Delete confirm**
-- `_deleteSavedSearch(id)` calls `confirm('Delete "name"? This cannot be undone.')` before removing
-- After delete: syncs to server, updates badge (`_updateSavedSearchesUI()`), re-renders dropdown
+**Clear All button (`#clear-filters-btn`)**
+- Renamed from "✕ Clear Filters" to "✕ Clear All"
+- Visibility condition expanded to include `filter_q`, `filter_strict`, `filter_price_drop_only`, `filter_watched` (previously only showed for dropdown filters)
+- `clearFilters()` hides `#filter-action-btns` wrapper immediately, then re-fetches (which calls `_updateSaveSearchBtn()` to confirm)
+
+**Delete a saved search**
+- `_deleteSavedSearch(id)` — `confirm()` dialog before removing; syncs + re-renders dropdown
+- `_clearAllSavedSearches()` exists but is not exposed in UI (kept for future use)
 
 **Applying a saved search**
-- `_applySavedSearch(id)` restores all filter state variables, updates dropdown/accordion UI, restores store checkboxes via `renderList(new Set(savedStores))`, then calls `_fetchBrowsePage(1)`
-- Also restores watch-filter and price-drop chip active states from the saved `filter_watched` / `filter_price_drop_only` flags
+- `_applySavedSearch(id)` restores all filter state variables, updates button labels, accordion summaries, strict button, watch/price-drop chip states, store checkboxes via `renderList(new Set(savedStores))`, then `_fetchBrowsePage(1)`
 
 **JS state**
 - `window._savedSearches` — array of saved search objects
-- Initialized to `[]` at startup; merged from server on login (server wins)
-- Reset to `[]` on logout alongside other per-user state
+- Initialized to `[]` at startup; merged from server on login (server wins, like `keywords`)
+- Reset to `[]` on logout
 
 ---
 
