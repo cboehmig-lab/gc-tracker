@@ -4269,10 +4269,10 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .log-err{color:#f88}
 
 .results{flex:1;overflow-y:auto;background:#1a1a1a}
-.results-hdr{padding:8px 16px;font-size:.88rem;font-weight:600;color:#ccc;background:#111;position:sticky;top:0;z-index:1;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;gap:8px;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,.5)}
+.results-hdr{padding:8px 16px;font-size:.88rem;font-weight:600;color:#ccc;background:#111;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;gap:8px;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,.5)}
 /* ── Quick-filter chip bar (Price Drops / Watch List / Want List) ── */
 .quick-filter-bar{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:6px 16px;background:#111;border-bottom:1px solid #1e1e1e;flex-shrink:0}
-#results-top-bar{display:flex;flex-direction:row;align-items:stretch;flex-shrink:0}
+#results-top-bar{display:flex;flex-direction:row;align-items:stretch;flex-shrink:0;position:sticky;top:0;z-index:2;background:#111}
 #results-top-bar .quick-filter-bar{border-bottom:none;background:none;padding:4px 8px 4px 16px;flex-shrink:0}
 #results-top-bar .results-hdr{flex:1;border-bottom:none;background:none;box-shadow:none}
 .qf-chip{padding:5px 10px;border-radius:16px;background:#1e1e1e;border:1px solid #3a3a3a;color:#aaa;font-size:.78rem;cursor:pointer;white-space:nowrap;-webkit-tap-highlight-color:transparent}
@@ -4966,7 +4966,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.0</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.1</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -5015,7 +5015,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.0</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.1</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -5367,6 +5367,19 @@ document.addEventListener('click', function(e) {
   const insideBtn = btn && (e.target === btn || btn.contains(e.target));
   if (!insideBtn && !dd.contains(e.target)) _closeSavedSearchesDropdown();
 });
+// Persistent delegated listener for saved-searches dropdown actions
+// (single listener — avoids {once:true} accumulation across re-renders)
+(function() {
+  const dd = document.getElementById('ss-dropdown');
+  if (!dd) return;
+  dd.addEventListener('click', function(e) {
+    if (e.target.closest('[data-ss-clear]')) { _closeSavedSearchesDropdown(); clearFilters(); return; }
+    const delBtn = e.target.closest('[data-ss-del]');
+    if (delBtn) { e.stopPropagation(); _deleteSavedSearch(delBtn.dataset.ssDel); return; }
+    const item = e.target.closest('[data-ss-id]');
+    if (item) _applySavedSearch(item.dataset.ssId);
+  });
+})();
 
 // Prevent pinch-zoom on iOS (Safari ignores user-scalable=no since iOS 10)
 document.addEventListener('gesturestart', function(e) { e.preventDefault(); }, { passive: false });
@@ -6726,15 +6739,20 @@ function toggleWatchFilter() {
   _watchFilterActive = !_watchFilterActive;
   const btn = document.getElementById('watchlist-toggle');
   btn.classList.toggle('wl-active', _watchFilterActive);
-  _updateFilterDot();
-
-  if (_browseMode === 'server') {
-    _srvPage = 1;
-    _fetchBrowsePage(1);
-  } else {
-    window._localPage = 1;
-    renderTable();
+  // Deactivate Want List when activating Watch List (they're mutually exclusive)
+  if (_watchFilterActive && _wantListSearchActive) {
+    _wantListSearchActive = false;
+    _globalSearchActive = false;
+    _globalSearchQuery = '';
+    _resetWantListLink();
+    _srvStores = getSelected();
+    if (!_srvStores.length) { document.getElementById('res-panel').style.display = 'none'; return; }
   }
+  _updateFilterDot();
+  _browseMode = 'server';
+  _srvPage = 1;
+  _srvLoading = false;
+  _fetchBrowsePage(1);
 }
 
 // Legacy showWatchList — now just activates the toggle
@@ -6840,13 +6858,6 @@ function _renderSavedSearchesDropdown() {
   });
   html += '</div>';
   dd.innerHTML = html;
-  dd.addEventListener('click', function(e) {
-    if (e.target.closest('[data-ss-clear]')) { _closeSavedSearchesDropdown(); clearFilters(); return; }
-    const delBtn = e.target.closest('[data-ss-del]');
-    if (delBtn) { e.stopPropagation(); _deleteSavedSearch(delBtn.dataset.ssDel); return; }
-    const item = e.target.closest('[data-ss-id]');
-    if (item) _applySavedSearch(item.dataset.ssId);
-  }, {once: true});
 }
 
 function _toggleSavedSearchesDropdown() {
@@ -8788,7 +8799,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.0"
+APP_VERSION = "2.10.1"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
