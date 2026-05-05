@@ -4129,12 +4129,19 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
 
         # ── Per-device new-item detection ─────────────────────────────────────
         # An item is NEW if date_listed > prev_scan_time.
-        # Both sides are YYYY-MM-DDTHH:MM:SSZ UTC so string comparison is valid.
+        # GC sometimes stores date-only values ("2026-05-05") with no time component.
+        # A plain string compare like "2026-05-05" > "2026-05-05T08:00:00Z" is False
+        # (shorter string sorts before longer at that position), so items listed today
+        # would never be flagged new once any scan ran today. Fix: treat date-only
+        # values as end-of-day ("2026-05-05T23:59:59Z") so they stay new all day.
+        def _norm_item_date(d):
+            return d + "T23:59:59Z" if d and len(d) == 10 else d
+
         new_ids_list = []
         if not baseline and prev_scan_time:
             for p in all_products:
                 item_date = p.get("date_listed") or _cat_cache.get(p["id"], {}).get("date_listed", "")
-                if item_date and item_date > prev_scan_time:
+                if item_date and _norm_item_date(item_date) > prev_scan_time:
                     new_ids_list.append(p["id"])
 
         send({"type":"progress","msg":f"  {len(new_ids_list):,} new items since last scan."})
@@ -4966,7 +4973,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.1</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.2</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -5015,7 +5022,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.1</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.2</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -8799,7 +8806,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.1"
+APP_VERSION = "2.10.2"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
