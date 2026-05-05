@@ -4296,6 +4296,8 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .ss-count-badge.loaded{background:#1e3a1e;color:#4ade80}
 .ss-delete-btn{background:none;border:none;color:#888;font-size:.75rem;cursor:pointer;padding:3px 5px;border-radius:3px;flex-shrink:0;line-height:1}
 .ss-delete-btn:hover{color:#f88;background:#2a1a1a}
+.ss-clear-all-btn{background:none;border:none;color:#888;font-size:.72rem;cursor:pointer;padding:2px 6px;border-radius:3px;white-space:nowrap}
+.ss-clear-all-btn:hover{color:#f88}
 #save-search-btn:hover{background:#1a3a1a!important}
 .ss-save-mobile-btn{padding:4px 9px;border-radius:4px;background:#1e2e1e;border:1px solid #4ade80;color:#4ade80;font-size:.75rem;cursor:pointer;white-space:nowrap}
 .badge{background:#c00;color:#fff;font-size:.7rem;font-weight:700;padding:2px 7px;border-radius:10px}.badge:empty{display:none}
@@ -5044,12 +5046,12 @@ tr.fav-row td:last-child{color:#4ade80}
       <div id="results-top-bar">
       <div class="quick-filter-bar">
         <button id="price-drop-toggle" onclick="togglePriceDropFilter()" class="qf-chip">↓ Price Drops</button>
+        <div id="ss-wrap" style="display:none;position:relative">
+          <button id="saved-searches-btn" onclick="_toggleSavedSearchesDropdown()" class="qf-chip" title="Your saved filter combinations">🔖 Saved Searches</button>
+        </div>
         <button id="watchlist-toggle"  onclick="toggleWatchFilter()"      class="qf-chip">★ Watch List</button>
         <button id="want-list-toggle"  onclick="searchWantList()"         class="qf-chip">🎯 Want List</button>
         <a id="search-wl-link" onclick="openKeywords()" class="qf-edit-link" style="display:none;font-size:.75rem">✏︎ Edit Want List</a>
-        <div id="ss-wrap" style="display:none;position:relative">
-          <button id="saved-searches-btn" onclick="_toggleSavedSearchesDropdown()" class="qf-chip" title="Your saved filter combinations">🔖 Saved Searches <span id="ss-btn-count" style="display:none;background:#c00;color:#fff;font-size:.65rem;font-weight:700;padding:1px 5px;border-radius:8px;margin-left:2px"></span></button>
-        </div>
         <button id="view-toggle-chip"  onclick="toggleMobileView()"       class="qf-chip view-toggle-chip-btn" title="Switch list / card view">☰</button>
       </div>
       <div class="results-hdr">
@@ -5065,7 +5067,6 @@ tr.fav-row td:last-child{color:#4ade80}
             <div class="filter-sheet-handle"></div>
             <div class="filter-sheet-hdr-row">
               <span class="filter-sheet-title">Filters</span>
-              <button id="save-search-btn-mobile" onclick="_saveCurrentSearch()" class="ss-save-mobile-btn" style="display:none">💾 Save Search</button>
               <button class="filter-clear-all-btn" onclick="clearFilters()">Clear All</button>
             </div>
           </div>
@@ -6755,21 +6756,13 @@ function _updateSaveSearchBtn() {
     f.filter_price_drop_only;
   const show = !!(window._authUser && hasAny);
   const btn  = document.getElementById('save-search-btn');
-  const btnM = document.getElementById('save-search-btn-mobile');
-  if (btn)  btn.style.display  = show ? '' : 'none';
-  if (btnM) btnM.style.display = show ? '' : 'none';
+  if (btn) btn.style.display = show ? '' : 'none';
 }
 
 function _updateSavedSearchesUI() {
   const wrap = document.getElementById('ss-wrap');
   if (!wrap) return;
-  const count = (window._savedSearches || []).length;
   wrap.style.display = window._authUser ? '' : 'none';
-  const badge = document.getElementById('ss-btn-count');
-  if (badge) {
-    badge.textContent = count || '';
-    badge.style.display = count ? '' : 'none';
-  }
 }
 
 function _ssEsc(s) {
@@ -6801,7 +6794,7 @@ function _renderSavedSearchesDropdown() {
       '<div class="ss-empty">No saved searches yet.<br>Set filters then click <b>💾 Save Search</b>.</div>';
     return;
   }
-  let html = '<div class="ss-dropdown-hdr"><span>Saved Searches</span></div><div class="ss-list">';
+  let html = '<div class="ss-dropdown-hdr"><span>Saved Searches</span><button class="ss-clear-all-btn" data-ss-clear="1">Clear All</button></div><div class="ss-list">';
   searches.forEach(function(ss) {
     html +=
       '<div class="ss-item" data-ss-id="' + _ssEsc(ss.id) + '">' +
@@ -6815,15 +6808,13 @@ function _renderSavedSearchesDropdown() {
   });
   html += '</div>';
   dd.innerHTML = html;
-  const list = dd.querySelector('.ss-list');
-  if (list) {
-    list.addEventListener('click', function(e) {
-      const delBtn = e.target.closest('[data-ss-del]');
-      if (delBtn) { e.stopPropagation(); _deleteSavedSearch(delBtn.dataset.ssDel); return; }
-      const item = e.target.closest('[data-ss-id]');
-      if (item) _applySavedSearch(item.dataset.ssId);
-    });
-  }
+  dd.addEventListener('click', function(e) {
+    if (e.target.closest('[data-ss-clear]')) { _clearAllSavedSearches(); return; }
+    const delBtn = e.target.closest('[data-ss-del]');
+    if (delBtn) { e.stopPropagation(); _deleteSavedSearch(delBtn.dataset.ssDel); return; }
+    const item = e.target.closest('[data-ss-id]');
+    if (item) _applySavedSearch(item.dataset.ssId);
+  }, {once: true});
 }
 
 function _toggleSavedSearchesDropdown() {
@@ -6947,6 +6938,16 @@ function _deleteSavedSearch(id) {
   const name = ss ? ss.name : 'this search';
   if (!confirm('Delete "' + name + '"? This cannot be undone.')) return;
   window._savedSearches = (window._savedSearches || []).filter(function(s) { return s.id !== id; });
+  _syncToServer();
+  _updateSavedSearchesUI();
+  _renderSavedSearchesDropdown();
+}
+
+function _clearAllSavedSearches() {
+  const n = (window._savedSearches || []).length;
+  if (!n) return;
+  if (!confirm('Clear all ' + n + ' saved search' + (n !== 1 ? 'es' : '') + '? This cannot be undone.')) return;
+  window._savedSearches = [];
   _syncToServer();
   _updateSavedSearchesUI();
   _renderSavedSearchesDropdown();
