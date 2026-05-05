@@ -4284,20 +4284,20 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 /* ── Saved Searches ── */
 #ss-wrap{position:relative}
 .ss-dropdown{position:fixed;z-index:500;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:8px;min-width:280px;max-width:380px;max-height:400px;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.7);display:none}
-.ss-dropdown-hdr{padding:10px 14px 6px;font-size:.72rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid #2a2a2a;display:flex;align-items:center;justify-content:space-between}
-.ss-empty{padding:20px 14px;color:#666;font-size:.82rem;text-align:center;line-height:1.5}
-.ss-item{display:flex;align-items:center;gap:8px;padding:9px 14px;cursor:pointer;border-bottom:1px solid #222;transition:background .12s}
-.ss-item:hover{background:#222}
+.ss-dropdown-hdr{padding:10px 14px 6px;font-size:.72rem;font-weight:700;color:#bbb;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid #2a2a2a;display:flex;align-items:center;justify-content:space-between}
+.ss-empty{padding:20px 14px;color:#aaa;font-size:.82rem;text-align:center;line-height:1.5}
+.ss-item{display:flex;align-items:center;gap:8px;padding:9px 14px;cursor:pointer;border-bottom:1px solid #2a2a2a;transition:background .12s}
+.ss-item:hover{background:#252525}
 .ss-item:last-child{border-bottom:none}
 .ss-item-main{flex:1;min-width:0}
-.ss-item-name{font-size:.84rem;font-weight:600;color:#eee;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ss-item-desc{font-size:.72rem;color:#777;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ss-count-badge{background:#2a2a2a;color:#aaa;font-size:.68rem;font-weight:700;padding:2px 7px;border-radius:10px;white-space:nowrap;flex-shrink:0}
+.ss-item-name{font-size:.84rem;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ss-item-desc{font-size:.72rem;color:#aaa;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ss-count-badge{background:#2a2a2a;color:#ccc;font-size:.68rem;font-weight:700;padding:2px 7px;border-radius:10px;white-space:nowrap;flex-shrink:0}
 .ss-count-badge.loaded{background:#1e3a1e;color:#4ade80}
-.ss-delete-btn{background:none;border:none;color:#555;font-size:.75rem;cursor:pointer;padding:3px 5px;border-radius:3px;flex-shrink:0;line-height:1}
+.ss-delete-btn{background:none;border:none;color:#888;font-size:.75rem;cursor:pointer;padding:3px 5px;border-radius:3px;flex-shrink:0;line-height:1}
 .ss-delete-btn:hover{color:#f88;background:#2a1a1a}
-#save-search-btn{padding:5px 10px;border-radius:4px;background:none;border:1px solid #3a5a3a;color:#4ade80;font-size:.78rem;cursor:pointer;white-space:nowrap;display:none}
-#save-search-btn:hover{background:#1e3a1e;border-color:#4ade80}
+#save-search-btn:hover{background:#1a3a1a!important}
+.ss-save-mobile-btn{padding:4px 9px;border-radius:4px;background:#1e2e1e;border:1px solid #4ade80;color:#4ade80;font-size:.75rem;cursor:pointer;white-space:nowrap}
 .badge{background:#c00;color:#fff;font-size:.7rem;font-weight:700;padding:2px 7px;border-radius:10px}.badge:empty{display:none}
 .cat-sel{padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer}
 .cat-sel:focus{border-color:#c00}
@@ -5048,9 +5048,8 @@ tr.fav-row td:last-child{color:#4ade80}
         <button id="want-list-toggle"  onclick="searchWantList()"         class="qf-chip">🎯 Want List</button>
         <a id="search-wl-link" onclick="openKeywords()" class="qf-edit-link" style="display:none;font-size:.75rem">✏︎ Edit Want List</a>
         <div id="ss-wrap" style="display:none;position:relative">
-          <button id="saved-searches-btn" onclick="_toggleSavedSearchesDropdown()" class="qf-chip" title="Your saved filter combinations">🔖 Saved <span id="ss-btn-count" style="display:none;background:#c00;color:#fff;font-size:.65rem;font-weight:700;padding:1px 5px;border-radius:8px;margin-left:2px"></span></button>
+          <button id="saved-searches-btn" onclick="_toggleSavedSearchesDropdown()" class="qf-chip" title="Your saved filter combinations">🔖 Saved Searches <span id="ss-btn-count" style="display:none;background:#c00;color:#fff;font-size:.65rem;font-weight:700;padding:1px 5px;border-radius:8px;margin-left:2px"></span></button>
         </div>
-        <div id="ss-dropdown" class="ss-dropdown"></div>
         <button id="view-toggle-chip"  onclick="toggleMobileView()"       class="qf-chip view-toggle-chip-btn" title="Switch list / card view">☰</button>
       </div>
       <div class="results-hdr">
@@ -5066,6 +5065,7 @@ tr.fav-row td:last-child{color:#4ade80}
             <div class="filter-sheet-handle"></div>
             <div class="filter-sheet-hdr-row">
               <span class="filter-sheet-title">Filters</span>
+              <button id="save-search-btn-mobile" onclick="_saveCurrentSearch()" class="ss-save-mobile-btn" style="display:none">💾 Save Search</button>
               <button class="filter-clear-all-btn" onclick="clearFilters()">Clear All</button>
             </div>
           </div>
@@ -5154,7 +5154,11 @@ tr.fav-row td:last-child{color:#4ade80}
                 <div style="overflow-y:auto;max-height:260px;padding:4px 0" id="subcat-dd-inner"></div>
               </div>
             </div>
-            <!-- Desktop-only clear button -->
+            <!-- Desktop-only action buttons -->
+            <button id="save-search-btn" onclick="_saveCurrentSearch()" title="Save current search + filters"
+              style="display:none;padding:5px 10px;border-radius:4px;background:#1e2e1e;border:1px solid #4ade80;color:#4ade80;font-size:.78rem;cursor:pointer;white-space:nowrap">
+              💾 Save Search
+            </button>
             <button id="clear-filters-btn" onclick="clearFilters()"
               style="display:none;padding:5px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #c00;color:#f88;font-size:.78rem;cursor:pointer;white-space:nowrap">
               ✕ Clear Filters
@@ -5163,9 +5167,10 @@ tr.fav-row td:last-child{color:#4ade80}
           <!-- ── Pinned Show Results (mobile only) ── -->
           <button class="filter-done-btn" onclick="_closeAllSheets()">Show Results</button>
         </div>
-        <button id="save-search-btn" onclick="_saveCurrentSearch()" title="Save current search + filters">💾 Save Search</button>
       </div>
       </div><!-- /results-top-bar -->
+      <!-- ss-dropdown lives here (outside overflow-x:auto chip bar) so position:fixed works on iOS -->
+      <div id="ss-dropdown" class="ss-dropdown"></div>
       <div id="res-body"></div>
     </div>
   </div>
@@ -5338,9 +5343,9 @@ document.addEventListener('DOMContentLoaded', () => {
 document.addEventListener('click', function(e) {
   const dd  = document.getElementById('ss-dropdown');
   const btn = document.getElementById('saved-searches-btn');
-  if (dd && dd.style.display === 'block' && !dd.contains(e.target) && e.target !== btn && !btn.contains(e.target)) {
-    _closeSavedSearchesDropdown();
-  }
+  if (!dd || dd.style.display !== 'block') return;
+  const insideBtn = btn && (e.target === btn || btn.contains(e.target));
+  if (!insideBtn && !dd.contains(e.target)) _closeSavedSearchesDropdown();
 });
 
 // Prevent pinch-zoom on iOS (Safari ignores user-scalable=no since iOS 10)
@@ -6323,6 +6328,8 @@ async function _fetchBrowsePage(page) {
       _updateWantListCount();
     }
 
+    _updateSaveSearchBtn();
+
   } finally {
     _srvLoading = false;
   }
@@ -6739,16 +6746,18 @@ function dismissFirstRun() {
 window._savedSearches = [];
 
 function _updateSaveSearchBtn() {
-  const btn = document.getElementById('save-search-btn');
-  if (!btn) return;
   const f = _getBrowseFilters();
   const hasAny = f.filter_q ||
-    (f.filter_brands      && f.filter_brands.length)      ||
-    (f.filter_conditions  && f.filter_conditions.length)  ||
-    (f.filter_categories  && f.filter_categories.length)  ||
+    (f.filter_brands        && f.filter_brands.length)        ||
+    (f.filter_conditions    && f.filter_conditions.length)    ||
+    (f.filter_categories    && f.filter_categories.length)    ||
     (f.filter_subcategories && f.filter_subcategories.length) ||
     f.filter_price_drop_only;
-  btn.style.display = (window._authUser && hasAny) ? '' : 'none';
+  const show = !!(window._authUser && hasAny);
+  const btn  = document.getElementById('save-search-btn');
+  const btnM = document.getElementById('save-search-btn-mobile');
+  if (btn)  btn.style.display  = show ? '' : 'none';
+  if (btnM) btnM.style.display = show ? '' : 'none';
 }
 
 function _updateSavedSearchesUI() {
