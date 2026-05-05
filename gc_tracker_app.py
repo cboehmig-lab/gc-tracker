@@ -4170,7 +4170,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#111;color:#eee;height:100vh;display:flex;flex-direction:column}
 
-header{background:#c00;padding:12px 24px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+header{background:linear-gradient(135deg,#4a0000,#7a0000);padding:12px 24px;display:flex;align-items:center;gap:12px;flex-shrink:0}
 .mobile-title-bar{display:none}
 .mobile-bottom-bar{display:none}
 header h1{font-size:1.2rem;font-weight:700;color:#fff}
@@ -4298,6 +4298,22 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .ss-delete-btn:hover{color:#f88;background:#2a1a1a}
 .ss-clear-all-btn{background:none;border:none;color:#888;font-size:.72rem;cursor:pointer;padding:2px 6px;border-radius:3px;white-space:nowrap}
 .ss-clear-all-btn:hover{color:#f88}
+/* ── About modal ── */
+#about-modal{display:none;position:fixed;inset:0;z-index:900;background:rgba(0,0,0,.7);align-items:center;justify-content:center}
+#about-modal.open{display:flex}
+#about-box{background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:24px 28px;max-width:340px;width:90%;text-align:center;position:relative}
+#about-box h3{color:#ffcccc;font-size:1rem;margin:0 0 6px}
+#about-box .about-sub{color:#888;font-size:.78rem;margin-bottom:18px}
+.about-donate-row{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:14px}
+.about-donate-label{color:#aaa;font-size:.8rem}
+.about-donate-row a{display:flex;align-items:center;opacity:.8;transition:opacity .15s}
+.about-donate-row a:hover{opacity:1}
+.about-music-link{display:inline-flex;align-items:center;gap:5px;color:#aaa;font-size:.82rem;text-decoration:none}
+.about-music-link:hover{color:#ffcccc}
+.about-close-btn{margin-top:20px;padding:7px 24px;background:#2a2a2a;border:1px solid #3a3a3a;border-radius:5px;color:#ccc;font-size:.82rem;cursor:pointer;width:100%}
+.about-close-btn:hover{background:#333;color:#fff}
+.mtb-about{color:#ffcccc;font-size:.6rem;font-weight:400;opacity:.55;cursor:pointer;white-space:nowrap;text-align:left;background:none;border:none;padding:0}
+.mtb-about:hover{opacity:1}
 #save-search-btn:hover{background:#1a3a1a!important}
 #filter-action-btns{display:contents}  /* desktop: wrapper invisible, children flow inline */
 .ss-save-mobile-btn{padding:4px 9px;border-radius:4px;background:#1e2e1e;border:1px solid #4ade80;color:#4ade80;font-size:.75rem;cursor:pointer;white-space:nowrap}
@@ -4999,7 +5015,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><span></span><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.0</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.0</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -6744,6 +6760,13 @@ function getSelected() {
 
 function dismissFirstRun() {
   document.getElementById('first-run-modal').style.display = 'none';
+}
+
+function _openAboutModal() {
+  document.getElementById('about-modal').classList.add('open');
+}
+function _closeAboutModal() {
+  document.getElementById('about-modal').classList.remove('open');
 }
 
 // ── Saved Searches ────────────────────────────────────────────────────────────
@@ -8723,6 +8746,38 @@ function clToggleWatch(id, name, url, price, location, btn) {
       <circle cx="18" cy="16" r="3" stroke="#aaa" stroke-width="1.5"/>
     </svg>
   </a>
+</div>
+
+<!-- ── About modal ── -->
+<div id="about-modal" onclick="if(event.target===this)_closeAboutModal()">
+  <div id="about-box">
+    <h3>GC Used Inventory Tracker</h3>
+    <div class="about-sub">Developed by CKB</div>
+    <div class="about-donate-row">
+      <span class="about-donate-label">Donate</span>
+      <a href="https://paypal.me/smurfco" target="_blank" rel="noopener" title="PayPal">
+        <svg width="22" height="22" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M19.5 8.5c.3-2-1.2-3.5-3.5-3.5H9.5L7 20h3l.7-4.5h2.3c3.5 0 6-2 6.5-5.5l.5-1.5z" fill="#009cde"/>
+          <path d="M16 10.5c.2-1.5-.8-2.5-2.5-2.5H9l-1.5 9h2.5l.5-3h2c2.5 0 4-1.5 4.3-3.5l.2-.5z" fill="#003087"/>
+        </svg>
+      </a>
+      <a href="https://account.venmo.com/u/charles-boehmig" target="_blank" rel="noopener" title="Venmo">
+        <svg width="22" height="22" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <rect width="24" height="24" rx="4" fill="#3D95CE"/>
+          <path d="M17 5.5c.5 1 .7 2 .7 3.3 0 4-3.4 9.2-6.2 12.7H7.3L5 6.3l4-.4 1.3 10.2C11.6 14 13 10.8 13 8.3c0-1.3-.2-2.3-.6-3L17 5.5z" fill="#fff"/>
+        </svg>
+      </a>
+    </div>
+    <a href="https://animalsintrees.com" target="_blank" rel="noopener" class="about-music-link">
+      My music
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M9 18V5l12-2v13" stroke="#aaa" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="6" cy="18" r="3" stroke="#aaa" stroke-width="1.5"/>
+        <circle cx="18" cy="16" r="3" stroke="#aaa" stroke-width="1.5"/>
+      </svg>
+    </a>
+    <button class="about-close-btn" onclick="_closeAboutModal()">Close</button>
+  </div>
 </div>
 
 </body>
