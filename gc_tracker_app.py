@@ -2666,13 +2666,14 @@ def api_browse():
     # ── Unified query matching (shared by keyword list and filter_q) ─────────
     import re as _re
 
-    def _compile_query(query_str):
+    def _compile_query(query_str, fuzzy=False):
         """Parse a query string into AND-joined terms.
         Syntax:
           Allen          → whole-word match  (won't match Allentown, McAllen)
           "Jam Pedals"   → exact phrase match
           Thorpy, Dane   → comma = AND; each part uses same rules
           OD*            → wildcard: * is a glob wildcard (OD808, OD-1, etc.)
+          fuzzy=True     → plain terms use contains matching instead of whole-word
         """
         terms = []
         for part in query_str.split(','):
@@ -2684,13 +2685,15 @@ def api_browse():
             elif '*' in part:
                 pieces = [_re.escape(p) for p in part.split('*')]
                 terms.append(('regex', _re.compile('.*'.join(pieces), _re.IGNORECASE)))
+            elif fuzzy:
+                terms.append(('contains', part.lower()))
             else:
                 terms.append(('word', _re.compile(r'\b' + _re.escape(part) + r'\b', _re.IGNORECASE)))
         return terms
 
     def _matches_all(text_lower, terms):
         for mode, val in terms:
-            if mode == 'exact':
+            if mode in ('exact', 'contains'):
                 if val not in text_lower:
                     return False
             else:
@@ -2699,7 +2702,8 @@ def api_browse():
         return bool(terms)
 
     # Compile each want-list keyword into its term list; an item matches if ANY entry matches
-    _kw_compiled = [_compile_query(kw.strip()) for kw in keywords if kw.strip()]
+    # Strip leading '=' prefix (legacy strict marker — whole-word is now the default)
+    _kw_compiled = [_compile_query(kw.lstrip('=').strip()) for kw in keywords if kw.strip().lstrip('=')]
     _kw_compiled = [t for t in _kw_compiled if t]
 
     def _kw_match(name_l, brand_l):
@@ -2776,7 +2780,8 @@ def api_browse():
     def _apply_base(items):
         r = items
         if fq:
-            fq_terms = _compile_query(fq)
+            # f_strict=True → fuzzy/contains mode (old behaviour); False → whole-word (default)
+            fq_terms = _compile_query(fq, fuzzy=f_strict)
             r = [i for i in r if _matches_all(
                 ((i["name"] or "") + " " + (i["brand"] or "")).lower(), fq_terms)]
         if f_want_only:       r = [i for i in r if i["kwMatch"]]
@@ -4973,7 +4978,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.8</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.5</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -5022,7 +5027,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.8</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.5</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -6961,11 +6966,11 @@ function _applySavedSearch(id) {
   // Update strict button
   const strictBtn = document.getElementById('strict-search-btn');
   if (strictBtn) {
-    strictBtn.textContent = window._strictSearch ? '=' : '≈';
+    strictBtn.textContent = '≈';
     strictBtn.classList.toggle('active', window._strictSearch);
     strictBtn.title = window._strictSearch
-      ? 'Strict whole-word — click for fuzzy'
-      : 'Fuzzy (contains) — click for strict whole-word';
+      ? '≈ Fuzzy (contains) mode on — click to restore whole-word default'
+      : 'Whole-word search (default) — click for ≈ fuzzy (contains) mode';
   }
   // Restore watch / price-drop chip state
   _watchFilterActive = !!f.filter_watched;
@@ -7130,11 +7135,11 @@ function _toggleStrictSearch() {
   window._strictSearch = !window._strictSearch;
   const btn = document.getElementById('strict-search-btn');
   if (btn) {
-    btn.textContent = window._strictSearch ? '=' : '≈';
+    btn.textContent = '≈';
     btn.classList.toggle('active', window._strictSearch);
     btn.title = window._strictSearch
-      ? 'Strict (whole-word) — click for fuzzy'
-      : 'Fuzzy (contains) — click for strict whole-word';
+      ? '≈ Fuzzy (contains) mode on — click to restore whole-word default'
+      : 'Whole-word search (default) — click for ≈ fuzzy (contains) mode';
   }
   _srvLoading = false;
   _srvPage = 1;
@@ -7142,32 +7147,39 @@ function _toggleStrictSearch() {
 }
 
 function _escapeRegex(s) {
-  var out = '', specials = '\\.^$*+?()[]{}|';
+  // SAFE: use String.fromCharCode(92) for backslash — never use '\\' in Python template strings
+  var bs = String.fromCharCode(92);
+  var specials = bs + '.^$*+?()[]{}|';
+  var out = '';
   for (var i = 0; i < s.length; i++)
-    out += specials.indexOf(s[i]) >= 0 ? '\\' + s[i] : s[i];
+    out += specials.indexOf(s[i]) >= 0 ? bs + s[i] : s[i];
   return out;
 }
-function _parseQueryTerms(queryStr) {
-  /* Mirror of Python _compile_query — same syntax rules. */
-  const terms = [];
+function _parseQueryTerms(queryStr, fuzzy) {
+  /* Mirror of Python _compile_query — same syntax rules.
+     SAFE: word-boundary string built with String.fromCharCode to avoid Python \\ collapse. */
+  var wb = String.fromCharCode(92) + 'b';  // produces \b for RegExp word boundary
+  var terms = [];
   queryStr.split(',').forEach(function(part) {
     part = part.trim();
     if (!part) return;
     if (part.startsWith('"') && part.endsWith('"') && part.length > 2) {
       terms.push({mode:'exact', val: part.slice(1,-1).toLowerCase()});
-    } else if (part.includes('*')) {
-      const pieces = part.split('*').map(p => _escapeRegex(p));
+    } else if (part.indexOf('*') >= 0) {
+      var pieces = part.split('*').map(function(p) { return _escapeRegex(p); });
       terms.push({mode:'regex', val: new RegExp(pieces.join('.*'), 'i')});
+    } else if (fuzzy) {
+      terms.push({mode:'contains', val: part.toLowerCase()});
     } else {
-      const escaped = _escapeRegex(part);
-      terms.push({mode:'word', val: new RegExp('\\b' + escaped + '\\b', 'i')});
+      var escaped = _escapeRegex(part);
+      terms.push({mode:'word', val: new RegExp(wb + escaped + wb, 'i')});
     }
   });
   return terms;
 }
 function _matchesAllTerms(textLower, terms) {
   return terms.length > 0 && terms.every(function(t) {
-    if (t.mode === 'exact') return textLower.includes(t.val);
+    if (t.mode === 'exact' || t.mode === 'contains') return textLower.includes(t.val);
     return t.val.test(textLower);
   });
 }
@@ -7175,7 +7187,9 @@ function _itemMatchesKeyword(item) {
   if (!window._keywords || !window._keywords.length) return false;
   const text = ((item.name || '') + ' ' + (item.brand || '')).toLowerCase();
   return window._keywords.some(function(kw) {
-    return _matchesAllTerms(text, _parseQueryTerms(kw.trim()));
+    // Strip legacy '=' strict prefix — whole-word is the default now
+    var k = kw.replace(/^=/, '').trim();
+    return k && _matchesAllTerms(text, _parseQueryTerms(k));
   });
 }
 
@@ -8236,7 +8250,7 @@ function clearFilters() {
   _updateResSearchClear();
   window._strictSearch = false;
   const _strictBtn = document.getElementById('strict-search-btn');
-  if (_strictBtn) { _strictBtn.textContent = '≈'; _strictBtn.classList.remove('active'); _strictBtn.title = 'Fuzzy (contains) — click for strict whole-word'; }
+  if (_strictBtn) { _strictBtn.textContent = '≈'; _strictBtn.classList.remove('active'); _strictBtn.title = 'Whole-word search (default) — click for ≈ fuzzy (contains) mode'; }
   // Also turn off watch/price-drop filters if active
   if (_watchFilterActive) {
     _watchFilterActive = false;
@@ -8273,7 +8287,7 @@ function clearResSearch() {
   _updateResSearchClear();
   window._strictSearch = false;
   const _strictBtn = document.getElementById('strict-search-btn');
-  if (_strictBtn) { _strictBtn.textContent = '≈'; _strictBtn.classList.remove('active'); _strictBtn.title = 'Fuzzy (contains) — click for strict whole-word'; }
+  if (_strictBtn) { _strictBtn.textContent = '≈'; _strictBtn.classList.remove('active'); _strictBtn.title = 'Whole-word search (default) — click for ≈ fuzzy (contains) mode'; }
   _srvLoading = false;
   _srvPage = 1;
   _fetchBrowsePage(1);
@@ -8844,7 +8858,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.8"
+APP_VERSION = "2.10.5"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 

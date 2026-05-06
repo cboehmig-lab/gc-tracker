@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-06 · Current version: v2.10.7 · Status: deployed on Railway · Branch: main*
+*Last updated: 2026-05-06 · Current version: v2.10.5 · Status: deployed on Railway · Branch: main*
 
 ---
 
@@ -490,17 +490,57 @@ When bumping version, update ALL FOUR of these:
 
 ## ⚠️ Critical Python/JS Template Gotchas
 
-**Regex literals in Python triple-quoted template strings — the `[\]` trap**
-- Python processes `\\` → `\` when the triple-quoted string is evaluated
-- `new RegExp('\\\\b' + word + '\\\\b')` in source → `new RegExp('\\b' + word + '\\b')` at runtime — OK
-- `/[.*+?^${}()|[\]\\]/g` looks valid but Chrome/V8 chokes on `[\]` inside a character class — parses it as an unclosed class, throws `SyntaxError: Invalid regular expression: missing /` and **kills all JS on the page**
-- **Rule**: When writing a character class that includes `[` or `]`, always escape both explicitly: `/[.*+?^${}()|\[\]\\]/g` — no ambiguity for any JS engine
-- This burned us twice: v2.9.0 (replaced with `text.split(/\W+/).includes(word)`) and v2.10.5–v2.10.7 (`_parseQueryTerms` — fixed by changing `[\]` → `\[\]`)
-- Symptoms: page loads HTML fine, stores list is empty, "Loading…" never resolves, browser console shows `(index):NNNN Uncaught SyntaxError: Invalid regular expression: missing /`
+**THE MOST DANGEROUS BUG IN THIS CODEBASE — READ THIS BEFORE WRITING ANY JS**
+
+All JavaScript in this app lives inside Python triple-quoted strings. Python processes backslash escape sequences in those strings before they ever reach the browser. This has burned us repeatedly and is the reason v2.10.5–v2.10.8 all had to be reverted.
+
+**Rule 1: `\\` in Python source → single `\` in browser output**
+- `'\\\\'` in Python source → `'\\'` in browser → `\` character in JS string. Fine.
+- `'\\'` in Python source → `'\'` in browser → **JS syntax error** (backslash escapes the closing quote)
+- This means any JS string literal containing a lone backslash, like `'\\' + s[i]`, becomes `'\' + s[i]` in the browser — a parse error that kills all JS on the page.
+
+**Rule 2: Regex literals with `\` near `/` are lethal**
+- `/[.*+?^${}()|\[\]\\]/g` in Python source: the `\\` becomes `\`, so browser gets `/[.*+?^${}()|\[\]\]/g`
+- That trailing `\` escapes the closing `/` — browser never finds the end of the regex — throws `SyntaxError: Invalid regular expression: missing /` — **kills all JS on the page**
+- Symptom: page loads HTML, stores list empty, "Loading…" never resolves, console shows `SyntaxError: Invalid regular expression: missing /`
+
+**Rule 3: Safe patterns to use instead**
+
+When you need to build a regex from a user string (to escape special chars, etc.) and that code lives in the Python template:
+- ✅ Use `new RegExp(...)` constructor — string arguments go through normal JS string rules, not regex literal parsing
+- ✅ Use `String.fromCharCode(92)` instead of `'\\'` to get a backslash without Python eating it
+- ✅ Use char code comparisons (`s.charCodeAt(i) === 92`) instead of `s[i] === '\\'`
+- ✅ Use a lookup table approach: build the output character by character using only code points, no backslash literals
+- ❌ Never use regex literals (`/pattern/`) inside the Python template if the pattern contains `\\` — Python will collapse it
+- ❌ Never use `'\\'` to represent a backslash in a JS string — Python collapses it to `'\'` which is a JS syntax error
+
+**Rule 4: Test in the browser before committing**
+After any JS change, open the page, open the browser console, and confirm there are no SyntaxErrors before pushing. A working page is the only real test.
 
 **Inline onclick strings with regex**
 - Don't build regex patterns inside `onclick="..."` attributes via Python string concatenation
 - Use `data-*` attributes + `addEventListener` instead (see accordion items)
+
+---
+
+## 🎯 Planned Next Features (implement from v2.10.4)
+
+These features were designed and attempted in v2.10.5–v2.10.8 but never successfully shipped due to the Python/JS escape bug described above. Implement them fresh starting from v2.10.4, following the safe patterns in the Gotchas section.
+
+### 1. Wildcard search (`*`)
+In both the main search bar and the want list, support `*` as a wildcard character. Typing `OD*` should match anything that starts with "OD" — OD808, OD-1, OD Groove, etc. `*drive*` should match anything containing "drive". The `*` means "any characters can go here."
+
+### 2. Whole-word matching as the default for plain terms
+Currently, typing `Allen` in the search bar can match "Allentown." After this change, a plain search term should only match as a complete standalone word — so `Allen` matches "Allen" or "Allen Amplification" but not "Allentown" or "McAllen." The existing `≈` fuzzy toggle can remain for users who want the old contains-style behavior.
+
+### 3. AND search with commas, applied consistently
+Comma-separated terms already work as AND (item must contain all of them). After this change, each individual comma-separated part should support the full syntax — wildcards, quoted phrases, whole-word matching. So `Thorpy, Dane*` should require both "Thorpy" (whole word) AND anything starting with "Dane."
+
+### 4. A search syntax help popup (ⓘ button)
+Add a small ⓘ (info) button next to the main search bar. Clicking it should open a small popup/popover that explains the search syntax — what `*` does, what quotes do, what commas do, what whole-word matching means. Clicking anywhere outside the popup should close it.
+
+### 5. Button width fix for Save Search / Clear All
+The Save Search and Clear All buttons in the filter panel should not stretch to fill the full row width. They should be compact/auto-width. (In v2.10.4, `flex:1` was removed from the inline HTML but may need to be confirmed on both desktop and mobile.)
 
 ---
 
@@ -522,41 +562,8 @@ When bumping version, update ALL FOUR of these:
 - Save Search / Clear All buttons narrowed (removed `flex:1` from inline HTML; `flex:1` added to mobile CSS only)
 - Want list modal help text updated with real examples (replacing "Wangcaster")
 
-### v2.10.5 — Unified matching system, search ⓘ popup, bug fixes
-**Unified query matching (Python + JS, identical logic)**
-- Comma = AND (e.g. `Thorpy, Dane` = must contain both)
-- Plain word = whole-word `\b...\b` match (e.g. `Allen` won't match Allentown)
-- `"quoted phrase"` = substring match in exact order
-- `OD*` / `*drive*` = wildcard via `.*` regex
-- Python: `_compile_query(query_str)` + `_matches_all(text, terms)`
-- JS: `_parseQueryTerms(queryStr)` + `_matchesAllTerms(textLower, terms)` + `_itemMatchesKeyword(item)`
-- Applies to both the search bar (`_apply_base` / `filter_q`) and want list keywords
+### v2.10.5 through v2.10.8 — ATTEMPTED AND REVERTED ⚠️
 
-**Search ⓘ popup**
-- Replaced `≈` strict toggle button with `ⓘ` info button (`#search-info-btn`)
-- Clicking opens `#search-info-popover` (absolute-positioned) with syntax cheat sheet
-- Outside-click closes it — with null-guard on button ref (see v2.10.6)
+Multiple attempts to implement the features listed in "Planned Next Features" below all failed due to the Python/JS regex literal escape trap (see Critical Gotchas). Every version from v2.10.5 onward crashed the page on load with `SyntaxError: Invalid regular expression: missing /` or a related JS parse error. All changes were reverted. **The current deployed version is v2.10.4.**
 
-**Sticky filter bar**
-- Moved `position:sticky;top:0` from `.results-hdr` to `#results-top-bar`
-- `.results-hdr` was nested inside `#results-top-bar` flex container which constrained sticky bounds
-
-**Watch List / Want List mutual exclusivity**
-- Activating Watch List while Want List is active now deactivates Want List (and vice versa)
-- `toggleWatchFilter()` checks `_wantListSearchActive` and resets it; `searchWantList()` checks `_watchFilterActive`
-
-**Saved search dropdown `{once:true}` fix**
-- Every call to `_renderSavedSearchesDropdown()` was adding a new `{once:true}` listener to `#ss-dropdown`
-- After N renders, clicking fired N stale handlers — table disappeared because old `clearFilters()` calls fired
-- Fix: removed listener from render function; single persistent delegated listener set up at init
-
-### v2.10.6 — JS null crash fix
-- `document.addEventListener('click', ...)` for the ⓘ popover called `btn.contains(e.target)` without null-checking `btn`
-- If `#search-info-btn` was null on any click (e.g. during page transitions), threw `TypeError`, crashing all JS
-- Fix: added `&& btn &&` null guard: `if (pop && btn && pop.classList.contains('open') && ...)`
-
-### v2.10.7 — Regex literal Chrome crash fix ⚠️ KNOWN ISSUE — app may still be broken
-- `_parseQueryTerms` used `/[.*+?^${}()|[\]\\]/g` — Chrome's V8 chokes on `[\]` inside a character class
-- Fix: changed to `/[.*+?^${}()|\[\]\\]/g` (explicit `\[` and `\]`)
-- Symptom if broken: page loads, stores list empty, "Loading…" forever, console shows `SyntaxError: Invalid regular expression: missing /`
-- **If still broken after this**: the regex literal approach is fundamentally risky in Python templates. Consider replacing `_parseQueryTerms` escaping with a loop-based approach that avoids regex literals entirely.
+Do not attempt to port any code from those commits. Start fresh from v2.10.4 and implement the planned features using the guidance in the Critical Gotchas section.
