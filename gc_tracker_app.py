@@ -2663,48 +2663,39 @@ def api_browse():
     new_ids    = set(data.get("new_ids", []))
     store_set  = set(stores) if not search_all else None
 
-    # ── Unified query matching (shared by keyword list and filter_q) ─────────
+    # ── Keyword matching helper ───────────────────────────────────────────
     import re as _re
-
-    def _compile_query(query_str):
-        """Parse a query string into AND-joined terms.
-        Syntax:
-          Allen          → whole-word match  (won't match Allentown, McAllen)
-          "Jam Pedals"   → exact phrase match
-          Thorpy, Dane   → comma = AND; each part uses same rules
-          OD*            → wildcard: * is a glob wildcard (OD808, OD-1, etc.)
-        """
-        terms = []
-        for part in query_str.split(','):
-            part = part.strip()
-            if not part:
-                continue
-            if part.startswith('"') and part.endswith('"') and len(part) > 2:
-                terms.append(('exact', part[1:-1].lower()))
-            elif '*' in part:
-                pieces = [_re.escape(p) for p in part.split('*')]
-                terms.append(('regex', _re.compile('.*'.join(pieces), _re.IGNORECASE)))
-            else:
-                terms.append(('word', _re.compile(r'\b' + _re.escape(part) + r'\b', _re.IGNORECASE)))
-        return terms
-
-    def _matches_all(text_lower, terms):
-        for mode, val in terms:
-            if mode == 'exact':
-                if val not in text_lower:
-                    return False
-            else:
-                if not val.search(text_lower):
-                    return False
-        return bool(terms)
-
-    # Compile each want-list keyword into its term list; an item matches if ANY entry matches
-    _kw_compiled = [_compile_query(kw.strip()) for kw in keywords if kw.strip()]
-    _kw_compiled = [t for t in _kw_compiled if t]
+    _kw_compiled = []
+    for kw in keywords:
+        kw_stripped = kw.strip()
+        if kw_stripped.startswith('=') and len(kw_stripped) > 1:
+            # Strict whole-word match (= prefix)
+            word = kw_stripped[1:]
+            _kw_compiled.append(("word", _re.compile(r'\b' + _re.escape(word) + r'\b', _re.IGNORECASE)))
+        elif kw_stripped.startswith('"') and kw_stripped.endswith('"') and len(kw_stripped) > 2:
+            # Exact substring match (quoted)
+            _kw_compiled.append(("exact", kw_stripped[1:-1].lower()))
+        elif "," in kw_stripped:
+            # All-terms match (comma-separated)
+            terms = [t.strip().lower() for t in kw_stripped.split(",") if t.strip()]
+            if terms:
+                _kw_compiled.append(("all", terms))
+        else:
+            # Simple contains
+            _kw_compiled.append(("contains", kw_stripped.lower()))
 
     def _kw_match(name_l, brand_l):
         text = name_l + " " + brand_l
-        return any(_matches_all(text, terms) for terms in _kw_compiled)
+        for mode, val in _kw_compiled:
+            if mode == "word" and val.search(text):
+                return True
+            elif mode == "exact" and val in text:
+                return True
+            elif mode == "all" and all(t in text for t in val):
+                return True
+            elif mode == "contains" and val in text:
+                return True
+        return False
 
     # Check if any cache entries have store field
     has_store_data = any(v.get("store") for v in _cat_cache.values())
@@ -2776,9 +2767,24 @@ def api_browse():
     def _apply_base(items):
         r = items
         if fq:
-            fq_terms = _compile_query(fq)
-            r = [i for i in r if _matches_all(
-                ((i["name"] or "") + " " + (i["brand"] or "")).lower(), fq_terms)]
+            # Support =word prefix in search bar for whole-word match (same as want list = prefix)
+            fq_text   = fq[1:].strip() if fq.startswith('=') and len(fq) > 1 else fq
+            fq_strict = f_strict or fq.startswith('=')
+            if fq_text.startswith('"') and fq_text.endswith('"') and len(fq_text) > 2:
+                phrase = fq_text[1:-1]
+                r = [i for i in r if phrase in (i["name"] or "").lower()
+                     or phrase in (i["brand"] or "").lower()]
+            elif fq_strict:
+                words = fq_text.split()
+                pats = [_re.compile(r'\b' + _re.escape(w) + r'\b', _re.IGNORECASE) for w in words]
+                r = [i for i in r if all(
+                    p.search(" ".join([i["name"] or "", i["brand"] or ""]))
+                    for p in pats)]
+            else:
+                words = fq_text.split()
+                r = [i for i in r if all(
+                    w in " ".join([i["name"] or "", i["brand"] or ""]).lower()
+                    for w in words)]
         if f_want_only:       r = [i for i in r if i["kwMatch"]]
         if f_price_drop_only: r = [i for i in r if i.get("price_drop", 0) > 0]
         if f_watched:         r = [i for i in r if i["watched"]]
@@ -4316,6 +4322,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .mtb-about:hover{opacity:1}
 #save-search-btn:hover{background:#1a3a1a!important}
 #filter-action-btns{display:contents}  /* desktop: wrapper invisible, children flow inline */
+#save-search-btn,#clear-filters-btn{flex:none!important}  /* desktop: size to content, not stretch */
 .ss-save-mobile-btn{padding:4px 9px;border-radius:4px;background:#1e2e1e;border:1px solid #4ade80;color:#4ade80;font-size:.75rem;cursor:pointer;white-space:nowrap}
 .badge{background:#c00;color:#fff;font-size:.7rem;font-weight:700;padding:2px 7px;border-radius:10px}.badge:empty{display:none}
 .cat-sel{padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer}
@@ -4339,11 +4346,8 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #res-search:focus{border-color:#c00;box-shadow:0 0 0 3px rgba(204,0,0,.15)}
 .res-search-icon{display:none;position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:.9rem;pointer-events:none;opacity:.5}
 #res-search-count{font-size:.75rem;color:#555;white-space:nowrap}
-#search-info-btn:hover{color:#ccc;border-color:#666}
-#search-info-popover{display:none;position:absolute;top:calc(100% + 6px);right:0;z-index:200;background:#1e1e1e;border:1px solid #3a3a3a;border-radius:7px;padding:12px 14px;width:260px;font-size:.76rem;line-height:1.6;color:#bbb;box-shadow:0 6px 24px rgba(0,0,0,.6)}
-#search-info-popover.open{display:block}
-#search-info-popover b{color:#eee}
-#search-info-popover code{color:#4ade80;font-family:monospace;font-size:.8rem}
+#strict-search-btn{background:none;border:1px solid #3a3a3a;border-radius:4px;color:#555;font-size:.78rem;cursor:pointer;padding:2px 6px;line-height:1.4;white-space:nowrap;flex-shrink:0}
+#strict-search-btn.active{color:#fbbf24;border-color:#fbbf24}
 .dd-clear-row{padding:7px 12px;color:#f88;font-size:.78rem;cursor:pointer;border-bottom:1px solid #2a2a2a;display:flex;align-items:center;gap:4px}
 .dd-clear-row:hover{background:#1e1e1e}
 
@@ -4573,8 +4577,6 @@ tr.fav-row td:last-child{color:#4ade80}
   #res-title{font-size:.88rem}
   .badge{font-size:.72rem;padding:2px 7px}
   #res-search-wrap{margin-left:0;width:100%}
-  #save-search-btn,#clear-filters-btn{flex:1}  /* stretch to fill row on mobile */
-  #search-info-popover{right:auto;left:0}  /* popover opens left-aligned on mobile */
   #res-search{width:100%;flex:1;font-size:.84rem;padding:8px 14px;border-radius:20px}
   #res-search-count{font-size:.78rem}
   .cat-sel{font-size:.78rem;padding:6px 10px}
@@ -4951,12 +4953,11 @@ tr.fav-row td:last-child{color:#4ade80}
     <p style="color:#aaa;font-size:.82rem;margin-bottom:16px;line-height:1.6">
       Matching items are highlighted across all results. New matches sort to the top after a scan.<br><br>
       <span style="color:#ccc;font-weight:600">How to write keywords:</span><br>
-      <span style="color:#4ade80">Allen</span> &nbsp;— exact word match (won't match Allentown or McAllen)<br>
-      <span style="color:#4ade80">"Jam Pedals"</span> &nbsp;— phrase match (words in that exact order)<br>
-      <span style="color:#4ade80">Thorpy, Dane</span> &nbsp;— must contain both words (comma = AND)<br>
-      <span style="color:#4ade80">OD*</span> &nbsp;— wildcard: matches OD808, OD-1, OD Pedal…<br>
-      <span style="color:#4ade80">*drive*</span> &nbsp;— wildcard on both sides: matches anything containing "drive"<br><br>
-      <span style="color:#888;font-size:.78rem">💡 Same syntax works in the search bar. Click <b style="color:#ccc">ⓘ</b> next to the search box for a quick reference.</span>
+      <span style="color:#4ade80">Telecaster</span> &nbsp;— contains match: hits Telecaster, Telecasters, TelecasterPlus…<br>
+      <span style="color:#4ade80">=Telecaster</span> &nbsp;— <b style="color:#fbbf24">=</b> whole-word: hits "Fender Telecaster" but not "Telecasters"<br>
+      <span style="color:#4ade80">Fender, Telecaster</span> &nbsp;— <b>comma = AND</b>: item must contain both words<br>
+      <span style="color:#4ade80">"Fender Telecaster"</span> &nbsp;— <b>quotes = exact phrase</b> in that exact order<br><br>
+      <span style="color:#888;font-size:.78rem">💡 Use <b style="color:#ccc">=</b> to avoid false hits: <span style="color:#4ade80">=Allen</span> matches brand "Allen" but not "Allentown" or "McAllen". The <b style="color:#ccc">=</b> prefix also works in the main search bar.</span>
     </p>
     <div style="display:flex;gap:6px;margin-bottom:16px">
       <input id="kw-input" type="text" placeholder="Add an item to your want list…"
@@ -4973,7 +4974,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.7</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.4</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -5022,7 +5023,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.7</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.4</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -5102,15 +5103,7 @@ tr.fav-row td:last-child{color:#4ade80}
               <span class="res-search-icon">🔍</span>
               <input id="res-search" type="text" placeholder="Search all stores…" oninput="_globalKeywordSearch();_updateResSearchClear()" autocomplete="off">
               <button id="res-search-clear" onclick="clearResSearch()" title="Clear search" style="display:none;background:none;border:none;color:#888;font-size:.85rem;cursor:pointer;padding:0 4px;line-height:1">✕</button>
-              <button id="search-info-btn" onclick="_toggleSearchInfo(event)" title="Search syntax help" style="background:none;border:1px solid #3a3a3a;border-radius:4px;color:#555;font-size:.78rem;cursor:pointer;padding:2px 6px;line-height:1.4;flex-shrink:0">ⓘ</button>
-              <div id="search-info-popover">
-                <b>Search syntax</b><br>
-                <code>Allen</code> — exact word match<br>
-                <code>"Jam Pedals"</code> — phrase match<br>
-                <code>Thorpy, Dane</code> — must contain both<br>
-                <code>OD*</code> — wildcard (OD808, OD-1…)<br>
-                <code>*drive*</code> — contains "drive"
-              </div>
+              <button id="strict-search-btn" onclick="_toggleStrictSearch()" title="Fuzzy (contains) — click for strict whole-word">≈</button>
               <span id="res-search-count"></span>
             </div>
             <!-- ── Mobile accordion sections (hidden on desktop) ── -->
@@ -5190,11 +5183,11 @@ tr.fav-row td:last-child{color:#4ade80}
             <!-- Action buttons row (side-by-side on mobile, inline on desktop) -->
             <div id="filter-action-btns" style="display:none;gap:8px">
               <button id="save-search-btn" onclick="_saveCurrentSearch()" title="Save current search + filters"
-                style="padding:7px 10px;border-radius:4px;background:#1e2e1e;border:1px solid #4ade80;color:#4ade80;font-size:.78rem;cursor:pointer;white-space:nowrap">
+                style="flex:1;padding:7px 10px;border-radius:4px;background:#1e2e1e;border:1px solid #4ade80;color:#4ade80;font-size:.78rem;cursor:pointer;white-space:nowrap">
                 💾 Save Search
               </button>
               <button id="clear-filters-btn" onclick="clearFilters()"
-                style="padding:7px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #c00;color:#f88;font-size:.78rem;cursor:pointer;white-space:nowrap">
+                style="flex:1;padding:7px 10px;border-radius:4px;background:#1e1e1e;border:1px solid #c00;color:#f88;font-size:.78rem;cursor:pointer;white-space:nowrap">
                 ✕ Clear All
               </button>
             </div>
@@ -5372,19 +5365,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const filterSheet = document.getElementById('gc-filter-collapsible');
   if (storeSheet)  _initSwipeDismiss(storeSheet,  _closeAllSheets, '#store-list');
   if (filterSheet) _initSwipeDismiss(filterSheet, _closeAllSheets, '.filter-scroll-body');
-});
-
-// ── Search info popover ───────────────────────────────────────────────────────
-function _toggleSearchInfo(e) {
-  e.stopPropagation();
-  const pop = document.getElementById('search-info-popover');
-  if (pop) pop.classList.toggle('open');
-}
-document.addEventListener('click', function(e) {
-  const pop = document.getElementById('search-info-popover');
-  const btn = document.getElementById('search-info-btn');
-  if (pop && btn && pop.classList.contains('open') && e.target !== btn && !btn.contains(e.target))
-    pop.classList.remove('open');
 });
 
 // Close saved-searches dropdown on outside click
@@ -7141,35 +7121,24 @@ function _toggleStrictSearch() {
   _fetchBrowsePage(1);
 }
 
-function _parseQueryTerms(queryStr) {
-  /* Mirror of Python _compile_query — same syntax rules. */
-  const terms = [];
-  queryStr.split(',').forEach(function(part) {
-    part = part.trim();
-    if (!part) return;
-    if (part.startsWith('"') && part.endsWith('"') && part.length > 2) {
-      terms.push({mode:'exact', val: part.slice(1,-1).toLowerCase()});
-    } else if (part.includes('*')) {
-      const pieces = part.split('*').map(p => p.replace(/[.*+?^${}()|\[\]\\]/g,'\\$&'));
-      terms.push({mode:'regex', val: new RegExp(pieces.join('.*'), 'i')});
-    } else {
-      const escaped = part.replace(/[.*+?^${}()|\[\]\\]/g,'\\$&');
-      terms.push({mode:'word', val: new RegExp('\\b' + escaped + '\\b', 'i')});
-    }
-  });
-  return terms;
-}
-function _matchesAllTerms(textLower, terms) {
-  return terms.length > 0 && terms.every(function(t) {
-    if (t.mode === 'exact') return textLower.includes(t.val);
-    return t.val.test(textLower);
-  });
-}
 function _itemMatchesKeyword(item) {
-  if (!window._keywords || !window._keywords.length) return false;
+  if (!window._keywords.length) return false;
   const text = ((item.name || '') + ' ' + (item.brand || '')).toLowerCase();
-  return window._keywords.some(function(kw) {
-    return _matchesAllTerms(text, _parseQueryTerms(kw.trim()));
+  return window._keywords.some(kw => {
+    kw = kw.trim();
+    if (kw.startsWith('=') && kw.length > 1) {
+      // Strict whole-word match — split text on non-word chars, check for exact match
+      return text.toLowerCase().split(/\W+/).includes(kw.slice(1).toLowerCase());
+    } else if (kw.startsWith('"') && kw.endsWith('"') && kw.length > 2) {
+      // Exact substring match
+      return text.includes(kw.slice(1, -1).toLowerCase());
+    } else if (kw.includes(',')) {
+      // All-terms match
+      return kw.split(',').map(t => t.trim().toLowerCase()).filter(Boolean).every(t => text.includes(t));
+    } else {
+      // Simple contains
+      return text.includes(kw.toLowerCase());
+    }
   });
 }
 
@@ -8838,7 +8807,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.7"
+APP_VERSION = "2.10.4"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
