@@ -2767,18 +2767,21 @@ def api_browse():
     def _apply_base(items):
         r = items
         if fq:
-            if fq.startswith('"') and fq.endswith('"') and len(fq) > 2:
-                phrase = fq[1:-1]
+            # Support =word prefix in search bar for whole-word match (same as want list = prefix)
+            fq_text   = fq[1:].strip() if fq.startswith('=') and len(fq) > 1 else fq
+            fq_strict = f_strict or fq.startswith('=')
+            if fq_text.startswith('"') and fq_text.endswith('"') and len(fq_text) > 2:
+                phrase = fq_text[1:-1]
                 r = [i for i in r if phrase in (i["name"] or "").lower()
                      or phrase in (i["brand"] or "").lower()]
-            elif f_strict:
-                words = fq.split()
+            elif fq_strict:
+                words = fq_text.split()
                 pats = [_re.compile(r'\b' + _re.escape(w) + r'\b', _re.IGNORECASE) for w in words]
                 r = [i for i in r if all(
                     p.search(" ".join([i["name"] or "", i["brand"] or ""]))
                     for p in pats)]
             else:
-                words = fq.split()
+                words = fq_text.split()
                 r = [i for i in r if all(
                     w in " ".join([i["name"] or "", i["brand"] or ""]).lower()
                     for w in words)]
@@ -4319,6 +4322,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .mtb-about:hover{opacity:1}
 #save-search-btn:hover{background:#1a3a1a!important}
 #filter-action-btns{display:contents}  /* desktop: wrapper invisible, children flow inline */
+#save-search-btn,#clear-filters-btn{flex:none!important}  /* desktop: size to content, not stretch */
 .ss-save-mobile-btn{padding:4px 9px;border-radius:4px;background:#1e2e1e;border:1px solid #4ade80;color:#4ade80;font-size:.75rem;cursor:pointer;white-space:nowrap}
 .badge{background:#c00;color:#fff;font-size:.7rem;font-weight:700;padding:2px 7px;border-radius:10px}.badge:empty{display:none}
 .cat-sel{padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer}
@@ -4945,14 +4949,15 @@ tr.fav-row td:last-child{color:#4ade80}
 <div id="kw-modal" style="display:none;position:fixed;inset:0;z-index:100;align-items:center;justify-content:center">
   <div style="position:absolute;inset:0;background:rgba(0,0,0,.7)" onclick="closeKeywords()"></div>
   <div style="position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:24px 24px 20px;width:420px;max-height:80vh;overflow-y:auto;z-index:1">
-    <h2 style="color:#fff;font-size:1.05rem;margin-bottom:4px">🔑 Want List</h2>
-    <p style="color:#aaa;font-size:.82rem;margin-bottom:16px;line-height:1.6">Items matching your want list are highlighted in the results. New items that also match sort to the top.<br><br>
-      <span style="color:#ccc;font-weight:600">Matching modes:</span><br>
-      <span style="color:#4ade80">Wangcaster</span> — fuzzy: matches anything containing "Wangcaster"<br>
-      <span style="color:#4ade80">Wang, Caster</span> — matches items containing both words<br>
-      <span style="color:#4ade80">"Wang Caster"</span> — phrase match only<br>
-      <span style="color:#93c5fd">=Wangcaster</span> — strict: whole-word match only (won't match "Wangcasters" or "Wangcasterbridge")<br><br>
-      <span style="color:#ccc">Strict chips show a <span style="color:#fbbf24;font-weight:700">=</span> badge. To change mode, remove the keyword and re-add with or without the = prefix.</span>
+    <h2 style="color:#fff;font-size:1.05rem;margin-bottom:4px">🎯 Want List</h2>
+    <p style="color:#aaa;font-size:.82rem;margin-bottom:16px;line-height:1.6">
+      Matching items are highlighted across all results. New matches sort to the top after a scan.<br><br>
+      <span style="color:#ccc;font-weight:600">How to write keywords:</span><br>
+      <span style="color:#4ade80">Telecaster</span> &nbsp;— contains match: hits Telecaster, Telecasters, TelecasterPlus…<br>
+      <span style="color:#4ade80">=Telecaster</span> &nbsp;— <b style="color:#fbbf24">=</b> whole-word: hits "Fender Telecaster" but not "Telecasters"<br>
+      <span style="color:#4ade80">Fender, Telecaster</span> &nbsp;— <b>comma = AND</b>: item must contain both words<br>
+      <span style="color:#4ade80">"Fender Telecaster"</span> &nbsp;— <b>quotes = exact phrase</b> in that exact order<br><br>
+      <span style="color:#888;font-size:.78rem">💡 Use <b style="color:#ccc">=</b> to avoid false hits: <span style="color:#4ade80">=Allen</span> matches brand "Allen" but not "Allentown" or "McAllen". The <b style="color:#ccc">=</b> prefix also works in the main search bar.</span>
     </p>
     <div style="display:flex;gap:6px;margin-bottom:16px">
       <input id="kw-input" type="text" placeholder="Add an item to your want list…"
@@ -4969,7 +4974,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.3</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.4</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -5018,7 +5023,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.3</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.4</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -8802,7 +8807,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.3"
+APP_VERSION = "2.10.4"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
