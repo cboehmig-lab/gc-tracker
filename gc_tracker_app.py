@@ -4973,7 +4973,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.6</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.7</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -5022,7 +5022,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.6</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.7</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -7150,10 +7150,10 @@ function _parseQueryTerms(queryStr) {
     if (part.startsWith('"') && part.endsWith('"') && part.length > 2) {
       terms.push({mode:'exact', val: part.slice(1,-1).toLowerCase()});
     } else if (part.includes('*')) {
-      const pieces = part.split('*').map(p => p.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'));
+      const pieces = part.split('*').map(p => p.replace(/[.*+?^${}()|\[\]\\]/g,'\\$&'));
       terms.push({mode:'regex', val: new RegExp(pieces.join('.*'), 'i')});
     } else {
-      const escaped = part.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+      const escaped = part.replace(/[.*+?^${}()|\[\]\\]/g,'\\$&');
       terms.push({mode:'word', val: new RegExp('\\b' + escaped + '\\b', 'i')});
     }
   });
@@ -8838,7 +8838,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.6"
+APP_VERSION = "2.10.7"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
