@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-05 · Current version: v2.10.0 · Status: deployed on Railway · Branch: main*
+*Last updated: 2026-05-06 · Current version: v2.10.7 · Status: deployed on Railway · Branch: main*
 
 ---
 
@@ -490,13 +490,73 @@ When bumping version, update ALL FOUR of these:
 
 ## ⚠️ Critical Python/JS Template Gotchas
 
-**Regex in Python triple-quoted template strings**
+**Regex literals in Python triple-quoted template strings — the `[\]` trap**
 - Python processes `\\` → `\` when the triple-quoted string is evaluated
 - `new RegExp('\\\\b' + word + '\\\\b')` in source → `new RegExp('\\b' + word + '\\b')` at runtime — OK
-- But `/[.*+?^${}()|[\]\\]/g` in source (a regex literal with a backslash char class) → the trailing `\\` becomes `\`, leaving an unclosed character class `/[...\]/g` — **SyntaxError, kills the entire page**
-- **Rule**: Never use `RegExp` constructor strings with backslash escapes in Python templates. Use regex **literals** (`/\W+/`, `/\b/`) instead — the literal slash-backslash is preserved as-is.
-- This burned us in v2.9.0: the `kw.slice(1).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')` approach produced a parse-time SyntaxError. Replaced with `text.split(/\W+/).includes(word)` — regex literal, no escaping issue.
+- `/[.*+?^${}()|[\]\\]/g` looks valid but Chrome/V8 chokes on `[\]` inside a character class — parses it as an unclosed class, throws `SyntaxError: Invalid regular expression: missing /` and **kills all JS on the page**
+- **Rule**: When writing a character class that includes `[` or `]`, always escape both explicitly: `/[.*+?^${}()|\[\]\\]/g` — no ambiguity for any JS engine
+- This burned us twice: v2.9.0 (replaced with `text.split(/\W+/).includes(word)`) and v2.10.5–v2.10.7 (`_parseQueryTerms` — fixed by changing `[\]` → `\[\]`)
+- Symptoms: page loads HTML fine, stores list is empty, "Loading…" never resolves, browser console shows `(index):NNNN Uncaught SyntaxError: Invalid regular expression: missing /`
 
 **Inline onclick strings with regex**
 - Don't build regex patterns inside `onclick="..."` attributes via Python string concatenation
 - Use `data-*` attributes + `addEventListener` instead (see accordion items)
+
+---
+
+## Recent Changes (v2.10.0 → v2.10.7)
+
+### v2.10.1 — (internal patch, no user-facing change)
+
+### v2.10.2 — Date-only new-item detection fix
+- **Bug**: items with `date_listed = "2026-05-05"` (date-only, no time component) were never flagged NEW on the same day because `"2026-05-05" < "2026-05-05T08:00:00Z"` in string comparison
+- **Fix**: `_norm_item_date(d)` — if `len(d) == 10` (date-only), appends `T23:59:59Z` before comparison
+- Applied in the scan loop when building `new_ids_list`
+
+### v2.10.3 — Keyword search false-positive fix
+- **Bug**: want-list keyword "Allen" was matching store names like "Allentown" and "McAllen" because the search included store name and location fields
+- **Fix**: keyword matching now searches only `name + brand` fields, not store/location/category
+
+### v2.10.4 — `=` prefix whole-word search, UI polish
+- `=Allen` in the search bar forces whole-word match (`\bAllen\b`) — won't match "Allentown"
+- Save Search / Clear All buttons narrowed (removed `flex:1` from inline HTML; `flex:1` added to mobile CSS only)
+- Want list modal help text updated with real examples (replacing "Wangcaster")
+
+### v2.10.5 — Unified matching system, search ⓘ popup, bug fixes
+**Unified query matching (Python + JS, identical logic)**
+- Comma = AND (e.g. `Thorpy, Dane` = must contain both)
+- Plain word = whole-word `\b...\b` match (e.g. `Allen` won't match Allentown)
+- `"quoted phrase"` = substring match in exact order
+- `OD*` / `*drive*` = wildcard via `.*` regex
+- Python: `_compile_query(query_str)` + `_matches_all(text, terms)`
+- JS: `_parseQueryTerms(queryStr)` + `_matchesAllTerms(textLower, terms)` + `_itemMatchesKeyword(item)`
+- Applies to both the search bar (`_apply_base` / `filter_q`) and want list keywords
+
+**Search ⓘ popup**
+- Replaced `≈` strict toggle button with `ⓘ` info button (`#search-info-btn`)
+- Clicking opens `#search-info-popover` (absolute-positioned) with syntax cheat sheet
+- Outside-click closes it — with null-guard on button ref (see v2.10.6)
+
+**Sticky filter bar**
+- Moved `position:sticky;top:0` from `.results-hdr` to `#results-top-bar`
+- `.results-hdr` was nested inside `#results-top-bar` flex container which constrained sticky bounds
+
+**Watch List / Want List mutual exclusivity**
+- Activating Watch List while Want List is active now deactivates Want List (and vice versa)
+- `toggleWatchFilter()` checks `_wantListSearchActive` and resets it; `searchWantList()` checks `_watchFilterActive`
+
+**Saved search dropdown `{once:true}` fix**
+- Every call to `_renderSavedSearchesDropdown()` was adding a new `{once:true}` listener to `#ss-dropdown`
+- After N renders, clicking fired N stale handlers — table disappeared because old `clearFilters()` calls fired
+- Fix: removed listener from render function; single persistent delegated listener set up at init
+
+### v2.10.6 — JS null crash fix
+- `document.addEventListener('click', ...)` for the ⓘ popover called `btn.contains(e.target)` without null-checking `btn`
+- If `#search-info-btn` was null on any click (e.g. during page transitions), threw `TypeError`, crashing all JS
+- Fix: added `&& btn &&` null guard: `if (pop && btn && pop.classList.contains('open') && ...)`
+
+### v2.10.7 — Regex literal Chrome crash fix ⚠️ KNOWN ISSUE — app may still be broken
+- `_parseQueryTerms` used `/[.*+?^${}()|[\]\\]/g` — Chrome's V8 chokes on `[\]` inside a character class
+- Fix: changed to `/[.*+?^${}()|\[\]\\]/g` (explicit `\[` and `\]`)
+- Symptom if broken: page loads, stores list empty, "Loading…" forever, console shows `SyntaxError: Invalid regular expression: missing /`
+- **If still broken after this**: the regex literal approach is fundamentally risky in Python templates. Consider replacing `_parseQueryTerms` escaping with a loop-based approach that avoids regex literals entirely.
