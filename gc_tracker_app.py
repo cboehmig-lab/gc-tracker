@@ -2775,16 +2775,12 @@ def api_browse():
                 words = fq.split()
                 pats = [_re.compile(r'\b' + _re.escape(w) + r'\b', _re.IGNORECASE) for w in words]
                 r = [i for i in r if all(
-                    p.search(" ".join([i["name"] or "", i["brand"] or "",
-                                       i["store"] or "", i["location"] or "",
-                                       i["category"] or "", i["subcategory"] or ""]))
+                    p.search(" ".join([i["name"] or "", i["brand"] or ""]))
                     for p in pats)]
             else:
                 words = fq.split()
                 r = [i for i in r if all(
-                    w in " ".join([i["name"] or "", i["brand"] or "",
-                                   i["store"] or "", i["location"] or "",
-                                   i["category"] or "", i["subcategory"] or ""]).lower()
+                    w in " ".join([i["name"] or "", i["brand"] or ""]).lower()
                     for w in words)]
         if f_want_only:       r = [i for i in r if i["kwMatch"]]
         if f_price_drop_only: r = [i for i in r if i.get("price_drop", 0) > 0]
@@ -4973,7 +4969,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.2</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.3</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -5022,7 +5018,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.2</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.3</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -8806,7 +8802,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.2"
+APP_VERSION = "2.10.3"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
