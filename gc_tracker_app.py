@@ -1309,6 +1309,33 @@ def write_excel(new_items: list[dict]):
 
 app             = Flask(__name__)
 app.secret_key  = os.environ.get("SECRET_KEY", "gc-tracker-default-key-change-me")
+# Secure session cookie settings
+# SESSION_COOKIE_SECURE=True means the cookie is only sent over HTTPS.
+# We enable it when running on Railway (RAILWAY_ENVIRONMENT is set); local dev
+# is HTTP so we leave it off there to avoid breaking local testing.
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"]   = os.environ.get("RAILWAY_ENVIRONMENT") is not None
+
+# ── Login rate-limiting (in-memory, per IP) ────────────────────────────────────
+# Keyed by IP → list of attempt timestamps. Pruned on each check.
+_login_attempts: dict = {}
+_LOGIN_WINDOW   = 300   # seconds (5 min rolling window)
+_LOGIN_MAX      = 10    # max failed attempts before lockout
+
+def _check_login_rate(ip: str) -> bool:
+    """Return True (allowed) or False (rate-limited). Only counts failed attempts."""
+    now      = time.time()
+    attempts = [t for t in _login_attempts.get(ip, []) if now - t < _LOGIN_WINDOW]
+    _login_attempts[ip] = attempts
+    return len(attempts) < _LOGIN_MAX
+
+def _record_login_failure(ip: str):
+    now = time.time()
+    bucket = [t for t in _login_attempts.get(ip, []) if now - t < _LOGIN_WINDOW]
+    bucket.append(now)
+    _login_attempts[ip] = bucket
+
 _q              = queue.Queue()        # legacy fallback (kept for non-run endpoints)
 _run_queues: dict[str, list[queue.Queue]] = {}  # run_id → list of subscriber queues (fan-out)
 _run_queues_lock = threading.Lock()
@@ -1344,8 +1371,11 @@ def _log_device(device_id: str):
 
 @app.after_request
 def _track_device(response):
-    """Set a long-lived device cookie and log first visit of each day."""
-    # Only track page/API hits we care about (skip SSE streams & static)
+    """Set a long-lived device cookie, log first visit of each day, and add security headers."""
+    # Security headers — applied to every response
+    response.headers.setdefault("X-Frame-Options",        "SAMEORIGIN")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    # Skip SSE streams for device tracking (cookie/logging only, headers already set above)
     if request.path.startswith("/api/progress"):
         return response
     device_id = request.cookies.get("gt_device_id")
@@ -1498,11 +1528,15 @@ def api_register():
 
 @app.route("/api/login", methods=["POST"])
 def api_login():
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip()
+    if not _check_login_rate(ip):
+        return jsonify({"error": "Too many login attempts. Please wait a few minutes and try again."}), 429
     data     = request.json or {}
     username = (data.get("username") or "").strip()
     password = (data.get("password") or "").strip()
     user     = _user_by_username(username)
     if not user or not check_password_hash(user["password_hash"], password):
+        _record_login_failure(ip)
         return jsonify({"error": "Incorrect username or password."}), 401
     session.permanent = True
     session["user_id"]       = user["id"]
@@ -4976,7 +5010,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.6</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.7</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -5025,7 +5059,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.6</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.7</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -6189,10 +6223,10 @@ function renderList(preserveChecked) {
     const id = 'cb_' + name.replace(/[^a-zA-Z0-9]/g,'_');
     const isChecked = checked.has(name);
     div.innerHTML =
-      `<input type="checkbox" id="${id}" value="${name}" ${isChecked ? 'checked' : ''}>` +
-      `<label for="${id}">${name}${distSuffix}</label>` +
       `<button class="fav-btn ${isFav?'active':''}" title="${isFav?'Remove from':'Add to'} favorites"
-        onclick="toggleFav(event,'${name.replace(/'/g,"\\'")}',this)">★</button>`;
+        onclick="toggleFav(event,'${name.replace(/'/g,"\\'")}',this)">★</button>` +
+      `<input type="checkbox" id="${id}" value="${name}" ${isChecked ? 'checked' : ''}>` +
+      `<label for="${id}">${name}${distSuffix}</label>`;
     div.querySelector('input').addEventListener('change', updateCount);
     el.appendChild(div);
   });
@@ -8860,7 +8894,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.6"
+APP_VERSION = "2.10.7"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
