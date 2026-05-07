@@ -6,7 +6,7 @@ Run with:  python3 gc_tracker_app.py
 Then open: http://localhost:5050
 """
 
-import json, os, re, sys, time, threading, queue, webbrowser, random, sqlite3, hashlib
+import json, os, re, sys, time, threading, queue, webbrowser, random, sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from functools import wraps
@@ -1783,18 +1783,11 @@ def admin_users():
 
     rows_html = ""
     for u in users:
-        raw_email = u.get("email")
-        if raw_email:
-            h = hashlib.sha256(raw_email.lower().encode()).hexdigest()[:16]
-            email_cell = f'<span style="color:#666;font-family:monospace" title="SHA-256 of email (first 16 hex)">{h}…</span>'
-        else:
-            email_cell = '<span style="color:#444">not set</span>'
         last_scan  = _fmt(u.get("last_run"))
         joined     = _fmt(u.get("created_at"))
         rows_html += (
             f'<tr>'
             f'<td>{u["username"]}</td>'
-            f'<td>{email_cell}</td>'
             f'<td>{joined}</td>'
             f'<td>{last_scan}</td>'
             f'<td style="text-align:center">{u["wl_count"]}</td>'
@@ -1820,10 +1813,10 @@ a{{color:#888;text-decoration:none;font-size:.78rem}}
 <a href="/admin/devices?pw={pw}">→ Device log</a></div>
 <table>
 <tr>
-  <th>Username</th><th>Email hash</th><th>Joined</th><th>Last scan</th>
+  <th>Username</th><th>Joined</th><th>Last scan</th>
   <th>Watch</th><th>Want</th><th>Favs</th>
 </tr>
-{rows_html if rows_html else '<tr><td colspan="7" style="color:#555;padding:20px">No accounts yet.</td></tr>'}
+{rows_html if rows_html else '<tr><td colspan="6" style="color:#555;padding:20px">No accounts yet.</td></tr>'}
 </table>
 </body></html>"""
 
@@ -6139,11 +6132,14 @@ function toggleFavsFilter() {
   btn.classList.toggle('active', favsOnly);
   btn.textContent = favsOnly ? 'All Stores' : '★ Favorites';
   document.getElementById('search').value = '';
-  // When switching TO favs view, auto-select all favorites
   if (favsOnly) {
+    // Switching TO favorites: auto-select all favorites
     favorites.forEach(f => wasChecked.add(f));
+    renderList(wasChecked);
+  } else {
+    // Switching back to All Stores: restore full all-selected state
+    renderList(new Set(allStores));
   }
-  renderList(wasChecked);
 }
 
 function selectAll() {
