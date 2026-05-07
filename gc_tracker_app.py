@@ -1580,8 +1580,8 @@ def api_sync():
 def admin_devices():
     """Password-protected device access summary page."""
     pw = request.args.get("pw", "")
-    admin_pw = os.environ.get("RESET_PASSWORD", "Beatle909!")
-    if pw != admin_pw:
+    admin_pw = os.environ.get("RESET_PASSWORD", "")
+    if not admin_pw or pw != admin_pw:
         return Response(
             '<html><body style="background:#111;color:#eee;font-family:monospace;padding:40px">'
             '<h2>🔒 Access denied</h2>'
@@ -1668,8 +1668,8 @@ def _admin_task_page(title: str, api_path: str, description: str, pw: str,
     options_html: optional HTML snippet inserted above the Run button (e.g. checkboxes)
     extra_body_js: optional JS snippet merged into the POST body object (e.g. "force: document.getElementById('force-cb').checked")
     """
-    admin_pw = os.environ.get("RESET_PASSWORD", "Beatle909!")
-    if pw != admin_pw:
+    admin_pw = os.environ.get("RESET_PASSWORD", "")
+    if not admin_pw or pw != admin_pw:
         return None  # caller should return 401
     safe_api  = api_path.replace('"', '')
     safe_title = title.replace('<', '').replace('>', '')
@@ -1770,8 +1770,8 @@ def admin_validate_stores():
 def admin_users():
     """Password-protected user account summary page."""
     pw       = request.args.get("pw", "")
-    admin_pw = os.environ.get("RESET_PASSWORD", "Beatle909!")
-    if pw != admin_pw:
+    admin_pw = os.environ.get("RESET_PASSWORD", "")
+    if not admin_pw or pw != admin_pw:
         return Response(
             '<html><body style="background:#111;color:#eee;font-family:monospace;padding:40px">'
             '<h2>🔒 Access denied</h2>'
@@ -1862,8 +1862,8 @@ def admin_clear_lock():
     """Force-release the global scan lock if it's stuck after a crash.
     Protected by the same RESET_PASSWORD as /admin/devices."""
     pw = request.args.get("pw", "")
-    admin_pw = os.environ.get("RESET_PASSWORD", "Beatle909!")
-    if pw != admin_pw:
+    admin_pw = os.environ.get("RESET_PASSWORD", "")
+    if not admin_pw or pw != admin_pw:
         return Response("Unauthorized", status=401)
     if _lock.locked():
         try:
@@ -1880,8 +1880,8 @@ def admin_listing_patterns():
     how GC batches new listings — by day, hour-of-day, and minute within hour.
     Protected by the same RESET_PASSWORD as /admin/devices."""
     pw = request.args.get("pw", "")
-    admin_pw = os.environ.get("RESET_PASSWORD", "Beatle909!")
-    if pw != admin_pw:
+    admin_pw = os.environ.get("RESET_PASSWORD", "")
+    if not admin_pw or pw != admin_pw:
         return Response("Unauthorized", status=401)
 
     _load_cat_cache()
@@ -1980,8 +1980,8 @@ def api_reset():
     """Delete inventory state and cache to start fresh.
     Preserves favorites, watchlist, and want list."""
     data = request.json or {}
-    reset_pw = os.environ.get("RESET_PASSWORD", "Beatle909!")
-    if data.get("password") != reset_pw:
+    reset_pw = os.environ.get("RESET_PASSWORD", "")
+    if not reset_pw or data.get("password") != reset_pw:
         return jsonify({"error": "Incorrect password."}), 403
     deleted = []
     for f in [STATE_FILE, CAT_CACHE_FILE, OUTPUT_FILE,
@@ -3658,7 +3658,7 @@ def _populate_store_data(selected_stores: list = None):
 @app.route("/api/validate-stores", methods=["POST"])
 @login_required
 def api_validate_stores():
-    admin_pw = os.environ.get("RESET_PASSWORD", "Beatle909!")
+    admin_pw = os.environ.get("RESET_PASSWORD", "")
     if request.json.get("pw") != admin_pw:
         return jsonify({"error": "Unauthorized"}), 401
     if not _lock.acquire(blocking=False):
@@ -3687,7 +3687,7 @@ def api_store_coords():
 def api_build_store_coords():
     """Trigger a one-time geocoding run to build gc_store_coords.json.
     Uses the existing SSE stream — progress shows up in the log panel."""
-    admin_pw = os.environ.get("RESET_PASSWORD", "Beatle909!")
+    admin_pw = os.environ.get("RESET_PASSWORD", "")
     if (request.json or {}).get("pw") != admin_pw:
         return jsonify({"error": "Unauthorized"}), 401
     if not _lock.acquire(blocking=False):
@@ -7311,7 +7311,7 @@ function cancelReset() {
 
 function confirmReset() {
   const pw = document.getElementById('pw-input').value;
-  if (pw !== 'Beatle909!') {
+  if (!pw) {
     document.getElementById('pw-err').style.display = 'block';
     document.getElementById('pw-input').select();
     return;
