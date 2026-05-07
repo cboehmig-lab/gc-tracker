@@ -6,7 +6,7 @@ Run with:  python3 gc_tracker_app.py
 Then open: http://localhost:5050
 """
 
-import json, os, re, sys, time, threading, queue, webbrowser, random, sqlite3
+import json, os, re, sys, time, threading, queue, webbrowser, random, sqlite3, hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from functools import wraps
@@ -1783,7 +1783,12 @@ def admin_users():
 
     rows_html = ""
     for u in users:
-        email_cell = u.get("email") or '<span style="color:#444">not set</span>'
+        raw_email = u.get("email")
+        if raw_email:
+            h = hashlib.sha256(raw_email.lower().encode()).hexdigest()[:16]
+            email_cell = f'<span style="color:#666;font-family:monospace" title="SHA-256 of email (first 16 hex)">{h}…</span>'
+        else:
+            email_cell = '<span style="color:#444">not set</span>'
         last_scan  = _fmt(u.get("last_run"))
         joined     = _fmt(u.get("created_at"))
         rows_html += (
@@ -1815,7 +1820,7 @@ a{{color:#888;text-decoration:none;font-size:.78rem}}
 <a href="/admin/devices?pw={pw}">→ Device log</a></div>
 <table>
 <tr>
-  <th>Username</th><th>Email</th><th>Joined</th><th>Last scan</th>
+  <th>Username</th><th>Email hash</th><th>Joined</th><th>Last scan</th>
   <th>Watch</th><th>Want</th><th>Favs</th>
 </tr>
 {rows_html if rows_html else '<tr><td colspan="7" style="color:#555;padding:20px">No accounts yet.</td></tr>'}
@@ -4978,7 +4983,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.5</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.6</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -5027,7 +5032,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.5</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.6</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -6132,6 +6137,7 @@ function toggleFavsFilter() {
   favsOnly = !favsOnly;
   const btn = document.getElementById('favs-btn');
   btn.classList.toggle('active', favsOnly);
+  btn.textContent = favsOnly ? 'All Stores' : '★ Favorites';
   document.getElementById('search').value = '';
   // When switching TO favs view, auto-select all favorites
   if (favsOnly) {
@@ -8858,7 +8864,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.5"
+APP_VERSION = "2.10.6"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
