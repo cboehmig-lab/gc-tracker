@@ -4985,8 +4985,6 @@ tr.fav-row td:last-child{color:#4ade80}
       <div class="auth-err" id="welcome-reg-err"></div>
       <button class="auth-submit" onclick="_welcomeRegister()">Create Account &amp; Start Scanning</button>
     </div>
-    <!-- Forgot password note (login tab only) -->
-    <div id="welcome-forgot-note" style="text-align:center;margin-top:10px;font-size:.72rem;color:#555">Forgot your password? Post in the group and I'll reset it for you.</div>
     <!-- Guest option -->
     <div style="text-align:center;margin-top:16px">
       <button onclick="dismissFirstRun()" style="background:none;border:none;color:#aaa;font-size:.78rem;cursor:pointer;text-decoration:underline">Use as guest</button>
@@ -5051,7 +5049,6 @@ tr.fav-row td:last-child{color:#4ade80}
       <div class="auth-err" id="auth-login-err"></div>
       <button class="auth-submit" onclick="_authLogin()">Sign In</button>
       <div class="auth-note">Your watch list, want list &amp; favorites sync across all your devices.</div>
-      <div style="text-align:center;margin-top:8px;font-size:.72rem;color:#555">Forgot your password? Post in the group and I'll reset it for you.</div>
     </div>
     <!-- Register form -->
     <div id="auth-form-register" style="display:none">
@@ -5897,8 +5894,6 @@ function _welcomeTab(tab) {
   regTab.style.borderBottomColor   = tab === 'register' ? '#c00' : 'transparent';
   document.getElementById('welcome-login-err').textContent = '';
   document.getElementById('welcome-reg-err').textContent   = '';
-  const fn = document.getElementById('welcome-forgot-note');
-  if (fn) fn.style.display = tab === 'login' ? '' : 'none';
 }
 
 async function _welcomeLogin() {
