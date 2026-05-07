@@ -1,6 +1,8 @@
 # GC Tracker — Handoff Document
 *Last updated: 2026-05-06 · Current version: v2.10.5 · Status: deployed on Railway · Branch: main*
 
+> **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
+
 ---
 
 ## What This Is
@@ -523,28 +525,13 @@ After any JS change, open the page, open the browser console, and confirm there 
 
 ---
 
-## 🎯 Planned Next Features (implement from v2.10.4)
+## 🎯 Planned Next Features
 
-These features were designed and attempted in v2.10.5–v2.10.8 but never successfully shipped due to the Python/JS escape bug described above. Implement them fresh starting from v2.10.4, following the safe patterns in the Gotchas section.
-
-### 1. Wildcard search (`*`)
-In both the main search bar and the want list, support `*` as a wildcard character. Typing `OD*` should match anything that starts with "OD" — OD808, OD-1, OD Groove, etc. `*drive*` should match anything containing "drive". The `*` means "any characters can go here."
-
-### 2. Whole-word matching as the default for plain terms
-Currently, typing `Allen` in the search bar can match "Allentown." After this change, a plain search term should only match as a complete standalone word — so `Allen` matches "Allen" or "Allen Amplification" but not "Allentown" or "McAllen." The existing `≈` fuzzy toggle can remain for users who want the old contains-style behavior.
-
-### 3. AND search with commas, applied consistently
-Comma-separated terms already work as AND (item must contain all of them). After this change, each individual comma-separated part should support the full syntax — wildcards, quoted phrases, whole-word matching. So `Thorpy, Dane*` should require both "Thorpy" (whole word) AND anything starting with "Dane."
-
-### 4. A search syntax help popup (ⓘ button)
-Add a small ⓘ (info) button next to the main search bar. Clicking it should open a small popup/popover that explains the search syntax — what `*` does, what quotes do, what commas do, what whole-word matching means. Clicking anywhere outside the popup should close it.
-
-### 5. Button width fix for Save Search / Clear All
-The Save Search and Clear All buttons in the filter panel should not stretch to fill the full row width. They should be compact/auto-width. (In v2.10.4, `flex:1` was removed from the inline HTML but may need to be confirmed on both desktop and mobile.)
+No known planned features at this time. All v2.10.5 goals shipped.
 
 ---
 
-## Recent Changes (v2.10.0 → v2.10.7)
+## Recent Changes (v2.10.0 → v2.10.5)
 
 ### v2.10.1 — (internal patch, no user-facing change)
 
@@ -562,8 +549,37 @@ The Save Search and Clear All buttons in the filter panel should not stretch to 
 - Save Search / Clear All buttons narrowed (removed `flex:1` from inline HTML; `flex:1` added to mobile CSS only)
 - Want list modal help text updated with real examples (replacing "Wangcaster")
 
-### v2.10.5 through v2.10.8 — ATTEMPTED AND REVERTED ⚠️
+### v2.10.5 — Unified search syntax (wildcard, whole-word default, AND/comma, ⓘ popup), filter bar nowrap
 
-Multiple attempts to implement the features listed in "Planned Next Features" below all failed due to the Python/JS regex literal escape trap (see Critical Gotchas). Every version from v2.10.5 onward crashed the page on load with `SyntaxError: Invalid regular expression: missing /` or a related JS parse error. All changes were reverted. **The current deployed version is v2.10.4.**
+**The root cause of v2.10.5–v2.10.8 failures was solved:** `_escapeRegex` contained `'\\' + s[i]` which Python collapses to `'\' + s[i]` in the browser — a JS syntax error that killed all JS on page load. Similarly `'\\b'` became `'\b'` (backspace char, not word boundary). Fixed using `String.fromCharCode(92)` throughout.
 
-Do not attempt to port any code from those commits. Start fresh from v2.10.4 and implement the planned features using the guidance in the Critical Gotchas section.
+**Search syntax (server + client, fully mirrored):**
+- `_compile_query(query_str, fuzzy=False)` — unified Python function used by both `/api/browse` filter and want-list keyword compilation
+- Plain term (e.g. `Allen`) → whole-word match by default (`\bAllen\b`) — won't match "Allentown" or "McAllen"
+- `"Jam Pedals"` → exact phrase (contains match, case-insensitive)
+- `OD*` → wildcard (`*` = any characters); `*drive*` = contains "drive"
+- `Thorpy, Dane*` → comma = AND; each part supports full syntax independently
+- `≈` button (`#strict-search-btn`) → when active, switches server to **fuzzy/contains mode** (old pre-v2.10.5 behavior). `filter_strict: true` now means fuzzy, not strict — semantics inverted from v2.10.4. Default (off) = whole-word.
+
+**JS functions (safe backslash patterns):**
+- `_escapeRegex(s)` — uses `var bs = String.fromCharCode(92)` for backslash; `specials = bs + '.^$*+?()[]{}|'`
+- `_parseQueryTerms(queryStr, fuzzy)` — uses `var wb = String.fromCharCode(92) + 'b'` for `\b` word boundary passed to `new RegExp()`
+- `_matchesAllTerms()` — handles `exact`, `contains`, and `regex`/`word` modes
+- `_itemMatchesKeyword()` — strips leading `=` prefix (legacy v2.10.4 strict marker, now redundant)
+
+**ⓘ search help popup:**
+- `#search-info-btn` button next to `#res-search` — already in HTML since attempted v2.10.5
+- `#search-info-popover` div — shows syntax examples on click, closes on outside click
+- `_toggleSearchInfo(e)` — toggles `.open` class; global `document` click listener closes it
+- CSS: `#search-info-popover{position:absolute;top:calc(100%+6px);right:0;z-index:200;...}`; mobile: `right:auto;left:0`
+
+**`=` prefix on want-list keywords:**
+- Server: `_kw_compiled` strips `=` via `.lstrip('=')` before calling `_compile_query` (whole-word is now default so prefix is redundant)
+- Client: `_itemMatchesKeyword` strips `=` via `.replace(/^=/, '')` — safe (no backslash in this regex literal)
+
+**Filter bar nowrap (desktop):**
+- `.results-hdr{flex-wrap:nowrap}` — prevents Save/Clear buttons from wrapping to a new line when all 4 filter dropdowns are visible
+- `.cat-sel{flex-shrink:1;min-width:70px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}` — dropdowns compress with ellipsis instead of pushing
+- `#res-search-wrap{flex-shrink:1;min-width:90px}` + `#res-search{width:150px;min-width:0}` — search box compresses too
+- `#res-search-count{flex-shrink:0}` — "N of M" count never gets squeezed
+- Mobile `@media` block still sets `flex-wrap:wrap` — no mobile change
