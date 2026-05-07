@@ -26,7 +26,7 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 |---|---|
 | `DATA_DIR` | Where data files live — set to mounted volume path |
 | `SECRET_KEY` | Flask session secret — **must be set** for sessions to survive restarts |
-| `RESET_PASSWORD` | Password for admin pages and `/api/reset` — default `Beatle909!` |
+| `RESET_PASSWORD` | Password for admin pages and `/api/reset` — **must be set**; no default |
 | `ALGOLIA_APP_ID` / `ALGOLIA_API_KEY` | GC inventory API |
 
 ### Git push auth
@@ -99,11 +99,11 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 
 | URL | Purpose |
 |---|---|
-| `/admin/users?pw=Beatle909!` | User account list |
-| `/admin/devices?pw=Beatle909!` | Device access log |
-| `/admin/clear-lock?pw=Beatle909!` | Force-release stuck scan lock |
-| `/admin/listing-patterns?pw=Beatle909!` | GC listing timestamp analysis |
-| `/admin/build-coords?pw=Beatle909!` | Re-geocode store locations |
+| `/admin/users?pw=<RESET_PASSWORD>` | User account list |
+| `/admin/devices?pw=<RESET_PASSWORD>` | Device access log |
+| `/admin/clear-lock?pw=<RESET_PASSWORD>` | Force-release stuck scan lock |
+| `/admin/listing-patterns?pw=<RESET_PASSWORD>` | GC listing timestamp analysis |
+| `/admin/build-coords?pw=<RESET_PASSWORD>` | Re-geocode store locations |
 
 ---
 
@@ -295,7 +295,7 @@ When bumping version, update ALL FOUR of these:
 - `rm ~/Desktop/gc_tracker/.git/index.lock 2>/dev/null; true` then retry commit/push
 
 **Scan hangs / 409 forever**
-- Hit `/admin/clear-lock?pw=Beatle909!` to force-release without a Railway restart
+- Hit `/admin/clear-lock?pw=<RESET_PASSWORD>` to force-release without a Railway restart
 
 **No data after redeploy**
 - Railway wipes ephemeral storage on redeploy — attach a volume, set `DATA_DIR` to its mount path

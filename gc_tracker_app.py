@@ -1494,6 +1494,10 @@ def logout():
 
 @app.route("/api/register", methods=["POST"])
 def api_register():
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip()
+    if not _check_login_rate(ip):
+        return jsonify({"error": "Too many attempts from this device. Please wait a few minutes."}), 429
+    _record_login_failure(ip)   # count every register attempt to limit spam
     data     = request.json or {}
     username = re.sub(r'[^A-Za-z0-9_\-]', '', (data.get("username") or "").strip())
     password = (data.get("password") or "").strip()
@@ -4977,10 +4981,12 @@ tr.fav-row td:last-child{color:#4ade80}
       <input class="auth-field" type="password" id="welcome-reg-pw" placeholder="Password (8+ characters)" autocomplete="new-password">
       <input class="auth-field" type="password" id="welcome-reg-pw2" placeholder="Confirm password" autocomplete="new-password">
       <input class="auth-field" type="email" id="welcome-reg-email" placeholder="Email (optional)" autocomplete="email" style="margin-bottom:4px">
-      <div style="color:#aaa;font-size:.72rem;margin-bottom:12px;line-height:1.4">Optional — only used for password recovery. Never shared.</div>
+      <div style="color:#aaa;font-size:.72rem;margin-bottom:12px;line-height:1.4">Optional — helps identify your account if you ever need support. Never shared or used for marketing.</div>
       <div class="auth-err" id="welcome-reg-err"></div>
       <button class="auth-submit" onclick="_welcomeRegister()">Create Account &amp; Start Scanning</button>
     </div>
+    <!-- Forgot password note (login tab only) -->
+    <div id="welcome-forgot-note" style="text-align:center;margin-top:10px;font-size:.72rem;color:#555">Forgot your password? Post in the group and I'll reset it for you.</div>
     <!-- Guest option -->
     <div style="text-align:center;margin-top:16px">
       <button onclick="dismissFirstRun()" style="background:none;border:none;color:#aaa;font-size:.78rem;cursor:pointer;text-decoration:underline">Use as guest</button>
@@ -5017,7 +5023,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.8</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.10</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -5045,6 +5051,7 @@ tr.fav-row td:last-child{color:#4ade80}
       <div class="auth-err" id="auth-login-err"></div>
       <button class="auth-submit" onclick="_authLogin()">Sign In</button>
       <div class="auth-note">Your watch list, want list &amp; favorites sync across all your devices.</div>
+      <div style="text-align:center;margin-top:8px;font-size:.72rem;color:#555">Forgot your password? Post in the group and I'll reset it for you.</div>
     </div>
     <!-- Register form -->
     <div id="auth-form-register" style="display:none">
@@ -5052,7 +5059,7 @@ tr.fav-row td:last-child{color:#4ade80}
       <input class="auth-field" type="password" id="auth-reg-pw" placeholder="Password (8+ characters)" autocomplete="new-password">
       <input class="auth-field" type="password" id="auth-reg-pw2" placeholder="Confirm password" autocomplete="new-password">
       <input class="auth-field" type="email" id="auth-reg-email" placeholder="Email (optional)" autocomplete="email" style="margin-bottom:4px">
-      <div class="auth-note" style="margin-bottom:12px;margin-top:0;color:#aaa">Optional — only used for password recovery. Never shared.</div>
+      <div class="auth-note" style="margin-bottom:12px;margin-top:0;color:#aaa">Optional — helps identify your account if you ever need support. Never shared or used for marketing.</div>
       <div class="auth-err" id="auth-reg-err"></div>
       <button class="auth-submit" onclick="_authRegister()">Create Account</button>
     </div>
@@ -5066,7 +5073,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.8</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.10</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -5080,8 +5087,7 @@ tr.fav-row td:last-child{color:#4ade80}
       <input id="search" type="text" placeholder="Filter by location name…" autocomplete="off">
       <div class="sel-btns">
         <button class="sel-btn" id="favs-btn" onclick="toggleFavsFilter()">★ Favorites</button>
-        <button class="sel-btn" onclick="selectAll()">Select All</button>
-        <button class="sel-btn" onclick="clearAll()">Clear All</button>
+        <button class="sel-btn" id="sel-all-btn" onclick="toggleSelectAll()">Select All</button>
       </div>
       <div class="zip-sort-row">
         <button id="zip-sort-btn" onclick="toggleZipSort()" title="Sort stores by distance from ZIP">📍 ZIP Sort</button>
@@ -5891,6 +5897,8 @@ function _welcomeTab(tab) {
   regTab.style.borderBottomColor   = tab === 'register' ? '#c00' : 'transparent';
   document.getElementById('welcome-login-err').textContent = '';
   document.getElementById('welcome-reg-err').textContent   = '';
+  const fn = document.getElementById('welcome-forgot-note');
+  if (fn) fn.style.display = tab === 'login' ? '' : 'none';
 }
 
 async function _welcomeLogin() {
@@ -6191,6 +6199,11 @@ function clearAll() {
   document.querySelectorAll('.store-row input[type=checkbox]').forEach(cb => cb.checked = false);
   updateCount();
 }
+function toggleSelectAll() {
+  const visible = [...document.querySelectorAll('.store-row:not(.hidden) input[type=checkbox]')];
+  const allChecked = visible.length > 0 && visible.every(cb => cb.checked);
+  allChecked ? clearAll() : selectAll();
+}
 
 // ── Render store list ─────────────────────────────────────────────────────────
 function renderList(preserveChecked) {
@@ -6217,6 +6230,7 @@ function renderList(preserveChecked) {
   }
 
   el.innerHTML = '';
+  el.scrollTop = 0;
   filtered.forEach(name => {
     const isFav = favorites.includes(name);
     const dist  = (window._zipSortMode && window._userLat) ? _storeDistance(name) : null;
@@ -6266,6 +6280,10 @@ function updateCount() {
   const checked = [...document.querySelectorAll('.store-row input:checked')];
   const n = checked.length;
   document.getElementById('sel-count').textContent = n + ' store' + (n===1?'':'s') + ' selected';
+  const visible = [...document.querySelectorAll('.store-row:not(.hidden) input[type=checkbox]')];
+  const allChecked = visible.length > 0 && visible.every(cb => cb.checked);
+  const selBtn = document.getElementById('sel-all-btn');
+  if (selBtn) selBtn.textContent = allChecked ? 'Clear All' : 'Select All';
   _updateMobileToggleCounts();
   // Auto-browse cached inventory when stores are selected
   if (n > 0 && !running && !_globalSearchActive) browseCache();
@@ -8901,7 +8919,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.8"
+APP_VERSION = "2.10.10"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
