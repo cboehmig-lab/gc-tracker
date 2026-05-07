@@ -2000,6 +2000,9 @@ def api_reset():
 @login_required
 def api_clear_blocklist():
     """Remove the invalid stores blocklist so all stores are re-evaluated."""
+    reset_pw = os.environ.get("RESET_PASSWORD", "")
+    if not reset_pw or (request.json or {}).get("password") != reset_pw:
+        return jsonify({"error": "Unauthorized."}), 403
     f = DATA_DIR / "gc_invalid_stores.json"
     if f.exists():
         f.unlink()
@@ -3125,8 +3128,11 @@ def api_export_data():
 @app.route("/api/import-data", methods=["POST"])
 @login_required
 def api_import_data():
-    """Import a data bundle exported from another instance."""
+    """Import a data bundle exported from another instance. Requires admin password."""
     bundle = request.json or {}
+    reset_pw = os.environ.get("RESET_PASSWORD", "")
+    if not reset_pw or bundle.get("password") != reset_pw:
+        return jsonify({"error": "Unauthorized."}), 403
     written = []
     mapping = {
         "state":     STATE_FILE,
@@ -3153,7 +3159,8 @@ def api_cl_search():
     cities_param = request.args.get("cities", "").strip()
     if not q:
         return jsonify({"error": "No search term provided."})
-    cities = [c.strip() for c in cities_param.split(",") if c.strip()] if cities_param else []
+    _valid_cities = set(_CL_CITIES)
+    cities = [c.strip() for c in cities_param.split(",") if c.strip() in _valid_cities] if cities_param else []
     title_only = request.args.get("title_only", "").lower() in ("1", "true", "yes")
     try:
         results = _cl_search(q, cities or None, title_only=title_only)
@@ -4391,9 +4398,9 @@ th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
 th.sort-desc::after{content:" ▼";color:#c00;font-size:.6rem}
 td{padding:7px 10px;border-bottom:1px solid #1c1c1c;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 /* Action cols: fixed narrow */
-th:nth-child(1),td:nth-child(1){width:44px;text-align:center;overflow:visible}
-th:nth-child(2),td:nth-child(2){width:50px;text-align:center;overflow:visible}
-th:nth-child(3),td:nth-child(3){width:28px;text-align:center}
+th:nth-child(1),td:nth-child(1){width:50px;text-align:center;overflow:visible}
+th:nth-child(2),td:nth-child(2){width:28px;text-align:center}
+th:nth-child(3),td:nth-child(3){width:44px;text-align:center;overflow:visible}
 /* col 4 = Item: capped so data cols can breathe */
 th:nth-child(4),td:nth-child(4){max-width:420px}
 /* Data cols: auto-sized, nowrap keeps them from collapsing */
@@ -4404,8 +4411,8 @@ th:nth-child(8),td:nth-child(8){white-space:nowrap}
 th:nth-child(9),td:nth-child(9){white-space:nowrap}
 th:nth-child(10),td:nth-child(10){white-space:nowrap}
 th:nth-child(11),td:nth-child(11){white-space:nowrap}
-table.no-new th:nth-child(1),table.no-new td:nth-child(1){display:none}
-table.no-want th:nth-child(2),table.no-want td:nth-child(2){display:none}
+table.no-new th:nth-child(3),table.no-new td:nth-child(3){display:none}
+table.no-want th:nth-child(1),table.no-want td:nth-child(1){display:none}
 tr:hover td{background:#1d1d1d}
 td a{color:#7bbff7;text-decoration:none}
 td a:hover{color:#a8d4ff;text-decoration:underline}
@@ -5010,7 +5017,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.7</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.8</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -5059,7 +5066,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.7</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.8</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -6490,9 +6497,9 @@ function _buildRowHtml(item) {
       `</span></td>`
     : `<td>${item.price||''}</td>`;
   return `<tr class="${rowClass}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}" data-image-id="${esc(item.image_id)}">` +
-    `<td>${isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
     `<td>${item.kwMatch ? '<span class="tag-kw">WANT</span>' : ''}</td>` +
     `<td>${watchStar}</td>` +
+    `<td>${isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
     `<td>${nameCell}${soldBadge}</td>` +
     (_isMobile() ? priceCell + brandCell : brandCell + priceCell) +
     `<td>${esc(item.condition)}</td>` +
@@ -6578,9 +6585,9 @@ function _renderServerTable(items) {
   const hasWant = items.some(i => i.kwMatch);
   const tblCls  = [!hasNew ? 'no-new' : '', !hasWant ? 'no-want' : ''].filter(Boolean).join(' ');
   let html = `<table id="res-table"${tblCls ? ` class="${tblCls}"` : ''}><thead><tr>
-    <th data-col="0"></th>
     <th data-col="kw"></th>
     <th data-col="watch"></th>
+    <th data-col="0"></th>
     <th data-col="1">Item</th>
     <th data-col="2">Brand</th>
     <th data-col="3">Price</th>
@@ -8894,7 +8901,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.7"
+APP_VERSION = "2.10.8"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
