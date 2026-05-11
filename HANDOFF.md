@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-11 · Current version: v2.10.12 · Status: deployed on Railway · Branch: main*
+*Last updated: 2026-05-11 · Current version: v2.10.13 · Status: deployed on Railway · Branch: main*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
 
@@ -7,7 +7,7 @@
 
 ## What This Is
 
-A Flask web app deployed on Railway that tracks Guitar Center used inventory. Users create accounts (username + password) and see items flagged NEW since their last scan. Watch list, want list, and favorites sync across all devices via server-side user accounts. A separate standalone `/cl` page provides Craigslist used gear search.
+A Flask web app deployed on Railway that tracks Guitar Center used inventory. Users create accounts (username + password, or Google Sign-In) and see items flagged NEW since their last scan. Watch list, want list, and favorites sync across all devices via server-side user accounts. A separate standalone `/cl` page provides Craigslist used gear search.
 
 ---
 
@@ -28,6 +28,8 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 | `SECRET_KEY` | Flask session secret — **must be set** for sessions to survive restarts |
 | `APP_PASSWORD` | Password for admin pages and `/api/reset` — **must be set**; no default |
 | `ALGOLIA_APP_ID` / `ALGOLIA_API_KEY` | GC inventory API |
+| `GOOGLE_CLIENT_ID` | Google OAuth — from Google Cloud Console credentials |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth — from Google Cloud Console credentials |
 
 ### Git push auth
 - The default `origin` remote may authenticate as the wrong GitHub account (`charlesboehmig-boop` instead of `cboehmig-lab`)
@@ -53,12 +55,22 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 
 ### User accounts
 - SQLite database (`gc_users.db`) with two tables:
-  - `users`: id, username (unique), email (optional), password_hash (PBKDF2/SHA-256 via Werkzeug), created_at
-  - `user_data`: user_id, watchlist (JSON), keywords (JSON), favorites (JSON), last_run (ISO), new_ids (JSON)
-- `_init_user_db()` runs at startup and creates tables if missing
+  - `users`: id, username (unique), email (optional), password_hash (nullable — NULL for Google-only users), google_id (unique, nullable), created_at
+  - `user_data`: user_id, watchlist (JSON), keywords (JSON), favorites (JSON), last_run (ISO), new_ids (JSON), saved_searches (JSON)
+- `_init_user_db()` runs at startup and creates tables if missing; both `saved_searches` and `google_id` columns are added via `ALTER TABLE` for existing databases (migration-safe)
 - Sessions use Flask's signed cookie (`SECRET_KEY`) — permanent sessions survive browser restarts
 - Guest mode: users can dismiss the welcome modal and use the app without an account (data stays in localStorage only)
 - `login_required` decorator is a no-op pass-through — all pages publicly accessible; auth is opt-in
+
+### Google OAuth (v2.10.13+)
+- Requires `authlib` pip package + `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` env vars
+- `_GOOGLE_OAUTH_ENABLED` flag: True only if both env vars are set AND `authlib` is installed
+- **ProxyFix**: enabled on Railway (`RAILWAY_ENVIRONMENT` is set) so `url_for(..., _external=True)` generates `https://` URLs
+- **Auto-link**: if Google email matches an existing username/password account → link `google_id` and log in
+- **New Google users**: username auto-generated from Google display name via `_gen_google_username()`; `password_hash = None`
+- **Existing password accounts**: unchanged; if a Google-only user tries password login, they get a helpful error
+- Frontend: Google buttons are hidden by default; an IIFE fetches `/api/auth/config` on load and reveals them if `google_oauth: true`
+- `?next=` parameter stores where to redirect after OAuth callback (e.g. `/cl` from the CL page)
 
 ### Auth endpoints
 | Endpoint | Method | Purpose |
@@ -68,6 +80,9 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 | `/api/logout` | POST | Clear session |
 | `/api/me` | GET | Check session state; returns username + full user data |
 | `/api/sync` | POST | Save watchlist/keywords/favorites/last_run/new_ids to user record |
+| `/api/auth/google` | GET | Redirect to Google OAuth (accepts `?next=` param) |
+| `/api/auth/google/callback` | GET | Handle Google OAuth callback; create/find/link user; redirect |
+| `/api/auth/config` | GET | Returns `{"google_oauth": bool}` — used by frontend to show/hide Google buttons |
 
 ### Scan flow
 1. Client POST `/api/run` with `{stores, baseline}`
@@ -613,6 +628,27 @@ Collecting user feedback from soft launch (guitar groups). Check back here after
 - `Beatle909!` removed from HANDOFF.md; admin URL examples now show `<APP_PASSWORD>` placeholder
 - Forgot-password note added then removed — no automated reset exists, no contact mechanism wired up
 
+### v2.10.13 — Google Sign-In
+
+**Google OAuth integration** — users can now sign in with their Google account alongside the existing username/password flow.
+
+**Backend (Python)**
+- Added `authlib` to `requirements.txt`
+- `_GOOGLE_OAUTH_ENABLED` flag: True only when `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `authlib` are all present
+- ProxyFix enabled when `RAILWAY_ENVIRONMENT` is set (so `url_for(..., _external=True)` generates `https://`)
+- `users` table: `google_id TEXT UNIQUE` column added; `password_hash` constraint loosened to allow NULL for Google-only accounts; migration-safe `ALTER TABLE` on startup
+- New helpers: `_user_by_email()`, `_user_by_google_id()`, `_gen_google_username()`
+- New routes: `GET /api/auth/google`, `GET /api/auth/google/callback`, `GET /api/auth/config`
+- Callback logic: (1) existing `google_id` → log in; (2) matching email → link account + log in; (3) new user → create account with auto-generated username
+- Password login now returns a helpful error if a Google-only user tries to log in with a password
+
+**Frontend**
+- Google button (white, Google logo SVG) hidden by default; revealed on load if `/api/auth/config` returns `google_oauth: true`
+- Buttons added to: header `#auth-modal` (login + register tabs), welcome `#first-run-modal` (login + register tabs), CL page `#auth-modal`
+- `_googleSignIn(next)` navigates to `/api/auth/google?next=...`
+- `?google_error=1` on callback failure: error shown in auth modal login tab
+- CL page Google button uses `?next=/cl` so users land back on the CL page after auth
+
 ### v2.10.12 — Desktop thumb icon, favorites selection fix, mobile button rename
 
 **Desktop thumbnail button**: Changed from "⊞ Thumbnails" pill to an icon-only toggle (⊞ in list mode → click to switch to grid; ☰ in grid mode → click to switch back to list). Matches the mobile ☰/⊞ pattern.
@@ -665,3 +701,5 @@ Collecting user feedback from soft launch (guitar groups). Check back here after
 | `SECRET_KEY` | ✅ Set (long random string) |
 | `APP_PASSWORD` | ✅ Set (custom password) |
 | `DATA_DIR` | ✅ Points to persistent volume |
+| `GOOGLE_CLIENT_ID` | ✅ Set (from Google Cloud Console) |
+| `GOOGLE_CLIENT_SECRET` | ✅ Set (from Google Cloud Console) |

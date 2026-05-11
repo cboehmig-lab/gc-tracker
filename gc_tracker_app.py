@@ -36,6 +36,12 @@ try:
 except ImportError:
     sys.exit("Missing openpyxl. Run:  pip3 install openpyxl")
 
+try:
+    from authlib.integrations.flask_client import OAuth as _AuthlibOAuth
+    _AUTHLIB_AVAILABLE = True
+except ImportError:
+    _AUTHLIB_AVAILABLE = False
+
 # ── Paths & config ────────────────────────────────────────────────────────────
 SCRIPT_DIR     = Path(__file__).parent
 DATA_DIR       = Path(os.environ.get("DATA_DIR", SCRIPT_DIR))
@@ -70,7 +76,8 @@ def _init_user_db():
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 username      TEXT    UNIQUE NOT NULL COLLATE NOCASE,
                 email         TEXT    UNIQUE COLLATE NOCASE,
-                password_hash TEXT    NOT NULL,
+                password_hash TEXT,
+                google_id     TEXT    UNIQUE,
                 created_at    TEXT    NOT NULL
             )
         """)
@@ -91,6 +98,11 @@ def _init_user_db():
             conn.execute("ALTER TABLE user_data ADD COLUMN saved_searches TEXT DEFAULT '[]'")
         except Exception:
             pass  # Column already exists
+        # Migration: add google_id column for existing databases
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN google_id TEXT UNIQUE")
+        except Exception:
+            pass  # Column already exists
         conn.commit()
 
 def _user_by_username(username: str) -> dict | None:
@@ -102,6 +114,29 @@ def _user_by_id(user_id: int) -> dict | None:
     with _user_db() as conn:
         row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
         return dict(row) if row else None
+
+def _user_by_email(email: str) -> dict | None:
+    with _user_db() as conn:
+        row = conn.execute("SELECT * FROM users WHERE email=?", (email.strip().lower(),)).fetchone()
+        return dict(row) if row else None
+
+def _user_by_google_id(google_id: str) -> dict | None:
+    with _user_db() as conn:
+        row = conn.execute("SELECT * FROM users WHERE google_id=?", (google_id,)).fetchone()
+        return dict(row) if row else None
+
+def _gen_google_username(display_name: str) -> str:
+    """Generate a unique username from a Google display name."""
+    base = re.sub(r'[^A-Za-z0-9_\-]', '', display_name.replace(' ', '_'))[:25]
+    if len(base) < 3:
+        base = 'user'
+    candidate = base
+    i = 1
+    with _user_db() as conn:
+        while conn.execute("SELECT id FROM users WHERE username=?", (candidate,)).fetchone():
+            candidate = f"{base}_{i}"
+            i += 1
+    return candidate
 
 def _get_user_data(user_id: int) -> dict:
     with _user_db() as conn:
@@ -1317,6 +1352,26 @@ app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"]   = os.environ.get("RAILWAY_ENVIRONMENT") is not None
 
+# ProxyFix: Railway terminates TLS so Flask sees HTTP; this makes url_for() produce https://
+if os.environ.get("RAILWAY_ENVIRONMENT"):
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
+# ── Google OAuth setup ────────────────────────────────────────────────────────
+_GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
+_GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+_GOOGLE_OAUTH_ENABLED = bool(_GOOGLE_CLIENT_ID and _GOOGLE_CLIENT_SECRET and _AUTHLIB_AVAILABLE)
+
+if _GOOGLE_OAUTH_ENABLED:
+    _oauth  = _AuthlibOAuth(app)
+    _google = _oauth.register(
+        name="google",
+        client_id=_GOOGLE_CLIENT_ID,
+        client_secret=_GOOGLE_CLIENT_SECRET,
+        server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+        client_kwargs={"scope": "openid email profile"},
+    )
+
 # ── Login rate-limiting (in-memory, per IP) ────────────────────────────────────
 # Keyed by IP → list of attempt timestamps. Pruned on each check.
 _login_attempts: dict = {}
@@ -1539,8 +1594,10 @@ def api_login():
     username = (data.get("username") or "").strip()
     password = (data.get("password") or "").strip()
     user     = _user_by_username(username)
-    if not user or not check_password_hash(user["password_hash"], password):
+    if not user or not user.get("password_hash") or not check_password_hash(user["password_hash"], password):
         _record_login_failure(ip)
+        if user and user.get("google_id") and not user.get("password_hash"):
+            return jsonify({"error": "This account uses Google sign-in. Please use the 'Sign in with Google' button."}), 401
         return jsonify({"error": "Incorrect username or password."}), 401
     session.permanent = True
     session["user_id"]       = user["id"]
@@ -1552,6 +1609,79 @@ def api_logout():
     session.pop("user_id",       None)
     session.pop("user_username", None)
     return jsonify({"status": "logged_out"})
+
+# ── Google OAuth routes ───────────────────────────────────────────────────────
+
+@app.route("/api/auth/google")
+def auth_google():
+    if not _GOOGLE_OAUTH_ENABLED:
+        return "Google Sign-In is not configured.", 501
+    # Store where to redirect after login (default: "/")
+    next_url = request.args.get("next", "/")
+    session["oauth_next"] = next_url
+    from flask import url_for
+    redirect_uri = url_for("auth_google_callback", _external=True)
+    return _google.authorize_redirect(redirect_uri)
+
+@app.route("/api/auth/google/callback")
+def auth_google_callback():
+    if not _GOOGLE_OAUTH_ENABLED:
+        return "Google Sign-In is not configured.", 501
+    try:
+        token     = _google.authorize_access_token()
+        userinfo  = token.get("userinfo") or {}
+        google_id = userinfo.get("sub", "")
+        email     = (userinfo.get("email") or "").strip().lower()
+        name      = (userinfo.get("name") or "").strip()
+    except Exception as exc:
+        print(f"[Google OAuth] callback error: {exc}")
+        return redirect("/?google_error=1")
+
+    if not google_id:
+        return redirect("/?google_error=1")
+
+    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # 1) Already linked by google_id → just log in
+    user = _user_by_google_id(google_id)
+    if user:
+        session.permanent       = True
+        session["user_id"]       = user["id"]
+        session["user_username"] = user["username"]
+        next_url = session.pop("oauth_next", "/")
+        return redirect(next_url)
+
+    # 2) Email matches an existing account → link & log in
+    if email:
+        user = _user_by_email(email)
+        if user:
+            with _user_db() as conn:
+                conn.execute("UPDATE users SET google_id=? WHERE id=?", (google_id, user["id"]))
+                conn.commit()
+            session.permanent       = True
+            session["user_id"]       = user["id"]
+            session["user_username"] = user["username"]
+            next_url = session.pop("oauth_next", "/")
+            return redirect(next_url)
+
+    # 3) New Google user → create account
+    username = _gen_google_username(name or (email.split("@")[0] if email else "user"))
+    with _user_db() as conn:
+        cur = conn.execute(
+            "INSERT INTO users (username, email, password_hash, google_id, created_at) VALUES (?,?,?,?,?)",
+            (username, email or None, None, google_id, now)
+        )
+        user_id = cur.lastrowid
+        conn.commit()
+    session.permanent       = True
+    session["user_id"]       = user_id
+    session["user_username"] = username
+    next_url = session.pop("oauth_next", "/")
+    return redirect(next_url)
+
+@app.route("/api/auth/config")
+def auth_config():
+    return jsonify({"google_oauth": _GOOGLE_OAUTH_ENABLED})
 
 @app.route("/api/me")
 def api_me():
@@ -2110,6 +2240,10 @@ header h1 span{font-size:.6rem;font-weight:400;opacity:.55;margin-left:4px}
 .auth-submit{width:100%;padding:10px;background:#a5b4fc;color:#111;border:none;border-radius:6px;font-size:.9rem;font-weight:700;cursor:pointer;margin-top:4px}
 .auth-submit:hover{background:#818cf8;color:#fff}
 .auth-err{color:#f87171;font-size:.78rem;margin-top:8px;display:none}
+.auth-google-btn{display:flex;align-items:center;justify-content:center;gap:9px;width:100%;padding:10px;background:#fff;color:#222;border:none;border-radius:6px;font-size:.9rem;font-weight:600;cursor:pointer;transition:background .15s;margin-bottom:4px}
+.auth-google-btn:hover{background:#f0f0f0}
+.auth-divider{display:flex;align-items:center;gap:10px;margin:10px 0 12px;color:#555;font-size:.75rem}
+.auth-divider::before,.auth-divider::after{content:'';flex:1;border-top:1px solid #333}
 /* ── Mobile ── */
 @media(max-width:700px){
   header{padding:8px 14px}
@@ -2181,6 +2315,13 @@ header h1 span{font-size:.6rem;font-weight:400;opacity:.55;margin-left:4px}
   <div class="auth-box">
     <h2>Sign In</h2>
     <p>Sign in with your GC Tracker account to search Craigslist.</p>
+    <div id="cl-google-wrap" style="display:none">
+      <button class="auth-google-btn" onclick="window.location.href='/api/auth/google?next=/cl'">
+        <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.566 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z"/></svg>
+        Sign in with Google
+      </button>
+      <div class="auth-divider"><span>or sign in with username</span></div>
+    </div>
     <div class="auth-field"><label>Username</label><input id="auth-user" type="text" autocomplete="username"></div>
     <div class="auth-field"><label>Password</label><input id="auth-pw" type="password" autocomplete="current-password"
       onkeydown="if(event.key==='Enter') clDoLogin()"></div>
@@ -2251,6 +2392,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('auth-modal').classList.remove('open');
       document.getElementById('hdr-user').textContent = d.username;
       document.getElementById('hdr-signout').style.display = '';
+    }
+  } catch(e) {}
+
+  // Show Google sign-in button if configured
+  try {
+    const cr = await fetch('/api/auth/config');
+    const cd = await cr.json();
+    if (cd.google_oauth) {
+      const el = document.getElementById('cl-google-wrap');
+      if (el) el.style.display = '';
     }
   } catch(e) {}
 });
@@ -4277,6 +4428,11 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .auth-note{font-size:.75rem;color:#555;margin-top:14px;text-align:center}
 .auth-close{position:absolute;top:12px;right:14px;background:none;border:none;color:#666;font-size:1.2rem;cursor:pointer}
 #auth-modal .auth-box{position:relative}
+.auth-divider{display:flex;align-items:center;gap:10px;margin:14px 0 12px;color:#555;font-size:.75rem}
+.auth-divider::before,.auth-divider::after{content:'';flex:1;border-top:1px solid #333}
+.auth-google-btn{display:flex;align-items:center;justify-content:center;gap:9px;width:100%;padding:10px;background:#fff;color:#222;border:none;border-radius:5px;font-size:.9rem;font-weight:600;cursor:pointer;transition:background .15s}
+.auth-google-btn:hover{background:#f0f0f0}
+.auth-google-btn svg{flex-shrink:0}
 
 .layout{display:flex;flex:1;overflow:hidden}
 
@@ -5009,6 +5165,13 @@ tr.fav-row td:last-child{color:#4ade80}
     </div>
     <!-- Login form -->
     <div id="welcome-form-login">
+      <div id="welcome-google-wrap" style="display:none">
+        <button class="auth-google-btn" onclick="_googleSignIn('/')">
+          <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.566 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z"/></svg>
+          Sign in with Google
+        </button>
+        <div class="auth-divider"><span>or sign in with username</span></div>
+      </div>
       <input class="auth-field" type="text" id="welcome-login-user" placeholder="Username" autocomplete="username">
       <input class="auth-field" type="password" id="welcome-login-pw" placeholder="Password" autocomplete="current-password">
       <div class="auth-err" id="welcome-login-err"></div>
@@ -5016,6 +5179,13 @@ tr.fav-row td:last-child{color:#4ade80}
     </div>
     <!-- Register form -->
     <div id="welcome-form-register" style="display:none">
+      <div id="welcome-google-wrap-reg" style="display:none">
+        <button class="auth-google-btn" onclick="_googleSignIn('/')">
+          <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.566 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z"/></svg>
+          Continue with Google
+        </button>
+        <div class="auth-divider"><span>or create a username account</span></div>
+      </div>
       <input class="auth-field" type="text" id="welcome-reg-user" placeholder="Choose a username" autocomplete="username" maxlength="30">
       <input class="auth-field" type="password" id="welcome-reg-pw" placeholder="Password (8+ characters)" autocomplete="new-password">
       <input class="auth-field" type="password" id="welcome-reg-pw2" placeholder="Confirm password" autocomplete="new-password">
@@ -5060,7 +5230,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.12</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.13</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -5083,6 +5253,13 @@ tr.fav-row td:last-child{color:#4ade80}
     </div>
     <!-- Login form -->
     <div id="auth-form-login">
+      <div id="auth-google-wrap" style="display:none">
+        <button class="auth-google-btn" onclick="_googleSignIn('/')">
+          <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.566 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z"/></svg>
+          Sign in with Google
+        </button>
+        <div class="auth-divider"><span>or sign in with username</span></div>
+      </div>
       <input class="auth-field" type="text" id="auth-login-user" placeholder="Username" autocomplete="username">
       <input class="auth-field" type="password" id="auth-login-pw" placeholder="Password" autocomplete="current-password">
       <div class="auth-err" id="auth-login-err"></div>
@@ -5091,6 +5268,13 @@ tr.fav-row td:last-child{color:#4ade80}
     </div>
     <!-- Register form -->
     <div id="auth-form-register" style="display:none">
+      <div id="auth-google-wrap-reg" style="display:none">
+        <button class="auth-google-btn" onclick="_googleSignIn('/')">
+          <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.566 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z"/></svg>
+          Continue with Google
+        </button>
+        <div class="auth-divider"><span>or create a username account</span></div>
+      </div>
       <input class="auth-field" type="text" id="auth-reg-username" placeholder="Choose a username" autocomplete="username" maxlength="30">
       <input class="auth-field" type="password" id="auth-reg-pw" placeholder="Password (8+ characters)" autocomplete="new-password">
       <input class="auth-field" type="password" id="auth-reg-pw2" placeholder="Confirm password" autocomplete="new-password">
@@ -5109,7 +5293,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.12</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.13</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -5679,6 +5863,33 @@ function _lsSetVerified(key, val) {
 // ── Auth & server sync ────────────────────────────────────────────────────────
 window._authUser = null;  // null = not logged in, {email} = logged in
 let _syncTimer = null;
+
+// Show Google sign-in buttons if the server has Google OAuth configured
+(async function _initGoogleOAuth() {
+  try {
+    const r = await fetch('/api/auth/config');
+    const d = await r.json();
+    if (d.google_oauth) {
+      ['auth-google-wrap','auth-google-wrap-reg','welcome-google-wrap','welcome-google-wrap-reg'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = '';
+      });
+    }
+    // Show error if redirected back with ?google_error=1
+    if (new URLSearchParams(window.location.search).get('google_error') === '1') {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('google_error');
+      history.replaceState(null, '', url.toString());
+      _openAuthModal('login');
+      const el = document.getElementById('auth-login-err');
+      if (el) { el.textContent = 'Google sign-in failed. Please try again or use your username and password.'; }
+    }
+  } catch(e) {}
+})();
+
+function _googleSignIn(next) {
+  window.location.href = '/api/auth/google' + (next ? '?next=' + encodeURIComponent(next) : '');
+}
 
 function _openAuthModal(tab) {
   tab = tab || 'login';
@@ -9033,7 +9244,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.12"
+APP_VERSION = "2.10.13"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
