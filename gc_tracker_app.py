@@ -1632,6 +1632,14 @@ def auth_google():
 
 @app.route("/api/auth/google/callback")
 def auth_google_callback():
+    import urllib.parse as _up, traceback as _tb
+    try:
+        return _auth_google_callback_inner()
+    except Exception as exc:
+        print(f"[Google OAuth] UNHANDLED:\n{_tb.format_exc()}")
+        return redirect("/?google_error=1&debug=" + _up.quote(str(exc)[:300]))
+
+def _auth_google_callback_inner():
     if not _GOOGLE_OAUTH_ENABLED:
         return "Google Sign-In is not configured.", 501
     import urllib.parse as _up
@@ -1643,7 +1651,7 @@ def auth_google_callback():
     # Validate state against server-side dict (no session needed)
     pending = _oauth_pending.pop(state, None)
     if not pending or pending["expires"] < time.time():
-        return redirect("/?google_error=1")
+        return redirect("/?google_error=1&debug=state_missing_or_expired")
     next_url     = pending["next_url"]
     redirect_uri = url_for("auth_google_callback", _external=True)
 
@@ -1668,7 +1676,7 @@ def auth_google_callback():
         email     = (userinfo.get("email") or "").strip().lower()
         name      = (userinfo.get("name") or "").strip()
     except Exception as exc:
-        print(f"[Google OAuth] callback error: {exc}")
+        print(f"[Google OAuth] token/userinfo error: {exc}")
         return redirect("/?google_error=1&debug=" + _up.quote(str(exc)[:200]))
 
     if not google_id:
