@@ -1681,7 +1681,12 @@ def auth_google_callback():
 
 @app.route("/api/auth/config")
 def auth_config():
-    return jsonify({"google_oauth": _GOOGLE_OAUTH_ENABLED})
+    return jsonify({
+        "google_oauth":       _GOOGLE_OAUTH_ENABLED,
+        "authlib_installed":  _AUTHLIB_AVAILABLE,
+        "client_id_set":      bool(_GOOGLE_CLIENT_ID),
+        "client_secret_set":  bool(_GOOGLE_CLIENT_SECRET),
+    })
 
 @app.route("/api/me")
 def api_me():
