@@ -57,8 +57,9 @@ KEYWORDS_FILE    = DATA_DIR / "gc_keywords.json"
 STORE_COORDS_FILE = DATA_DIR / "gc_store_coords.json"
 
 
-PORT        = int(os.environ.get("PORT", 5050))
-APP_PASSWORD = (os.environ.get("APP_PASSWORD") or "").strip()
+PORT              = int(os.environ.get("PORT", 5050))
+APP_PASSWORD      = (os.environ.get("APP_PASSWORD") or "").strip()
+GA_MEASUREMENT_ID = os.environ.get("GA_MEASUREMENT_ID", "").strip()
 
 # ── User accounts (SQLite) ────────────────────────────────────────────────────
 USER_DB = DATA_DIR / "gc_users.db"
@@ -2367,6 +2368,7 @@ header h1 span{font-size:.6rem;font-weight:400;opacity:.55;margin-left:4px}
   .cl-results-hdr{flex-wrap:wrap;gap:6px;padding:6px 12px}
 }
 </style>
+<!-- __GA__ -->
 </head>
 <body>
 
@@ -5242,6 +5244,7 @@ tr.fav-row td:last-child{color:#4ade80}
   .compact-row-watch.active{color:#f5c518}
 }
 </style>
+<!-- __GA__ -->
 </head>
 <body>
 
@@ -9490,6 +9493,22 @@ function clToggleWatch(id, name, url, price, location, btn) {
 </body>
 </html>"""
 
+# ── Google Analytics ──────────────────────────────────────────────────────────
+if GA_MEASUREMENT_ID:
+    _ga_snippet = (
+        f'<!-- Google tag (gtag.js) -->\n'
+        f'<script async src="https://www.googletagmanager.com/gtag/js?id={GA_MEASUREMENT_ID}"></script>\n'
+        f'<script>\n'
+        f'window.dataLayer = window.dataLayer || [];\n'
+        f"function gtag(){{dataLayer.push(arguments);}}\n"
+        f"gtag('js', new Date());\n"
+        f"gtag('config', '{GA_MEASUREMENT_ID}');\n"
+        f'</script>'
+    )
+else:
+    _ga_snippet = ''
+HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
+CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 
 # ── Launch ────────────────────────────────────────────────────────────────────
 
