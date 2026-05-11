@@ -99,10 +99,19 @@ def _init_user_db():
         except Exception:
             pass  # Column already exists
         # Migration: add google_id column for existing databases
+        # NOTE: SQLite ALTER TABLE ADD COLUMN cannot include UNIQUE — add column
+        # first, then create the index separately.
         try:
-            conn.execute("ALTER TABLE users ADD COLUMN google_id TEXT UNIQUE")
+            conn.execute("ALTER TABLE users ADD COLUMN google_id TEXT")
         except Exception:
             pass  # Column already exists
+        try:
+            conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id
+                ON users(google_id) WHERE google_id IS NOT NULL
+            """)
+        except Exception:
+            pass
         conn.commit()
 
 def _user_by_username(username: str) -> dict | None:
