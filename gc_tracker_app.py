@@ -4044,6 +4044,19 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
 
         # (cache-ID snapshot removed — NEW detection now uses startDate timestamps)
 
+        # ── Capture anchor date BEFORE cache is overwritten ───────────────────────
+        # The most recently listed item in the pre-scan cache is our reference point.
+        # After scanning, anything with date_listed > anchor_date is genuinely new.
+        # This handles Algolia's 6-12h indexing pipeline delay: items can appear in
+        # search results with date_listed values older than the last scan time, which
+        # would make them invisible to timestamp-based detection but they'd silently
+        # push existing items down the date-sorted table (the "0 new / reordered" bug).
+        anchor_date = ""
+        if _cat_cache:
+            _cache_dates = [v.get("date_listed", "") for v in _cat_cache.values() if v.get("date_listed")]
+            if _cache_dates:
+                anchor_date = max(_cache_dates)
+
         # ── Apply data from Algolia API to products, tracking price drops ────────
         # Categories, condition, brand all come from the API now — no page scraping needed.
         for p in all_products:
@@ -4169,7 +4182,12 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             }
 
         # ── Per-device new-item detection ─────────────────────────────────────
-        # An item is NEW if date_listed > prev_scan_time.
+        # An item is NEW if date_listed > threshold, where threshold is whichever
+        # is more recent: the anchor_date (most recent item in pre-scan cache) or
+        # prev_scan_time (last wall-clock scan time). The anchor approach is primary
+        # because it's immune to Algolia's indexing pipeline delay — items that appear
+        # in search results after our last scan but carry older date_listed values
+        # (the "0 new / table reordered" bug) won't pollute the sort without being flagged.
         # GC sometimes stores date-only values ("2026-05-05") with no time component.
         # A plain string compare like "2026-05-05" > "2026-05-05T08:00:00Z" is False
         # (shorter string sorts before longer at that position), so items listed today
@@ -4178,11 +4196,17 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         def _norm_item_date(d):
             return d + "T23:59:59Z" if d and len(d) == 10 else d
 
+        # Pick the most restrictive (most recent) threshold so we don't over-flag.
+        # Normalize anchor_date in case it's date-only.
+        _norm_anchor = _norm_item_date(anchor_date) if anchor_date else ""
+        threshold = max(_norm_anchor, prev_scan_time) if (_norm_anchor and prev_scan_time) \
+                    else (_norm_anchor or prev_scan_time)
+
         new_ids_list = []
-        if not baseline and prev_scan_time:
+        if not baseline and threshold:
             for p in all_products:
                 item_date = p.get("date_listed") or _cat_cache.get(p["id"], {}).get("date_listed", "")
-                if item_date and _norm_item_date(item_date) > prev_scan_time:
+                if item_date and _norm_item_date(item_date) > threshold:
                     new_ids_list.append(p["id"])
 
         send({"type":"progress","msg":f"  {len(new_ids_list):,} new items since last scan."})
@@ -4417,7 +4441,7 @@ th:nth-child(10),td:nth-child(10){white-space:nowrap}
 th:nth-child(11),td:nth-child(11){white-space:nowrap}
 table.no-new th:nth-child(3),table.no-new td:nth-child(3){display:none}
 table.no-want th:nth-child(1),table.no-want td:nth-child(1){display:none}
-tr:hover td{background:#1d1d1d}
+tr:hover td{background:#2e1e1e}
 td a{color:#7bbff7;text-decoration:none}
 td a:hover{color:#a8d4ff;text-decoration:underline}
 .tag{background:#c00;color:#fff;font-size:.64rem;font-weight:700;padding:2px 7px;border-radius:10px;letter-spacing:.2px}
@@ -4453,6 +4477,12 @@ tr.fav-row td:last-child{color:#4ade80}
 /* ── Image thumbnail tooltip ── */
 #img-tooltip{display:none;position:fixed;z-index:200;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:8px;padding:6px;box-shadow:0 8px 24px rgba(0,0,0,.6);pointer-events:none}
 #img-tooltip img{display:block;width:200px;height:200px;object-fit:contain;border-radius:4px;background:#111}
+
+/* ── Desktop inline thumbnail view ── */
+.row-thumb{display:none;width:48px;height:48px;object-fit:contain;border-radius:4px;background:#111;flex-shrink:0}
+.thumb-name-cell{display:flex;align-items:center;gap:8px}
+#res-body.thumb-mode .row-thumb{display:block}
+#res-body.thumb-mode #res-table tbody tr{height:58px}
 
 /* ── Password modal ── */
 #pw-modal{display:none;position:fixed;inset:0;z-index:100;align-items:center;justify-content:center}
@@ -4524,6 +4554,7 @@ tr.fav-row td:last-child{color:#4ade80}
 /* ── Mobile toggle buttons (hidden on desktop) ── */
 .mobile-sidebar-toggle{display:none}
 .mobile-filter-toggle{display:none}
+.mobile-sort-row{display:none}
 .filter-sheet-handle{display:none}
 .filter-sheet-title{display:none}
 .filter-done-btn{display:none}
@@ -4678,6 +4709,11 @@ tr.fav-row td:last-child{color:#4ade80}
   }
   /* Chip row: quick toggle buttons side-by-side */
   .filter-chip-row{display:flex!important;flex-wrap:wrap;gap:6px;flex-shrink:0}
+  /* Mobile sort row */
+  .mobile-sort-row{display:flex!important;align-items:center;gap:6px;flex-wrap:wrap;flex-shrink:0}
+  .mobile-sort-label{font-size:.75rem;color:#888;flex-shrink:0}
+  .mobile-sort-btn{background:#1e1e1e;border:1px solid #3a3a3a;border-radius:14px;color:#aaa;font-size:.78rem;cursor:pointer;padding:5px 12px;white-space:nowrap;-webkit-tap-highlight-color:transparent}
+  .mobile-sort-btn.active{background:#3a0a0a;border-color:#c00;color:#fff}
   /* Filter buttons: full-width, larger tap targets in sheet */
   .filter-scroll-body .cat-sel{width:100%;text-align:left;padding:11px 14px;font-size:.88rem;border-radius:8px;box-sizing:border-box}
   .filter-scroll-body #res-search-wrap{width:100%;margin:0}
@@ -4814,6 +4850,8 @@ tr.fav-row td:last-child{color:#4ade80}
 
   /* ── Image tooltip: disabled on mobile ── */
   #img-tooltip{display:none!important}
+  /* ── Desktop thumbnail toggle: hidden on mobile ── */
+  #desktop-thumb-toggle{display:none!important}
 
   /* ── Touch-friendly sizing ── */
   input[type=checkbox]{width:20px;height:20px}
@@ -4909,11 +4947,12 @@ tr.fav-row td:last-child{color:#4ade80}
 
   /* ── Compact list view ── */
   .compact-list{display:flex;flex-direction:column;gap:0}
-  .compact-row{display:flex;align-items:center;padding:10px 12px;border-bottom:1px solid #232323;gap:8px;background:#1a1a1a}
+  .compact-row{display:flex;align-items:flex-start;padding:10px 12px;border-bottom:1px solid #232323;gap:8px;background:#1a1a1a}
   .compact-row.is-new{border-left:3px solid #c00}
-  .compact-row-left{flex:1;min-width:0;display:flex;align-items:center;gap:6px}
-  .compact-row-name{font-size:.84rem;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .compact-row-left{flex:1;min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:2px}
+  .compact-row-name{font-size:.84rem;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
   .compact-row-name a{color:#ddd;text-decoration:none}
+  .compact-row-sub{font-size:.72rem;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
   .compact-row-price{font-size:.88rem;font-weight:700;color:#fff;white-space:nowrap;flex-shrink:0}
   .compact-row-watch{background:none;border:none;cursor:pointer;color:#444;font-size:1rem;padding:2px 6px;min-height:36px;display:inline-flex;align-items:center}
   .compact-row-watch.active{color:#f5c518}
@@ -5021,7 +5060,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.10</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.11</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -5070,7 +5109,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.10</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.11</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -5124,6 +5163,7 @@ tr.fav-row td:last-child{color:#4ade80}
         <button id="want-list-toggle"  onclick="searchWantList()"         class="qf-chip">🎯 Want List</button>
         <a id="search-wl-link" onclick="openKeywords()" class="qf-edit-link" style="display:none;font-size:.75rem">✏︎ Edit Want List</a>
         <button id="view-toggle-chip"  onclick="toggleMobileView()"       class="qf-chip view-toggle-chip-btn" title="Switch list / card view">☰</button>
+        <button id="desktop-thumb-toggle" onclick="toggleDesktopThumbView()" class="qf-chip" title="Show thumbnails">⊞ Thumbnails</button>
       </div>
       <div class="results-hdr">
         <span id="res-title" style="display:none"></span>
@@ -5144,6 +5184,14 @@ tr.fav-row td:last-child{color:#4ade80}
           <!-- ── Scrollable filter content ── -->
           <div class="filter-scroll-body">
             <span id="filter-item-count" style="color:#888;font-size:.78rem;white-space:nowrap;margin-right:6px"></span>
+            <!-- ── Mobile sort row (hidden on desktop) ── -->
+            <div class="mobile-sort-row" id="mobile-sort-row">
+              <span class="mobile-sort-label">Sort:</span>
+              <button class="mobile-sort-btn active" data-sort-field="date" data-sort-dir="desc">Newest</button>
+              <button class="mobile-sort-btn" data-sort-field="date" data-sort-dir="asc">Oldest</button>
+              <button class="mobile-sort-btn" data-sort-field="price" data-sort-dir="asc">Price ↑</button>
+              <button class="mobile-sort-btn" data-sort-field="price" data-sort-dir="desc">Price ↓</button>
+            </div>
             <!-- Keyword search — at top of sheet, searches all stores globally -->
             <div id="res-search-wrap">
               <span class="res-search-icon">🔍</span>
@@ -5950,6 +5998,20 @@ async function _welcomeRegister() {
 // ── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('search').addEventListener('input', filterList);
+  // Desktop thumbnail view: apply saved preference on load
+  _applyDesktopThumbMode();
+  // Mobile sort row
+  document.getElementById('mobile-sort-row')?.addEventListener('click', e => {
+    const btn = e.target.closest('.mobile-sort-btn');
+    if (!btn) return;
+    _srvSortField = btn.dataset.sortField;
+    _srvSortDir   = btn.dataset.sortDir;
+    window._sortCol = _srvSortField === 'price' ? 3 : 7;
+    window._sortDir = _srvSortDir === 'asc' ? 1 : -1;
+    _updateMobileSortBtns();
+    _srvPage = 1;
+    _fetchBrowsePage(1);
+  });
   // Load personal data from localStorage
   favorites = _lsGet('favorites', []);
   window._watchlist = _lsGet('watchlist', {});
@@ -5988,7 +6050,8 @@ async function loadData() {
   const r = await fetch('/api/stores');
   const d = await r.json();
   allStores = d.stores;
-  renderList(new Set(d.stores));  // Select all stores on initial load
+  _selectedStores = new Set(d.stores);  // Select all stores on initial load
+  renderList();
   const info = d.info || {};
   const storeLabel = info.count ? info.count : allStores.length;
   _baseStoreCount = parseInt(storeLabel) || allStores.length;
@@ -6164,13 +6227,15 @@ function validateStores() {}
 
 // ── Mode switching ────────────────────────────────────────────────────────────
 let favsOnly = false;
+// In-memory selection set — persists across store filter text changes
+let _selectedStores = new Set();
 
 function _getCheckedStores() {
-  return new Set([...document.querySelectorAll('.store-row input:checked')].map(c => c.value));
+  return new Set(_selectedStores);
 }
 
 function toggleFavsFilter() {
-  const wasChecked = _getCheckedStores();
+  const wasChecked = new Set(_selectedStores);
   favsOnly = !favsOnly;
   const btn = document.getElementById('favs-btn');
   btn.classList.toggle('active', favsOnly);
@@ -6179,18 +6244,24 @@ function toggleFavsFilter() {
   if (favsOnly) {
     // Switching TO favorites: auto-select all favorites
     favorites.forEach(f => wasChecked.add(f));
-    renderList(wasChecked);
+    _selectedStores = wasChecked;
+    renderList();
   } else {
     // Switching back to All Stores: restore full all-selected state
-    renderList(new Set(allStores));
+    _selectedStores = new Set(allStores);
+    renderList();
   }
 }
 
 function selectAll() {
-  document.querySelectorAll('.store-row:not(.hidden) input[type=checkbox]').forEach(cb => cb.checked = true);
+  document.querySelectorAll('.store-row:not(.hidden) input[type=checkbox]').forEach(cb => {
+    cb.checked = true;
+    _selectedStores.add(cb.value);
+  });
   updateCount();
 }
 function clearAll() {
+  _selectedStores.clear();
   document.querySelectorAll('.store-row input[type=checkbox]').forEach(cb => cb.checked = false);
   updateCount();
 }
@@ -6201,9 +6272,7 @@ function toggleSelectAll() {
 }
 
 // ── Render store list ─────────────────────────────────────────────────────────
-function renderList(preserveChecked) {
-  // Capture current selections if not provided
-  const checked = preserveChecked || _getCheckedStores();
+function renderList() {
   const el = document.getElementById('store-list');
   const q  = document.getElementById('search').value.toLowerCase();
   // In favorites mode with a search query, show ALL matching stores so users can find and add new favorites
@@ -6237,13 +6306,17 @@ function renderList(preserveChecked) {
     div.className = 'store-row';
     div.dataset.name = name;
     const id = 'cb_' + name.replace(/[^a-zA-Z0-9]/g,'_');
-    const isChecked = checked.has(name);
+    const isChecked = _selectedStores.has(name);
     div.innerHTML =
       `<button class="fav-btn ${isFav?'active':''}" title="${isFav?'Remove from':'Add to'} favorites"
         onclick="toggleFav(event,'${name.replace(/'/g,"\\'")}',this)">★</button>` +
       `<input type="checkbox" id="${id}" value="${name}" ${isChecked ? 'checked' : ''}>` +
       `<label for="${id}">${name}${distSuffix}</label>`;
-    div.querySelector('input').addEventListener('change', updateCount);
+    div.querySelector('input').addEventListener('change', e => {
+      if (e.target.checked) _selectedStores.add(name);
+      else _selectedStores.delete(name);
+      updateCount();
+    });
     el.appendChild(div);
   });
   updateCount();
@@ -6272,8 +6345,7 @@ function toggleFav(e, name, btn) {
 
 // ── Selection ─────────────────────────────────────────────────────────────────
 function updateCount() {
-  const checked = [...document.querySelectorAll('.store-row input:checked')];
-  const n = checked.length;
+  const n = _selectedStores.size;
   document.getElementById('sel-count').textContent = n + ' store' + (n===1?'':'s') + ' selected';
   const visible = [...document.querySelectorAll('.store-row:not(.hidden) input[type=checkbox]')];
   const allChecked = visible.length > 0 && visible.every(cb => cb.checked);
@@ -6305,6 +6377,33 @@ let _srvSortField = 'date';
 let _srvSortDir = 'desc';
 window._sortCol = null;   // null (not undefined) so user_sorted=false on fresh load
 window._sortDir = 1;
+
+function _updateMobileSortBtns() {
+  document.querySelectorAll('.mobile-sort-btn').forEach(btn => {
+    btn.classList.toggle('active',
+      btn.dataset.sortField === _srvSortField && btn.dataset.sortDir === _srvSortDir);
+  });
+}
+
+// ── Desktop thumbnail view ────────────────────────────────────────────────────
+window._desktopThumbView = localStorage.getItem('gt_desktop_thumb_view') === 'true';
+
+function _applyDesktopThumbMode() {
+  const rb = document.getElementById('res-body');
+  if (rb) rb.classList.toggle('thumb-mode', !!window._desktopThumbView);
+  const btn = document.getElementById('desktop-thumb-toggle');
+  if (btn) {
+    btn.classList.toggle('wl-active', !!window._desktopThumbView);
+    btn.title = window._desktopThumbView ? 'Hide thumbnails' : 'Show thumbnails';
+    btn.textContent = window._desktopThumbView ? '✕ Thumbnails' : '⊞ Thumbnails';
+  }
+}
+
+function toggleDesktopThumbView() {
+  window._desktopThumbView = !window._desktopThumbView;
+  localStorage.setItem('gt_desktop_thumb_view', window._desktopThumbView);
+  _applyDesktopThumbMode();
+}
 let _srvTotalCount = 0;
 let _srvTotalUnfiltered = 0;
 let _srvTotalPages = 1;
@@ -6487,9 +6586,17 @@ function _populateFiltersFromServer(brands, conditions, categories, subcategorie
 function _buildRowHtml(item) {
   const priceNum = parseFloat((item.price||'').replace(/[^0-9.]/g,'')) || 0;
   const esc = s => (s||'').replace(/"/g,'&quot;').replace(/</g,'&lt;');
-  const nameCell = item.url
+  const nameLink = item.url
     ? `<a href="${item.url}" target="_blank">${esc(item.name)}</a>`
     : esc(item.name);
+  const thumbSrc = item.image_id
+    ? `https://media.guitarcenter.com/is/image/MMGS7/${item.image_id}-00-200x200.jpg`
+    : '';
+  const thumbHtml = thumbSrc
+    ? `<img class="row-thumb" src="${thumbSrc}" alt="" loading="lazy" onerror="this.style.display='none'">`
+    : '<span class="row-thumb"></span>';
+  // nameCell wraps thumb + link; soldBadge stays outside the flex div
+  const nameCell = `<div class="thumb-name-cell">${thumbHtml}${nameLink}</div>`;
   const isSold = item.sold || false;
   const isWatched = (window._watchlist || {})[item.id || ''];
   const watchStar = item.id
@@ -6720,7 +6827,7 @@ function _renderMobileCards(items) {
     html += `<div class="card-badges">${newBadge}${wantBadge}${soldBadge}</div>`;
     html += `<div class="card-name"><a href="${url}" target="_blank" rel="noopener">${name}</a></div>`;
     html += `<div class="card-price">${priceHtml}</div>`;
-    html += `<div class="card-meta">${store}${item.date ? ' · ' + esc(item.date) : ''}</div>`;
+    html += `<div class="card-meta">${cond ? cond + ' · ' : ''}${store}${item.date ? ' · ' + esc(item.date) : ''}</div>`;
     html += `<div class="card-actions">`;
     html += `<button class="card-watch-btn${watchCls}" onclick="toggleWatch('${item.id}',this)" data-id="${item.id}">${watched ? '★' : '☆'}</button>`;
     html += `</div>`;
@@ -6754,9 +6861,15 @@ function _renderMobileList(items) {
         `↓ ${item.price || '—'}</span>`
       : (item.price || '—');
 
+    const cond2  = esc(item.condition  || '');
+    const store2 = esc(item.store_name || item.store || '');
+    const subParts = [cond2, store2, esc(item.date || '')].filter(Boolean);
+    const subLine  = subParts.join(' · ');
+
     html += `<div class="compact-row${isNew}${isWant}">`;
     html += `<div class="compact-row-left">`;
     html += `<span class="compact-row-name">${newBadge}<a href="${url}" target="_blank" rel="noopener">${name}</a></span>`;
+    if (subLine) html += `<span class="compact-row-sub">${subLine}</span>`;
     html += `</div>`;
     html += `<span class="compact-row-price">${priceHtml2}</span>`;
     html += `<button class="compact-row-watch${watchCls}" onclick="toggleWatch('${item.id}',this)" data-id="${item.id}">${watched ? '★' : '☆'}</button>`;
@@ -6861,7 +6974,7 @@ function togglePriceDropFilter() {
 
 
 function getSelected() {
-  return [...document.querySelectorAll('.store-row input:checked')].map(c => c.value);
+  return [..._selectedStores];
 }
 
 
@@ -7037,7 +7150,8 @@ function _applySavedSearch(id) {
   if (pdBtn) pdBtn.classList.toggle('wl-active', _priceDropFilterActive);
   // Restore store selection
   const savedStores = new Set(ss.stores || []);
-  renderList(savedStores);
+  _selectedStores = savedStores;
+  renderList();
   _srvStores = ss.stores || [];
   updateCount && updateCount();
   _updateFilterDot();
@@ -8914,7 +9028,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.10"
+APP_VERSION = "2.10.11"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 

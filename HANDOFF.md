@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-06 · Current version: v2.10.5 · Status: deployed on Railway · Branch: main*
+*Last updated: 2026-05-11 · Current version: v2.10.11 · Status: deployed on Railway · Branch: main*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
 
@@ -527,7 +527,7 @@ After any JS change, open the page, open the browser console, and confirm there 
 
 ## 🎯 Planned Next Features
 
-No known planned features at this time. All v2.10.5 goals shipped.
+Collecting user feedback from soft launch (guitar groups). Check back here after feedback is in.
 
 ---
 
@@ -583,3 +583,77 @@ No known planned features at this time. All v2.10.5 goals shipped.
 - `#res-search-wrap{flex-shrink:1;min-width:90px}` + `#res-search{width:150px;min-width:0}` — search box compresses too
 - `#res-search-count{flex-shrink:0}` — "N of M" count never gets squeezed
 - Mobile `@media` block still sets `flex-wrap:wrap` — no mobile change
+
+---
+
+## Recent Changes (v2.10.5 → v2.10.10)
+
+### v2.10.6 — Admin privacy, store UX fixes
+- Email column removed from `/admin/users` entirely (no hash, no raw — just username/dates/counts)
+- Favorites button in store panel now toggles label: "★ Favorites" → "All Stores" when active; toggling back reselects ALL stores (not just favorites)
+- Favorites ★ button moved to left of checkbox in store rows (was on right, looked attached to item name)
+
+### v2.10.7 — Security hardening, NEW badge column move
+- Login rate limiting: 10 failed attempts per IP per 5-min rolling window → 429
+- Session cookie flags: `HttpOnly`, `SameSite=Lax`, `Secure` (auto-enabled on Railway via `RAILWAY_ENVIRONMENT`)
+- Security headers on every response: `X-Frame-Options: SAMEORIGIN`, `X-Content-Type-Options: nosniff`
+- `Beatle909!` removed from all Python defaults and JS — hardcoded password entirely gone from codebase
+- JS `confirmReset()` no longer hardcodes old password — sends to server for validation
+- All admin `os.environ.get()` calls made fail-closed: if `APP_PASSWORD` env var unset, access denied (not open)
+- NEW badge column moved to sit immediately left of item title (was leftmost column, looked attached to store names)
+
+### v2.10.8 — Additional security fixes
+- SSRF fix in `/api/cl-search`: city parameter now whitelisted against `_CL_CITIES` before use in URLs
+- `/api/import-data`: now requires `APP_PASSWORD` in request body (was completely unprotected — could wipe inventory cache for all users)
+- `/api/clear-blocklist`: same password protection added
+
+### v2.10.9 — Pre-launch UX + registration rate limiting
+- Registration rate limiting added (same 10/5-min window as login)
+- "Only used for password recovery" claim removed from email field (no recovery flow exists) — replaced with honest copy
+- `Beatle909!` removed from HANDOFF.md; admin URL examples now show `<APP_PASSWORD>` placeholder
+- Forgot-password note added then removed — no automated reset exists, no contact mechanism wired up
+
+### v2.10.11 — Multi-store filter, hover contrast, mobile UX, desktop thumbnails, anchor NEW detection
+
+**Store filter — preserve selections across filter changes**
+- Added `let _selectedStores = new Set()` as the authoritative in-memory selection store
+- `renderList()` no longer accepts a `preserveChecked` argument — always reads `_selectedStores`
+- Checkbox `change` events update `_selectedStores` directly; `selectAll()`/`clearAll()` do the same
+- `getSelected()` and `_getCheckedStores()` both read from `_selectedStores`, not the DOM
+- Effect: typing "dallas" after checking Plano TX preserves the Plano selection — filter is navigation only
+
+**Table row hover contrast (desktop)**
+- Row hover color changed from `#1d1d1d` (near-black) to `#2e1e1e` (visible dark maroon)
+
+**Mobile condition in subtitle**
+- Card view `.card-meta` now reads: `Condition · Store · Date` (e.g. "Excellent · South Austin · 5/11/26")
+- List view (`.compact-row`) gains a new `.compact-row-sub` line with the same format
+- `.compact-row-left` changed from `align-items:center` to `flex-direction:column` to accommodate two lines
+
+**Mobile sort by price**
+- New `.mobile-sort-row` in the filter sheet (hidden on desktop) with four buttons: Newest / Oldest / Price ↑ / Price ↓
+- `_updateMobileSortBtns()` keeps active state in sync
+- Event delegation wired in DOMContentLoaded; updates `_srvSortField`, `_srvSortDir`, re-fetches
+
+**Desktop thumbnail view toggle**
+- `⊞ Thumbnails` button in `.quick-filter-bar` (hidden on mobile via `@media`)
+- `_buildRowHtml` adds `<img class="row-thumb">` inside `.thumb-name-cell` wrapper in the item name cell
+- Toggle adds `.thumb-mode` class to `#res-body`; CSS shows `.row-thumb` only in that mode
+- State persisted in `localStorage` key `gt_desktop_thumb_view`; applied on DOMContentLoaded
+
+**Anchor-based NEW item detection**
+- Before the scan cache is overwritten, the server computes `anchor_date` = max `date_listed` across all cached items
+- After scanning, threshold = `max(anchor_date, prev_scan_time)` — the most restrictive (most recent) of the two
+- Fixes the "0 new items / table reordered" bug where Algolia's 6-12h indexing pipeline delay caused items to appear in search results with `date_listed` older than the last scan time, silently pushing existing items down the date-sorted table without being flagged NEW
+
+### v2.10.10 — Store panel UX, env var fix
+- Select All / Clear All merged into one toggle button (`#sel-all-btn`): shows "Select All" normally, switches to "Clear All" when all visible stores checked. Logic in `toggleSelectAll()`, label updated in `updateCount()`
+- Store list scroll resets to top (`el.scrollTop = 0`) in `renderList()` — fixes mid-list positioning after favorites toggle on mobile
+- `APP_PASSWORD` env var: code was reading `RESET_PASSWORD` but Railway var is named `APP_PASSWORD`. Fixed throughout. Top-level constant `APP_PASSWORD = (os.environ.get("APP_PASSWORD") or "").strip()` defined once at startup, used everywhere.
+
+### Key env vars (Railway)
+| Var | Status |
+|---|---|
+| `SECRET_KEY` | ✅ Set (long random string) |
+| `APP_PASSWORD` | ✅ Set (custom password) |
+| `DATA_DIR` | ✅ Points to persistent volume |
