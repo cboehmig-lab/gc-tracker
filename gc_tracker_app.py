@@ -1586,7 +1586,7 @@ def api_register():
     session.permanent = True
     session["user_id"]       = user_id
     session["user_username"] = username
-    return jsonify({"status": "registered", "username": username, "data": _get_user_data(user_id)})
+    return jsonify({"status": "registered", "username": username, "google_linked": False, "data": _get_user_data(user_id)})
 
 @app.route("/api/login", methods=["POST"])
 def api_login():
@@ -1605,7 +1605,7 @@ def api_login():
     session.permanent = True
     session["user_id"]       = user["id"]
     session["user_username"] = username
-    return jsonify({"status": "ok", "username": username, "data": _get_user_data(user["id"])})
+    return jsonify({"status": "ok", "username": username, "google_linked": bool(user.get("google_id")), "data": _get_user_data(user["id"])})
 
 @app.route("/api/logout", methods=["POST"])
 def api_logout():
@@ -1733,7 +1733,9 @@ def _auth_google_callback_inner():
     session.permanent        = True
     session["user_id"]       = user_id
     session["user_username"] = username
-    return redirect(next_url)
+    # Flag new Google users so the frontend shows the welcome/setup modal
+    sep = "&" if "?" in next_url else "?"
+    return redirect(next_url + sep + "google_new=1")
 
 @app.route("/api/auth/config")
 def auth_config():
@@ -1744,10 +1746,13 @@ def api_me():
     user_id = session.get("user_id")
     if not user_id:
         return jsonify({"logged_in": False})
+    user = _user_by_id(user_id)
     return jsonify({
-        "logged_in": True,
-        "username":  session.get("user_username", ""),
-        "data":      _get_user_data(user_id),
+        "logged_in":    True,
+        "username":     session.get("user_username", ""),
+        "google_linked": bool(user and user.get("google_id")),
+        "has_email":    bool(user and user.get("email")),
+        "data":         _get_user_data(user_id),
     })
 
 @app.route("/api/sync", methods=["POST"])
@@ -1765,6 +1770,52 @@ def api_sync():
     if kwargs:
         _set_user_data(user_id, **kwargs)
     return jsonify({"status": "synced"})
+
+@app.route("/api/setup-google-account", methods=["POST"])
+def api_setup_google_account():
+    """Set/change username after Google sign-in, optionally importing an existing account."""
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Not logged in."}), 401
+    data         = request.json or {}
+    new_username = re.sub(r'[^A-Za-z0-9_\-]', '', (data.get("username") or "").strip())
+    import_pw    = (data.get("import_password") or "").strip()
+    if not new_username or len(new_username) < 3:
+        return jsonify({"error": "Username must be at least 3 characters (letters, numbers, _ -)"}), 400
+    if len(new_username) > 30:
+        return jsonify({"error": "Username must be 30 characters or fewer."}), 400
+    existing = _user_by_username(new_username)
+    if existing and existing["id"] != user_id:
+        # Username belongs to another account — need password to import it
+        if not import_pw:
+            return jsonify({"error": "taken"}), 409
+        if not existing.get("password_hash") or not check_password_hash(existing["password_hash"], import_pw):
+            return jsonify({"error": "wrong_password"}), 401
+        # Credentials verified — merge old account into current Google account
+        old_data = _get_user_data(existing["id"])
+        new_data = _get_user_data(user_id)
+        merged = {
+            "watchlist":      {**new_data["watchlist"], **old_data["watchlist"]},
+            "keywords":       old_data["keywords"]       if old_data["keywords"]       else new_data["keywords"],
+            "favorites":      list(set(new_data["favorites"] + old_data["favorites"])),
+            "saved_searches": old_data["saved_searches"] if old_data["saved_searches"] else new_data["saved_searches"],
+            "last_run":       old_data["last_run"]       or new_data["last_run"],
+            "new_ids":        old_data["new_ids"]        if old_data["new_ids"]        else new_data["new_ids"],
+        }
+        _set_user_data(user_id, **merged)
+        with _user_db() as conn:
+            conn.execute("DELETE FROM user_data WHERE user_id=?", (existing["id"],))
+            conn.execute("DELETE FROM users WHERE id=?", (existing["id"],))
+            conn.execute("UPDATE users SET username=? WHERE id=?", (new_username, user_id))
+            conn.commit()
+        session["user_username"] = new_username
+        return jsonify({"status": "imported", "username": new_username, "data": _get_user_data(user_id)})
+    # Username available (or unchanged) — just update it
+    with _user_db() as conn:
+        conn.execute("UPDATE users SET username=? WHERE id=?", (new_username, user_id))
+        conn.commit()
+    session["user_username"] = new_username
+    return jsonify({"status": "ok", "username": new_username, "data": _get_user_data(user_id)})
 
 @app.route("/admin/devices")
 def admin_devices():
@@ -4489,6 +4540,27 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .auth-google-btn{display:flex;align-items:center;justify-content:center;gap:9px;width:100%;padding:10px;background:#fff;color:#222;border:none;border-radius:5px;font-size:.9rem;font-weight:600;cursor:pointer;transition:background .15s}
 .auth-google-btn:hover{background:#f0f0f0}
 .auth-google-btn svg{flex-shrink:0}
+/* ── Google welcome modal ── */
+#google-welcome-modal{display:none;position:fixed;inset:0;z-index:300;align-items:center;justify-content:center}
+#google-welcome-modal.open{display:flex}
+#google-welcome-modal .gw-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.75)}
+#google-welcome-modal .gw-box{position:relative;background:#1a1a1a;border:1px solid #2e2e2e;border-radius:12px;padding:32px 36px;width:380px;max-width:92vw;z-index:1}
+#google-welcome-modal h2{color:#fff;font-size:1.1rem;margin-bottom:6px}
+#google-welcome-modal p{color:#888;font-size:.82rem;margin-bottom:20px;line-height:1.5}
+.gw-label{display:block;font-size:.78rem;color:#888;margin-bottom:5px;margin-top:14px}
+.gw-divider{border:none;border-top:1px solid #2e2e2e;margin:20px 0}
+.gw-import-toggle{background:none;border:none;color:#888;font-size:.8rem;cursor:pointer;padding:0;text-decoration:underline;margin-bottom:14px}
+.gw-import-section{display:none}
+.gw-import-section.open{display:block}
+.gw-msg{font-size:.8rem;margin:8px 0 4px;min-height:18px}
+.gw-msg.error{color:#f88}
+.gw-msg.success{color:#4ade80}
+/* ── Google link banner ── */
+#google-link-banner{display:none;background:#1a2a3a;border-bottom:1px solid #2a4a6a;padding:8px 24px;align-items:center;gap:12px;font-size:.82rem;color:#7ab8d4;flex-wrap:wrap}
+#google-link-banner.show{display:flex}
+#google-link-banner button.glib-link{padding:4px 12px;background:#1a4a6a;color:#7ab8d4;border:1px solid #2a6a9a;border-radius:4px;cursor:pointer;font-size:.8rem;white-space:nowrap}
+#google-link-banner button.glib-link:hover{background:#2a5a7a}
+#google-link-banner button.glib-dismiss{padding:4px 8px;background:none;color:#555;border:none;cursor:pointer;font-size:.8rem;margin-left:auto}
 
 .layout{display:flex;flex:1;overflow:hidden}
 
@@ -5286,7 +5358,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.13</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.14</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -5342,6 +5414,37 @@ tr.fav-row td:last-child{color:#4ade80}
   </div>
 </div>
 
+<!-- ── Google new-user welcome modal ── -->
+<div id="google-welcome-modal">
+  <div class="gw-backdrop" onclick="_gwSkip()"></div>
+  <div class="gw-box">
+    <h2>Welcome to GC Tracker! 👋</h2>
+    <p>You're signed in with Google. Choose a username for your account — it's how you'll appear and sign in if you ever use a password instead.</p>
+    <label class="gw-label" for="gw-username">Username</label>
+    <input class="auth-field" type="text" id="gw-username" placeholder="Choose a username" autocomplete="username" maxlength="30" oninput="_gwClearImport()">
+    <div class="gw-msg" id="gw-msg"></div>
+    <hr class="gw-divider">
+    <div style="color:#aaa;font-size:.82rem;margin-bottom:10px">Already have a GC Tracker account? Import your watch list, want list, and favorites.</div>
+    <button class="gw-import-toggle" id="gw-import-toggle" onclick="_gwToggleImport()">+ Import existing account</button>
+    <div class="gw-import-section" id="gw-import-section">
+      <div style="color:#888;font-size:.78rem;margin-bottom:10px;line-height:1.5">Enter your existing username above and the password for that account. Your saved data will be moved over and the old account will be removed.</div>
+      <label class="gw-label" for="gw-import-pw">Password for existing account</label>
+      <input class="auth-field" type="password" id="gw-import-pw" placeholder="Password" autocomplete="current-password">
+    </div>
+    <button class="auth-submit" onclick="_gwSubmit()" id="gw-submit" style="margin-top:6px">Save &amp; Continue</button>
+    <div style="text-align:center;margin-top:12px">
+      <button onclick="_gwSkip()" style="background:none;border:none;color:#555;font-size:.78rem;cursor:pointer;text-decoration:underline">Skip for now</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Google link nudge banner (for existing password users) ── -->
+<div id="google-link-banner">
+  🔒 <span>Link Google Sign-In to your account for added security — password-only login will be retired in a future update.</span>
+  <button class="glib-link" onclick="_glinkStart()">Link Google Account</button>
+  <button class="glib-dismiss" onclick="_glinkDismiss()">✕ Dismiss</button>
+</div>
+
 <div id="update-banner" style="display:none;background:#1a3a1a;border-bottom:1px solid #2a6a2a;padding:8px 24px;align-items:center;gap:12px;font-size:.82rem;color:#8fc98f">
   ⬆ Update available: v<span id="update-version"></span> —
   <button onclick="installUpdate()" style="padding:4px 12px;background:#2a6a2a;color:#8fc98f;border:1px solid #3a8a3a;border-radius:4px;cursor:pointer;font-size:.8rem">Install Update</button>
@@ -5349,7 +5452,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.13</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.14</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -5925,26 +6028,116 @@ let _syncTimer = null;
   try {
     const r = await fetch('/api/auth/config');
     const d = await r.json();
+    window._googleOauthEnabled = !!d.google_oauth;
     if (d.google_oauth) {
       ['auth-google-wrap','auth-google-wrap-reg','welcome-google-wrap','welcome-google-wrap-reg'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.display = '';
       });
     }
+    const params = new URLSearchParams(window.location.search);
     // Show error if redirected back with ?google_error=1
-    if (new URLSearchParams(window.location.search).get('google_error') === '1') {
+    if (params.get('google_error') === '1') {
       const url = new URL(window.location.href);
       url.searchParams.delete('google_error');
+      url.searchParams.delete('debug');
       history.replaceState(null, '', url.toString());
       _openAuthModal('login');
       const el = document.getElementById('auth-login-err');
       if (el) { el.textContent = 'Google sign-in failed. Please try again or use your username and password.'; }
+    }
+    // Show welcome modal for new Google users
+    if (params.get('google_new') === '1') {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('google_new');
+      history.replaceState(null, '', url.toString());
+      _gwOpen();
     }
   } catch(e) {}
 })();
 
 function _googleSignIn(next) {
   window.location.href = '/api/auth/google' + (next ? '?next=' + encodeURIComponent(next) : '');
+}
+
+// ── Google welcome modal (new Google users) ──────────────────────────────────
+function _gwOpen() {
+  const modal = document.getElementById('google-welcome-modal');
+  if (!modal) return;
+  // Pre-fill with current username
+  const input = document.getElementById('gw-username');
+  if (input && window._authUser) input.value = window._authUser.username || '';
+  modal.classList.add('open');
+}
+function _gwSkip() {
+  document.getElementById('google-welcome-modal').classList.remove('open');
+}
+function _gwClearImport() {
+  document.getElementById('gw-msg').textContent = '';
+  document.getElementById('gw-msg').className = 'gw-msg';
+}
+function _gwToggleImport() {
+  const sec = document.getElementById('gw-import-section');
+  const btn = document.getElementById('gw-import-toggle');
+  const open = sec.classList.toggle('open');
+  btn.textContent = open ? '− Hide import' : '+ Import existing account';
+}
+async function _gwSubmit() {
+  const username = (document.getElementById('gw-username').value || '').trim();
+  const importPw = (document.getElementById('gw-import-pw').value || '').trim();
+  const msg      = document.getElementById('gw-msg');
+  const btn      = document.getElementById('gw-submit');
+  msg.textContent = ''; msg.className = 'gw-msg';
+  if (!username || username.length < 3) {
+    msg.textContent = 'Username must be at least 3 characters.'; msg.className = 'gw-msg error'; return;
+  }
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const body = {username};
+    if (importPw) body.import_password = importPw;
+    const r = await fetch('/api/setup-google-account', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d = await r.json();
+    if (d.error === 'taken') {
+      // Username belongs to existing account — show import section
+      msg.textContent = 'That username belongs to an existing account. Enter its password above to import your saved data.';
+      msg.className = 'gw-msg error';
+      const sec = document.getElementById('gw-import-section');
+      if (!sec.classList.contains('open')) _gwToggleImport();
+      document.getElementById('gw-import-pw').focus();
+    } else if (d.error === 'wrong_password') {
+      msg.textContent = 'Incorrect password for that account.';
+      msg.className = 'gw-msg error';
+    } else if (d.error) {
+      msg.textContent = d.error; msg.className = 'gw-msg error';
+    } else {
+      // Success — update auth UI and close
+      if (d.status === 'imported') {
+        msg.textContent = '✓ Data imported successfully!'; msg.className = 'gw-msg success';
+        if (d.data) _loadAndMergeServerData(d.data);
+      }
+      _setAuthUI(d.username, '');
+      window._authUser = {username: d.username};
+      setTimeout(() => _gwSkip(), d.status === 'imported' ? 1200 : 0);
+    }
+  } catch(e) {
+    msg.textContent = 'Network error. Please try again.'; msg.className = 'gw-msg error';
+  }
+  btn.disabled = false; btn.textContent = 'Save & Continue';
+}
+
+// ── Google link banner (existing password users without Google linked) ────────
+function _glinkStart() {
+  window.location.href = '/api/auth/google?next=' + encodeURIComponent(window.location.pathname);
+}
+function _glinkDismiss() {
+  try { localStorage.setItem('gt_google_link_dismissed', '1'); } catch(e) {}
+  document.getElementById('google-link-banner').classList.remove('show');
+}
+function _maybeShowLinkBanner(googleLinked, hasEmail, googleOauthEnabled) {
+  if (!googleOauthEnabled || googleLinked) return;
+  try { if (localStorage.getItem('gt_google_link_dismissed') === '1') return; } catch(e) {}
+  const banner = document.getElementById('google-link-banner');
+  if (banner) banner.classList.add('show');
 }
 
 function _openAuthModal(tab) {
@@ -6111,12 +6304,13 @@ async function _syncToServer(immediate) {
 
 // ── Shared auth helper — called after any successful login or register ─────────
 async function _onAuthSuccess(d, isNew) {
-  window._authUser = {username: d.username};
+  window._authUser = {username: d.username, googleLinked: !!d.google_linked};
   _setAuthUI(d.username, '');
   _closeAuthModal();
   document.getElementById('first-run-modal').style.display = 'none';
   await _loadAndMergeServerData(d.data || {});
   _updateRelativeTime();
+  _maybeShowLinkBanner(!!d.google_linked, !!d.has_email, window._googleOauthEnabled);
   // Auto-trigger baseline scan on first-ever login (no prior scan history)
   if (!window._lastRunISO) {
     appendLog('🎸 Welcome! Building the inventory database for the first time — this takes a few minutes…', 'log-dim');
@@ -6304,9 +6498,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     const meD = await meR.json();
     if (meD.logged_in) {
       alreadyLoggedIn = true;
-      window._authUser = {username: meD.username};
+      window._authUser = {username: meD.username, googleLinked: !!meD.google_linked};
       _setAuthUI(meD.username, '');
       await _loadAndMergeServerData(meD.data || {});
+      _maybeShowLinkBanner(!!meD.google_linked, !!meD.has_email, window._googleOauthEnabled);
     }
   } catch(e) { /* not logged in or network error — continue with localStorage */ }
   await loadData();
@@ -9300,7 +9495,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.13"
+APP_VERSION = "2.10.14"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 
