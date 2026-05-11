@@ -1634,8 +1634,9 @@ def auth_google_callback():
         email     = (userinfo.get("email") or "").strip().lower()
         name      = (userinfo.get("name") or "").strip()
     except Exception as exc:
+        import urllib.parse
         print(f"[Google OAuth] callback error: {exc}")
-        return redirect("/?google_error=1")
+        return redirect("/?google_error=1&debug=" + urllib.parse.quote(str(exc)[:200]))
 
     if not google_id:
         return redirect("/?google_error=1")
