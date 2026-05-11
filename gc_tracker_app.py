@@ -5060,7 +5060,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.11</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.12</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -5109,7 +5109,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.11</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.12</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -5163,7 +5163,7 @@ tr.fav-row td:last-child{color:#4ade80}
         <button id="want-list-toggle"  onclick="searchWantList()"         class="qf-chip">🎯 Want List</button>
         <a id="search-wl-link" onclick="openKeywords()" class="qf-edit-link" style="display:none;font-size:.75rem">✏︎ Edit Want List</a>
         <button id="view-toggle-chip"  onclick="toggleMobileView()"       class="qf-chip view-toggle-chip-btn" title="Switch list / card view">☰</button>
-        <button id="desktop-thumb-toggle" onclick="toggleDesktopThumbView()" class="qf-chip" title="Show thumbnails">⊞ Thumbnails</button>
+        <button id="desktop-thumb-toggle" onclick="toggleDesktopThumbView()" class="qf-chip" title="Show thumbnail grid view">⊞</button>
       </div>
       <div class="results-hdr">
         <span id="res-title" style="display:none"></span>
@@ -5366,7 +5366,7 @@ tr.fav-row td:last-child{color:#4ade80}
   </button>
   <button class="mbb-btn" id="mbb-filters" onclick="_mbbFilters()">
     <span class="mbb-icon">🔍</span>
-    <span class="mbb-label">Search & Filter</span>
+    <span class="mbb-label">Filter & Sort</span>
     <span class="mbb-dot" id="mbb-filter-dot"></span>
   </button>
   <button class="mbb-btn" id="mbb-stores" onclick="_mbbStores()">
@@ -6229,26 +6229,29 @@ function validateStores() {}
 let favsOnly = false;
 // In-memory selection set — persists across store filter text changes
 let _selectedStores = new Set();
+// Snapshot of all-stores selection taken just before entering favorites mode
+let _preFavsSelection = null;
 
 function _getCheckedStores() {
   return new Set(_selectedStores);
 }
 
 function toggleFavsFilter() {
-  const wasChecked = new Set(_selectedStores);
   favsOnly = !favsOnly;
   const btn = document.getElementById('favs-btn');
   btn.classList.toggle('active', favsOnly);
   btn.textContent = favsOnly ? 'All Stores' : '★ Favorites';
   document.getElementById('search').value = '';
   if (favsOnly) {
-    // Switching TO favorites: auto-select all favorites
-    favorites.forEach(f => wasChecked.add(f));
-    _selectedStores = wasChecked;
+    // Switching TO favorites: snapshot current all-stores selection, then
+    // select ONLY favorites (not merged with current selection)
+    _preFavsSelection = new Set(_selectedStores);
+    _selectedStores = new Set(favorites);
     renderList();
   } else {
-    // Switching back to All Stores: restore full all-selected state
-    _selectedStores = new Set(allStores);
+    // Switching back to All Stores: restore the pre-favorites selection exactly
+    _selectedStores = _preFavsSelection || new Set(allStores);
+    _preFavsSelection = null;
     renderList();
   }
 }
@@ -6393,9 +6396,11 @@ function _applyDesktopThumbMode() {
   if (rb) rb.classList.toggle('thumb-mode', !!window._desktopThumbView);
   const btn = document.getElementById('desktop-thumb-toggle');
   if (btn) {
+    // ⊞ shown when in list view (click to switch to grid)
+    // ☰ shown when in grid/thumb view (click to switch back to list)
+    btn.textContent = window._desktopThumbView ? '☰' : '⊞';
+    btn.title = window._desktopThumbView ? 'Switch to list view' : 'Switch to thumbnail grid view';
     btn.classList.toggle('wl-active', !!window._desktopThumbView);
-    btn.title = window._desktopThumbView ? 'Hide thumbnails' : 'Show thumbnails';
-    btn.textContent = window._desktopThumbView ? '✕ Thumbnails' : '⊞ Thumbnails';
   }
 }
 
@@ -9028,7 +9033,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.11"
+APP_VERSION = "2.10.12"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 

@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-11 · Current version: v2.10.11 · Status: deployed on Railway · Branch: main*
+*Last updated: 2026-05-11 · Current version: v2.10.12 · Status: deployed on Railway · Branch: main*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
 
@@ -612,6 +612,14 @@ Collecting user feedback from soft launch (guitar groups). Check back here after
 - "Only used for password recovery" claim removed from email field (no recovery flow exists) — replaced with honest copy
 - `Beatle909!` removed from HANDOFF.md; admin URL examples now show `<APP_PASSWORD>` placeholder
 - Forgot-password note added then removed — no automated reset exists, no contact mechanism wired up
+
+### v2.10.12 — Desktop thumb icon, favorites selection fix, mobile button rename
+
+**Desktop thumbnail button**: Changed from "⊞ Thumbnails" pill to an icon-only toggle (⊞ in list mode → click to switch to grid; ☰ in grid mode → click to switch back to list). Matches the mobile ☰/⊞ pattern.
+
+**Favorites selection behavior fix**: Switching TO favorites now selects *only* your favorites (previously merged with current all-stores selection). Pre-favorites selection is saved in `_preFavsSelection`; switching back to All Stores restores that snapshot exactly. Persistence across filter-text changes remains, but is scoped to whichever mode is active.
+
+**Mobile bottom bar label**: "Search & Filter" → "Filter & Sort".
 
 ### v2.10.11 — Multi-store filter, hover contrast, mobile UX, desktop thumbnails, anchor NEW detection
 
