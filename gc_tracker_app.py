@@ -1358,19 +1358,13 @@ if os.environ.get("RAILWAY_ENVIRONMENT"):
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 # ── Google OAuth setup ────────────────────────────────────────────────────────
+# Uses direct HTTP requests (no authlib session dependency) to avoid Railway
+# proxy state-mismatch issues. State is stored server-side in _oauth_pending.
 _GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
 _GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
-_GOOGLE_OAUTH_ENABLED = bool(_GOOGLE_CLIENT_ID and _GOOGLE_CLIENT_SECRET and _AUTHLIB_AVAILABLE)
+_GOOGLE_OAUTH_ENABLED = bool(_GOOGLE_CLIENT_ID and _GOOGLE_CLIENT_SECRET)
 
-if _GOOGLE_OAUTH_ENABLED:
-    _oauth  = _AuthlibOAuth(app)
-    _google = _oauth.register(
-        name="google",
-        client_id=_GOOGLE_CLIENT_ID,
-        client_secret=_GOOGLE_CLIENT_SECRET,
-        server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
-        client_kwargs={"scope": "openid email profile"},
-    )
+_oauth_pending: dict = {}   # state_token → {next_url, expires}
 
 # ── Login rate-limiting (in-memory, per IP) ────────────────────────────────────
 # Keyed by IP → list of attempt timestamps. Pruned on each check.
@@ -1616,27 +1610,66 @@ def api_logout():
 def auth_google():
     if not _GOOGLE_OAUTH_ENABLED:
         return "Google Sign-In is not configured.", 501
-    # Store where to redirect after login (default: "/")
-    next_url = request.args.get("next", "/")
-    session["oauth_next"] = next_url
+    import secrets as _sec, urllib.parse as _up
     from flask import url_for
+    next_url     = request.args.get("next", "/")
     redirect_uri = url_for("auth_google_callback", _external=True)
-    return _google.authorize_redirect(redirect_uri)
+    # Store state server-side — avoids session cookie issues on Railway proxy
+    state = _sec.token_urlsafe(32)
+    _oauth_pending[state] = {"next_url": next_url, "expires": time.time() + 600}
+    # Purge expired states
+    now_t = time.time()
+    for k in [k for k, v in list(_oauth_pending.items()) if v["expires"] < now_t]:
+        _oauth_pending.pop(k, None)
+    params = {
+        "client_id":     _GOOGLE_CLIENT_ID,
+        "redirect_uri":  redirect_uri,
+        "response_type": "code",
+        "scope":         "openid email profile",
+        "state":         state,
+    }
+    return redirect("https://accounts.google.com/o/oauth2/v2/auth?" + _up.urlencode(params))
 
 @app.route("/api/auth/google/callback")
 def auth_google_callback():
     if not _GOOGLE_OAUTH_ENABLED:
         return "Google Sign-In is not configured.", 501
+    import urllib.parse as _up
+    from flask import url_for
+
+    state = request.args.get("state", "")
+    code  = request.args.get("code",  "")
+
+    # Validate state against server-side dict (no session needed)
+    pending = _oauth_pending.pop(state, None)
+    if not pending or pending["expires"] < time.time():
+        return redirect("/?google_error=1")
+    next_url     = pending["next_url"]
+    redirect_uri = url_for("auth_google_callback", _external=True)
+
     try:
-        token     = _google.authorize_access_token()
-        userinfo  = token.get("userinfo") or {}
+        # Exchange code for token directly — no authlib session dependency
+        token_resp = http.post("https://oauth2.googleapis.com/token", data={
+            "code":          code,
+            "client_id":     _GOOGLE_CLIENT_ID,
+            "client_secret": _GOOGLE_CLIENT_SECRET,
+            "redirect_uri":  redirect_uri,
+            "grant_type":    "authorization_code",
+        }, timeout=10)
+        token_data   = token_resp.json()
+        access_token = token_data.get("access_token", "")
+        if not access_token:
+            raise ValueError(f"No access_token: {token_data}")
+        # Fetch user info
+        ui_resp  = http.get("https://www.googleapis.com/oauth2/v3/userinfo",
+                            headers={"Authorization": f"Bearer {access_token}"}, timeout=10)
+        userinfo  = ui_resp.json()
         google_id = userinfo.get("sub", "")
         email     = (userinfo.get("email") or "").strip().lower()
         name      = (userinfo.get("name") or "").strip()
     except Exception as exc:
-        import urllib.parse
         print(f"[Google OAuth] callback error: {exc}")
-        return redirect("/?google_error=1&debug=" + urllib.parse.quote(str(exc)[:200]))
+        return redirect("/?google_error=1&debug=" + _up.quote(str(exc)[:200]))
 
     if not google_id:
         return redirect("/?google_error=1")
@@ -1646,10 +1679,9 @@ def auth_google_callback():
     # 1) Already linked by google_id → just log in
     user = _user_by_google_id(google_id)
     if user:
-        session.permanent       = True
+        session.permanent        = True
         session["user_id"]       = user["id"]
         session["user_username"] = user["username"]
-        next_url = session.pop("oauth_next", "/")
         return redirect(next_url)
 
     # 2) Email matches an existing account → link & log in
@@ -1662,14 +1694,13 @@ def auth_google_callback():
                     conn.commit()
             except Exception as exc:
                 print(f"[Google OAuth] DB link error: {exc}")
-            session.permanent       = True
+            session.permanent        = True
             session["user_id"]       = user["id"]
             session["user_username"] = user["username"]
-            next_url = session.pop("oauth_next", "/")
             return redirect(next_url)
 
     # 3) New Google user → create account
-    # password_hash='' rather than None so existing DBs with NOT NULL constraint don't error
+    # password_hash='' (not None) so existing DBs with NOT NULL constraint don't error
     username = _gen_google_username(name or (email.split("@")[0] if email else "user"))
     try:
         with _user_db() as conn:
@@ -1681,21 +1712,15 @@ def auth_google_callback():
             conn.commit()
     except Exception as exc:
         print(f"[Google OAuth] DB insert error: {exc}")
-        return redirect("/?google_error=1")
-    session.permanent       = True
+        return redirect("/?google_error=1&debug=" + _up.quote(str(exc)[:200]))
+    session.permanent        = True
     session["user_id"]       = user_id
     session["user_username"] = username
-    next_url = session.pop("oauth_next", "/")
     return redirect(next_url)
 
 @app.route("/api/auth/config")
 def auth_config():
-    return jsonify({
-        "google_oauth":       _GOOGLE_OAUTH_ENABLED,
-        "authlib_installed":  _AUTHLIB_AVAILABLE,
-        "client_id_set":      bool(_GOOGLE_CLIENT_ID),
-        "client_secret_set":  bool(_GOOGLE_CLIENT_SECRET),
-    })
+    return jsonify({"google_oauth": _GOOGLE_OAUTH_ENABLED})
 
 @app.route("/api/me")
 def api_me():
