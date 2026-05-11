@@ -1655,9 +1655,12 @@ def auth_google_callback():
     if email:
         user = _user_by_email(email)
         if user:
-            with _user_db() as conn:
-                conn.execute("UPDATE users SET google_id=? WHERE id=?", (google_id, user["id"]))
-                conn.commit()
+            try:
+                with _user_db() as conn:
+                    conn.execute("UPDATE users SET google_id=? WHERE id=?", (google_id, user["id"]))
+                    conn.commit()
+            except Exception as exc:
+                print(f"[Google OAuth] DB link error: {exc}")
             session.permanent       = True
             session["user_id"]       = user["id"]
             session["user_username"] = user["username"]
@@ -1665,14 +1668,19 @@ def auth_google_callback():
             return redirect(next_url)
 
     # 3) New Google user → create account
+    # password_hash='' rather than None so existing DBs with NOT NULL constraint don't error
     username = _gen_google_username(name or (email.split("@")[0] if email else "user"))
-    with _user_db() as conn:
-        cur = conn.execute(
-            "INSERT INTO users (username, email, password_hash, google_id, created_at) VALUES (?,?,?,?,?)",
-            (username, email or None, None, google_id, now)
-        )
-        user_id = cur.lastrowid
-        conn.commit()
+    try:
+        with _user_db() as conn:
+            cur = conn.execute(
+                "INSERT INTO users (username, email, password_hash, google_id, created_at) VALUES (?,?,?,?,?)",
+                (username, email or None, "", google_id, now)
+            )
+            user_id = cur.lastrowid
+            conn.commit()
+    except Exception as exc:
+        print(f"[Google OAuth] DB insert error: {exc}")
+        return redirect("/?google_error=1")
     session.permanent       = True
     session["user_id"]       = user_id
     session["user_username"] = username
