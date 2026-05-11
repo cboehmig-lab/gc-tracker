@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-11 · Current version: v2.10.13 · Status: deployed on Railway · Branch: main*
+*Last updated: 2026-05-11 · Current version: v2.10.14 · Status: deployed on Railway · Branch: main*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
 
@@ -67,10 +67,15 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 - `_GOOGLE_OAUTH_ENABLED` flag: True only if both env vars are set AND `authlib` is installed
 - **ProxyFix**: enabled on Railway (`RAILWAY_ENVIRONMENT` is set) so `url_for(..., _external=True)` generates `https://` URLs
 - **Auto-link**: if Google email matches an existing username/password account → link `google_id` and log in
-- **New Google users**: username auto-generated from Google display name via `_gen_google_username()`; `password_hash = None`
+- **New Google users**: username auto-generated from Google display name via `_gen_google_username()`; `password_hash = ""` (empty string, not NULL — satisfies `NOT NULL` DB constraint and naturally fails `check_password_hash()`)
 - **Existing password accounts**: unchanged; if a Google-only user tries password login, they get a helpful error
-- Frontend: Google buttons are hidden by default; an IIFE fetches `/api/auth/config` on load and reveals them if `google_oauth: true`
+- **OAuth state**: stored server-side in `_oauth_pending` dict (not Flask session) — avoids Railway proxy CSRF state mismatch
+- Frontend: Google buttons are hidden by default; an IIFE fetches `/api/auth/config` on load and reveals them if `google_oauth: true`; stores `window._googleOauthEnabled` globally
 - `?next=` parameter stores where to redirect after OAuth callback (e.g. `/cl` from the CL page)
+- **Re-triggering welcome modal**: navigate to `/?google_new=1` while logged in to re-open the username setup modal (useful if skipped on first login)
+- **Username setup / account import** (`POST /api/setup-google-account`): lets new Google users set a username; if username is taken and correct password is provided, merges old account's data into the Google account and deletes the old account
+- **Link banner** (v2.10.14): shows for password-only users who haven't linked Google; dismissible (stored in `localStorage: gt_google_link_dismissed`); calls `_maybeShowLinkBanner(googleLinked, hasEmail, googleOauthEnabled)` from both `_onAuthSuccess` and the DOMContentLoaded `/api/me` handler
+- `/api/login` and `/api/register` responses now include `google_linked: bool`
 
 ### Auth endpoints
 | Endpoint | Method | Purpose |
@@ -83,6 +88,7 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 | `/api/auth/google` | GET | Redirect to Google OAuth (accepts `?next=` param) |
 | `/api/auth/google/callback` | GET | Handle Google OAuth callback; create/find/link user; redirect |
 | `/api/auth/config` | GET | Returns `{"google_oauth": bool}` — used by frontend to show/hide Google buttons |
+| `/api/setup-google-account` | POST | Set/change username after Google sign-in; optionally import (merge + delete) an existing password account |
 
 ### Scan flow
 1. Client POST `/api/run` with `{stores, baseline}`
@@ -262,7 +268,8 @@ The CL panel stub still exists in the main `HTML_TEMPLATE` as `<div id="cl-panel
 
 | Variable | Where | Purpose |
 |---|---|---|
-| `window._authUser` | JS var | `null` = guest, `{username}` = logged in |
+| `window._authUser` | JS var | `null` = guest, `{username, googleLinked}` = logged in |
+| `window._googleOauthEnabled` | JS var | Set by `_initGoogleOAuth` IIFE on page load; used by `_maybeShowLinkBanner` |
 | `window._lastRunISO` | localStorage + server | Last scan time (ISO UTC) |
 | `window._newIds` | localStorage + server | Set of SKUs flagged NEW on last scan |
 | `window._watchlist` | localStorage + server | Watched items `{id: {name, store, ...}}` |
@@ -542,7 +549,9 @@ After any JS change, open the page, open the browser console, and confirm there 
 
 ## 🎯 Planned Next Features
 
-Collecting user feedback from soft launch (guitar groups). Check back here after feedback is in.
+- **Additional OAuth providers** (Facebook, Apple): same direct Authorization Code flow as Google — each needs its own `CLIENT_ID`/`CLIENT_SECRET` env vars, a new `/api/auth/<provider>` + callback route, and a `<provider>_id` column in `users`. Authlib is already a dependency and can simplify multi-provider registration, but the direct HTTP approach used for Google also works fine.
+- **Google Analytics**: add `gtag.js` snippet to both `HTML_TEMPLATE` and `CL_TEMPLATE`. GA4 measurement ID stored as `GA_MEASUREMENT_ID` env var (or hardcoded). Simple — no backend changes needed.
+- **Account settings page/modal**: allow users to change their username or link Google at any time (not just via the `/?google_new=1` URL trick).
 
 ---
 
@@ -627,6 +636,23 @@ Collecting user feedback from soft launch (guitar groups). Check back here after
 - "Only used for password recovery" claim removed from email field (no recovery flow exists) — replaced with honest copy
 - `Beatle909!` removed from HANDOFF.md; admin URL examples now show `<APP_PASSWORD>` placeholder
 - Forgot-password note added then removed — no automated reset exists, no contact mechanism wired up
+
+### v2.10.14 — Google welcome modal + link banner
+
+**Welcome modal** (`#google-welcome-modal`): appears for new Google users on first sign-in (`?google_new=1`). Pre-fills auto-generated username from Google display name. Users can:
+- Change their username (3–30 chars, alphanumeric + `_-`)
+- Import an existing account: enter old username's password → data merges (watchlist, keywords, favorites, saved searches, last_run, new_ids merged), old account deleted, Google account takes over old username
+- Skip for now (username stays as auto-generated)
+
+Navigate to `/?google_new=1` to re-trigger the modal at any time (e.g. to change username later).
+
+**Link banner** (`#google-link-banner`): nudge for existing password-only users to link Google. Shows after login/page-load if: Google OAuth is enabled AND user does not have `google_id` AND they haven't dismissed it. Dismiss stored in `localStorage` key `gt_google_link_dismissed`. Clicking "Link Google Account" navigates to `/api/auth/google?next=<current_path>`.
+
+**Account deletion on import**: when a Google user imports an existing password account, both `user_data` and `users` rows for the old account are hard-deleted. This is intentional — leaves one login path (Google) and eliminates the weaker password-only account.
+
+**Both auth paths remain open**: username/password registration and login are still fully functional. Google is additive, not a replacement.
+
+---
 
 ### v2.10.13 — Google Sign-In
 
