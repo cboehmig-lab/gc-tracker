@@ -700,9 +700,9 @@
     "source": "csv-zip:55811 (Duluth, MN)"
   },
   "Springfield": {
-    "lat": 37.1654,
-    "lng": -93.2522,
-    "source": "csv-zip:65804 (Springfield, MO)"
+    "lat": 40.7050,
+    "lng": -74.3193,
+    "source": "csv-zip:07081 (Springfield, NJ)"
   },
   "Jackson": {
     "lat": 32.4122,
