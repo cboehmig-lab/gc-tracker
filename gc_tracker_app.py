@@ -3171,6 +3171,18 @@ def api_browse():
         filtered.sort(key=lambda x: x.get("date_raw") or "", reverse=reverse)
     elif sort_field == "price_drop_since":
         filtered.sort(key=lambda x: x.get("price_drop_since") or "", reverse=reverse)
+    elif sort_field == "condition":
+        # Quality ranking (v2.10.15), not alphabetical: best → worst when ascending
+        # (Excellent→Great→Good→Fair→Poor), reverse on descending. Alphabetical
+        # order had no meaning for users (and put Poor near the top because 'P' > 'G').
+        # First click on the column = 'asc' (see JS line ~8389: non-date fields default
+        # to +1 on first click), so users see Excellent-first by default.
+        # Unknown/blank conditions sort to the end either way.
+        _unknown_rank = 99 if not reverse else -1
+        filtered.sort(
+            key=lambda x: _cond_order.get(x.get("condition") or "", _unknown_rank),
+            reverse=reverse,
+        )
     else:
         filtered.sort(key=lambda x: (x.get(sort_field) or "").lower(), reverse=reverse)
 
@@ -8400,6 +8412,9 @@ function sortTable(colIdx) {
   window._sortCol = colIdx;
   window._localPage = 1;  // Reset pagination on sort
   const dir = window._sortDir;
+  // Quality ranking for condition column (v2.10.15) — best to worst, not alphabetical.
+  // Unknown conditions go to the end regardless of direction.
+  const _condRank = {Excellent:0, Great:1, Good:2, Fair:3, Poor:4};
   window._tableData.sort((a, b) => {
     let av = a[field] || '', bv = b[field] || '';
     if (field === 'price') {
@@ -8411,6 +8426,11 @@ function sortTable(colIdx) {
       av = a['date_raw'] || '';
       bv = b['date_raw'] || '';
       return av.toString().localeCompare(bv.toString()) * dir;
+    }
+    if (field === 'condition') {
+      const ra = (_condRank[av] !== undefined) ? _condRank[av] : (dir === 1 ? 99 : -1);
+      const rb = (_condRank[bv] !== undefined) ? _condRank[bv] : (dir === 1 ? 99 : -1);
+      return (ra - rb) * dir;
     }
     return av.toString().localeCompare(bv.toString()) * dir;
   });
