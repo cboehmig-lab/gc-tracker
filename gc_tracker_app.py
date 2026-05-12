@@ -91,12 +91,20 @@ def _init_user_db():
                 last_run       TEXT    DEFAULT '',
                 new_ids        TEXT    DEFAULT '[]',
                 saved_searches TEXT    DEFAULT '[]',
+                last_anchor    TEXT    DEFAULT '',
                 updated_at     TEXT    DEFAULT ''
             )
         """)
         # Migration: add saved_searches column for existing databases
         try:
             conn.execute("ALTER TABLE user_data ADD COLUMN saved_searches TEXT DEFAULT '[]'")
+        except Exception:
+            pass  # Column already exists
+        # Migration: add last_anchor column for existing databases (v2.10.15)
+        # Per-user anchor for NEW detection — replaces the buggy global-cache anchor
+        # which was contaminated by other users' scans.
+        try:
+            conn.execute("ALTER TABLE user_data ADD COLUMN last_anchor TEXT DEFAULT ''")
         except Exception:
             pass  # Column already exists
         # Migration: add google_id column for existing databases
@@ -152,11 +160,17 @@ def _get_user_data(user_id: int) -> dict:
     with _user_db() as conn:
         row = conn.execute("SELECT * FROM user_data WHERE user_id=?", (user_id,)).fetchone()
     if not row:
-        return {"watchlist": {}, "keywords": [], "favorites": [], "last_run": "", "new_ids": [], "saved_searches": []}
+        return {"watchlist": {}, "keywords": [], "favorites": [], "last_run": "", "new_ids": [], "saved_searches": [], "last_anchor": ""}
     try:
         ss = json.loads(row["saved_searches"] or "[]")
     except Exception:
         ss = []
+    # last_anchor column may not exist on rows from before the migration ran in
+    # this process; sqlite3.Row raises IndexError for missing keys, so guard it.
+    try:
+        last_anchor = row["last_anchor"] or ""
+    except (KeyError, IndexError):
+        last_anchor = ""
     return {
         "watchlist":      json.loads(row["watchlist"] or "{}"),
         "keywords":       json.loads(row["keywords"]  or "[]"),
@@ -164,10 +178,11 @@ def _get_user_data(user_id: int) -> dict:
         "last_run":       row["last_run"] or "",
         "new_ids":        json.loads(row["new_ids"]   or "[]"),
         "saved_searches": ss,
+        "last_anchor":    last_anchor,
     }
 
 def _set_user_data(user_id: int, **kwargs):
-    """Update one or more user_data fields. Valid keys: watchlist, keywords, favorites, last_run, new_ids, saved_searches"""
+    """Update one or more user_data fields. Valid keys: watchlist, keywords, favorites, last_run, new_ids, saved_searches, last_anchor"""
     now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     with _user_db() as conn:
         conn.execute(
@@ -180,11 +195,17 @@ def _set_user_data(user_id: int, **kwargs):
                     f"UPDATE user_data SET {field}=?, updated_at=? WHERE user_id=?",
                     (json.dumps(value), now, user_id)
                 )
-            elif field == "last_run":
-                conn.execute(
-                    "UPDATE user_data SET last_run=?, updated_at=? WHERE user_id=?",
-                    (value, now, user_id)
-                )
+            elif field in ("last_run", "last_anchor"):
+                # Plain TEXT fields — stored as-is (not JSON-encoded)
+                try:
+                    conn.execute(
+                        f"UPDATE user_data SET {field}=?, updated_at=? WHERE user_id=?",
+                        (value, now, user_id)
+                    )
+                except sqlite3.OperationalError:
+                    # last_anchor column missing on this connection (very rare —
+                    # migration runs at startup, but tolerate it anyway)
+                    pass
         conn.commit()
 
 _init_user_db()
@@ -1768,6 +1789,8 @@ def api_sync():
             kwargs[field] = data[field]
     if "last_run" in data:
         kwargs["last_run"] = data["last_run"]
+    if "last_anchor" in data:
+        kwargs["last_anchor"] = data["last_anchor"] or ""
     if kwargs:
         _set_user_data(user_id, **kwargs)
     return jsonify({"status": "synced"})
@@ -1802,6 +1825,7 @@ def api_setup_google_account():
             "saved_searches": old_data["saved_searches"] if old_data["saved_searches"] else new_data["saved_searches"],
             "last_run":       old_data["last_run"]       or new_data["last_run"],
             "new_ids":        old_data["new_ids"]        if old_data["new_ids"]        else new_data["new_ids"],
+            "last_anchor":    max(old_data.get("last_anchor", ""), new_data.get("last_anchor", "")),
         }
         _set_user_data(user_id, **merged)
         with _user_db() as conn:
@@ -3331,9 +3355,12 @@ def api_run():
     # Otherwise fall back to the device's own localStorage value.
     user_id = session.get("user_id")
     if user_id:
-        device_last_run = _get_user_data(user_id).get("last_run", "")
+        _udata = _get_user_data(user_id)
+        device_last_run    = _udata.get("last_run", "")
+        device_last_anchor = _udata.get("last_anchor", "")
     else:
-        device_last_run = (data.get("device_last_run") or "").strip()
+        device_last_run    = (data.get("device_last_run")    or "").strip()
+        device_last_anchor = (data.get("device_last_anchor") or "").strip()
     # Compute run_time here so we can return it to the client immediately.
     run_time_now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     _current_run_time = run_time_now
@@ -3342,7 +3369,11 @@ def api_run():
     while not _q.empty():
         try: _q.get_nowait()
         except queue.Empty: break
-    t = threading.Thread(target=_run, args=(selected, baseline, run_id, device_last_run, run_time_now), daemon=True)
+    t = threading.Thread(
+        target=_run,
+        args=(selected, baseline, run_id, device_last_run, run_time_now, device_last_anchor, user_id),
+        daemon=True,
+    )
     t.start()
     return jsonify({"status": "started", "run_id": run_id, "run_time": run_time_now})
 
@@ -4201,7 +4232,7 @@ def _fill_gaps(selected_stores: list[str]):
 
 
 
-def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_last_run: str = "", run_time: str = ""):
+def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_last_run: str = "", run_time: str = "", device_last_anchor: str = "", user_id: int | None = None):
     def send(msg):
         if run_id:
             _broadcast(run_id, msg)   # fan-out to all subscribers
@@ -4304,18 +4335,23 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
 
         # (cache-ID snapshot removed — NEW detection now uses startDate timestamps)
 
-        # ── Capture anchor date BEFORE cache is overwritten ───────────────────────
-        # The most recently listed item in the pre-scan cache is our reference point.
-        # After scanning, anything with date_listed > anchor_date is genuinely new.
-        # This handles Algolia's 6-12h indexing pipeline delay: items can appear in
-        # search results with date_listed values older than the last scan time, which
-        # would make them invisible to timestamp-based detection but they'd silently
-        # push existing items down the date-sorted table (the "0 new / reordered" bug).
-        anchor_date = ""
-        if _cat_cache:
-            _cache_dates = [v.get("date_listed", "") for v in _cat_cache.values() if v.get("date_listed")]
-            if _cache_dates:
-                anchor_date = max(_cache_dates)
+        # ── Anchor date for NEW detection (per-user, v2.10.15) ───────────────────
+        # The anchor represents "the max date_listed of items this user was exposed
+        # to at their last scan." Anything with date_listed > anchor is genuinely new
+        # to THIS user. This handles Algolia's 6-12h indexing pipeline delay: items
+        # can appear in search results with date_listed values older than the last
+        # scan time, which would make them invisible to timestamp-based detection
+        # but they'd silently push existing items down the date-sorted table (the
+        # "0 new / reordered" bug).
+        #
+        # IMPORTANT: We use the *per-user* stored anchor (passed in as
+        # device_last_anchor), NOT max(date_listed in _cat_cache). _cat_cache is the
+        # global shared inventory written by EVERY user's scan, so reading it here
+        # contaminates the anchor with other users' activity — if Alice scanned five
+        # minutes ago, Bob's threshold would jump to Alice's freshest item and Bob
+        # would see 0 new items even when items are genuinely new to him. (Bug
+        # introduced in v2.10.11, fixed in v2.10.15.)
+        anchor_date = device_last_anchor or ""
 
         # ── Apply data from Algolia API to products, tracking price drops ────────
         # Categories, condition, brand all come from the API now — no page scraping needed.
@@ -4471,18 +4507,44 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
 
         send({"type":"progress","msg":f"  {len(new_ids_list):,} new items since last scan."})
 
+        # ── Compute new per-user anchor (post-scan) ─────────────────────────────
+        # The anchor we persist for this user is the max date_listed across the
+        # cache AFTER this scan. It represents "everything I've now been exposed
+        # to" — next time this user scans, anything older than this anchor will
+        # be treated as already-seen even if Algolia surfaces it freshly (the
+        # indexing-delay protection that anchor_date was designed for).
+        new_anchor = ""
+        if _cat_cache:
+            _post_dates = [v.get("date_listed", "") for v in _cat_cache.values() if v.get("date_listed")]
+            if _post_dates:
+                new_anchor = max(_post_dates)
+        # Don't let the anchor regress: if the global cache somehow lost dates,
+        # keep the threshold we just used (anchor_date or prev_scan_time).
+        new_anchor = max(new_anchor, anchor_date or "", prev_scan_time or "")
+
+        # Persist server-side for logged-in users (atomic with this scan completing).
+        # Guests receive scan_anchor in the SSE done payload and roundtrip via localStorage.
+        # NOTE: We persist last_anchor on baseline scans too — a baseline establishes
+        # the starting point that future scans compare against.
+        if user_id:
+            try:
+                _set_user_data(user_id, last_anchor=new_anchor, last_run=run_time)
+            except Exception:
+                pass  # Non-fatal — client will also sync via /api/sync after done
+
         # For large scans, don't send full item lists via SSE — client will use server-side browse
         large_scan = len(all_products) > 1000
         items_for_sse = [] if large_scan else [fmt(p) for p in all_products[:500]]
         send({
-            "type":       "done",
-            "baseline":   baseline,
-            "stopped":    _stop_event.is_set(),
-            "scanned":    len(all_products),
-            "new_ids":    new_ids_list,
-            "scan_time":  run_time,
-            "items":      items_for_sse,
-            "use_browse": large_scan,
+            "type":        "done",
+            "baseline":    baseline,
+            "stopped":     _stop_event.is_set(),
+            "scanned":     len(all_products),
+            "new_ids":     new_ids_list,
+            "scan_time":   run_time,
+            "scan_anchor": new_anchor,
+            "items":       items_for_sse,
+            "use_browse":  large_scan,
         })
     except Exception as e:
         send({"type":"done","error":str(e),"scanned":0,"new_count":0,"new_items":[]})
@@ -5361,7 +5423,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.14</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.15</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -5455,7 +5517,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.14</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.15</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -6243,6 +6305,7 @@ async function _loadAndMergeServerData(serverData) {
   const sLr  = serverData.last_run       || '';
   const sNid = serverData.new_ids        || [];
   const sSS  = serverData.saved_searches || [];
+  const sLa  = serverData.last_anchor    || '';
 
   const mergedWl  = Object.assign({}, sWl, window._watchlist);
   // Keywords: server is authoritative when logged in so that deletions on one
@@ -6250,7 +6313,8 @@ async function _loadAndMergeServerData(serverData) {
   // empty (first-ever sync for this account).
   const mergedKw  = sKw.length > 0 ? [...sKw].sort() : [...window._keywords].sort();
   const mergedFav = [...new Set([...sFav, ...favorites])];
-  const localLr   = window._lastRunISO || '';
+  const localLr   = window._lastRunISO    || '';
+  const localLa   = window._lastAnchorISO || '';
   let mergedLr, mergedNid;
   if (sLr && localLr) {
     if (sLr >= localLr) { mergedLr = sLr;  mergedNid = sNid; }
@@ -6259,6 +6323,9 @@ async function _loadAndMergeServerData(serverData) {
     mergedLr  = sLr || localLr;
     mergedNid = sLr ? sNid : [...(window._newIds || [])];
   }
+  // Anchor: take the newer of server vs local (string ISO compare works for UTC Z).
+  // Server-wins when set because it's authoritative across devices.
+  const mergedLa = (sLa && localLa) ? (sLa >= localLa ? sLa : localLa) : (sLa || localLa);
 
   // Saved searches: server is authoritative (like keywords) so deletions propagate
   const mergedSS = sSS.length > 0 ? sSS : (window._savedSearches || []);
@@ -6267,13 +6334,15 @@ async function _loadAndMergeServerData(serverData) {
   window._keywords       = mergedKw;
   favorites              = mergedFav;
   window._lastRunISO     = mergedLr || null;
+  window._lastAnchorISO  = mergedLa || null;
   window._newIds         = new Set(mergedNid);
   window._savedSearches  = mergedSS;
 
   _lsSet('watchlist', window._watchlist);
   _lsSet('keywords',  window._keywords);
   _lsSet('favorites', favorites);
-  if (window._lastRunISO) _lsSet('last_run', window._lastRunISO);
+  if (window._lastRunISO)    _lsSet('last_run',    window._lastRunISO);
+  if (window._lastAnchorISO) _lsSet('last_anchor', window._lastAnchorISO);
   _lsSet('new_ids', [...window._newIds]);
 
   // Push merged state back to server
@@ -6298,6 +6367,7 @@ async function _syncToServer(immediate) {
         keywords:       window._keywords      || [],
         favorites:      favorites              || [],
         last_run:       window._lastRunISO    || '',
+        last_anchor:    window._lastAnchorISO || '',
         new_ids:        window._newIds instanceof Set ? [...window._newIds] : (window._newIds || []),
         saved_searches: window._savedSearches || [],
       }),
@@ -6530,6 +6600,7 @@ async function loadData() {
 }
 
 window._lastRunISO = null;
+window._lastAnchorISO = null;
 let _relTimeTimer = null;
 
 function _timeAgo(iso) {
@@ -6567,6 +6638,10 @@ function _updateRelativeTime() {
 async function loadState(alreadyLoggedIn) {
   // Per-user timing from localStorage (may already be set from server merge)
   if (!window._lastRunISO) window._lastRunISO = _lsGet('last_run', null);
+  // Per-user anchor (v2.10.15): max date_listed this user has been exposed to.
+  // Used by the server's NEW detection threshold so other users' scan activity
+  // can't push our threshold forward and silently hide genuinely-new items.
+  if (!window._lastAnchorISO) window._lastAnchorISO = _lsGet('last_anchor', null);
 
   // Shared state from server
   const r = await fetch('/api/state');
@@ -7947,9 +8022,12 @@ async function startRun(payload, isBaseline) {
   document.getElementById('res-panel').style.display = 'none';
   document.getElementById('log').innerHTML = '';
 
-  // Include this device's last-run time so the server gives per-device NEW results
+  // Include this device's last-run time so the server gives per-device NEW results.
+  // Also include the per-user anchor (v2.10.15) — for guests this is the only way the
+  // server learns it; for logged-in users the server reads its own DB and ignores this.
   const runPayload = Object.assign({}, payload, {
-    device_last_run: window._lastRunISO || ''
+    device_last_run:    window._lastRunISO    || '',
+    device_last_anchor: window._lastAnchorISO || ''
   });
   const resp = await fetch('/api/run', {
     method:'POST', headers:{'Content-Type':'application/json'},
@@ -8049,6 +8127,13 @@ function showResults(msg, isBaseline) {
 
   window._lastRunISO = msg.scan_time || new Date().toISOString();
   _lsSet('last_run', window._lastRunISO);
+  // Per-user anchor (v2.10.15): server sends the max date_listed in the
+  // post-scan cache. Store locally so the next scan's threshold isn't
+  // contaminated by other users' activity.
+  if (msg.scan_anchor) {
+    window._lastAnchorISO = msg.scan_anchor;
+    _lsSet('last_anchor', msg.scan_anchor);
+  }
   // Sync scan results to server so they follow the user to other devices
   _syncToServer(true);
   _updateRelativeTime();
@@ -9003,6 +9088,8 @@ async function doReset(pw) {
   _lsSet('new_ids', []);
   window._lastRunISO = null;
   _lsSet('last_run', null);
+  window._lastAnchorISO = null;
+  _lsSet('last_anchor', null);
   // Clean up any legacy keys
   try { localStorage.removeItem('gt_prev_snapshot'); localStorage.removeItem('gt_prev_fp_set'); } catch(e) {}
   _updateRelativeTime();
@@ -9514,7 +9601,7 @@ CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 
 # ── Version & Auto-updater ────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.14"
+APP_VERSION = "2.10.15"
 GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
 GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
 

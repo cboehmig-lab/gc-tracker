@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-11 · Current version: v2.10.14 · Status: deployed on Railway · Branch: main*
+*Last updated: 2026-05-12 · Current version: v2.10.15 · Status: deployed on Railway · Branch: main*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
 
@@ -636,6 +636,30 @@ After any JS change, open the page, open the browser console, and confirm there 
 - "Only used for password recovery" claim removed from email field (no recovery flow exists) — replaced with honest copy
 - `Beatle909!` removed from HANDOFF.md; admin URL examples now show `<APP_PASSWORD>` placeholder
 - Forgot-password note added then removed — no automated reset exists, no contact mechanism wired up
+
+### v2.10.15 — Per-user anchor for NEW detection (multi-user bug fix)
+
+**Bug**: After v2.10.11 added `anchor_date = max(date_listed across _cat_cache)` to protect against Algolia's indexing-delay reordering, NEW-item detection silently broke in the multi-user case. `_cat_cache` is the **global shared inventory** (one `gc_category_cache.json` written by every user's scan). So when User A finished a scan minutes before User B started one, B's `anchor_date` was computed from a cache already containing A's freshest items. With `threshold = max(anchor_date, prev_scan_time)`, B's older `prev_scan_time` lost to A's recent anchor, threshold became "minutes ago," and almost nothing in B's results could satisfy `date_listed > threshold` → 0 new items, even though items genuinely new to B were sitting at the top of the table.
+
+**Fix**: anchor is now **per-user**. New `last_anchor` column on `user_data` (migration-safe `ALTER TABLE`). At scan start, threshold = `max(this_user.last_anchor, this_user.prev_scan_time)`. At scan completion, server computes `new_anchor = max(date_listed in _cat_cache after scan)` and persists it to the scanning user's record (atomic with the scan via `_set_user_data`). Other users' scans no longer touch this user's anchor.
+
+**Flow**:
+- `_run()` signature gained `device_last_anchor` + `user_id` params
+- `api_run` loads per-user `last_anchor` from `_get_user_data(user_id)` for logged-in users; accepts `device_last_anchor` in the request payload for guests
+- `_run` uses `device_last_anchor` (not the global cache max) as the anchor for threshold
+- Post-scan, `_run` persists `last_anchor + last_run` to the user's record server-side
+- SSE `done` payload now includes `scan_anchor` so guests can roundtrip via localStorage
+- `/api/sync` accepts `last_anchor`; `_get_user_data` returns it; client merges with server-wins-when-newer (ISO string compare)
+- Client: `window._lastAnchorISO` initialized from `localStorage.last_anchor`, sent as `device_last_anchor` in `/api/run`, updated from `msg.scan_anchor` in the done SSE
+- Google account import merge picks the newer of the two `last_anchor` values
+
+**Edge cases**:
+- First scan after deploy: existing logged-in users have `last_anchor = ""` → threshold falls back to `prev_scan_time` alone for that one scan, then the anchor is established. (Same as pre-v2.10.11 behavior — one scan of being "unprotected.")
+- Baseline scans still persist `last_anchor` so subsequent non-baseline scans have a starting point.
+- Guests: round-trip via localStorage. No multi-device sync but single-device anchor protection works.
+- Logged-in users on multiple devices: each device sends its own `last_anchor` via `/api/sync`, server takes the newer value; the next scan from any device gets the freshest anchor.
+
+**Not changed**: the original Algolia-indexing-delay protection. If an item appears in today's search results with `date_listed` from a week ago (well below this user's anchor), it still won't be flagged NEW — that's the intended behavior.
 
 ### v2.10.14 — Google welcome modal + link banner
 
