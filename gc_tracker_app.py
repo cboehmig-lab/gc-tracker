@@ -101,7 +101,7 @@ def _init_user_db():
             conn.execute("ALTER TABLE user_data ADD COLUMN saved_searches TEXT DEFAULT '[]'")
         except Exception:
             pass  # Column already exists
-        # Migration: add last_anchor column for existing databases (v2.10.15)
+        # Migration: add last_anchor column for existing databases (v2.10.17)
         # Per-user anchor for NEW detection — replaces the buggy global-cache anchor
         # which was contaminated by other users' scans.
         try:
@@ -1420,6 +1420,13 @@ def _record_login_failure(ip: str):
     bucket.append(now)
     _login_attempts[ip] = bucket
 
+def _client_ip() -> str:
+    """Canonical client IP for rate-limiting and logging.
+    ProxyFix(x_for=1) is applied on Railway, so request.remote_addr is
+    already normalized to the real client IP — no need to read the
+    X-Forwarded-For header directly (which clients can spoof)."""
+    return request.remote_addr or "unknown"
+
 _q              = queue.Queue()        # legacy fallback (kept for non-run endpoints)
 _run_queues: dict[str, list[queue.Queue]] = {}  # run_id → list of subscriber queues (fan-out)
 _run_queues_lock = threading.Lock()
@@ -1447,7 +1454,7 @@ def _log_device(device_id: str):
         "time":       datetime.utcnow().strftime("%H:%M:%SZ"),
         "device_id":  device_id,
         "ua":         request.headers.get("User-Agent", "")[:120],
-        "ip":         request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip(),
+        "ip":         _client_ip(),
     })
     with _device_log_lock:
         with open(_DEVICE_LOG, "a") as f:
@@ -1491,13 +1498,15 @@ def _track_device(response):
     response.headers.setdefault("X-Frame-Options",        "SAMEORIGIN")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy",        "strict-origin-when-cross-origin")
-    response.headers.setdefault("Permissions-Policy",     "camera=(), microphone=(), geolocation=(self)")
+    response.headers.setdefault("Permissions-Policy",     "camera=(), microphone=(), geolocation=()")
     # HSTS — only on Railway (HTTPS); tells browsers to always use HTTPS for this domain
     if os.environ.get("RAILWAY_ENVIRONMENT"):
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-    # CSP — inline scripts/styles needed (single-file app), but block everything else
+    # CSP — inline scripts/styles needed (single-file app), but block everything else.
+    # default-src 'none' forces explicit allowlists for every resource type.
+    # frame-ancestors 'none' prevents clickjacking (stronger than X-Frame-Options alone).
     response.headers.setdefault("Content-Security-Policy",
-        "default-src 'self'; "
+        "default-src 'none'; "
         "script-src 'self' 'unsafe-inline' https://accounts.google.com https://apis.google.com; "
         "style-src 'self' 'unsafe-inline' https://accounts.google.com; "
         "img-src 'self' data: https://media.guitarcenter.com https://*.googleusercontent.com; "
@@ -1506,7 +1515,8 @@ def _track_device(response):
         "font-src 'self'; "
         "object-src 'none'; "
         "base-uri 'self'; "
-        "form-action 'self' https://accounts.google.com"
+        "form-action 'self' https://accounts.google.com; "
+        "frame-ancestors 'none'"
     )
     # Skip SSE streams for device tracking (cookie/logging only, headers already set above)
     if request.path.startswith("/api/progress"):
@@ -1514,9 +1524,11 @@ def _track_device(response):
     device_id = request.cookies.get("gt_device_id")
     if not device_id:
         device_id = str(_uuid.uuid4())
-        # 2-year cookie — survives browser restarts
+        # 2-year cookie — survives browser restarts; Secure only on Railway (HTTPS)
         response.set_cookie("gt_device_id", device_id,
-                            max_age=60*60*24*730, httponly=True, samesite="Lax")
+                            max_age=60*60*24*730, httponly=True, samesite="Lax",
+                            secure=bool(os.environ.get("RAILWAY_ENVIRONMENT")),
+                            path="/")
     _log_device(device_id)
     return response
 
@@ -1573,7 +1585,7 @@ def _cleanup_run_queue(run_id: str):
             _current_run_id = ""
 
 
-def login_required(f):
+def optional_user_context(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         # Site access is open — no login required.
@@ -1610,9 +1622,16 @@ button{width:100%;padding:10px;background:#c00;color:#fff;border:none;
 def admin_login():
     if request.method == "GET":
         return Response(_ADMIN_LOGIN_HTML.format(err=""), content_type="text/html")
+    ip = _client_ip()
+    if not _check_login_rate(ip):
+        return Response(
+            _ADMIN_LOGIN_HTML.format(err='<div class="err">Too many attempts. Please wait a few minutes.</div>'),
+            status=429, content_type="text/html")
     pw = (request.form.get("pw") or "").strip()
     admin_pw = APP_PASSWORD
     if not admin_pw or pw != admin_pw:
+        _record_login_failure(ip)
+        print(f"[Admin] Failed login attempt from {ip}")
         return Response(
             _ADMIN_LOGIN_HTML.format(err='<div class="err">Incorrect password.</div>'),
             status=401, content_type="text/html")
@@ -1689,7 +1708,7 @@ def logout():
 
 @app.route("/api/register", methods=["POST"])
 def api_register():
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip()
+    ip = _client_ip()
     if not _check_login_rate(ip):
         return jsonify({"error": "Too many attempts from this device. Please wait a few minutes."}), 429
     _record_login_failure(ip)   # count every register attempt to limit spam
@@ -1727,7 +1746,7 @@ def api_register():
 
 @app.route("/api/login", methods=["POST"])
 def api_login():
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip()
+    ip = _client_ip()
     if not _check_login_rate(ip):
         return jsonify({"error": "Too many login attempts. Please wait a few minutes and try again."}), 429
     data     = request.json or {}
@@ -1820,10 +1839,11 @@ def _auth_google_callback_inner():
         # Fetch user info
         ui_resp  = http.get("https://www.googleapis.com/oauth2/v3/userinfo",
                             headers={"Authorization": f"Bearer {access_token}"}, timeout=10)
-        userinfo  = ui_resp.json()
-        google_id = userinfo.get("sub", "")
-        email     = (userinfo.get("email") or "").strip().lower()
-        name      = (userinfo.get("name") or "").strip()
+        userinfo       = ui_resp.json()
+        google_id      = userinfo.get("sub", "")
+        email          = (userinfo.get("email") or "").strip().lower()
+        email_verified = bool(userinfo.get("email_verified", False))
+        name           = (userinfo.get("name") or "").strip()
     except Exception as exc:
         print(f"[Google OAuth] token/userinfo error: {exc}")
         return redirect("/?google_error=1")
@@ -1842,7 +1862,8 @@ def _auth_google_callback_inner():
         return redirect(next_url)
 
     # 2) Email matches an existing account → link & log in
-    if email:
+    # Require email_verified to prevent account takeover via unverified Google emails
+    if email and email_verified:
         user = _user_by_email(email)
         if user:
             try:
@@ -1919,6 +1940,9 @@ def api_setup_google_account():
     user_id = session.get("user_id")
     if not user_id:
         return jsonify({"error": "Not logged in."}), 401
+    ip = _client_ip()
+    if not _check_login_rate(ip):
+        return jsonify({"error": "Too many attempts. Please wait a few minutes."}), 429
     data         = request.json or {}
     new_username = re.sub(r'[^A-Za-z0-9_\-]', '', (data.get("username") or "").strip())
     import_pw    = (data.get("import_password") or "").strip()
@@ -1932,6 +1956,7 @@ def api_setup_google_account():
         if not import_pw:
             return jsonify({"error": "taken"}), 409
         if not existing.get("password_hash") or not check_password_hash(existing["password_hash"], import_pw):
+            _record_login_failure(ip)
             return jsonify({"error": "wrong_password"}), 401
         # Credentials verified — merge old account into current Google account
         old_data = _get_user_data(existing["id"])
@@ -2334,7 +2359,7 @@ def admin_listing_patterns():
 
 
 @app.route("/api/reset", methods=["POST"])
-@login_required
+@optional_user_context
 def api_reset():
     """Delete inventory state and cache to start fresh.
     Preserves favorites, watchlist, and want list."""
@@ -2355,7 +2380,7 @@ def api_reset():
     return jsonify({"deleted": deleted, "status": "Reset complete. Ready for a fresh baseline."})
 
 @app.route("/api/clear-blocklist", methods=["POST"])
-@login_required
+@optional_user_context
 def api_clear_blocklist():
     """Remove the invalid stores blocklist so all stores are re-evaluated."""
     denied = _require_admin_api()
@@ -2367,7 +2392,7 @@ def api_clear_blocklist():
     return jsonify({"status": "Blocklist cleared. Run Validate Stores to re-check all stores."})
 
 @app.route("/")
-@login_required
+@optional_user_context
 def index():
     return HTML_TEMPLATE
 
@@ -2935,7 +2960,7 @@ function clToggleWatch(id, name, url, price, location, btn) {
 </html>"""
 
 @app.route("/download/excel")
-@login_required
+@optional_user_context
 def download_excel():
     if not OUTPUT_FILE.exists():
         return "No Excel file yet — run the tracker first.", 404
@@ -2943,7 +2968,7 @@ def download_excel():
                      download_name="gc_new_inventory.xlsx")
 
 @app.route("/api/stores")
-@login_required
+@optional_user_context
 def api_stores():
     return jsonify({
         "stores":    get_store_list(),
@@ -2951,7 +2976,7 @@ def api_stores():
     })
 
 @app.route("/api/stores/refresh", methods=["POST"])
-@login_required
+@optional_user_context
 def api_stores_refresh():
     stores = refresh_store_list()
     info   = get_store_info()
@@ -2959,7 +2984,7 @@ def api_stores_refresh():
                     "count": len(stores), "info": info})
 
 @app.route("/api/favorites", methods=["POST"])
-@login_required
+@optional_user_context
 def api_favorites():
     data = request.json
     favs = load_favorites()
@@ -3034,7 +3059,7 @@ def api_saved_search_counts():
 
 
 @app.route("/api/browse", methods=["POST"])
-@login_required
+@optional_user_context
 def api_browse():
     """Return cached inventory for selected stores with server-side
     pagination, sorting, and filtering.  Sends only one page at a time
@@ -3264,7 +3289,7 @@ def api_browse():
     elif sort_field == "price_drop_since":
         filtered.sort(key=lambda x: x.get("price_drop_since") or "", reverse=reverse)
     elif sort_field == "condition":
-        # Quality ranking (v2.10.15), not alphabetical: best → worst when ascending
+        # Quality ranking (v2.10.17), not alphabetical: best → worst when ascending
         # (Excellent→Great→Good→Fair→Poor), reverse on descending. Alphabetical
         # order had no meaning for users (and put Poor near the top because 'P' > 'G').
         # First click on the column = 'asc' (see JS line ~8389: non-date fields default
@@ -3318,14 +3343,14 @@ def api_browse():
 
 
 @app.route("/api/watchlist", methods=["GET"])
-@login_required
+@optional_user_context
 def api_watchlist_get():
     wl = load_watchlist()
     return jsonify({"watchlist": wl})
 
 
 @app.route("/api/watchlist", methods=["POST"])
-@login_required
+@optional_user_context
 def api_watchlist_post():
     data = request.json
     sku  = data.get("id", "")
@@ -3358,7 +3383,7 @@ def api_watchlist_post():
 
 
 @app.route("/api/watchlist/items", methods=["GET"])
-@login_required
+@optional_user_context
 def api_watchlist_items():
     """Return watchlist items formatted for display."""
     wl         = load_watchlist()
@@ -3399,13 +3424,13 @@ def api_watchlist_items():
 
 
 @app.route("/api/keywords", methods=["GET"])
-@login_required
+@optional_user_context
 def api_keywords_get():
     return jsonify({"keywords": load_keywords()})
 
 
 @app.route("/api/keywords", methods=["POST"])
-@login_required
+@optional_user_context
 def api_keywords_post():
     data = request.json or {}
     action = data.get("action", "")
@@ -3426,7 +3451,7 @@ def api_keywords_post():
 
 
 @app.route("/api/state")
-@login_required
+@optional_user_context
 def api_state():
     _load_cat_cache()
     total_items = sum(1 for v in _cat_cache.values() if v.get("available", True))
@@ -3440,7 +3465,7 @@ def api_state():
     })
 
 @app.route("/api/run", methods=["POST"])
-@login_required
+@optional_user_context
 def api_run():
     global _current_run_time
     if not _lock.acquire(blocking=False):
@@ -3482,7 +3507,7 @@ def api_run():
     return jsonify({"status": "started", "run_id": run_id, "run_time": run_time_now})
 
 @app.route("/api/set-cookies", methods=["POST"])
-@login_required
+@optional_user_context
 def api_set_cookies():
     """Import browser cookies into the HTTP session."""
     cookie_string = request.json.get("cookies", "")
@@ -3499,7 +3524,7 @@ def api_set_cookies():
 
 
 @app.route("/api/export-data")
-@login_required
+@optional_user_context
 def api_export_data():
     """Export all data files as a JSON bundle for migration."""
     bundle = {}
@@ -3525,7 +3550,7 @@ def api_export_data():
 
 
 @app.route("/api/import-data", methods=["POST"])
-@login_required
+@optional_user_context
 def api_import_data():
     """Import a data bundle exported from another instance. Requires admin session."""
     denied = _require_admin_api()
@@ -3552,7 +3577,7 @@ def api_import_data():
 
 
 @app.route("/api/cl-search")
-@login_required
+@optional_user_context
 def api_cl_search():
     q = request.args.get("q", "").strip()
     cities_param = request.args.get("cities", "").strip()
@@ -3774,7 +3799,7 @@ def _cl_search(query: str, cities: list = None, title_only: bool = False) -> lis
 
 
 @app.route("/api/cl-parse-test")
-@login_required
+@optional_user_context
 def api_cl_parse_test():
     """Test the CL parser on a live page and show what it finds."""
     city = request.args.get("city", "sfbay")
@@ -3825,7 +3850,7 @@ def api_cl_parse_test():
         return jsonify({"error": str(e)})
 
 @app.route("/api/cl-debug")
-@login_required
+@optional_user_context
 def api_cl_debug():
     """Probe a CL city to find the right section code and response format."""
     city = request.args.get("city", "sfbay")
@@ -3860,7 +3885,7 @@ def api_cl_debug():
 
 
 @app.route("/api/debug-fetch")
-@login_required
+@optional_user_context
 def api_debug_fetch():
     """Test Algolia API fetch for a store."""
     store = request.args.get("store", "Austin")
@@ -3881,7 +3906,7 @@ def api_debug_fetch():
         return jsonify({"error": str(e)})
 
 @app.route("/api/debug-condition")
-@login_required
+@optional_user_context
 def api_debug_condition():
     """Inspect the saved listing HTML to find exactly where condition data lives."""
     debug_file = DATA_DIR / "gc_debug_listing.html"
@@ -3957,7 +3982,7 @@ def api_debug_condition():
     return jsonify(report)
 
 @app.route("/api/debug-condition/reset", methods=["GET", "POST"])
-@login_required
+@optional_user_context
 def api_debug_condition_reset():
     debug_file = DATA_DIR / "gc_debug_listing.html"
     if debug_file.exists():
@@ -3965,7 +3990,7 @@ def api_debug_condition_reset():
     return jsonify({"status": "cleared"})
 
 @app.route("/api/debug-condition/diag")
-@login_required
+@optional_user_context
 def api_debug_condition_diag():
     """Read the condition extraction diagnostic log."""
     diag_file = DATA_DIR / "gc_condition_diag.json"
@@ -3974,7 +3999,7 @@ def api_debug_condition_diag():
     return diag_file.read_text()
 
 @app.route("/api/stop", methods=["POST"])
-@login_required
+@optional_user_context
 def api_stop():
     _stop_event.set()
     # Force-release lock after a short delay to prevent stuck state
@@ -3987,7 +4012,7 @@ def api_stop():
     return jsonify({"status": "stopping"})
 
 @app.route("/api/populate-store-data", methods=["POST"])
-@login_required
+@optional_user_context
 def api_populate_store_data():
     """One-time migration: scan stores to tag cache entries with their store name."""
     if not _lock.acquire(blocking=False):
@@ -4062,7 +4087,7 @@ def _populate_store_data(selected_stores: list = None):
 
 
 @app.route("/api/validate-stores", methods=["POST"])
-@login_required
+@optional_user_context
 def api_validate_stores():
     denied = _require_admin_api()
     if denied:
@@ -4078,7 +4103,7 @@ def api_validate_stores():
     return jsonify({"status": "started"})
 
 @app.route("/api/store-coords")
-@login_required
+@optional_user_context
 def api_store_coords():
     """Return cached store coordinates JSON (built by /api/build-store-coords)."""
     if STORE_COORDS_FILE.exists():
@@ -4089,7 +4114,7 @@ def api_store_coords():
     return jsonify({})
 
 @app.route("/api/build-store-coords", methods=["POST"])
-@login_required
+@optional_user_context
 def api_build_store_coords():
     """Trigger a one-time geocoding run to build gc_store_coords.json.
     Uses the existing SSE stream — progress shows up in the log panel."""
@@ -4124,7 +4149,7 @@ def api_build_store_coords():
     return jsonify({"status": "started"})
 
 @app.route("/api/fill-gaps", methods=["POST"])
-@login_required
+@optional_user_context
 def api_fill_gaps():
     """Re-scrape listing pages for selected stores to fill missing condition/category data."""
     if not _lock.acquire(blocking=False):
@@ -4143,7 +4168,7 @@ def api_fill_gaps():
     return jsonify({"status": "started"})
 
 @app.route("/api/progress")
-@login_required
+@optional_user_context
 def api_progress():
     run_id = request.args.get("run_id", "")
     # Each SSE connection gets its own subscriber queue so fan-out works correctly.
@@ -4439,7 +4464,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
 
         # (cache-ID snapshot removed — NEW detection now uses startDate timestamps)
 
-        # ── Anchor date for NEW detection (per-user, v2.10.15) ───────────────────
+        # ── Anchor date for NEW detection (per-user, v2.10.17) ───────────────────
         # The anchor represents "the max date_listed of items this user was exposed
         # to at their last scan." Anything with date_listed > anchor is genuinely new
         # to THIS user. This handles Algolia's 6-12h indexing pipeline delay: items
@@ -4454,7 +4479,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         # contaminates the anchor with other users' activity — if Alice scanned five
         # minutes ago, Bob's threshold would jump to Alice's freshest item and Bob
         # would see 0 new items even when items are genuinely new to him. (Bug
-        # introduced in v2.10.11, fixed in v2.10.15.)
+        # introduced in v2.10.11, fixed in v2.10.17.)
         anchor_date = device_last_anchor or ""
 
         # ── Apply data from Algolia API to products, tracking price drops ────────
@@ -5498,7 +5523,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.15</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.17</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -5588,7 +5613,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.15</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.17</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -6708,7 +6733,7 @@ function _updateRelativeTime() {
 async function loadState(alreadyLoggedIn) {
   // Per-user timing from localStorage (may already be set from server merge)
   if (!window._lastRunISO) window._lastRunISO = _lsGet('last_run', null);
-  // Per-user anchor (v2.10.15): max date_listed this user has been exposed to.
+  // Per-user anchor (v2.10.17): max date_listed this user has been exposed to.
   // Used by the server's NEW detection threshold so other users' scan activity
   // can't push our threshold forward and silently hide genuinely-new items.
   if (!window._lastAnchorISO) window._lastAnchorISO = _lsGet('last_anchor', null);
@@ -8066,7 +8091,7 @@ async function startRun(payload, isBaseline) {
   document.getElementById('log').innerHTML = '';
 
   // Include this device's last-run time so the server gives per-device NEW results.
-  // Also include the per-user anchor (v2.10.15) — for guests this is the only way the
+  // Also include the per-user anchor (v2.10.17) — for guests this is the only way the
   // server learns it; for logged-in users the server reads its own DB and ignores this.
   const runPayload = Object.assign({}, payload, {
     device_last_run:    window._lastRunISO    || '',
@@ -8170,7 +8195,7 @@ function showResults(msg, isBaseline) {
 
   window._lastRunISO = msg.scan_time || new Date().toISOString();
   _lsSet('last_run', window._lastRunISO);
-  // Per-user anchor (v2.10.15): server sends the max date_listed in the
+  // Per-user anchor (v2.10.17): server sends the max date_listed in the
   // post-scan cache. Store locally so the next scan's threshold isn't
   // contaminated by other users' activity.
   if (msg.scan_anchor) {
@@ -8443,7 +8468,7 @@ function sortTable(colIdx) {
   window._sortCol = colIdx;
   window._localPage = 1;  // Reset pagination on sort
   const dir = window._sortDir;
-  // Quality ranking for condition column (v2.10.15) — best to worst, not alphabetical.
+  // Quality ranking for condition column (v2.10.17) — best to worst, not alphabetical.
   // Unknown conditions go to the end regardless of direction.
   const _condRank = {Excellent:0, Great:1, Good:2, Fair:3, Poor:4};
   window._tableData.sort((a, b) => {
@@ -9626,7 +9651,7 @@ CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 
 # ── Version ───────────────────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.16"
+APP_VERSION = "2.10.17"
 
 
 

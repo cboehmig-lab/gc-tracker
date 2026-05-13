@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-13 · Current version: v2.10.16 · Status: deployed on Railway · Branch: main*
+*Last updated: 2026-05-13 · Current version: v2.10.17 · Status: deployed on Railway · Branch: main*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
 
@@ -118,13 +118,17 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 
 ## Admin Pages
 
+Admin access uses session-based auth — navigate to `/admin/login` and enter the `APP_PASSWORD`.
+The old `?pw=<APP_PASSWORD>` query-string pattern was removed in v2.10.16. **Do not reintroduce it.**
+
 | URL | Purpose |
 |---|---|
-| `/admin/users?pw=<APP_PASSWORD>` | User account list |
-| `/admin/devices?pw=<APP_PASSWORD>` | Device access log |
-| `/admin/clear-lock?pw=<APP_PASSWORD>` | Force-release stuck scan lock |
-| `/admin/listing-patterns?pw=<APP_PASSWORD>` | GC listing timestamp analysis |
-| `/admin/build-coords?pw=<APP_PASSWORD>` | Re-geocode store locations |
+| `/admin/login` | Admin login (session-based; do NOT use `?pw=`) |
+| `/admin/users` | User account list |
+| `/admin/devices` | Device access log |
+| `/admin/clear-lock` | Force-release stuck scan lock |
+| `/admin/listing-patterns` | GC listing timestamp analysis |
+| `/admin/build-coords` | Re-geocode store locations |
 
 ---
 
@@ -317,7 +321,7 @@ When bumping version, update ALL FOUR of these:
 - `rm ~/Desktop/gc_tracker/.git/index.lock 2>/dev/null; true` then retry commit/push
 
 **Scan hangs / 409 forever**
-- Hit `/admin/clear-lock?pw=<APP_PASSWORD>` to force-release without a Railway restart
+- Log in at `/admin/login`, then hit `/admin/clear-lock` to force-release without a Railway restart
 
 **No data after redeploy**
 - Railway wipes ephemeral storage on redeploy — attach a volume, set `DATA_DIR` to its mount path
