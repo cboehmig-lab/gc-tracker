@@ -1,2 +1,34 @@
 gc_users.db
 gc_users.db-journal
+
+# Environment / secrets
+.env
+.env.*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.py.bak
+
+# Local utility scripts (contain hardcoded keys)
+analyze_listings.py
+probe_geoloc.py
+seed_coords.py
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data files (managed on server, not in repo)
+gc_category_cache.json
+gc_store_coords.json
+gc_last_scan.txt
+gc_device_log.jsonl
+gc_invalid_stores.json

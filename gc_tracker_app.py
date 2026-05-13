@@ -717,8 +717,8 @@ def _clean_name(name: str) -> str:
     return name
 
 
-ALGOLIA_APP_ID  = "7AQ22QS8RJ"
-ALGOLIA_API_KEY = "d04d765e552eb08aff3601eae8f2b729"
+ALGOLIA_APP_ID  = os.environ.get("ALGOLIA_APP_ID", "")
+ALGOLIA_API_KEY = os.environ.get("ALGOLIA_API_KEY", "")
 ALGOLIA_INDEX   = "cD-guitarcenter"
 ALGOLIA_URL     = f"https://{ALGOLIA_APP_ID.lower()}-dsn.algolia.net/1/indexes/*/queries"
 ALGOLIA_HEADERS = {
@@ -1374,7 +1374,10 @@ def write_excel(new_items: list[dict]):
 # ── Flask ─────────────────────────────────────────────────────────────────────
 
 app             = Flask(__name__)
-app.secret_key  = os.environ.get("SECRET_KEY", "gc-tracker-default-key-change-me")
+_secret = os.environ.get("SECRET_KEY", "").strip()
+if not _secret:
+    raise RuntimeError("SECRET_KEY env var is required — refusing to start with no secret")
+app.secret_key  = _secret
 # Secure session cookie settings
 # SESSION_COOKIE_SECURE=True means the cookie is only sent over HTTPS.
 # We enable it when running on Railway (RAILWAY_ENVIRONMENT is set); local dev
@@ -5522,10 +5525,6 @@ tr.fav-row td:last-child{color:#4ade80}
   <button class="glib-dismiss" onclick="_glinkDismiss()">✕ Dismiss</button>
 </div>
 
-<div id="update-banner" style="display:none;background:#1a3a1a;border-bottom:1px solid #2a6a2a;padding:8px 24px;align-items:center;gap:12px;font-size:.82rem;color:#8fc98f">
-  ⬆ Update available: v<span id="update-version"></span> —
-  <button onclick="installUpdate()" style="padding:4px 12px;background:#2a6a2a;color:#8fc98f;border:1px solid #3a8a3a;border-radius:4px;cursor:pointer;font-size:.8rem">Install Update</button>
-  <button onclick="document.getElementById('update-banner').style.display='none'" style="padding:4px 8px;background:none;color:#666;border:none;cursor:pointer;font-size:.8rem">✕</button>
 </div>
 
 <!-- ══ GC PANEL ══ -->
@@ -6669,18 +6668,6 @@ async function loadState(alreadyLoggedIn) {
   if (!alreadyLoggedIn && !window._authUser) {
     document.getElementById('first-run-modal').style.display = 'flex';
   }
-  // Check for updates
-  try {
-    const vr = await fetch('/api/version');
-    const vd = await vr.json();
-    if (vd.update_available) {
-      const banner = document.getElementById('update-banner');
-      if (banner) {
-        banner.style.display = 'flex';
-        banner.querySelector('#update-version').textContent = vd.latest;
-      }
-    }
-  } catch(e) {}
 }
 
 // ── Refresh store list ────────────────────────────────────────────────────────
@@ -9061,26 +9048,6 @@ function populateStoreData() {}
 function cancelValidate() {}
 function startValidate() {}
 
-// ── Auto-updater ──────────────────────────────────────────────────────────────
-async function installUpdate() {
-  if (running) { appendLog('Stop the current run before updating.', 'log-err'); return; }
-  document.getElementById('update-banner').style.display = 'none';
-  document.getElementById('log').innerHTML = '';
-  appendLog('⬆ Downloading update from GitHub…');
-  await fetch('/api/update', {method: 'POST'});
-  const es = new EventSource('/api/progress');
-  es.onmessage = e => {
-    const msg = JSON.parse(e.data);
-    if (msg.type === 'ping') return;
-    if (msg.type === 'progress') { appendLog(msg.msg); return; }
-    if (msg.type === 'done') {
-      es.close();
-      if (msg.update_success) {
-        appendLog('✓ Update installed! Please restart the app (close this window and re-run the launcher).', 'log-dim');
-      }
-    }
-  };
-}
 
 // ── Reset ─────────────────────────────────────────────────────────────────────
 async function resetData() {
@@ -9619,69 +9586,9 @@ CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 
 # ── Launch ────────────────────────────────────────────────────────────────────
 
-# ── Version & Auto-updater ────────────────────────────────────────────────────
+# ── Version ───────────────────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.15"
-GITHUB_RAW  = "https://raw.githubusercontent.com/cboehmig-lab/gc-tracker/main"
-GITHUB_REPO = "https://github.com/cboehmig-lab/gc-tracker"
-
-def _check_for_update() -> tuple[bool, str]:
-    """Check GitHub for a newer version. Returns (update_available, latest_version)."""
-    try:
-        r = _http.get(f"{GITHUB_RAW}/version.txt", timeout=5)
-        if r.status_code == 200:
-            latest = r.text.strip()
-            if latest != APP_VERSION:
-                return True, latest
-    except Exception:
-        pass
-    return False, APP_VERSION
-
-def _do_update(send_progress=None):
-    """Download the latest gc_tracker_app.py from GitHub and replace this file."""
-    def log(msg):
-        if send_progress:
-            send_progress(msg)
-        else:
-            print(msg)
-    try:
-        log("Downloading update...")
-        r = _http.get(f"{GITHUB_RAW}/gc_tracker_app.py", timeout=30)
-        r.raise_for_status()
-        this_file = Path(__file__).resolve()
-        backup = this_file.with_suffix(".py.bak")
-        this_file.rename(backup)
-        this_file.write_text(r.text, encoding="utf-8")
-        log(f"✓ Updated! Backup saved as {backup.name}. Restart the app to use the new version.")
-        return True
-    except Exception as e:
-        log(f"Update failed: {e}")
-        return False
-
-
-@app.route("/api/version")
-@login_required
-def api_version():
-    update_available, latest = _check_for_update()
-    return jsonify({
-        "current":          APP_VERSION,
-        "latest":           latest,
-        "update_available": update_available,
-        "repo":             GITHUB_REPO,
-    })
-
-@app.route("/api/update", methods=["POST"])
-@login_required
-def api_do_update():
-    def _run():
-        def send(msg): _q.put({"type": "progress", "msg": msg})
-        success = _do_update(send)
-        _q.put({"type": "done", "scanned": 0, "new_ids": [],
-                "items": [], "baseline": False, "stopped": False,
-                "update_success": success})
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
-    return jsonify({"status": "started"})
+APP_VERSION = "2.10.16"
 
 
 
@@ -9694,15 +9601,6 @@ if __name__ == "__main__":
         refresh_store_list()
 
     # Nightly scan removed — "Check for New" is manual only
-
-    # Check for updates silently on startup
-    try:
-        update_available, latest = _check_for_update()
-        if update_available:
-            print(f"\n  ⬆  Update available: v{latest} (you have v{APP_VERSION})")
-            print(f"  Visit the app and click 'Update Available' to install.\n")
-    except Exception:
-        pass
 
     url = f"http://localhost:{PORT}"
     print(f"\n  Guitar Center Tracker v{APP_VERSION} is running!")
