@@ -1,98 +1,117 @@
-# Guitar Center Used Inventory Tracker
+# GC Used Inventory Tracker
 
-Automatically checks the Guitar Center used inventory for **Austin** and **South Austin** stores and logs new items to an Excel file.
+A Flask web app for tracking Guitar Center used inventory. The live app lets users browse cached used gear, run scans, save watch lists, save want list keywords, save searches, mark favorite stores, and sync account data across devices.
 
----
+The app also includes a standalone Craigslist used gear search page at `/cl`.
 
-## Quick Start
+## Current deployment
 
-### 1. Install dependencies (one time)
+| Item | Detail |
+|---|---|
+| Platform | Railway |
+| Repo | `cboehmig-lab/gc-tracker` |
+| Branch | `main` |
+| Entry point | `gc_tracker_app.py` |
+| Start command | `python gc_tracker_app.py` |
+| Runtime data | Stored under `DATA_DIR`, which should point to a Railway persistent volume |
+
+Railway auto-deploys from `main`. Do not push directly to `main` for risky changes. Use a branch and pull request.
+
+## Required environment variables
+
+| Variable | Purpose |
+|---|---|
+| `DATA_DIR` | Directory for runtime database, cache, logs, and generated files. On Railway this must be a persistent volume path. |
+| `SECRET_KEY` | Flask session signing secret. Must be a long random value. The app should not start without it. |
+| `APP_PASSWORD` | Admin password used at `/admin/login`. Must be long and unique. |
+| `ALGOLIA_APP_ID` | Guitar Center inventory Algolia application ID. |
+| `ALGOLIA_API_KEY` | Guitar Center inventory Algolia API key. |
+| `GOOGLE_CLIENT_ID` | Google OAuth client ID. Required only if Google Sign-In is enabled. |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth client secret. Required only if Google Sign-In is enabled. |
+| `GA_MEASUREMENT_ID` | Optional Google Analytics measurement ID. |
+
+Never commit `.env` files, production secrets, SQLite databases, runtime cache files, logs, or generated exports.
+
+## Local development
 
 ```bash
-pip install requests beautifulsoup4 openpyxl
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+export SECRET_KEY='replace-with-a-long-random-local-secret'
+export APP_PASSWORD='replace-with-a-local-admin-password'
+export DATA_DIR='./data'
+python gc_tracker_app.py
 ```
 
-### 2. Run the tracker
+Then open:
 
-```bash
-python gc_inventory_tracker.py
+```text
+http://localhost:5050
 ```
 
-- **First run**: logs all current inventory as your baseline (nothing goes into the Excel file yet — this just sets the starting point).
-- **Every run after that**: only items that are new since the last run get added to `gc_new_inventory.xlsx`.
+For local Google OAuth testing, also set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` and make sure the Google callback URL matches your local route.
 
----
+## Admin access
 
-## What you get
+Admin pages use session-based admin login.
+
+```text
+/admin/login
+```
+
+Old `?pw=<password>` admin URLs should not be used and should not be reintroduced. Admin-only actions should check server-side admin session state, not client-side visibility or query-string passwords.
+
+## Runtime data files
+
+The live app stores runtime data outside the repo, under `DATA_DIR`.
 
 | File | Purpose |
-|------|---------|
-| `gc_new_inventory.xlsx` | Opens in Excel. New rows are added each run. |
-| `gc_state.json` | Tracks which items you've seen. Don't delete this. |
+|---|---|
+| `gc_users.db` | SQLite user database. Includes accounts, password hashes, Google IDs, and per-user saved data. |
+| `gc_category_cache.json` | Shared cached inventory data. |
+| `gc_last_scan.txt` | Global fallback scan timestamp for guest mode. |
+| `gc_device_log.jsonl` | Device access log. |
+| `gc_invalid_stores.json` | Auto-managed invalid-store blocklist. |
+| `gc_new_inventory.xlsx` | Generated Excel export. |
 
-### Excel columns
+These files should not be committed.
 
-| Column | Description |
-|--------|-------------|
-| Date Found | Timestamp of the run that spotted this item |
-| Item Name | Product description |
-| Price | Listed price |
-| Store | Austin or South Austin |
-| Link | Clickable URL to the GC listing |
+## Security notes
 
----
+Before deploying security-sensitive changes, check:
 
-## Troubleshooting
+- No secrets are committed in current files.
+- Historical exposed secrets have been rotated if they were ever used in production.
+- Admin endpoints require `/admin/login` session auth.
+- Expensive endpoints have abuse controls or rate limits.
+- User data reads and writes are scoped to the current session user.
+- OAuth account linking requires verified identity.
+- Error messages do not leak tokens, secrets, stack traces, or provider exception details.
+- HTML generated from user, admin, device, store, or inventory data is escaped or rendered as text.
 
-### "Could not find product cards"
+See `SECURITY_HARDENING.md` for the current security checklist.
 
-Guitar Center occasionally updates their page markup. If this happens:
+## Rollback
 
-1. Open `gc_debug_page.html` (saved automatically) in your browser.
-2. Right-click a product listing → **Inspect Element**.
-3. Note the CSS class on the outer `<div>` wrapping each product.
-4. Add that class to the `cards = (...)` block in `parse_products()`.
+Current known-good baseline before the security/docs branch:
 
-### Website uses JavaScript rendering
+```text
+69308d33de8762fbbcd8cd6aa686568ab61dfd2e
+```
 
-If you see an empty or login page in `gc_debug_page.html`, Guitar Center may be rendering products via JavaScript. In that case:
+For safer releases:
 
 ```bash
-pip install playwright
-playwright install chromium
+git tag pre-security-fixes 69308d33de8762fbbcd8cd6aa686568ab61dfd2e
+git push origin pre-security-fixes
 ```
 
-Then replace the `fetch_page()` function with:
-
-```python
-def fetch_page(start: int = 0) -> str:
-    from playwright.sync_api import sync_playwright
-    url = f"{BASE_URL}?{QUERY}&start={start}"
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(url, wait_until="networkidle")
-        html = page.content()
-        browser.close()
-    return html
-```
-
-### "HTTP error 403" or "Access denied"
-
-The site may be blocking automated requests. Try:
-1. Increase `REQUEST_DELAY` to `3.0` or higher.
-2. Run the script while your browser has a Guitar Center tab open.
-
----
-
-## Running automatically (optional)
-
-You can schedule this as a cron job on Mac to run daily:
+If a merged PR breaks the app, revert the merge commit and push to `main` so Railway redeploys the previous behavior.
 
 ```bash
-# Open crontab editor
-crontab -e
-
-# Add this line to run at 8am daily (adjust path to your script):
-0 8 * * * /usr/bin/python3 /path/to/gc_inventory_tracker.py >> /path/to/gc_tracker.log 2>&1
+git revert <merge_commit_sha>
+git push origin main
 ```
+
+Avoid destructive database migrations unless there is a backup and rollback plan.
