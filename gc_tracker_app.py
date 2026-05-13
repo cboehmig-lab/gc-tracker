@@ -6,6 +6,7 @@ Run with:  python3 gc_tracker_app.py
 Then open: http://localhost:5050
 """
 
+import html as _html
 import json, os, re, sys, time, threading, queue, webbrowser, random, sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -1452,12 +1453,61 @@ def _log_device(device_id: str):
         with open(_DEVICE_LOG, "a") as f:
             f.write(entry + "\n")
 
+# ── CSRF protection (Origin check on state-changing requests) ─────────────────
+@app.before_request
+def _csrf_check():
+    """Block cross-origin POST/PUT/DELETE/PATCH requests.
+    JSON APIs already get implicit protection (browsers won't send
+    Content-Type: application/json cross-origin without CORS preflight),
+    but this adds an explicit Origin/Referer check as defense-in-depth."""
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return None
+    origin  = request.headers.get("Origin", "")
+    referer = request.headers.get("Referer", "")
+    # Allow requests with no Origin (e.g. same-origin, curl, server-to-server)
+    if not origin and not referer:
+        return None
+    host = request.host  # e.g. "gctracker.animalsintrees.com" or "localhost:5050"
+    # Check Origin header first
+    if origin:
+        from urllib.parse import urlparse
+        parsed = urlparse(origin)
+        if parsed.netloc == host:
+            return None
+        return jsonify({"error": "Cross-origin request blocked."}), 403
+    # Fallback: check Referer
+    if referer:
+        from urllib.parse import urlparse
+        parsed = urlparse(referer)
+        if parsed.netloc == host:
+            return None
+        return jsonify({"error": "Cross-origin request blocked."}), 403
+    return None
+
 @app.after_request
 def _track_device(response):
     """Set a long-lived device cookie, log first visit of each day, and add security headers."""
     # Security headers — applied to every response
     response.headers.setdefault("X-Frame-Options",        "SAMEORIGIN")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy",        "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy",     "camera=(), microphone=(), geolocation=(self)")
+    # HSTS — only on Railway (HTTPS); tells browsers to always use HTTPS for this domain
+    if os.environ.get("RAILWAY_ENVIRONMENT"):
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    # CSP — inline scripts/styles needed (single-file app), but block everything else
+    response.headers.setdefault("Content-Security-Policy",
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://accounts.google.com https://apis.google.com; "
+        "style-src 'self' 'unsafe-inline' https://accounts.google.com; "
+        "img-src 'self' data: https://media.guitarcenter.com https://*.googleusercontent.com; "
+        "connect-src 'self' https://accounts.google.com https://oauth2.googleapis.com https://www.googleapis.com; "
+        "frame-src https://accounts.google.com; "
+        "font-src 'self'; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self' https://accounts.google.com"
+    )
     # Skip SSE streams for device tracking (cookie/logging only, headers already set above)
     if request.path.startswith("/api/progress"):
         return response
@@ -1530,6 +1580,68 @@ def login_required(f):
         # Individual sensitive endpoints (e.g. /api/reset) enforce their own password.
         return f(*args, **kwargs)
     return decorated
+
+# ── Admin session auth ────────────────────────────────────────────────────────
+# Replaces the old ?pw= query-string pattern so the admin password never
+# appears in URLs, browser history, or server/proxy logs.
+
+_ADMIN_LOGIN_HTML = """<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Admin Login</title>
+<style>
+body{background:#111;color:#eee;font-family:monospace;display:flex;align-items:center;
+     justify-content:center;height:100vh;margin:0}
+.box{background:#1a1a1a;border:1px solid #2e2e2e;border-radius:10px;padding:40px;width:320px}
+h2{text-align:center;margin-bottom:16px;color:#fff}
+input{width:100%;padding:10px;background:#222;border:1px solid #444;color:#eee;
+      border-radius:4px;margin-bottom:12px;box-sizing:border-box;font-size:1rem}
+button{width:100%;padding:10px;background:#c00;color:#fff;border:none;
+       border-radius:4px;cursor:pointer;font-size:1rem}
+.err{color:#f88;text-align:center;margin-bottom:12px;font-size:.85rem}
+</style></head><body>
+<div class="box"><h2>Admin Login</h2>
+<form method="POST">
+  {err}
+  <input name="pw" type="password" placeholder="Admin password" autofocus>
+  <button type="submit">Enter</button>
+</form>
+</div></body></html>"""
+
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    if request.method == "GET":
+        return Response(_ADMIN_LOGIN_HTML.format(err=""), content_type="text/html")
+    pw = (request.form.get("pw") or "").strip()
+    admin_pw = APP_PASSWORD
+    if not admin_pw or pw != admin_pw:
+        return Response(
+            _ADMIN_LOGIN_HTML.format(err='<div class="err">Incorrect password.</div>'),
+            status=401, content_type="text/html")
+    session["admin"] = True
+    next_url = request.args.get("next", "/admin/users")
+    if not next_url.startswith("/") or next_url.startswith("//"):
+        next_url = "/admin/users"
+    return redirect(next_url)
+
+@app.route("/admin/logout", methods=["POST"])
+def admin_logout():
+    session.pop("admin", None)
+    return redirect("/admin/login")
+
+def _is_admin() -> bool:
+    """Check if the current request has admin access via session."""
+    return bool(session.get("admin")) and bool(APP_PASSWORD)
+
+def _require_admin():
+    """Return a redirect Response to admin login if not authenticated, else None."""
+    if _is_admin():
+        return None
+    return redirect(f"/admin/login?next={request.path}")
+
+def _require_admin_api():
+    """For POST API endpoints — return a JSON 401 if not admin, else None."""
+    if _is_admin():
+        return None
+    return jsonify({"error": "Unauthorized"}), 401
 
 
 LOGIN_PAGE = """<!DOCTYPE html>
@@ -1647,6 +1759,9 @@ def auth_google():
     import secrets as _sec, urllib.parse as _up
     from flask import url_for
     next_url     = request.args.get("next", "/")
+    # Prevent open redirect — only allow relative paths
+    if not next_url.startswith("/") or next_url.startswith("//"):
+        next_url = "/"
     redirect_uri = url_for("auth_google_callback", _external=True)
     # Store state server-side — avoids session cookie issues on Railway proxy
     state = _sec.token_urlsafe(32)
@@ -1671,7 +1786,7 @@ def auth_google_callback():
         return _auth_google_callback_inner()
     except Exception as exc:
         print(f"[Google OAuth] UNHANDLED:\n{_tb.format_exc()}")
-        return redirect("/?google_error=1&debug=" + _up.quote(str(exc)[:300]))
+        return redirect("/?google_error=1")
 
 def _auth_google_callback_inner():
     if not _GOOGLE_OAUTH_ENABLED:
@@ -1685,7 +1800,7 @@ def _auth_google_callback_inner():
     # Validate state against server-side dict (no session needed)
     pending = _oauth_pending.pop(state, None)
     if not pending or pending["expires"] < time.time():
-        return redirect("/?google_error=1&debug=state_missing_or_expired")
+        return redirect("/?google_error=1")
     next_url     = pending["next_url"]
     redirect_uri = url_for("auth_google_callback", _external=True)
 
@@ -1711,7 +1826,7 @@ def _auth_google_callback_inner():
         name      = (userinfo.get("name") or "").strip()
     except Exception as exc:
         print(f"[Google OAuth] token/userinfo error: {exc}")
-        return redirect("/?google_error=1&debug=" + _up.quote(str(exc)[:200]))
+        return redirect("/?google_error=1")
 
     if not google_id:
         return redirect("/?google_error=1")
@@ -1754,7 +1869,7 @@ def _auth_google_callback_inner():
             conn.commit()
     except Exception as exc:
         print(f"[Google OAuth] DB insert error: {exc}")
-        return redirect("/?google_error=1&debug=" + _up.quote(str(exc)[:200]))
+        return redirect("/?google_error=1")
     session.permanent        = True
     session["user_id"]       = user_id
     session["user_username"] = username
@@ -1847,19 +1962,10 @@ def api_setup_google_account():
 
 @app.route("/admin/devices")
 def admin_devices():
-    """Password-protected device access summary page."""
-    pw = request.args.get("pw", "")
-    admin_pw = APP_PASSWORD
-    if not admin_pw or pw != admin_pw:
-        return Response(
-            '<html><body style="background:#111;color:#eee;font-family:monospace;padding:40px">'
-            '<h2>🔒 Access denied</h2>'
-            '<form><input name="pw" type="password" placeholder="Password" autofocus '
-            'style="padding:8px;background:#222;border:1px solid #444;color:#eee;border-radius:4px">'
-            '<button type="submit" style="padding:8px 16px;background:#c00;color:#fff;border:none;'
-            'border-radius:4px;cursor:pointer;margin-left:8px">Enter</button></form>'
-            '</body></html>', 401, {"Content-Type": "text/html"}
-        )
+    """Session-protected device access summary page."""
+    denied = _require_admin()
+    if denied:
+        return denied
 
     # Parse log
     entries = []
@@ -1917,8 +2023,8 @@ def admin_devices():
     html += ['<h2>All Devices</h2><table>']
     html += ['<tr><th>ID</th><th>Platform</th><th>First seen</th><th>Last seen</th><th>Days active</th><th>IP</th></tr>']
     for r in rows:
-        html += [f'<tr><td>{r["id"]}</td><td>{r["platform"]}</td><td>{r["first"]}</td>'
-                 f'<td>{r["last"]}</td><td>{r["days"]}</td><td>{r["ip"]}</td></tr>']
+        html += [f'<tr><td>{_html.escape(str(r["id"]))}</td><td>{_html.escape(str(r["platform"]))}</td><td>{_html.escape(str(r["first"]))}</td>'
+                 f'<td>{_html.escape(str(r["last"]))}</td><td>{int(r["days"])}</td><td>{_html.escape(str(r["ip"]))}</td></tr>']
     html += ['</table>']
 
     html += ['<h2>Daily Active Devices (last 30 days)</h2><table>']
@@ -1930,21 +2036,18 @@ def admin_devices():
     return Response("".join(html), content_type="text/html")
 
 
-def _admin_task_page(title: str, api_path: str, description: str, pw: str,
+def _admin_task_page(title: str, api_path: str, description: str,
                      options_html: str = "", extra_body_js: str = "") -> str:
     """Shared HTML template for long-running admin task pages (build-coords, validate-stores).
 
     options_html: optional HTML snippet inserted above the Run button (e.g. checkboxes)
     extra_body_js: optional JS snippet merged into the POST body object (e.g. "force: document.getElementById('force-cb').checked")
+    Auth is handled by the caller via _require_admin().
     """
-    admin_pw = APP_PASSWORD
-    if not admin_pw or pw != admin_pw:
-        return None  # caller should return 401
     safe_api  = api_path.replace('"', '')
     safe_title = title.replace('<', '').replace('>', '')
     safe_desc  = description.replace('<', '').replace('>', '')
-    safe_pw    = admin_pw.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'")
-    body_extra = f", {extra_body_js}" if extra_body_js else ""
+    body_inner = extra_body_js if extra_body_js else ""
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <title>{safe_title} — GC Tracker Admin</title>
@@ -1972,7 +2075,7 @@ async function run() {{
   const resp = await fetch('{safe_api}', {{
     method: 'POST',
     headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{pw: '{safe_pw}'{body_extra}}})
+    body: JSON.stringify({{{body_inner}}})
   }});
   if (!resp.ok) {{
     const e = await resp.json().catch(()=>({{}}));
@@ -1999,7 +2102,9 @@ async function run() {{
 @app.route("/admin/build-coords")
 def admin_build_coords():
     """Admin page to geocode all stores and build gc_store_coords.json."""
-    pw = request.args.get("pw", "")
+    denied = _require_admin()
+    if denied:
+        return denied
     html = _admin_task_page(
         title="Build Store Coordinates",
         api_path="/api/build-store-coords",
@@ -2007,49 +2112,36 @@ def admin_build_coords():
                     "active store, then geocodes that string via Nominatim (~1 req/sec). "
                     "Takes ~5 min. Skips stores already in gc_store_coords.json unless "
                     "'Force re-geocode all' is checked.",
-        pw=pw,
         options_html='<label style="display:block;margin-top:14px;color:#bbb;cursor:pointer">'
                      '<input type="checkbox" id="force-cb" style="vertical-align:middle"> '
                      'Force re-geocode all stores (even cached ones)</label>',
         extra_body_js="force: document.getElementById('force-cb').checked",
     )
-    if html is None:
-        return Response("Unauthorized", status=401)
     return Response(html, content_type="text/html")
 
 
 @app.route("/admin/validate-stores")
 def admin_validate_stores():
     """Admin page to validate and clean up the store list."""
-    pw = request.args.get("pw", "")
+    denied = _require_admin()
+    if denied:
+        return denied
     html = _admin_task_page(
         title="Validate Stores",
         api_path="/api/validate-stores",
         description="Checks every store for 404s, auto-removes dead stores, "
                     "renames any whose slugs changed, then rebuilds the store list from GC live data. "
                     "Takes ~0.5s per store.",
-        pw=pw,
     )
-    if html is None:
-        return Response("Unauthorized", status=401)
     return Response(html, content_type="text/html")
 
 
 @app.route("/admin/users")
 def admin_users():
-    """Password-protected user account summary page."""
-    pw       = request.args.get("pw", "")
-    admin_pw = APP_PASSWORD
-    if not admin_pw or pw != admin_pw:
-        return Response(
-            '<html><body style="background:#111;color:#eee;font-family:monospace;padding:40px">'
-            '<h2>🔒 Access denied</h2>'
-            '<form><input name="pw" type="password" placeholder="Password" autofocus '
-            'style="padding:8px;background:#222;border:1px solid #444;color:#eee;border-radius:4px">'
-            '<button type="submit" style="padding:8px 16px;background:#c00;color:#fff;border:none;'
-            'border-radius:4px;cursor:pointer;margin-left:8px">Enter</button></form>'
-            '</body></html>', 401, {"Content-Type": "text/html"}
-        )
+    """Session-protected user account summary page."""
+    denied = _require_admin()
+    if denied:
+        return denied
 
     # Load all users + their data
     with _user_db() as conn:
@@ -2090,12 +2182,12 @@ def admin_users():
         joined     = _fmt(u.get("created_at"))
         rows_html += (
             f'<tr>'
-            f'<td>{u["username"]}</td>'
-            f'<td>{joined}</td>'
-            f'<td>{last_scan}</td>'
-            f'<td style="text-align:center">{u["wl_count"]}</td>'
-            f'<td style="text-align:center">{u["kw_count"]}</td>'
-            f'<td style="text-align:center">{u["fav_count"]}</td>'
+            f'<td>{_html.escape(str(u["username"]))}</td>'
+            f'<td>{_html.escape(str(joined))}</td>'
+            f'<td>{_html.escape(str(last_scan))}</td>'
+            f'<td style="text-align:center">{int(u["wl_count"])}</td>'
+            f'<td style="text-align:center">{int(u["kw_count"])}</td>'
+            f'<td style="text-align:center">{int(u["fav_count"])}</td>'
             f'</tr>'
         )
 
@@ -2113,7 +2205,7 @@ a{{color:#888;text-decoration:none;font-size:.78rem}}
 </style></head><body>
 <h1>👤 User Accounts</h1>
 <div class="sub">{len(users)} account{"s" if len(users)!=1 else ""} &nbsp;·&nbsp;
-<a href="/admin/devices?pw={pw}">→ Device log</a></div>
+<a href="/admin/devices">→ Device log</a></div>
 <table>
 <tr>
   <th>Username</th><th>Joined</th><th>Last scan</th>
@@ -2129,11 +2221,10 @@ a{{color:#888;text-decoration:none;font-size:.78rem}}
 @app.route("/admin/clear-lock")
 def admin_clear_lock():
     """Force-release the global scan lock if it's stuck after a crash.
-    Protected by the same APP_PASSWORD as /admin/devices."""
-    pw = request.args.get("pw", "")
-    admin_pw = APP_PASSWORD
-    if not admin_pw or pw != admin_pw:
-        return Response("Unauthorized", status=401)
+    Protected by admin session."""
+    denied = _require_admin()
+    if denied:
+        return denied
     if _lock.locked():
         try:
             _lock.release()
@@ -2147,11 +2238,10 @@ def admin_clear_lock():
 def admin_listing_patterns():
     """Analyze date_listed distribution across the cached inventory to reveal
     how GC batches new listings — by day, hour-of-day, and minute within hour.
-    Protected by the same APP_PASSWORD as /admin/devices."""
-    pw = request.args.get("pw", "")
-    admin_pw = APP_PASSWORD
-    if not admin_pw or pw != admin_pw:
-        return Response("Unauthorized", status=401)
+    Protected by admin session."""
+    denied = _require_admin()
+    if denied:
+        return denied
 
     _load_cat_cache()
     from collections import Counter
@@ -2248,10 +2338,9 @@ def admin_listing_patterns():
 def api_reset():
     """Delete inventory state and cache to start fresh.
     Preserves favorites, watchlist, and want list."""
-    data = request.json or {}
-    reset_pw = APP_PASSWORD
-    if not reset_pw or data.get("password") != reset_pw:
-        return jsonify({"error": "Incorrect password."}), 403
+    denied = _require_admin_api()
+    if denied:
+        return denied
     deleted = []
     for f in [STATE_FILE, CAT_CACHE_FILE, OUTPUT_FILE,
               DATA_DIR / "gc_last_scan.txt",
@@ -2269,9 +2358,9 @@ def api_reset():
 @login_required
 def api_clear_blocklist():
     """Remove the invalid stores blocklist so all stores are re-evaluated."""
-    reset_pw = APP_PASSWORD
-    if not reset_pw or (request.json or {}).get("password") != reset_pw:
-        return jsonify({"error": "Unauthorized."}), 403
+    denied = _require_admin_api()
+    if denied:
+        return denied
     f = DATA_DIR / "gc_invalid_stores.json"
     if f.exists():
         f.unlink()
@@ -3438,11 +3527,11 @@ def api_export_data():
 @app.route("/api/import-data", methods=["POST"])
 @login_required
 def api_import_data():
-    """Import a data bundle exported from another instance. Requires admin password."""
+    """Import a data bundle exported from another instance. Requires admin session."""
+    denied = _require_admin_api()
+    if denied:
+        return denied
     bundle = request.json or {}
-    reset_pw = APP_PASSWORD
-    if not reset_pw or bundle.get("password") != reset_pw:
-        return jsonify({"error": "Unauthorized."}), 403
     written = []
     mapping = {
         "state":     STATE_FILE,
@@ -3975,9 +4064,9 @@ def _populate_store_data(selected_stores: list = None):
 @app.route("/api/validate-stores", methods=["POST"])
 @login_required
 def api_validate_stores():
-    admin_pw = APP_PASSWORD
-    if request.json.get("pw") != admin_pw:
-        return jsonify({"error": "Unauthorized"}), 401
+    denied = _require_admin_api()
+    if denied:
+        return denied
     if not _lock.acquire(blocking=False):
         return jsonify({"error": "A run is already in progress."}), 409
     _stop_event.clear()
@@ -4004,9 +4093,9 @@ def api_store_coords():
 def api_build_store_coords():
     """Trigger a one-time geocoding run to build gc_store_coords.json.
     Uses the existing SSE stream — progress shows up in the log panel."""
-    admin_pw = APP_PASSWORD
-    if (request.json or {}).get("pw") != admin_pw:
-        return jsonify({"error": "Unauthorized"}), 401
+    denied = _require_admin_api()
+    if denied:
+        return denied
     if not _lock.acquire(blocking=False):
         return jsonify({"error": "A run is already in progress."}), 409
     _stop_event.clear()
@@ -4848,20 +4937,6 @@ tr.fav-row td:last-child{color:#4ade80}
 #res-body.thumb-mode #res-table tbody tr{height:58px}
 
 /* ── Password modal ── */
-#pw-modal{display:none;position:fixed;inset:0;z-index:100;align-items:center;justify-content:center}
-#pw-overlay{position:absolute;inset:0;background:rgba(0,0,0,.7)}
-#pw-box{position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:30px 28px;width:340px;z-index:1}
-#pw-box h2{color:#fff;font-size:1.05rem;margin-bottom:6px}
-#pw-box p{color:#777;font-size:.82rem;margin-bottom:18px;line-height:1.5}
-#pw-input{width:100%;padding:9px 12px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#eee;font-size:.95rem;outline:none;margin-bottom:10px}
-#pw-input:focus{border-color:#c00}
-#pw-err{color:#f88;font-size:.8rem;margin-bottom:10px;display:none}
-.pw-btns{display:flex;gap:8px}
-.pw-btns button{flex:1;padding:9px;border-radius:5px;font-size:.88rem;font-weight:600;cursor:pointer;border:none}
-#pw-cancel{background:#2a2a2a;color:#aaa;border:1px solid #3a3a3a!important}
-#pw-cancel:hover{color:#fff}
-#pw-confirm{background:#c00;color:#fff}
-#pw-confirm:hover{background:#e00}
 /* ── CL Search tab ── */
 #cl-panel{flex-direction:row}
 .cl-left{width:220px;min-width:200px;background:#1a1a1a;border-right:1px solid #2e2e2e;display:flex;flex-direction:column;flex-shrink:0}
@@ -5206,7 +5281,6 @@ tr.fav-row td:last-child{color:#4ade80}
   #cl-search-wl-link{font-size:.78rem}
 
   /* ── Modals: full-width on mobile ── */
-  #pw-box{width:calc(100% - 32px)!important;max-width:380px}
   #kw-modal > div:last-child{width:calc(100% - 32px)!important;max-width:420px}
   #first-run-modal > div:nth-child(2){width:calc(100% - 32px)!important;max-width:400px}
   #vs-modal > div:nth-child(2){width:calc(100% - 32px)!important;max-width:380px}
@@ -5345,20 +5419,6 @@ tr.fav-row td:last-child{color:#4ade80}
   </div>
 </div>
 
-<div id="pw-modal">
-  <div id="pw-overlay" onclick="cancelReset()"></div>
-  <div id="pw-box">
-    <h2>🗑 Reset All Inventory</h2>
-    <p>This will delete all cached inventory, scan history, and the Excel export. Your want list will be preserved. Enter the password to continue.</p>
-    <input type="password" id="pw-input" placeholder="Password"
-           onkeydown="if(event.key==='Enter')confirmReset()">
-    <div id="pw-err">Incorrect password.</div>
-    <div class="pw-btns">
-      <button id="pw-cancel" onclick="cancelReset()">Cancel</button>
-      <button id="pw-confirm" onclick="confirmReset()">Reset →</button>
-    </div>
-  </div>
-</div>
 
 <!-- ── Welcome / auth modal (shown on first visit when not logged in) ── -->
 <div id="first-run-modal" style="display:none;position:fixed;inset:0;z-index:200;align-items:center;justify-content:center">
@@ -6116,7 +6176,6 @@ let _syncTimer = null;
     if (params.get('google_error') === '1') {
       const url = new URL(window.location.href);
       url.searchParams.delete('google_error');
-      url.searchParams.delete('debug');
       history.replaceState(null, '', url.toString());
       _openAuthModal('login');
       const el = document.getElementById('auth-login-err');
@@ -7983,21 +8042,6 @@ function _updateWantListCount() {
   editLink.style.display = (!_isMobile() || _wantListSearchActive) ? 'inline' : 'none';
 }
 
-function cancelReset() {
-  document.getElementById('pw-modal').style.display = 'none';
-}
-
-function confirmReset() {
-  const pw = document.getElementById('pw-input').value;
-  if (!pw) {
-    document.getElementById('pw-err').style.display = 'block';
-    document.getElementById('pw-input').select();
-    return;
-  }
-  document.getElementById('pw-modal').style.display = 'none';
-  doReset(pw);
-}
-
 // ── Run ───────────────────────────────────────────────────────────────────────
 async function runTracker() {
   // Always scan nationwide so snapshot comparison is accurate
@@ -9052,17 +9096,11 @@ function startValidate() {}
 // ── Reset ─────────────────────────────────────────────────────────────────────
 async function resetData() {
   if (running) { appendLog('Stop the current run before resetting.', 'log-err'); return; }
-  document.getElementById('pw-modal').style.display = 'flex';
-  document.getElementById('pw-input').value = '';
-  document.getElementById('pw-err').style.display = 'none';
-  setTimeout(() => document.getElementById('pw-input').focus(), 50);
-}
-
-async function doReset(pw) {
+  if (!confirm('Reset all inventory data? This preserves your watchlist, want list, and favorites.')) return;
   const r = await fetch('/api/reset', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({password: pw})
+    body: JSON.stringify({})
   });
   const d = await r.json();
   if (!r.ok) {
