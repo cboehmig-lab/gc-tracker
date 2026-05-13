@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-12 · Current version: v2.10.15 · Status: deployed on Railway · Branch: main*
+*Last updated: 2026-05-13 · Current version: v2.10.16 · Status: deployed on Railway · Branch: main*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
 
@@ -636,6 +636,42 @@ After any JS change, open the page, open the browser console, and confirm there 
 - "Only used for password recovery" claim removed from email field (no recovery flow exists) — replaced with honest copy
 - `Beatle909!` removed from HANDOFF.md; admin URL examples now show `<APP_PASSWORD>` placeholder
 - Forgot-password note added then removed — no automated reset exists, no contact mechanism wired up
+
+### v2.10.16 — Security hardening (credentials, admin auth, headers)
+
+**Credential cleanup**:
+- Algolia `APP_ID` / `API_KEY` moved from hardcoded values to `ALGOLIA_APP_ID` / `ALGOLIA_API_KEY` env vars (must be set on Railway)
+- `SECRET_KEY` fallback removed — app now crashes on startup if env var is missing (was falling back to a publicly visible default)
+- Auto-updater removed entirely (`GITHUB_RAW`, `GITHUB_REPO`, `_check_for_update`, `_do_update`, `/api/version`, `/api/update`, JS `installUpdate()`, update banner HTML) — redundant with Railway auto-deploy and leaked repo identity
+- Utility scripts (`analyze_listings.py`, `probe_geoloc.py`) updated to read Algolia creds from env vars
+- `.gitignore` expanded: `.env`, `__pycache__`, `.DS_Store`, IDE files, utility scripts, runtime data files
+
+**Admin auth overhaul**:
+- All admin endpoints moved from `?pw=<password>` query string to session-based auth via `/admin/login`
+- New routes: `GET/POST /admin/login`, `POST /admin/logout`
+- `_is_admin()`, `_require_admin()`, `_require_admin_api()` helpers replace inline password checks
+- Admin password no longer appears in URLs, browser history, or server/proxy logs
+- `_admin_task_page()` helper no longer embeds password in JS POST bodies
+- `/api/reset` changed from password-in-body to admin session check; old password modal removed, replaced with `confirm()` dialog
+- Same session auth applied to: `/api/clear-blocklist`, `/api/validate-stores`, `/api/build-store-coords`, `/api/import-data`
+
+**Security headers**:
+- `Content-Security-Policy`: restricts script/style/img/connect sources; allows inline (required for single-file app) + Google OAuth domains
+- `Strict-Transport-Security`: enabled on Railway (HTTPS only), `max-age=31536000`
+- `Referrer-Policy: strict-origin-when-cross-origin`
+- `Permissions-Policy`: camera/microphone denied, geolocation self-only
+
+**CSRF protection**:
+- `@app.before_request` Origin/Referer check on all state-changing requests (POST/PUT/DELETE/PATCH)
+- Cross-origin requests blocked with 403; same-origin and no-origin (curl, server-to-server) allowed
+
+**Other fixes**:
+- Open redirect in OAuth `?next=` parameter: now validated to only allow relative paths starting with `/`
+- XSS in admin pages: all user-supplied data (usernames, IPs, user agents, dates) passed through `html.escape()` before HTML insertion
+- OAuth error redirects no longer leak exception details in URL `?debug=` params — errors logged server-side only
+- `import html as _html` added to imports
+
+**Admin access after deploy**: navigate to `/admin/login`, enter admin password once — session persists. Old `?pw=` URLs no longer work.
 
 ### v2.10.15 — Per-user anchor for NEW detection (multi-user bug fix)
 
