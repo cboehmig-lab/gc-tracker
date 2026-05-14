@@ -602,6 +602,7 @@ async function _syncToServer(immediate) {
 // ── Shared auth helper — called after any successful login or register ─────────
 async function _onAuthSuccess(d, isNew) {
   window._authUser = {username: d.username, googleLinked: !!d.google_linked};
+  _lsSet('guest_dismissed', false);  // clear guest flag now that they have an account
   _setAuthUI(d.username, '');
   _closeAuthModal();
   document.getElementById('first-run-modal').style.display = 'none';
@@ -893,8 +894,8 @@ async function loadState(alreadyLoggedIn) {
   _updateRelativeTime();
   document.getElementById('check-now-btn').style.display = 'inline';
 
-  // Show welcome/auth modal if not logged in — only once per session
-  if (!alreadyLoggedIn && !window._authUser && !window._firstRunShown) {
+  // Show welcome/auth modal if not logged in — only once, persisted in localStorage
+  if (!alreadyLoggedIn && !window._authUser && !window._firstRunShown && !_lsGet('guest_dismissed', false)) {
     window._firstRunShown = true;
     document.getElementById('first-run-modal').style.display = 'flex';
   }
@@ -1754,7 +1755,8 @@ function getSelected() {
 
 function dismissFirstRun() {
   document.getElementById('first-run-modal').style.display = 'none';
-  window._firstRunShown = true;  // prevent re-showing on post-scan loadState() calls
+  window._firstRunShown = true;
+  _lsSet('guest_dismissed', true);  // persist across reloads for guests
 }
 
 function _openAboutModal() {
