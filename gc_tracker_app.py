@@ -4799,7 +4799,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #affiliate-footer{position:fixed;bottom:10px;left:12px;z-index:50;font-size:.72rem;display:flex;flex-direction:column;gap:1px}
 #affiliate-footer a{color:#f87171;text-decoration:none;transition:color .15s}
 #affiliate-footer a:hover{color:#fca5a5;text-decoration:underline}
-#affiliate-footer .aff-disc{color:#555;font-size:.62rem}
+#affiliate-footer .aff-disc{color:#888;font-size:.62rem}
 
 /* ── Desktop sidebar collapse ── */
 #sidebar-collapse-btn{display:none}
@@ -4809,13 +4809,13 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
   #sidebar-collapse-btn{
     display:flex;align-items:center;justify-content:center;
     position:absolute;right:0;top:50%;transform:translateY(-50%);
-    width:18px;height:48px;padding:0;
-    background:#1a1a1a;border:none;border-left:1px solid #2e2e2e;
-    border-radius:0 3px 3px 0;color:#555;cursor:pointer;font-size:.55rem;
+    width:20px;height:72px;padding:0;
+    background:#252525;border:none;border-left:1px solid #444;
+    border-radius:0 5px 5px 0;color:#aaa;cursor:pointer;font-size:.75rem;
     z-index:20;line-height:1;transition:color .15s,background .15s;
     writing-mode:vertical-rl
   }
-  #sidebar-collapse-btn:hover{color:#eee;background:#252525}
+  #sidebar-collapse-btn:hover{color:#fff;background:#333}
 }
 
 .left-footer{padding:12px;border-top:1px solid #2e2e2e;flex-shrink:0;background:#1a1a1a;position:relative;z-index:2}
