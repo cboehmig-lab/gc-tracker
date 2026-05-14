@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-14 · Current version: v2.10.18 · Status: deployed on Railway · Branch: main*
+*Last updated: 2026-05-14 · Current version: v2.10.18 · Status: deployed on Railway · Domain: gcgeartracker.com*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
 
@@ -15,11 +15,13 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 
 | Thing | Detail |
 |---|---|
+| Domain | `gcgeartracker.com` (primary) · `gctracker.animalsintrees.com` redirects here |
 | Platform | Railway (`cboehmig-lab/gc-tracker` GitHub repo) |
 | Auto-deploy | Every push to `main` triggers a Railway redeploy |
 | Branch protection | Force-pushes blocked on `main` (GitHub → Settings → Branches) |
 | Data dir | Set via `DATA_DIR` env var on Railway — **must be a persistent volume** |
 | Python entry | `gc_tracker_app.py` (single file, ~8000+ lines) |
+| Static assets | `static/gc.css`, `static/gc.js`, `static/cl.css`, `static/cl.js` |
 
 ### Critical env vars
 | Var | Purpose |
@@ -849,59 +851,65 @@ Navigate to `/?google_new=1` to re-trigger the modal at any time (e.g. to change
 
 ---
 
-## Planned Next Work: Static File Extraction (CSP Hardening)
+## ✅ Completed: Static File Extraction (v2.10.18, merged 2026-05-14)
 
-### Goal
-The current MDN HTTP Observatory score is **B (75/100)**. The two main deductions are `'unsafe-inline'` in `script-src` and `style-src` — required because all JS and CSS live inline in the single-file Flask app templates. Extracting them to static files and removing `'unsafe-inline'` would push the score toward A.
+All JS and CSS extracted from inline Python template strings into static files:
 
-### Scale
-- `CL_TEMPLATE`: ~108K chars, starts at char ~104K in `gc_tracker_app.py`
-- `HTML_TEMPLATE`: ~241K chars, starts at char ~213K in `gc_tracker_app.py`
-- Inline JS: ~174K chars across 15 `<script>` blocks
-- Inline CSS: ~61K chars across 8 `<style>` blocks
-- Inline event handlers (`onclick=`, `onchange=`, etc.): **123 occurrences** — must all be converted to `addEventListener` calls
-
-### Proposed file structure
 ```
 static/
-  gc.css       ← all CSS from HTML_TEMPLATE
-  gc.js        ← all JS from HTML_TEMPLATE
-  cl.css       ← all CSS from CL_TEMPLATE
-  cl.js        ← all JS from CL_TEMPLATE
+  gc.css    ← all CSS from HTML_TEMPLATE
+  gc.js     ← all JS from HTML_TEMPLATE
+  cl.css    ← all CSS from CL_TEMPLATE
+  cl.js     ← all JS from CL_TEMPLATE
 ```
-Flask serves these automatically at `/static/...` (no config needed).
 
-### Work breakdown
-1. **Create branch**: `static-files-refactor` off `main`
-2. **Extract CSS**: move all `<style>` blocks from both templates into `static/gc.css` and `static/cl.css`; replace with `<link rel="stylesheet" href="/static/gc.css">`
-3. **Extract JS**: move all `<script>` blocks (no `src=` attribute) into `static/gc.js` and `static/cl.js`; replace with `<script src="/static/gc.js"></script>` at bottom of `<body>`
-4. **Fix inline event handlers**: replace all 123 `onclick="..."`, `onchange="..."`, etc. with `data-*` attributes + `addEventListener` delegation — same pattern already used for accordion items
-5. **Update CSP**: remove `'unsafe-inline'` from `script-src` and `style-src` once static files are wired up
-6. **Update CSP `script-src`**: add `/static/` origin or use a nonce (static files are simpler)
-7. **Test** the full checklist (see below)
-8. **Open PR** from `static-files-refactor` → `main`; do NOT merge until tested on Railway staging
+- `script-src 'unsafe-inline'` **removed** from CSP — static JS files only
+- `style-src 'unsafe-inline'` **retained** — required for inline `style="..."` HTML attributes throughout both templates (hundreds of occurrences; not feasible to migrate)
+- All 124 inline `onclick="..."` event handlers replaced with `data-action` / `data-*` attributes + global event delegation
+- The Python/JS backslash escape gotcha is now permanently resolved — `.js` files are not processed by Python string handling
+- Affiliate link (Sovrn) removed — application was rejected; removed from HTML template, About modal, and CSS
+- "Download Excel" removed from the status bar
 
-### Python escape gotcha — SOLVED by this refactor
-Currently all JS inside triple-quoted Python strings suffers from `'\\b'` → `'\b'` (backspace, not word boundary), `'\\/'` → `'\/'`, etc. Moving JS to `.js` files eliminates this entirely — static files are not processed by Python string handling.
+---
 
-### Test checklist before merging
-- App starts locally (`python gc_tracker_app.py`)
-- Main page loads, no console errors
-- Guest mode works (scan, browse, filters, sort)
-- Username/password register + login + logout
-- Google Sign-In (if env vars available)
-- `/admin/login` and all admin pages
-- Scan flow + SSE progress stream
-- ZIP sort (needs `api.zippopotam.us` in CSP connect-src — already there)
-- `/cl` page — search, city sidebar, watch list
-- Excel download
-- Saved searches
-- Price drop filter, watch filter, want list
-- Mobile layout (resize to ≤820px)
-- MDN Observatory rescan — score should improve from B
+## 🎯 Planned Next Work: Domain Migration
+
+**Goal:** Move the primary domain from `gctracker.animalsintrees.com` to `gcgeartracker.com` (purchased 2026-05-14).
+
+### Steps
+
+1. **Point domain to Railway**
+   - In your domain registrar's DNS settings, add a `CNAME` record: `gcgeartracker.com` → Railway's generated domain (e.g. `web-production-xxxx.up.railway.app`)
+   - Or use Railway's custom domain feature: Railway dashboard → your service → Settings → Networking → Add custom domain → enter `gcgeartracker.com`
+   - Railway will provision an SSL cert automatically via Let's Encrypt (~5 min)
+
+2. **Set up redirect from old domain**
+   - Option A (simple): In Railway, also add `gctracker.animalsintrees.com` as a custom domain, then add a Flask route that redirects it:
+     ```python
+     @app.before_request
+     def _redirect_old_domain():
+         if request.host == 'gctracker.animalsintrees.com':
+             return redirect('https://gcgeartracker.com' + request.path, code=301)
+     ```
+   - Option B: Configure the redirect at the DNS/registrar level if they support URL forwarding
+
+3. **Update Google OAuth**
+   - Go to [Google Cloud Console](https://console.cloud.google.com) → APIs & Services → Credentials → your OAuth 2.0 Client
+   - Add `https://gcgeartracker.com` to **Authorized JavaScript origins**
+   - Add `https://gcgeartracker.com/api/auth/google/callback` to **Authorized redirect URIs**
+   - Keep the old `animalsintrees.com` entries in place during the transition
+
+4. **Update HANDOFF and README** — replace all references to `gctracker.animalsintrees.com` with `gcgeartracker.com`
 
 ### Key risks
-- **Broken JS references**: global functions called from Python-generated HTML (e.g. `onclick="_openAboutModal()"` on the About button in `.mobile-title-bar`) must be global on `window` — make sure nothing accidentally goes into a module scope
-- **CSS load order**: if any CSS depends on specificity order across former `<style>` blocks, concatenation order matters
-- **Railway static serving**: Flask's built-in static serving works fine for low traffic; for production consider Railway's CDN or a `Cache-Control` header
-- **Branch isolation**: do ALL work on `static-files-refactor`; never merge half-extracted state to `main`
+- **Google OAuth breaks** if you remove the old domain from Google Cloud Console before traffic fully migrates — keep both URIs registered for at least a few weeks
+- **Session cookies**: Flask sessions are domain-scoped. Users on the old domain who get 301'd to the new domain will need to log in again once (expected behavior)
+- **`RAILWAY_ENVIRONMENT`**: Railway's ProxyFix and `Secure` cookie flags are keyed off `RAILWAY_ENVIRONMENT` being set — this will work correctly on the new domain without any code changes
+
+---
+
+## 🎯 Future Ideas
+
+- **Capacitor mobile app**: wrap the existing web app in a Capacitor WebView shell for iOS/Android App Store distribution. No backend changes needed — Capacitor loads `gcgeartracker.com` in a native WebView. Requires Xcode (Mac) for iOS build, Android Studio for Android.
+- **Additional OAuth providers** (Facebook, Apple): same Authorization Code flow as Google — each needs `CLIENT_ID`/`CLIENT_SECRET` env vars + a new callback route + a `<provider>_id` column in `users`.
+- **Account settings page**: allow users to change username or link Google without the `/?google_new=1` URL trick.

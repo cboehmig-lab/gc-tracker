@@ -1,98 +1,98 @@
-# Guitar Center Used Inventory Tracker
+# GC Used Inventory Tracker
 
-Automatically checks the Guitar Center used inventory for **Austin** and **South Austin** stores and logs new items to an Excel file.
+A web app that tracks Guitar Center used gear inventory across all US stores, flags new listings since your last scan, and lets you search Craigslist for used gear — all in one place.
 
----
-
-## Quick Start
-
-### 1. Install dependencies (one time)
-
-```bash
-pip install requests beautifulsoup4 openpyxl
-```
-
-### 2. Run the tracker
-
-```bash
-python gc_inventory_tracker.py
-```
-
-- **First run**: logs all current inventory as your baseline (nothing goes into the Excel file yet — this just sets the starting point).
-- **Every run after that**: only items that are new since the last run get added to `gc_new_inventory.xlsx`.
+**Live site:** [gcgeartracker.com](https://gcgeartracker.com)
 
 ---
 
-## What you get
+## What It Does
 
-| File | Purpose |
-|------|---------|
-| `gc_new_inventory.xlsx` | Opens in Excel. New rows are added each run. |
-| `gc_state.json` | Tracks which items you've seen. Don't delete this. |
-
-### Excel columns
-
-| Column | Description |
-|--------|-------------|
-| Date Found | Timestamp of the run that spotted this item |
-| Item Name | Product description |
-| Price | Listed price |
-| Store | Austin or South Austin |
-| Link | Clickable URL to the GC listing |
+- Scans Guitar Center's used inventory across 298+ stores and flags items listed since your last visit
+- Filter by brand, condition, category, price drops, and more
+- Watch list and want list sync across devices when signed in
+- ZIP code sort — see gear closest to you first
+- Save custom filter combinations as named searches
+- Standalone `/cl` page for Craigslist used gear search across major US cities
+- Guest mode (no account required) or full accounts with Google Sign-In
 
 ---
 
-## Troubleshooting
+## Tech Stack
 
-### "Could not find product cards"
-
-Guitar Center occasionally updates their page markup. If this happens:
-
-1. Open `gc_debug_page.html` (saved automatically) in your browser.
-2. Right-click a product listing → **Inspect Element**.
-3. Note the CSS class on the outer `<div>` wrapping each product.
-4. Add that class to the `cards = (...)` block in `parse_products()`.
-
-### Website uses JavaScript rendering
-
-If you see an empty or login page in `gc_debug_page.html`, Guitar Center may be rendering products via JavaScript. In that case:
-
-```bash
-pip install playwright
-playwright install chromium
-```
-
-Then replace the `fetch_page()` function with:
-
-```python
-def fetch_page(start: int = 0) -> str:
-    from playwright.sync_api import sync_playwright
-    url = f"{BASE_URL}?{QUERY}&start={start}"
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(url, wait_until="networkidle")
-        html = page.content()
-        browser.close()
-    return html
-```
-
-### "HTTP error 403" or "Access denied"
-
-The site may be blocking automated requests. Try:
-1. Increase `REQUEST_DELAY` to `3.0` or higher.
-2. Run the script while your browser has a Guitar Center tab open.
+| Layer | Detail |
+|---|---|
+| Backend | Python / Flask (single entry point: `gc_tracker_app.py`) |
+| Database | SQLite (`gc_users.db`) — user accounts, watchlists, want lists, favorites |
+| Inventory data | Guitar Center Algolia search API |
+| Hosting | Railway (auto-deploys from `main` branch) |
+| Static assets | `static/gc.css`, `static/gc.js`, `static/cl.css`, `static/cl.js` |
 
 ---
 
-## Running automatically (optional)
+## Project Structure
 
-You can schedule this as a cron job on Mac to run daily:
+```
+gc_tracker_app.py        ← Main Flask app (~8000+ lines)
+requirements.txt         ← Python dependencies
+Procfile                 ← Railway process definition
+static/
+  gc.css                 ← Main app styles
+  gc.js                  ← Main app JavaScript
+  cl.css                 ← Craigslist page styles
+  cl.js                  ← Craigslist page JavaScript
+```
+
+All runtime data files (database, inventory cache, etc.) live on a Railway persistent volume set via `DATA_DIR` env var — they are not in this repo.
+
+---
+
+## Deployment (Railway)
+
+The app is deployed on Railway with auto-deploy on push to `main`.
+
+### Required Environment Variables
+
+| Var | Purpose |
+|---|---|
+| `SECRET_KEY` | Flask session secret — must be set or app won't start |
+| `APP_PASSWORD` | Admin pages password — must be set or admin access is denied |
+| `DATA_DIR` | Path to Railway persistent volume (data files live here) |
+| `ALGOLIA_APP_ID` | Guitar Center inventory API |
+| `ALGOLIA_API_KEY` | Guitar Center inventory API |
+| `GOOGLE_CLIENT_ID` | Google OAuth (optional — Google Sign-In disabled if unset) |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth (optional) |
+
+### To deploy a change
 
 ```bash
-# Open crontab editor
-crontab -e
-
-# Add this line to run at 8am daily (adjust path to your script):
-0 8 * * * /usr/bin/python3 /path/to/gc_inventory_tracker.py >> /path/to/gc_tracker.log 2>&1
+# Always push from Mac terminal (not the sandbox)
+git push https://cboehmig-lab@github.com/cboehmig-lab/gc-tracker.git main
 ```
+
+Railway picks up the push and redeploys automatically (~2 min).
+
+---
+
+## Admin Pages
+
+Navigate to `/admin/login` and enter `APP_PASSWORD`.
+
+| URL | Purpose |
+|---|---|
+| `/admin/users` | User account list |
+| `/admin/devices` | Device access log |
+| `/admin/clear-lock` | Release a stuck scan lock |
+| `/admin/listing-patterns` | Algolia timestamp analysis |
+| `/admin/build-coords` | Re-geocode store locations |
+
+---
+
+## Development Notes
+
+- **Python/JS template gotcha**: JS used to live inside Python triple-quoted strings. After the v2.10.18 static file refactor, all JS is in `static/gc.js` and `static/cl.js` — Python string escape issues no longer apply.
+- **CSP**: `script-src` does not include `'unsafe-inline'`; `style-src` does (required for inline `style="..."` HTML attributes throughout the templates).
+- **Git lock files**: if a commit fails with `cannot lock ref`, run `rm ~/Desktop/gc_tracker/.git/index.lock 2>/dev/null; true` and retry.
+- **Wrong GitHub account on push**: default remote may push as the wrong account. Use the explicit URL above.
+
+See `HANDOFF.md` for full architecture details, version history, and debugging guide.
