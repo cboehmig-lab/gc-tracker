@@ -1514,7 +1514,7 @@ def _track_device(response):
     response.headers.setdefault("Content-Security-Policy",
         "default-src 'none'; "
         "script-src 'self' https://accounts.google.com https://apis.google.com https://www.googletagmanager.com; "
-        "style-src 'self' https://accounts.google.com; "
+        "style-src 'self' 'unsafe-inline' https://accounts.google.com; "
         "img-src 'self' data: https://media.guitarcenter.com https://*.googleusercontent.com; "
         "connect-src 'self' https://accounts.google.com https://oauth2.googleapis.com https://www.googleapis.com https://api.zippopotam.us; "
         "frame-src https://accounts.google.com; "
