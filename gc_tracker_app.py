@@ -1510,7 +1510,7 @@ def _track_device(response):
         "script-src 'self' 'unsafe-inline' https://accounts.google.com https://apis.google.com; "
         "style-src 'self' 'unsafe-inline' https://accounts.google.com; "
         "img-src 'self' data: https://media.guitarcenter.com https://*.googleusercontent.com; "
-        "connect-src 'self' https://accounts.google.com https://oauth2.googleapis.com https://www.googleapis.com; "
+        "connect-src 'self' https://accounts.google.com https://oauth2.googleapis.com https://www.googleapis.com https://api.zippopotam.us; "
         "frame-src https://accounts.google.com; "
         "font-src 'self'; "
         "object-src 'none'; "
@@ -4796,6 +4796,27 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #dev-footer a:hover{color:#fff}
 #dev-footer svg{opacity:.7;transition:opacity .2s}
 #dev-footer a:hover svg{opacity:1}
+#affiliate-footer{position:fixed;bottom:10px;left:12px;z-index:50;font-size:.72rem;display:flex;flex-direction:column;gap:1px}
+#affiliate-footer a{color:#f87171;text-decoration:none;transition:color .15s}
+#affiliate-footer a:hover{color:#fca5a5;text-decoration:underline}
+#affiliate-footer .aff-disc{color:#555;font-size:.62rem}
+
+/* ── Desktop sidebar collapse ── */
+#sidebar-collapse-btn{display:none}
+@media(min-width:821px){
+  .left{overflow:hidden;transition:width .2s ease,min-width .2s ease}
+  .left.sidebar-collapsed{width:18px;min-width:18px}
+  #sidebar-collapse-btn{
+    display:flex;align-items:center;justify-content:center;
+    position:absolute;right:0;top:50%;transform:translateY(-50%);
+    width:18px;height:48px;padding:0;
+    background:#1a1a1a;border:none;border-left:1px solid #2e2e2e;
+    border-radius:0 3px 3px 0;color:#555;cursor:pointer;font-size:.55rem;
+    z-index:20;line-height:1;transition:color .15s,background .15s;
+    writing-mode:vertical-rl
+  }
+  #sidebar-collapse-btn:hover{color:#eee;background:#252525}
+}
 
 .left-footer{padding:12px;border-top:1px solid #2e2e2e;flex-shrink:0;background:#1a1a1a;position:relative;z-index:2}
 #sel-count{font-size:.78rem;color:#666;margin-bottom:8px}
@@ -5617,6 +5638,7 @@ tr.fav-row td:last-child{color:#4ade80}
 <div class="layout">
 
   <div class="left" id="gc-left">
+    <button id="sidebar-collapse-btn" onclick="toggleDesktopSidebar()" title="Collapse store panel">«</button>
     <div class="sheet-handle"></div>
     <button class="mobile-sidebar-toggle" id="gc-sidebar-toggle" onclick="toggleMobileSidebar('gc')">
       <span class="toggle-arrow" id="gc-toggle-arrow">▶</span>
@@ -6625,8 +6647,25 @@ async function _welcomeRegister() {
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
+function toggleDesktopSidebar() {
+  const left = document.getElementById('gc-left');
+  const btn  = document.getElementById('sidebar-collapse-btn');
+  if (!left || !btn) return;
+  const collapsed = left.classList.toggle('sidebar-collapsed');
+  btn.textContent = collapsed ? '»' : '«';
+  btn.title = collapsed ? 'Expand store panel' : 'Collapse store panel';
+  try { localStorage.setItem('gt_sidebar_collapsed', collapsed ? '1' : ''); } catch(e) {}
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('search').addEventListener('input', filterList);
+  // Desktop sidebar: restore collapsed state
+  if (localStorage.getItem('gt_sidebar_collapsed')) {
+    const left = document.getElementById('gc-left');
+    const btn  = document.getElementById('sidebar-collapse-btn');
+    if (left) { left.classList.add('sidebar-collapsed'); }
+    if (btn)  { btn.textContent = '»'; btn.title = 'Expand store panel'; }
+  }
   // Desktop thumbnail view: apply saved preference on load
   _applyDesktopThumbMode();
   // Mobile sort row
@@ -9593,11 +9632,10 @@ function clToggleWatch(id, name, url, price, location, btn) {
       <circle cx="18" cy="16" r="3" stroke="#aaa" stroke-width="1.5"/>
     </svg>
   </a>
-  <span style="margin-left:4px">·</span>
-  <span style="display:inline-flex;flex-direction:column;align-items:flex-start;gap:1px">
-    <a href="https://sovrn.co/1c6uect" target="_blank" rel="noopener sponsored" style="color:#f87171;text-decoration:none;font-size:.8rem">Guitar Center Affiliate Link</a>
-    <span style="font-size:.65rem;color:#555;line-height:1">I may earn a commission from purchases</span>
-  </span>
+</div>
+<div id="affiliate-footer">
+  <a href="https://sovrn.co/1c6uect" target="_blank" rel="noopener sponsored">Guitar Center Affiliate Link</a>
+  <span class="aff-disc">I may earn a commission from qualifying purchases</span>
 </div>
 
 <!-- ── About modal ── -->
