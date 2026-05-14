@@ -9593,6 +9593,11 @@ function clToggleWatch(id, name, url, price, location, btn) {
       <circle cx="18" cy="16" r="3" stroke="#aaa" stroke-width="1.5"/>
     </svg>
   </a>
+  <span style="margin-left:4px">·</span>
+  <span style="display:inline-flex;flex-direction:column;align-items:flex-start;gap:1px">
+    <a href="https://sovrn.co/1c6uect" target="_blank" rel="noopener sponsored" style="color:#f87171;text-decoration:none;font-size:.8rem">Guitar Center Affiliate Link</a>
+    <span style="font-size:.65rem;color:#555;line-height:1">I may earn a commission from purchases</span>
+  </span>
 </div>
 
 <!-- ── About modal ── -->
@@ -9623,6 +9628,10 @@ function clToggleWatch(id, name, url, price, location, btn) {
         <circle cx="18" cy="16" r="3" stroke="#aaa" stroke-width="1.5"/>
       </svg>
     </a>
+    <div style="margin-top:10px;text-align:center">
+      <a href="https://sovrn.co/1c6uect" target="_blank" rel="noopener sponsored" style="color:#f87171;font-size:.85rem">Guitar Center Affiliate Link</a>
+      <div style="font-size:.72rem;color:#666;margin-top:2px">I may earn a commission from qualifying purchases</div>
+    </div>
     <button class="about-close-btn" onclick="_closeAboutModal()">Close</button>
   </div>
 </div>
