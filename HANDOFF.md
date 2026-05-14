@@ -846,3 +846,62 @@ Navigate to `/?google_new=1` to re-trigger the modal at any time (e.g. to change
 | `DATA_DIR` | ✅ Points to persistent volume |
 | `GOOGLE_CLIENT_ID` | ✅ Set (from Google Cloud Console) |
 | `GOOGLE_CLIENT_SECRET` | ✅ Set (from Google Cloud Console) |
+
+---
+
+## Planned Next Work: Static File Extraction (CSP Hardening)
+
+### Goal
+The current MDN HTTP Observatory score is **B (75/100)**. The two main deductions are `'unsafe-inline'` in `script-src` and `style-src` — required because all JS and CSS live inline in the single-file Flask app templates. Extracting them to static files and removing `'unsafe-inline'` would push the score toward A.
+
+### Scale
+- `CL_TEMPLATE`: ~108K chars, starts at char ~104K in `gc_tracker_app.py`
+- `HTML_TEMPLATE`: ~241K chars, starts at char ~213K in `gc_tracker_app.py`
+- Inline JS: ~174K chars across 15 `<script>` blocks
+- Inline CSS: ~61K chars across 8 `<style>` blocks
+- Inline event handlers (`onclick=`, `onchange=`, etc.): **123 occurrences** — must all be converted to `addEventListener` calls
+
+### Proposed file structure
+```
+static/
+  gc.css       ← all CSS from HTML_TEMPLATE
+  gc.js        ← all JS from HTML_TEMPLATE
+  cl.css       ← all CSS from CL_TEMPLATE
+  cl.js        ← all JS from CL_TEMPLATE
+```
+Flask serves these automatically at `/static/...` (no config needed).
+
+### Work breakdown
+1. **Create branch**: `static-files-refactor` off `main`
+2. **Extract CSS**: move all `<style>` blocks from both templates into `static/gc.css` and `static/cl.css`; replace with `<link rel="stylesheet" href="/static/gc.css">`
+3. **Extract JS**: move all `<script>` blocks (no `src=` attribute) into `static/gc.js` and `static/cl.js`; replace with `<script src="/static/gc.js"></script>` at bottom of `<body>`
+4. **Fix inline event handlers**: replace all 123 `onclick="..."`, `onchange="..."`, etc. with `data-*` attributes + `addEventListener` delegation — same pattern already used for accordion items
+5. **Update CSP**: remove `'unsafe-inline'` from `script-src` and `style-src` once static files are wired up
+6. **Update CSP `script-src`**: add `/static/` origin or use a nonce (static files are simpler)
+7. **Test** the full checklist (see below)
+8. **Open PR** from `static-files-refactor` → `main`; do NOT merge until tested on Railway staging
+
+### Python escape gotcha — SOLVED by this refactor
+Currently all JS inside triple-quoted Python strings suffers from `'\\b'` → `'\b'` (backspace, not word boundary), `'\\/'` → `'\/'`, etc. Moving JS to `.js` files eliminates this entirely — static files are not processed by Python string handling.
+
+### Test checklist before merging
+- App starts locally (`python gc_tracker_app.py`)
+- Main page loads, no console errors
+- Guest mode works (scan, browse, filters, sort)
+- Username/password register + login + logout
+- Google Sign-In (if env vars available)
+- `/admin/login` and all admin pages
+- Scan flow + SSE progress stream
+- ZIP sort (needs `api.zippopotam.us` in CSP connect-src — already there)
+- `/cl` page — search, city sidebar, watch list
+- Excel download
+- Saved searches
+- Price drop filter, watch filter, want list
+- Mobile layout (resize to ≤820px)
+- MDN Observatory rescan — score should improve from B
+
+### Key risks
+- **Broken JS references**: global functions called from Python-generated HTML (e.g. `onclick="_openAboutModal()"` on the About button in `.mobile-title-bar`) must be global on `window` — make sure nothing accidentally goes into a module scope
+- **CSS load order**: if any CSS depends on specificity order across former `<style>` blocks, concatenation order matters
+- **Railway static serving**: Flask's built-in static serving works fine for low traffic; for production consider Railway's CDN or a `Cache-Control` header
+- **Branch isolation**: do ALL work on `static-files-refactor`; never merge half-extracted state to `main`
