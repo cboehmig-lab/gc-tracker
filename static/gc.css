@@ -104,10 +104,6 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #dev-footer a:hover{color:#fff}
 #dev-footer svg{opacity:.7;transition:opacity .2s}
 #dev-footer a:hover svg{opacity:1}
-#affiliate-footer{position:fixed;bottom:10px;left:12px;z-index:50;font-size:.72rem;display:flex;flex-direction:column;gap:1px}
-#affiliate-footer a{color:#f87171;text-decoration:none;transition:color .15s}
-#affiliate-footer a:hover{color:#fca5a5;text-decoration:underline}
-#affiliate-footer .aff-disc{color:#888;font-size:.62rem}
 
 /* ── Desktop sidebar collapse ── */
 #sidebar-collapse-btn{display:none}

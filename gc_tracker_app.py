@@ -4745,10 +4745,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </svg>
   </a>
 </div>
-<div id="affiliate-footer">
-  <a href="https://sovrn.co/1c6uect" target="_blank" rel="noopener sponsored">Guitar Center Affiliate Link</a>
-  <span class="aff-disc">I may earn a commission from qualifying purchases</span>
-</div>
 
 <!-- ── About modal ── -->
 <div id="about-modal">
@@ -4778,10 +4774,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <circle cx="18" cy="16" r="3" stroke="#aaa" stroke-width="1.5"/>
       </svg>
     </a>
-    <div style="margin-top:10px;text-align:center">
-      <a href="https://sovrn.co/1c6uect" target="_blank" rel="noopener sponsored" style="color:#f87171;font-size:.85rem">Guitar Center Affiliate Link</a>
-      <div style="font-size:.72rem;color:#666;margin-top:2px">I may earn a commission from qualifying purchases</div>
-    </div>
     <button class="about-close-btn">Close</button>
   </div>
 </div>
