@@ -7,6 +7,7 @@ Then open: http://localhost:5050
 """
 
 import html as _html
+import hmac
 import json, os, re, sys, time, threading, queue, webbrowser, random, sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -101,7 +102,7 @@ def _init_user_db():
             conn.execute("ALTER TABLE user_data ADD COLUMN saved_searches TEXT DEFAULT '[]'")
         except Exception:
             pass  # Column already exists
-        # Migration: add last_anchor column for existing databases (v2.10.17)
+        # Migration: add last_anchor column for existing databases (v2.10.18)
         # Per-user anchor for NEW detection — replaces the buggy global-cache anchor
         # which was contaminated by other users' scans.
         try:
@@ -1407,6 +1408,11 @@ _login_attempts: dict = {}
 _LOGIN_WINDOW   = 300   # seconds (5 min rolling window)
 _LOGIN_MAX      = 10    # max failed attempts before lockout
 
+# ── Scan rate-limiting (in-memory, per IP) ─────────────────────────────────────
+# Prevents unauthenticated bots from hammering /api/run and exhausting Algolia quota.
+_scan_last: dict = {}   # IP → last scan start timestamp
+_SCAN_COOLDOWN = 60     # seconds between scans per IP (logged-in users are exempt)
+
 def _check_login_rate(ip: str) -> bool:
     """Return True (allowed) or False (rate-limited). Only counts failed attempts."""
     now      = time.time()
@@ -1629,7 +1635,7 @@ def admin_login():
             status=429, content_type="text/html")
     pw = (request.form.get("pw") or "").strip()
     admin_pw = APP_PASSWORD
-    if not admin_pw or pw != admin_pw:
+    if not admin_pw or not hmac.compare_digest(pw, admin_pw):
         _record_login_failure(ip)
         print(f"[Admin] Failed login attempt from {ip}")
         return Response(
@@ -1692,9 +1698,13 @@ button:hover{background:#e00}
 def login():
     from flask import render_template_string
     if request.method == "POST":
-        if request.form.get("password") == APP_PASSWORD:
+        ip = _client_ip()
+        if not _check_login_rate(ip):
+            return render_template_string(LOGIN_PAGE, error=True)
+        if APP_PASSWORD and hmac.compare_digest((request.form.get("password") or "").strip(), APP_PASSWORD):
             session["logged_in"] = True
             return redirect("/")
+        _record_login_failure(ip)
         return render_template_string(LOGIN_PAGE, error=True)
     return render_template_string(LOGIN_PAGE, error=False)
 
@@ -3289,7 +3299,7 @@ def api_browse():
     elif sort_field == "price_drop_since":
         filtered.sort(key=lambda x: x.get("price_drop_since") or "", reverse=reverse)
     elif sort_field == "condition":
-        # Quality ranking (v2.10.17), not alphabetical: best → worst when ascending
+        # Quality ranking (v2.10.18), not alphabetical: best → worst when ascending
         # (Excellent→Great→Good→Fair→Poor), reverse on descending. Alphabetical
         # order had no meaning for users (and put Poor near the top because 'P' > 'G').
         # First click on the column = 'asc' (see JS line ~8389: non-date fields default
@@ -3476,13 +3486,22 @@ def api_run():
             return jsonify({"status": "joined", "run_id": joined_id, "run_time": joined_time})
         # Race: scan just finished between the lock check and subscribe — tell client to retry
         return jsonify({"error": "Scan just finished, please try again."}), 409
+    # Rate-limit unauthenticated scan triggers to prevent Algolia quota exhaustion.
+    # Logged-in users (user_id in session) are exempt — they have an account to hold accountable.
+    user_id = session.get("user_id")
+    if not user_id:
+        ip  = _client_ip()
+        now = time.time()
+        if now - _scan_last.get(ip, 0) < _SCAN_COOLDOWN:
+            _lock.release()
+            return jsonify({"error": "Please wait a moment before starting another scan."}), 429
+        _scan_last[ip] = now
     _stop_event.clear()
     data     = request.json
     selected = data.get("stores", [])
     baseline = data.get("baseline", False)
     # If user is logged in, use their server-stored last_run (synced across devices).
     # Otherwise fall back to the device's own localStorage value.
-    user_id = session.get("user_id")
     if user_id:
         _udata = _get_user_data(user_id)
         device_last_run    = _udata.get("last_run", "")
@@ -3510,6 +3529,9 @@ def api_run():
 @optional_user_context
 def api_set_cookies():
     """Import browser cookies into the HTTP session."""
+    denied = _require_admin_api()
+    if denied:
+        return denied
     cookie_string = request.json.get("cookies", "")
     count = 0
     for part in cookie_string.split(";"):
@@ -3527,6 +3549,9 @@ def api_set_cookies():
 @optional_user_context
 def api_export_data():
     """Export all data files as a JSON bundle for migration."""
+    denied = _require_admin_api()
+    if denied:
+        return denied
     bundle = {}
     for name, path in [
         ("state",     STATE_FILE),
@@ -3802,6 +3827,9 @@ def _cl_search(query: str, cities: list = None, title_only: bool = False) -> lis
 @optional_user_context
 def api_cl_parse_test():
     """Test the CL parser on a live page and show what it finds."""
+    denied = _require_admin_api()
+    if denied:
+        return denied
     city = request.args.get("city", "sfbay")
     q    = request.args.get("q", "telecaster")
     try:
@@ -3853,7 +3881,12 @@ def api_cl_parse_test():
 @optional_user_context
 def api_cl_debug():
     """Probe a CL city to find the right section code and response format."""
+    denied = _require_admin_api()
+    if denied:
+        return denied
     city = request.args.get("city", "sfbay")
+    if city not in _CL_CITIES:
+        return jsonify({"error": f"Unknown city '{city}'. Must be one of the supported CL cities."}), 400
     q    = request.args.get("q", "telecaster")
     out  = {}
     for section in ["msa", "msg", "mso", "mlt"]:
@@ -3888,6 +3921,9 @@ def api_cl_debug():
 @optional_user_context
 def api_debug_fetch():
     """Test Algolia API fetch for a store."""
+    denied = _require_admin_api()
+    if denied:
+        return denied
     store = request.args.get("store", "Austin")
     try:
         data     = fetch_page(store, 1)
@@ -3909,6 +3945,9 @@ def api_debug_fetch():
 @optional_user_context
 def api_debug_condition():
     """Inspect the saved listing HTML to find exactly where condition data lives."""
+    denied = _require_admin_api()
+    if denied:
+        return denied
     debug_file = DATA_DIR / "gc_debug_listing.html"
     if not debug_file.exists():
         return jsonify({"error": "No debug file yet — run the tracker once to save a listing page, then visit this URL."})
@@ -3984,6 +4023,9 @@ def api_debug_condition():
 @app.route("/api/debug-condition/reset", methods=["GET", "POST"])
 @optional_user_context
 def api_debug_condition_reset():
+    denied = _require_admin_api()
+    if denied:
+        return denied
     debug_file = DATA_DIR / "gc_debug_listing.html"
     if debug_file.exists():
         debug_file.unlink()
@@ -3993,6 +4035,9 @@ def api_debug_condition_reset():
 @optional_user_context
 def api_debug_condition_diag():
     """Read the condition extraction diagnostic log."""
+    denied = _require_admin_api()
+    if denied:
+        return denied
     diag_file = DATA_DIR / "gc_condition_diag.json"
     if not diag_file.exists():
         return jsonify({"error": "No diagnostic file yet — run the tracker first."})
@@ -4464,7 +4509,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
 
         # (cache-ID snapshot removed — NEW detection now uses startDate timestamps)
 
-        # ── Anchor date for NEW detection (per-user, v2.10.17) ───────────────────
+        # ── Anchor date for NEW detection (per-user, v2.10.18) ───────────────────
         # The anchor represents "the max date_listed of items this user was exposed
         # to at their last scan." Anything with date_listed > anchor is genuinely new
         # to THIS user. This handles Algolia's 6-12h indexing pipeline delay: items
@@ -4479,7 +4524,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         # contaminates the anchor with other users' activity — if Alice scanned five
         # minutes ago, Bob's threshold would jump to Alice's freshest item and Bob
         # would see 0 new items even when items are genuinely new to him. (Bug
-        # introduced in v2.10.11, fixed in v2.10.17.)
+        # introduced in v2.10.11, fixed in v2.10.18.)
         anchor_date = device_last_anchor or ""
 
         # ── Apply data from Algolia API to products, tracking price drops ────────
@@ -5544,7 +5589,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.17</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.18</span></h1>
   <button id="stop-btn" onclick="stopRun()">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -5634,7 +5679,7 @@ tr.fav-row td:last-child{color:#4ade80}
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.17</span></div>
+<div class="mobile-title-bar"><button class="mtb-about" onclick="_openAboutModal()">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.18</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -6772,7 +6817,7 @@ function _updateRelativeTime() {
 async function loadState(alreadyLoggedIn) {
   // Per-user timing from localStorage (may already be set from server merge)
   if (!window._lastRunISO) window._lastRunISO = _lsGet('last_run', null);
-  // Per-user anchor (v2.10.17): max date_listed this user has been exposed to.
+  // Per-user anchor (v2.10.18): max date_listed this user has been exposed to.
   // Used by the server's NEW detection threshold so other users' scan activity
   // can't push our threshold forward and silently hide genuinely-new items.
   if (!window._lastAnchorISO) window._lastAnchorISO = _lsGet('last_anchor', null);
@@ -8130,7 +8175,7 @@ async function startRun(payload, isBaseline) {
   document.getElementById('log').innerHTML = '';
 
   // Include this device's last-run time so the server gives per-device NEW results.
-  // Also include the per-user anchor (v2.10.17) — for guests this is the only way the
+  // Also include the per-user anchor (v2.10.18) — for guests this is the only way the
   // server learns it; for logged-in users the server reads its own DB and ignores this.
   const runPayload = Object.assign({}, payload, {
     device_last_run:    window._lastRunISO    || '',
@@ -8234,7 +8279,7 @@ function showResults(msg, isBaseline) {
 
   window._lastRunISO = msg.scan_time || new Date().toISOString();
   _lsSet('last_run', window._lastRunISO);
-  // Per-user anchor (v2.10.17): server sends the max date_listed in the
+  // Per-user anchor (v2.10.18): server sends the max date_listed in the
   // post-scan cache. Store locally so the next scan's threshold isn't
   // contaminated by other users' activity.
   if (msg.scan_anchor) {
@@ -8507,7 +8552,7 @@ function sortTable(colIdx) {
   window._sortCol = colIdx;
   window._localPage = 1;  // Reset pagination on sort
   const dir = window._sortDir;
-  // Quality ranking for condition column (v2.10.17) — best to worst, not alphabetical.
+  // Quality ranking for condition column (v2.10.18) — best to worst, not alphabetical.
   // Unknown conditions go to the end regardless of direction.
   const _condRank = {Excellent:0, Great:1, Good:2, Fair:3, Poor:4};
   window._tableData.sort((a, b) => {
@@ -9698,7 +9743,7 @@ CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 
 # ── Version ───────────────────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.17"
+APP_VERSION = "2.10.18"
 
 
 

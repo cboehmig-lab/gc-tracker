@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-13 · Current version: v2.10.17 · Status: deployed on Railway · Branch: main*
+*Last updated: 2026-05-14 · Current version: v2.10.18 · Status: deployed on Railway · Branch: main*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
 
@@ -60,7 +60,7 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 - `_init_user_db()` runs at startup and creates tables if missing; both `saved_searches` and `google_id` columns are added via `ALTER TABLE` for existing databases (migration-safe)
 - Sessions use Flask's signed cookie (`SECRET_KEY`) — permanent sessions survive browser restarts
 - Guest mode: users can dismiss the welcome modal and use the app without an account (data stays in localStorage only)
-- `login_required` decorator is a no-op pass-through — all pages publicly accessible; auth is opt-in
+- `optional_user_context` decorator (renamed from `login_required` in v2.10.17) is a no-op pass-through — all user-facing pages are publicly accessible; auth is opt-in
 
 ### Google OAuth (v2.10.13+)
 - Requires `authlib` pip package + `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` env vars
@@ -640,6 +640,59 @@ After any JS change, open the page, open the browser console, and confirm there 
 - "Only used for password recovery" claim removed from email field (no recovery flow exists) — replaced with honest copy
 - `Beatle909!` removed from HANDOFF.md; admin URL examples now show `<APP_PASSWORD>` placeholder
 - Forgot-password note added then removed — no automated reset exists, no contact mechanism wired up
+
+### v2.10.18 — Security hardening (auth guards, timing fix, rate limiting)
+
+**Admin guards on previously unprotected endpoints**:
+- `POST /api/set-cookies` — now requires admin session. Was publicly accessible; injecting cookies corrupted the shared `_http` session for all concurrent users/scans.
+- `GET /api/export-data` — now requires admin session. Was publicly accessible; returned full server state bundle.
+- `GET /api/cl-debug` — now requires admin session + validates `city` against `_CL_CITIES` allowlist (SSRF fix).
+- `GET /api/cl-parse-test` — now requires admin session.
+- `GET /api/debug-fetch` — now requires admin session.
+- `GET /api/debug-condition` — now requires admin session.
+- `GET/POST /api/debug-condition/reset` — now requires admin session.
+- `GET /api/debug-condition/diag` — now requires admin session.
+- None of these endpoints are called from the frontend UI — they are dev/debug tools only.
+
+**Timing oracle fix**:
+- Admin login: `pw != admin_pw` replaced with `not hmac.compare_digest(pw, admin_pw)`.
+- `/login` form: `password == APP_PASSWORD` replaced with `hmac.compare_digest(...)`.
+- `import hmac` added to top-level imports.
+
+**Rate limiting**:
+- `POST /login` form: now applies `_check_login_rate()` / `_record_login_failure()` (same logic as `/api/login` and `/admin/login`). Was previously unrate-limited.
+- `POST /api/run`: unauthenticated (guest) callers are now limited to one scan per 60 seconds per IP (`_SCAN_COOLDOWN = 60`, tracked in `_scan_last` dict). Logged-in users (`user_id` in session) are exempt from this limit.
+
+**No behavior change** for normal users — all user-facing endpoints work identically.
+
+---
+
+### v2.10.17 — Security hardening (CSP, cookies, OAuth, rate limiting, rename)
+
+**CSP / headers**:
+- `default-src` changed from `'self'` to `'none'` with explicit allowlists
+- `frame-ancestors 'none'` added (fixes Observatory clickjacking finding)
+- `connect-src` adds `https://api.zippopotam.us` (fixes ZIP sort "check connection" error broken since v2.10.16 CSP addition)
+- `Permissions-Policy`: `geolocation=()` (was `geolocation=(self)` — app doesn't use browser geolocation)
+
+**Cookies**:
+- `gt_device_id` cookie: `secure=True` when `RAILWAY_ENVIRONMENT` is set (fixes Observatory finding)
+
+**Google OAuth**:
+- OAuth callback now checks `email_verified` before auto-linking an existing account by email match
+
+**Rate limiting**:
+- `_client_ip()` helper added — uses `request.remote_addr` (normalized by ProxyFix) instead of raw `X-Forwarded-For`
+- Admin login rate limiting added (uses same `_check_login_rate()` / `_record_login_failure()` as `/api/login`)
+
+**Rename**:
+- `login_required` decorator renamed to `optional_user_context` (33 occurrences) to avoid false sense of protection
+
+**HANDOFF / docs**:
+- Admin URL examples using `?pw=` removed from HANDOFF.md
+- Version bumped, header and mobile title bar updated
+
+---
 
 ### v2.10.16 — Security hardening (credentials, admin auth, headers)
 
