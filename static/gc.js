@@ -889,13 +889,13 @@ async function loadState(alreadyLoggedIn) {
   const s = await r.json();
   _baseItemCount = s.total_items || 0;
   document.getElementById('s-known').textContent = _baseItemCount.toLocaleString();
-  if (s.excel_exists) document.getElementById('s-excel').style.display = 'inline';
 
   _updateRelativeTime();
   document.getElementById('check-now-btn').style.display = 'inline';
 
-  // Show welcome/auth modal if not logged in
-  if (!alreadyLoggedIn && !window._authUser) {
+  // Show welcome/auth modal if not logged in — only once per session
+  if (!alreadyLoggedIn && !window._authUser && !window._firstRunShown) {
+    window._firstRunShown = true;
     document.getElementById('first-run-modal').style.display = 'flex';
   }
 }
@@ -1080,10 +1080,10 @@ function renderList() {
     const id = 'cb_' + name.replace(/[^a-zA-Z0-9]/g,'_');
     const isChecked = _selectedStores.has(name);
     div.innerHTML =
-      `<button class="fav-btn ${isFav?'active':''}" title="${isFav?'Remove from':'Add to'} favorites"
-        onclick="toggleFav(event,'${name.replace(/'/g,"\\'")}',this)">★</button>` +
+      `<button class="fav-btn ${isFav?'active':''}" title="${isFav?'Remove from':'Add to'} favorites">★</button>` +
       `<input type="checkbox" id="${id}" value="${name}" ${isChecked ? 'checked' : ''}>` +
       `<label for="${id}">${name}${distSuffix}</label>`;
+    div.querySelector('.fav-btn').addEventListener('click', e => { e.stopPropagation(); toggleFav(e, name, e.currentTarget); });
     div.querySelector('input').addEventListener('change', e => {
       if (e.target.checked) _selectedStores.add(name);
       else _selectedStores.delete(name);
@@ -1374,7 +1374,7 @@ function _buildRowHtml(item) {
   const isSold = item.sold || false;
   const isWatched = (window._watchlist || {})[item.id || ''];
   const watchStar = item.id
-    ? `<button class="watch-btn ${isWatched ? 'active' : ''}" onclick="toggleWatch('${(item.id||'').replace(/'/g,"\\'")}',this)" title="${isWatched ? 'Remove from' : 'Add to'} watch list">${isWatched ? '★' : '☆'}</button>`
+    ? `<button class="watch-btn ${isWatched ? 'active' : ''}" data-action="toggleWatch" data-id="${(item.id||'').replace(/"/g,'&quot;')}" title="${isWatched ? 'Remove from' : 'Add to'} watch list">${isWatched ? '★' : '☆'}</button>`
     : '';
   const soldBadge = isSold ? ' <span class="tag-sold">Sold</span>' : '';
   const isNew = item.isNew || (item.id && window._newIds && window._newIds.has(item.id));
@@ -1414,8 +1414,8 @@ function _buildPaginatorHtml(currentPage, totalPages, totalCount, perPage) {
   html += `<span class="pg-info">${startItem.toLocaleString()}–${endItem.toLocaleString()} of ${totalCount.toLocaleString()}</span>`;
 
   // First / Prev
-  html += `<button class="pg-nav" onclick="goToPage(1)" ${currentPage === 1 ? 'disabled' : ''} title="First page">&#x276E;&#x276E;</button>`;
-  html += `<button class="pg-nav" onclick="goToPage(${currentPage - 1})" ${currentPage === 1 ? 'disabled' : ''} title="Previous page">&#x276E;</button>`;
+  html += `<button class="pg-nav" data-action="goToPage" data-page="1" ${currentPage === 1 ? 'disabled' : ''} title="First page">&#x276E;&#x276E;</button>`;
+  html += `<button class="pg-nav" data-action="goToPage" data-page="${currentPage - 1}" ${currentPage === 1 ? 'disabled' : ''} title="Previous page">&#x276E;</button>`;
 
   // Page numbers with smart ellipsis
   const pages = _getPaginatorRange(currentPage, totalPages);
@@ -1423,13 +1423,13 @@ function _buildPaginatorHtml(currentPage, totalPages, totalCount, perPage) {
     if (p === '...') {
       html += '<span class="pg-ellipsis">…</span>';
     } else {
-      html += `<button class="${p === currentPage ? 'pg-active' : ''}" onclick="goToPage(${p})">${p}</button>`;
+      html += `<button class="${p === currentPage ? 'pg-active' : ''}" data-action="goToPage" data-page="${p}">${p}</button>`;
     }
   });
 
   // Next / Last
-  html += `<button class="pg-nav" onclick="goToPage(${currentPage + 1})" ${currentPage === totalPages ? 'disabled' : ''} title="Next page">&#x276F;</button>`;
-  html += `<button class="pg-nav" onclick="goToPage(${totalPages})" ${currentPage === totalPages ? 'disabled' : ''} title="Last page">&#x276F;&#x276F;</button>`;
+  html += `<button class="pg-nav" data-action="goToPage" data-page="${currentPage + 1}" ${currentPage === totalPages ? 'disabled' : ''} title="Next page">&#x276F;</button>`;
+  html += `<button class="pg-nav" data-action="goToPage" data-page="${totalPages}" ${currentPage === totalPages ? 'disabled' : ''} title="Last page">&#x276F;&#x276F;</button>`;
 
   html += '</div>';
   return html;
@@ -1603,7 +1603,7 @@ function _renderMobileCards(items) {
     html += `<div class="card-price">${priceHtml}</div>`;
     html += `<div class="card-meta">${cond ? cond + ' · ' : ''}${store}${item.date ? ' · ' + esc(item.date) : ''}</div>`;
     html += `<div class="card-actions">`;
-    html += `<button class="card-watch-btn${watchCls}" onclick="toggleWatch('${item.id}',this)" data-id="${item.id}">${watched ? '★' : '☆'}</button>`;
+    html += `<button class="card-watch-btn${watchCls}" data-action="toggleWatch" data-id="${item.id}">${watched ? '★' : '☆'}</button>`;
     html += `</div>`;
     html += '</div>'; // card-body
 
@@ -1646,7 +1646,7 @@ function _renderMobileList(items) {
     if (subLine) html += `<span class="compact-row-sub">${subLine}</span>`;
     html += `</div>`;
     html += `<span class="compact-row-price">${priceHtml2}</span>`;
-    html += `<button class="compact-row-watch${watchCls}" onclick="toggleWatch('${item.id}',this)" data-id="${item.id}">${watched ? '★' : '☆'}</button>`;
+    html += `<button class="compact-row-watch${watchCls}" data-action="toggleWatch" data-id="${item.id}">${watched ? '★' : '☆'}</button>`;
     html += `</div>`;
   });
   html += '</div>';
@@ -1754,6 +1754,7 @@ function getSelected() {
 
 function dismissFirstRun() {
   document.getElementById('first-run-modal').style.display = 'none';
+  window._firstRunShown = true;  // prevent re-showing on post-scan loadState() calls
 }
 
 function _openAboutModal() {
@@ -2021,7 +2022,7 @@ function renderKeywordList() {
       const badge = isStrict ? `<span style="font-size:.65rem;font-weight:700;color:#fbbf24;padding-right:2px" title="Strict whole-word match">=</span>` : '';
       return `<span style="display:inline-flex;align-items:center;gap:3px;background:${chipBg};color:${chipColor};border:1px solid ${chipBorder};border-radius:14px;padding:4px 7px 4px 9px;font-size:.78rem;font-weight:600;white-space:nowrap">` +
         `${badge}${safe}` +
-        `<button onclick="removeKeywordAt(${i})" style="background:none;border:none;color:${chipColor};opacity:.6;font-size:.75rem;cursor:pointer;padding:0 0 0 4px;line-height:1" title="Remove" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.6">&#10005;</button>` +
+        `<button data-action="removeKeyword" data-idx="${i}" style="background:none;border:none;color:${chipColor};opacity:.6;font-size:.75rem;cursor:pointer;padding:0 0 0 4px;line-height:1" title="Remove">&#10005;</button>` +
         `</span>`;
     }).join('') +
   `</div>`;
@@ -2789,7 +2790,7 @@ function _accRenderBrand(query) {
     if (count === 0 && !(window._selectedBrands || []).includes(name)) return false;
     return !q || name.toLowerCase().includes(q);
   });
-  const _bClear = (window._selectedBrands || []).length > 0 ? '<div class="acc-clear-row" onclick="_clearBrandFilter()">✕ Clear Brand</div>' : '';
+  const _bClear = (window._selectedBrands || []).length > 0 ? '<div class="acc-clear-row" data-action="clearBrand">✕ Clear Brand</div>' : '';
   list.innerHTML = _bClear + (_accBuildItems(data, window._selectedBrands || []) || '<div class="acc-empty">No brands found</div>');
   list.onclick = function(e) { const el = e.target.closest('.acc-item'); if (el) _toggleBrand(el.dataset.val); };
   _accExpandHeight('brand');
@@ -2798,7 +2799,7 @@ function _accRenderBrand(query) {
 function _accRenderCond() {
   const list = document.getElementById('acc-cond-list');
   if (!list) return;
-  const _cClear = (window._selectedConds || []).length > 0 ? '<div class="acc-clear-row" onclick="_clearCondFilter()">✕ Clear Condition</div>' : '';
+  const _cClear = (window._selectedConds || []).length > 0 ? '<div class="acc-clear-row" data-action="clearCond">✕ Clear Condition</div>' : '';
   list.innerHTML = _cClear + (_accBuildItems(window._condList || [], window._selectedConds || []) || '<div class="acc-empty">No conditions</div>');
   list.onclick = function(e) { const el = e.target.closest('.acc-item'); if (el) _toggleCond(el.dataset.val); };
   _accExpandHeight('cond');
@@ -2807,7 +2808,7 @@ function _accRenderCond() {
 function _accRenderCat() {
   const list = document.getElementById('acc-cat-list');
   if (!list) return;
-  const _catClear = (window._selectedCats || []).length > 0 ? '<div class="acc-clear-row" onclick="_clearCatFilter()">✕ Clear Category</div>' : '';
+  const _catClear = (window._selectedCats || []).length > 0 ? '<div class="acc-clear-row" data-action="clearCat">✕ Clear Category</div>' : '';
   list.innerHTML = _catClear + (_accBuildItems(window._catList || [], window._selectedCats || []) || '<div class="acc-empty">No categories</div>');
   list.onclick = function(e) { const el = e.target.closest('.acc-item'); if (el) _toggleCat(el.dataset.val); };
   _accExpandHeight('cat');
@@ -2816,7 +2817,7 @@ function _accRenderCat() {
 function _accRenderSub() {
   const list = document.getElementById('acc-sub-list');
   if (!list) return;
-  const _sClear = (window._selectedSubs || []).length > 0 ? '<div class="acc-clear-row" onclick="_clearSubFilter()">✕ Clear Subcategory</div>' : '';
+  const _sClear = (window._selectedSubs || []).length > 0 ? '<div class="acc-clear-row" data-action="clearSub">✕ Clear Subcategory</div>' : '';
   list.innerHTML = _sClear + (_accBuildItems(window._subList || [], window._selectedSubs || []) || '<div class="acc-empty">No subcategories</div>');
   list.onclick = function(e) { const el = e.target.closest('.acc-item'); if (el) _toggleSub(el.dataset.val); };
   _accExpandHeight('sub');
@@ -2884,7 +2885,7 @@ function _renderBrandList() {
   const q = (document.getElementById('brand-dd-search').value || '').toLowerCase();
   const list = document.getElementById('brand-dd-list');
   let html = window._selectedBrands.length > 0
-    ? '<div class="dd-clear-row" onclick="_clearBrandFilter()">✕ Clear Brand</div>' : '';
+    ? '<div class="dd-clear-row" data-action="clearBrand">✕ Clear Brand</div>' : '';
   window._brandList.forEach(b => {
     if (q && !b.name.toLowerCase().includes(q)) return;
     const isActive = window._selectedBrands.includes(b.name);
@@ -2964,7 +2965,7 @@ function _closeCondOnOutside(e) {
 function _renderCondList() {
   const inner = document.getElementById('cond-dd-inner') || document.getElementById('cond-dd-panel');
   let html = window._selectedConds.length > 0
-    ? '<div class="dd-clear-row" onclick="_clearCondFilter()">✕ Clear Condition</div>' : '';
+    ? '<div class="dd-clear-row" data-action="clearCond">✕ Clear Condition</div>' : '';
   window._condList.forEach(c => {
     const name = (c && c.name !== undefined) ? c.name : c;
     const count = (c && c.count !== undefined) ? c.count : '';
@@ -3035,7 +3036,7 @@ function _closeCatOnOutside(e) { if (!e.target.closest('#cat-dropdown')) _closeC
 function _renderCatList() {
   const inner = document.getElementById('cat-dd-inner') || document.getElementById('cat-dd-panel');
   let html = window._selectedCats.length > 0
-    ? '<div class="dd-clear-row" onclick="_clearCatFilter()">✕ Clear Category</div>' : '';
+    ? '<div class="dd-clear-row" data-action="clearCat">✕ Clear Category</div>' : '';
   window._catList.forEach(c => {
     const name = (c && c.name !== undefined) ? c.name : c;
     const count = (c && c.count !== undefined) ? c.count : '';
@@ -3099,7 +3100,7 @@ function _closeSubOnOutside(e) { if (!e.target.closest('#subcat-dropdown')) _clo
 function _renderSubList() {
   const inner = document.getElementById('subcat-dd-inner') || document.getElementById('subcat-dd-panel');
   let html = window._selectedSubs.length > 0
-    ? '<div class="dd-clear-row" onclick="_clearSubFilter()">✕ Clear Subcategory</div>' : '';
+    ? '<div class="dd-clear-row" data-action="clearSub">✕ Clear Subcategory</div>' : '';
   window._subList.forEach(s => {
     const name = (s && s.name !== undefined) ? s.name : s;
     const count = (s && s.count !== undefined) ? s.count : '';
@@ -3284,7 +3285,6 @@ async function resetData() {
   _updateRelativeTime();
   document.getElementById('check-now-btn').style.display = 'inline'; // Show so user can kick off a new scan
   document.getElementById('s-known').textContent = '0';
-  document.getElementById('s-excel').style.display = 'none';
 }
 
 // ── Log helper ────────────────────────────────────────────────────────────────
@@ -3540,7 +3540,7 @@ function clRenderResults() {
     if (i === 1) { html += '<th style="width:62px;text-align:center">Want</th>'; return; }
     const sortIdx = i - 2;
     const cls = _clSortCol === sortIdx ? (_clSortDir === 1 ? 'sort-asc' : 'sort-desc') : '';
-    html += '<th class="' + cls + '" onclick="clSort(' + sortIdx + ')">' + l + '</th>';
+    html += '<th class="' + cls + '" data-action="clSort" data-idx="' + sortIdx + '">' + l + '</th>';
   });
   html += '</tr></thead><tbody>';
 
@@ -3593,7 +3593,7 @@ function clRenderResults() {
     const star  = isFav ? '<span class="cl-fav-star">★</span>' : '';
     const clId  = 'cl:' + (r.url || r.title || '');
     const isWatched = (window._clWatchlist || {})[clId];
-    const watchStar = `<button class="watch-btn ${isWatched ? 'active' : ''}" onclick="clToggleWatch('${clId.replace(/'/g,"\\'")}','${(r.title||'').replace(/'/g,"\\'")}','${(r.url||'').replace(/'/g,"\\'")}','${(r.price||'').replace(/'/g,"\\'")}','${(r.location||'').replace(/'/g,"\\'")}',this)" title="${isWatched ? 'Remove from' : 'Add to'} watch list">${isWatched ? '★' : '☆'}</button>`;
+    const watchStar = `<button class="watch-btn ${isWatched ? 'active' : ''}" data-action="clToggleWatch" data-id="${clId.replace(/"/g,'&quot;')}" data-title="${(r.title||'').replace(/"/g,'&quot;')}" data-url="${(r.url||'').replace(/"/g,'&quot;')}" data-price="${(r.price||'').replace(/"/g,'&quot;')}" data-location="${(r.location||'').replace(/"/g,'&quot;')}" title="${isWatched ? 'Remove from' : 'Add to'} watch list">${isWatched ? '★' : '☆'}</button>`;
     const wantMatch = _clMatchesWantList(r.title || '');
     const title = r.url
       ? star + '<a href="' + r.url + '" target="_blank" rel="noopener">' + (r.title || '(no title)') + '</a>'
@@ -3711,6 +3711,33 @@ function clToggleWatch(id, name, url, price, location, btn) {
 // ── Phase 3: inline event handler wiring ─────────────────────────────────────
 // All formerly-inline onclick/oninput/onkeydown attributes have been removed
 // from the HTML templates and are wired here via addEventListener.
+// ── Global delegated click handler for dynamically-rendered elements ─────────
+// Handles onclick that can't be inline due to CSP script-src without 'unsafe-inline'
+document.addEventListener('click', function(e) {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const action = el.dataset.action;
+  if (action === 'toggleWatch') {
+    toggleWatch(el.dataset.id, el);
+  } else if (action === 'goToPage') {
+    goToPage(parseInt(el.dataset.page, 10));
+  } else if (action === 'removeKeyword') {
+    removeKeywordAt(parseInt(el.dataset.idx, 10));
+  } else if (action === 'clearBrand') {
+    _clearBrandFilter();
+  } else if (action === 'clearCond') {
+    _clearCondFilter();
+  } else if (action === 'clearCat') {
+    _clearCatFilter();
+  } else if (action === 'clearSub') {
+    _clearSubFilter();
+  } else if (action === 'clSort') {
+    clSort(parseInt(el.dataset.idx, 10));
+  } else if (action === 'clToggleWatch') {
+    clToggleWatch(el.dataset.id, el.dataset.title, el.dataset.url, el.dataset.price, el.dataset.location, el);
+  }
+});
+
 document.addEventListener('DOMContentLoaded', function() {
 
   // Validate stores modal

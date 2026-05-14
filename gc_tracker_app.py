@@ -4488,7 +4488,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <span>Items: <b id="s-known">—</b></span>
       <span>Stores: <b id="s-stores">—</b></span>
       <!-- global-search moved into filter sheet -->
-      <span id="s-excel" style="display:none"><a style="color:#6ab0f5" href="/download/excel">Download Excel ↗</a></span>
       <span id="s-want-match" style="display:none;color:#4caf50;font-weight:600;font-size:.82rem;cursor:pointer" title="Click to view want list matches"></span>
     </div>
     <div id="log"><span class="log-dim">Ready</span></div>
