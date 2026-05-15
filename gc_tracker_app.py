@@ -124,6 +124,11 @@ def _init_user_db():
             """)
         except Exception:
             pass
+        # Migration: add deleted_at column for soft-delete / scheduled deletion (v2.11.2)
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN deleted_at TEXT")
+        except Exception:
+            pass  # Column already exists
         conn.commit()
 
 def _user_by_username(username: str) -> dict | None:
@@ -2250,10 +2255,23 @@ def admin_users():
     if denied:
         return denied
 
+    # Auto-purge any users whose scheduled deletion date has passed
+    from datetime import timezone as _tz
+    now_iso = datetime.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _user_db() as conn:
+        due = [r["id"] for r in conn.execute(
+            "SELECT id FROM users WHERE deleted_at IS NOT NULL AND deleted_at <= ?", (now_iso,)
+        ).fetchall()]
+        for uid_del in due:
+            conn.execute("DELETE FROM user_data WHERE user_id=?", (uid_del,))
+            conn.execute("DELETE FROM users WHERE id=?", (uid_del,))
+        if due:
+            conn.commit()
+
     # Load all users + their data
     with _user_db() as conn:
         users = [dict(r) for r in conn.execute(
-            "SELECT u.id, u.username, u.email, u.created_at, "
+            "SELECT u.id, u.username, u.email, u.created_at, u.deleted_at, "
             "       d.last_run, d.updated_at "
             "FROM users u "
             "LEFT JOIN user_data d ON d.user_id = u.id "
@@ -2283,29 +2301,62 @@ def admin_users():
             return dt.strftime("%b %d, %Y  %H:%M UTC")
         except: return ts
 
+    csrf_token = _admin_page_csrf()
     rows_html = ""
     for u in users:
-        last_scan  = _fmt(u.get("last_run"))
-        joined     = _fmt(u.get("created_at"))
-        uid        = int(u["id"])
+        last_scan   = _fmt(u.get("last_run"))
+        joined      = _fmt(u.get("created_at"))
+        uid         = int(u["id"])
+        uname_safe  = _html.escape(str(u["username"]))
+        deleted_at  = u.get("deleted_at") or ""
+        if deleted_at:
+            # Show delete-on date and Cancel / Delete Now options
+            try:
+                del_dt = datetime.strptime(deleted_at, "%Y-%m-%dT%H:%M:%SZ")
+                del_label = del_dt.strftime("Deletes %b %d")
+            except Exception:
+                del_label = "Scheduled"
+            action_html = (
+                f'<span style="color:#a05050;font-size:.75rem">{del_label}</span> '
+                f'<form method="POST" action="/admin/delete-user" style="display:inline">'
+                f'<input type="hidden" name="id" value="{uid}">'
+                f'<input type="hidden" name="_csrf" value="{csrf_token}">'
+                f'<input type="hidden" name="action" value="cancel">'
+                f'<button type="submit" style="background:#1a3a1a;color:#8fc88f;border:none;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:.75rem">Undo</button>'
+                f'</form> '
+                f'<form method="POST" action="/admin/delete-user" style="display:inline"'
+                f' onsubmit="return confirm(\'Permanently delete {uname_safe} right now?\')">'
+                f'<input type="hidden" name="id" value="{uid}">'
+                f'<input type="hidden" name="_csrf" value="{csrf_token}">'
+                f'<input type="hidden" name="action" value="now">'
+                f'<button type="submit" style="background:#600;color:#fcc;border:none;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:.75rem">Delete Now</button>'
+                f'</form>'
+            )
+            row_style = ' style="opacity:.6"'
+        else:
+            action_html = (
+                f'<form method="POST" action="/admin/delete-user" style="display:inline"'
+                f' onsubmit="return confirm(\'Schedule {uname_safe} for deletion in 10 days?\')">'
+                f'<input type="hidden" name="id" value="{uid}">'
+                f'<input type="hidden" name="_csrf" value="{csrf_token}">'
+                f'<input type="hidden" name="action" value="schedule">'
+                f'<button type="submit" style="background:#600;color:#fcc;border:none;border-radius:4px;padding:3px 10px;cursor:pointer;font-size:.78rem">✕ Delete</button>'
+                f'</form>'
+            )
+            row_style = ''
         rows_html += (
-            f'<tr>'
-            f'<td>{_html.escape(str(u["username"]))}</td>'
+            f'<tr{row_style}>'
+            f'<td>{uname_safe}</td>'
             f'<td>{_html.escape(str(joined))}</td>'
             f'<td>{_html.escape(str(last_scan))}</td>'
             f'<td style="text-align:center">{int(u["wl_count"])}</td>'
             f'<td style="text-align:center">{int(u["kw_count"])}</td>'
             f'<td style="text-align:center">{int(u["fav_count"])}</td>'
-            f'<td style="text-align:center">'
-            f'<button onclick="delUser({uid},\'{_html.escape(str(u["username"]))}\',this)" '
-            f'style="background:#600;color:#fcc;border:none;border-radius:4px;padding:3px 10px;cursor:pointer;font-size:.78rem">✕ Delete</button>'
-            f'</td>'
+            f'<td style="text-align:center">{action_html}</td>'
             f'</tr>'
         )
 
-    csrf_token = _admin_page_csrf()
     html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
-<meta name="csrf-token" content="{csrf_token}">
 <title>Users</title>
 <style>
 body{{background:#111;color:#ddd;font-family:monospace;padding:24px;font-size:.88rem}}
@@ -2327,32 +2378,6 @@ a{{color:#888;text-decoration:none;font-size:.78rem}}
 </tr>
 {rows_html if rows_html else '<tr><td colspan="7" style="color:#555;padding:20px">No accounts yet.</td></tr>'}
 </table>
-<script>
-var _csrf = '{csrf_token}';
-function delUser(id, name, btn) {{
-  if (!confirm('Delete user "' + name + '" and all their data? This cannot be undone.')) return;
-  btn.disabled = true; btn.textContent = '…';
-  fetch('/admin/delete-user', {{
-    method: 'POST',
-    headers: {{'Content-Type': 'application/json', 'X-CSRF-Token': _csrf}},
-    body: JSON.stringify({{id: id}})
-  }}).then(function(r) {{
-    return r.json();
-  }}).then(function(d) {{
-    if (d.ok) {{
-      btn.closest('tr').remove();
-    }} else {{
-      btn.disabled = false;
-      btn.textContent = '✕ Delete';
-      alert(d.error || 'Delete failed');
-    }}
-  }}).catch(function(e) {{
-    btn.disabled = false;
-    btn.textContent = '✕ Delete';
-    alert('Request failed: ' + e);
-  }});
-}}
-</script>
 </body></html>"""
 
     return Response(html, mimetype="text/html")
@@ -2360,27 +2385,35 @@ function delUser(id, name, btn) {{
 
 @app.route("/admin/delete-user", methods=["POST"])
 def admin_delete_user():
-    """Delete a user account (and their data) from the admin panel."""
+    """Schedule a user for deletion (soft-delete) or cancel/confirm from the admin panel."""
     denied = _require_admin()
     if denied:
         return denied
-    if not _check_admin_csrf_header():
-        return jsonify({"ok": False, "error": "Invalid CSRF token — reload the page and try again."}), 403
-    data = request.get_json(silent=True) or {}
-    user_id = data.get("id")
-    if not user_id:
-        return jsonify({"ok": False, "error": "Missing id"}), 400
+    # CSRF: validate form token
+    submitted = request.form.get("_csrf", "")
+    expected  = session.get("_admin_csrf") or ""
+    if not expected or not submitted or not hmac.compare_digest(submitted, expected):
+        return Response("Invalid CSRF token — go back and reload the page.", status=403, content_type="text/plain")
+    user_id = request.form.get("id", "")
+    action  = request.form.get("action", "schedule")  # "schedule" | "cancel" | "now"
     try:
         user_id = int(user_id)
     except (ValueError, TypeError):
-        return jsonify({"ok": False, "error": "Invalid id"}), 400
+        return Response("Invalid user id.", status=400, content_type="text/plain")
     user = _user_by_id(user_id)
     if not user:
-        return jsonify({"ok": False, "error": "User not found"}), 404
+        return Response("User not found.", status=404, content_type="text/plain")
     with _user_db() as conn:
-        conn.execute("DELETE FROM user_data WHERE user_id=?", (user_id,))
-        conn.execute("DELETE FROM users WHERE id=?", (user_id,))
-    return jsonify({"ok": True})
+        if action == "now":
+            conn.execute("DELETE FROM user_data WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+        elif action == "cancel":
+            conn.execute("UPDATE users SET deleted_at=NULL WHERE id=?", (user_id,))
+        else:  # schedule
+            from datetime import timezone
+            delete_on = (datetime.now(timezone.utc) + timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            conn.execute("UPDATE users SET deleted_at=? WHERE id=?", (delete_on, user_id))
+    return redirect("/admin/users")
 
 
 @app.route("/admin/clear-lock")
@@ -4630,6 +4663,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <!-- ── Persistent view-toggle chips (always visible, not in filter sheet) ── -->
       <div id="results-top-bar">
       <div class="quick-filter-bar">
+        <button id="view-toggle-chip"       class="qf-chip view-toggle-chip-btn" title="Switch list / card view">☰</button>
+        <button id="desktop-thumb-toggle" class="qf-chip" title="Show thumbnail grid view">⊞</button>
         <button id="price-drop-toggle" class="qf-chip">↓ Price Drops</button>
         <div id="ss-wrap" style="display:none;position:relative">
           <button id="saved-searches-btn" class="qf-chip" title="Your saved filter combinations">🔖 Saved Searches</button>
@@ -4637,8 +4672,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <button id="watchlist-toggle"      class="qf-chip">★ Watch List</button>
         <button id="want-list-toggle"         class="qf-chip">🎯 Want List</button>
         <a id="search-wl-link" class="qf-edit-link" style="display:none;font-size:.75rem">✏︎ Edit Want List</a>
-        <button id="view-toggle-chip"       class="qf-chip view-toggle-chip-btn" title="Switch list / card view">☰</button>
-        <button id="desktop-thumb-toggle" class="qf-chip" title="Show thumbnail grid view">⊞</button>
       </div>
       <div class="results-hdr">
         <span id="res-title" style="display:none"></span>
@@ -4930,7 +4963,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.11.2"
+APP_VERSION = "2.11.3"
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
