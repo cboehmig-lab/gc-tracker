@@ -1466,6 +1466,15 @@ def _log_device(device_id: str):
         with open(_DEVICE_LOG, "a") as f:
             f.write(entry + "\n")
 
+# ── Old-domain redirect (301 to gcgeartracker.com) ───────────────────────────
+@app.before_request
+def _redirect_old_domain():
+    """301-redirect any request arriving on the old hostname to gcgeartracker.com."""
+    host = request.host.split(":")[0].lower()
+    if host == "gctracker.animalsintrees.com":
+        target = "https://gcgeartracker.com" + request.full_path.rstrip("?")
+        return redirect(target, code=301)
+
 # ── CSRF protection (Origin check on state-changing requests) ─────────────────
 @app.before_request
 def _csrf_check():
