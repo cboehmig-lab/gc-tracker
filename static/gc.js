@@ -817,6 +817,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       _setAuthUI(meD.username, '');
       await _loadAndMergeServerData(meD.data || {});
       _maybeShowLinkBanner(!!meD.google_linked, !!meD.has_email, window._googleOauthEnabled);
+      if (meD.is_admin) {
+        const al = document.getElementById('admin-footer-link');
+        const as = document.getElementById('admin-footer-sep');
+        if (al) al.style.display = '';
+        if (as) as.style.display = '';
+      }
     }
   } catch(e) { /* not logged in or network error — continue with localStorage */ }
   await loadData();

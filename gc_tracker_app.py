@@ -62,6 +62,7 @@ STORE_COORDS_FILE = DATA_DIR / "gc_store_coords.json"
 PORT              = int(os.environ.get("PORT", 5050))
 APP_PASSWORD      = (os.environ.get("APP_PASSWORD") or "").strip()
 GA_MEASUREMENT_ID = os.environ.get("GA_MEASUREMENT_ID", "").strip()
+ADMIN_EMAIL       = (os.environ.get("ADMIN_EMAIL") or "").strip().lower()
 
 # ── User accounts (SQLite) ────────────────────────────────────────────────────
 USER_DB = DATA_DIR / "gc_users.db"
@@ -1628,6 +1629,7 @@ button{width:100%;padding:10px;background:#c00;color:#fff;border:none;
 <div class="box"><h2>Admin Login</h2>
 <form method="POST">
   {err}
+  <input type="hidden" name="_csrf" value="{csrf}">
   <input name="pw" type="password" placeholder="Admin password" autofocus>
   <button type="submit">Enter</button>
 </form>
@@ -1635,22 +1637,40 @@ button{width:100%;padding:10px;background:#c00;color:#fff;border:none;
 
 @app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
+    import secrets as _secrets
     if request.method == "GET":
-        return Response(_ADMIN_LOGIN_HTML.replace('{err}',""), content_type="text/html")
+        token = _secrets.token_hex(32)
+        session["_admin_csrf"] = token
+        html = _ADMIN_LOGIN_HTML.replace('{err}','').replace('{csrf}', token)
+        return Response(html, content_type="text/html")
+    # Validate CSRF token before anything else
+    submitted = request.form.get("_csrf") or ""
+    expected  = session.get("_admin_csrf") or ""
+    if not expected or not hmac.compare_digest(submitted, expected):
+        token = _secrets.token_hex(32)
+        session["_admin_csrf"] = token
+        return Response(
+            _ADMIN_LOGIN_HTML.replace('{err}','<div class="err">Invalid request. Please reload and try again.</div>').replace('{csrf}', token),
+            status=403, content_type="text/html")
     ip = _client_ip()
     if not _check_login_rate(ip):
+        token = _secrets.token_hex(32)
+        session["_admin_csrf"] = token
         return Response(
-            _ADMIN_LOGIN_HTML.replace('{err}','<div class="err">Too many attempts. Please wait a few minutes.</div>'),
+            _ADMIN_LOGIN_HTML.replace('{err}','<div class="err">Too many attempts. Please wait a few minutes.</div>').replace('{csrf}', token),
             status=429, content_type="text/html")
     pw = (request.form.get("pw") or "").strip()
     admin_pw = APP_PASSWORD
     if not admin_pw or not hmac.compare_digest(pw, admin_pw):
         _record_login_failure(ip)
         print(f"[Admin] Failed login attempt from {ip}")
+        token = _secrets.token_hex(32)
+        session["_admin_csrf"] = token
         return Response(
-            _ADMIN_LOGIN_HTML.replace('{err}','<div class="err">Incorrect password.</div>'),
+            _ADMIN_LOGIN_HTML.replace('{err}','<div class="err">Incorrect password.</div>').replace('{csrf}', token),
             status=401, content_type="text/html")
     session["admin"] = True
+    session.pop("_admin_csrf", None)
     next_url = request.args.get("next", "/admin/users")
     if not next_url.startswith("/") or next_url.startswith("//"):
         next_url = "/admin/users"
@@ -1662,8 +1682,18 @@ def admin_logout():
     return redirect("/admin/login")
 
 def _is_admin() -> bool:
-    """Check if the current request has admin access via session."""
-    return bool(session.get("admin")) and bool(APP_PASSWORD)
+    """Check if the current request has admin access.
+    Two paths: (1) explicit admin session from /admin/login password form,
+    (2) logged-in Google user whose email matches ADMIN_EMAIL env var."""
+    if bool(session.get("admin")) and bool(APP_PASSWORD):
+        return True
+    if ADMIN_EMAIL:
+        user_id = session.get("user_id")
+        if user_id:
+            user = _user_by_id(user_id)
+            if user and (user.get("email") or "").strip().lower() == ADMIN_EMAIL:
+                return True
+    return False
 
 def _require_admin():
     """Return a redirect Response to admin login if not authenticated, else None."""
@@ -1932,6 +1962,7 @@ def api_me():
         "username":     session.get("user_username", ""),
         "google_linked": bool(user and user.get("google_id")),
         "has_email":    bool(user and user.get("email")),
+        "is_admin":     _is_admin(),
         "data":         _get_user_data(user_id),
     })
 
@@ -2224,6 +2255,7 @@ def admin_users():
     for u in users:
         last_scan  = _fmt(u.get("last_run"))
         joined     = _fmt(u.get("created_at"))
+        uid        = int(u["id"])
         rows_html += (
             f'<tr>'
             f'<td>{_html.escape(str(u["username"]))}</td>'
@@ -2232,6 +2264,10 @@ def admin_users():
             f'<td style="text-align:center">{int(u["wl_count"])}</td>'
             f'<td style="text-align:center">{int(u["kw_count"])}</td>'
             f'<td style="text-align:center">{int(u["fav_count"])}</td>'
+            f'<td style="text-align:center">'
+            f'<button onclick="delUser({uid},\'{_html.escape(str(u["username"]))}\',this)" '
+            f'style="background:#600;color:#fcc;border:none;border-radius:4px;padding:3px 10px;cursor:pointer;font-size:.78rem">✕ Delete</button>'
+            f'</td>'
             f'</tr>'
         )
 
@@ -2241,7 +2277,7 @@ def admin_users():
 body{{background:#111;color:#ddd;font-family:monospace;padding:24px;font-size:.88rem}}
 h1{{color:#fff;margin-bottom:4px}}
 .sub{{color:#666;margin-bottom:24px;font-size:.82rem}}
-table{{border-collapse:collapse;width:100%;max-width:900px}}
+table{{border-collapse:collapse;width:100%;max-width:960px}}
 th{{background:#1e1e1e;padding:8px 14px;text-align:left;border-bottom:2px solid #333;color:#aaa}}
 td{{padding:7px 14px;border-bottom:1px solid #222}}
 tr:hover td{{background:#1a1a1a}}
@@ -2253,13 +2289,47 @@ a{{color:#888;text-decoration:none;font-size:.78rem}}
 <table>
 <tr>
   <th>Username</th><th>Joined</th><th>Last scan</th>
-  <th>Watch</th><th>Want</th><th>Favs</th>
+  <th>Watch</th><th>Want</th><th>Favs</th><th></th>
 </tr>
-{rows_html if rows_html else '<tr><td colspan="6" style="color:#555;padding:20px">No accounts yet.</td></tr>'}
+{rows_html if rows_html else '<tr><td colspan="7" style="color:#555;padding:20px">No accounts yet.</td></tr>'}
 </table>
+<script>
+function delUser(id, name, btn) {{
+  if (!confirm('Delete user "' + name + '" and all their data? This cannot be undone.')) return;
+  btn.disabled = true; btn.textContent = '…';
+  fetch('/admin/delete-user', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{id:id}})}})
+    .then(r => r.json()).then(d => {{
+      if (d.ok) btn.closest('tr').remove();
+      else {{ btn.disabled = false; btn.textContent = '✕ Delete'; alert(d.error || 'Error'); }}
+    }}).catch(() => {{ btn.disabled = false; btn.textContent = '✕ Delete'; }});
+}}
+</script>
 </body></html>"""
 
     return Response(html, mimetype="text/html")
+
+
+@app.route("/admin/delete-user", methods=["POST"])
+def admin_delete_user():
+    """Delete a user account (and their data) from the admin panel."""
+    denied = _require_admin()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    user_id = data.get("id")
+    if not user_id:
+        return jsonify({"ok": False, "error": "Missing id"}), 400
+    try:
+        user_id = int(user_id)
+    except (ValueError, TypeError):
+        return jsonify({"ok": False, "error": "Invalid id"}), 400
+    user = _user_by_id(user_id)
+    if not user:
+        return jsonify({"ok": False, "error": "User not found"}), 404
+    with _user_db() as conn:
+        conn.execute("DELETE FROM user_data WHERE user_id=?", (user_id,))
+        conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+    return jsonify({"ok": True})
 
 
 @app.route("/admin/clear-lock")
@@ -4758,6 +4828,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <circle cx="18" cy="16" r="3" stroke="#aaa" stroke-width="1.5"/>
     </svg>
   </a>
+  <span id="admin-footer-sep" style="display:none;margin-left:4px">·</span>
+  <a id="admin-footer-link" href="/admin/users" style="display:none;margin-left:0;color:#888;font-size:11px">Admin</a>
 </div>
 
 <!-- ── About modal ── -->
@@ -4814,7 +4886,7 @@ CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 
 # ── Version ───────────────────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.20"
+APP_VERSION = "2.10.21"
 
 
 
