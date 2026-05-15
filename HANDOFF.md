@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-15 · Current version: v2.10.20 · Status: deployed on Railway · Domain: gcgeartracker.com*
+*Last updated: 2026-05-15 · Current version: v2.11.0 · Status: deployed on Railway · Domain: gcgeartracker.com*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
 
@@ -32,6 +32,7 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 | `ALGOLIA_APP_ID` / `ALGOLIA_API_KEY` | GC inventory API |
 | `GOOGLE_CLIENT_ID` | Google OAuth — from Google Cloud Console credentials |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth — from Google Cloud Console credentials |
+| `ADMIN_EMAIL` | Email address that gets admin privileges when logged in via Google (e.g. `cboehmig@gmail.com`) |
 
 ### Git push auth
 - The default `origin` remote may authenticate as the wrong GitHub account (`charlesboehmig-boop` instead of `cboehmig-lab`)
@@ -839,6 +840,36 @@ Navigate to `/?google_new=1` to re-trigger the modal at any time (e.g. to change
 - Select All / Clear All merged into one toggle button (`#sel-all-btn`): shows "Select All" normally, switches to "Clear All" when all visible stores checked. Logic in `toggleSelectAll()`, label updated in `updateCount()`
 - Store list scroll resets to top (`el.scrollTop = 0`) in `renderList()` — fixes mid-list positioning after favorites toggle on mobile
 - `APP_PASSWORD` env var: code was reading `RESET_PASSWORD` but Railway var is named `APP_PASSWORD`. Fixed throughout. Top-level constant `APP_PASSWORD = (os.environ.get("APP_PASSWORD") or "").strip()` defined once at startup, used everywhere.
+
+---
+
+## Recent Changes (v2.10.20 → v2.11.0)
+
+### v2.11.0 — Admin overhaul + security hardening (minor version bump)
+
+This release collects several admin-panel improvements and security fixes added across v2.10.21–v2.10.22, and marks them as a minor version bump because they represent new user-facing functionality rather than pure bug fixes.
+
+**Admin login CSRF protection**
+- `_ADMIN_LOGIN_HTML` now includes a `{csrf}` hidden field
+- `admin_login()` generates a `session["_admin_csrf"]` token on GET, validates it with `hmac.compare_digest` on POST, rotates it on every response, and pops it on successful login
+
+**Google-based admin access (`ADMIN_EMAIL` env var)**
+- New `ADMIN_EMAIL` env var (set to `cboehmig@gmail.com` on Railway)
+- `_is_admin()` now grants admin privileges to any logged-in user whose account email matches `ADMIN_EMAIL` — no separate password session required
+
+**Delete users on admin panel**
+- `POST /admin/delete-user` endpoint: removes the user's rows from both `users` and `user_data` tables
+- Admin users page now shows a ✕ Delete button per row with a confirmation dialog
+- CSRF-protected: the admin users page embeds a `<meta name="csrf-token">` tag; the delete JS reads it and sends it as an `X-CSRF-Token` header; the endpoint validates with `_check_admin_csrf_header()` before touching the DB
+
+**Admin footer link (visible to admins only)**
+- A small "Admin" link added to the `#dev-footer` div, hidden (`display:none`) by default
+- On page load, `/api/me` now returns `is_admin: true/false`; if true, JS reveals the link and a separator dot
+- Regular users never see it; server-side protection is unchanged
+
+**New helpers added to `gc_tracker_app.py`**
+- `_admin_page_csrf()` — generates/reuses a session CSRF token for post-login admin pages
+- `_check_admin_csrf_header()` — timing-safe validation of the `X-CSRF-Token` request header
 
 ---
 
