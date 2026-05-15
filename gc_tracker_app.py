@@ -2328,15 +2328,29 @@ a{{color:#888;text-decoration:none;font-size:.78rem}}
 {rows_html if rows_html else '<tr><td colspan="7" style="color:#555;padding:20px">No accounts yet.</td></tr>'}
 </table>
 <script>
+var _csrf = '{csrf_token}';
 function delUser(id, name, btn) {{
   if (!confirm('Delete user "' + name + '" and all their data? This cannot be undone.')) return;
   btn.disabled = true; btn.textContent = '…';
-  const csrf = (document.querySelector('meta[name="csrf-token"]') || {{}}).content || '';
-  fetch('/admin/delete-user', {{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':csrf}},body:JSON.stringify({{id:id}})}})
-    .then(r => r.json()).then(d => {{
-      if (d.ok) btn.closest('tr').remove();
-      else {{ btn.disabled = false; btn.textContent = '✕ Delete'; alert(d.error || 'Error'); }}
-    }}).catch(() => {{ btn.disabled = false; btn.textContent = '✕ Delete'; }});
+  fetch('/admin/delete-user', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json', 'X-CSRF-Token': _csrf}},
+    body: JSON.stringify({{id: id}})
+  }}).then(function(r) {{
+    return r.json();
+  }}).then(function(d) {{
+    if (d.ok) {{
+      btn.closest('tr').remove();
+    }} else {{
+      btn.disabled = false;
+      btn.textContent = '✕ Delete';
+      alert(d.error || 'Delete failed');
+    }}
+  }}).catch(function(e) {{
+    btn.disabled = false;
+    btn.textContent = '✕ Delete';
+    alert('Request failed: ' + e);
+  }});
 }}
 </script>
 </body></html>"""
@@ -4481,7 +4495,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.20</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6"><!-- __VER__ --></span></h1>
   <button id="stop-btn">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -4571,7 +4585,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.20</span></div>
+<div class="mobile-title-bar"><button class="mtb-about">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver"><!-- __VER__ --></span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -4916,14 +4930,10 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
+APP_VERSION = "2.11.2"
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
+HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
-
-# ── Launch ────────────────────────────────────────────────────────────────────
-
-# ── Version ───────────────────────────────────────────────────────────────────
-
-APP_VERSION = "2.11.1"
 
 
 
