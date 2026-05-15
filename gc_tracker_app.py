@@ -1636,11 +1636,11 @@ button{width:100%;padding:10px;background:#c00;color:#fff;border:none;
 @app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
     if request.method == "GET":
-        return Response(_ADMIN_LOGIN_HTML.format(err=""), content_type="text/html")
+        return Response(_ADMIN_LOGIN_HTML.replace('{err}',""), content_type="text/html")
     ip = _client_ip()
     if not _check_login_rate(ip):
         return Response(
-            _ADMIN_LOGIN_HTML.format(err='<div class="err">Too many attempts. Please wait a few minutes.</div>'),
+            _ADMIN_LOGIN_HTML.replace('{err}','<div class="err">Too many attempts. Please wait a few minutes.</div>'),
             status=429, content_type="text/html")
     pw = (request.form.get("pw") or "").strip()
     admin_pw = APP_PASSWORD
@@ -1648,7 +1648,7 @@ def admin_login():
         _record_login_failure(ip)
         print(f"[Admin] Failed login attempt from {ip}")
         return Response(
-            _ADMIN_LOGIN_HTML.format(err='<div class="err">Incorrect password.</div>'),
+            _ADMIN_LOGIN_HTML.replace('{err}','<div class="err">Incorrect password.</div>'),
             status=401, content_type="text/html")
     session["admin"] = True
     next_url = request.args.get("next", "/admin/users")
