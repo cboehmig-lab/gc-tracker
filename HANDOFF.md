@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-15 · Current version: v2.11.0 · Status: deployed on Railway · Domain: gcgeartracker.com*
+*Last updated: 2026-05-15 · Current version: v2.11.4 · Status: deployed on Railway · Domain: gcgeartracker.com*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
 
@@ -121,17 +121,36 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 
 ## Admin Pages
 
-Admin access uses session-based auth — navigate to `/admin/login` and enter the `APP_PASSWORD`.
+**Normal access**: log in to the main app via Google (must be the `ADMIN_EMAIL` account) → small "Admin" link appears in the page footer → click through to `/admin/users`.
+
+**Break-glass**: navigate directly to `/admin/login` and enter `APP_PASSWORD` if Google auth is unavailable.
+
 The old `?pw=<APP_PASSWORD>` query-string pattern was removed in v2.10.16. **Do not reintroduce it.**
+
+All admin pages share a top nav bar (`_admin_nav(current)` helper) with links to all pages and a ← App return link.
 
 | URL | Purpose |
 |---|---|
-| `/admin/login` | Admin login (session-based; do NOT use `?pw=`) |
-| `/admin/users` | User account list |
-| `/admin/devices` | Device access log |
+| `/admin/login` | Password-based admin login (break-glass only — normal path is Google + footer link) |
+| `/admin/users` | User account list with soft-delete (10-day scheduled deletion, Undo, Delete Now) |
+| `/admin/devices` | Device access log (4411+ unique devices, platform breakdown) |
 | `/admin/clear-lock` | Force-release stuck scan lock |
 | `/admin/listing-patterns` | GC listing timestamp analysis |
 | `/admin/build-coords` | Re-geocode store locations |
+| `/admin/validate-stores` | Validate and clean up store list |
+
+### Soft-delete flow (v2.11.3+)
+- ✕ Delete button → marks user with `deleted_at = now + 10 days` (row dims, shows "Deletes May 25")
+- **Undo** → clears `deleted_at`, restores user to normal
+- **Delete Now** → immediately removes user from `users` and `user_data` tables
+- On every `/admin/users` page load, any user whose `deleted_at` is in the past is auto-purged
+- `deleted_at TEXT` column added via migration in `_init_user_db()`
+
+### Admin CSRF protection
+- Admin login form: CSRF token in `session["_admin_csrf"]`, validated with `hmac.compare_digest`
+- Admin POST actions (delete-user): CSRF token embedded as hidden `<input name="_csrf">` in each form, validated in the endpoint via `hmac.compare_digest`
+- `_admin_page_csrf()` — generates/reuses session token for post-login pages
+- `_check_admin_csrf_header()` — validates `X-CSRF-Token` header (used if switching back to JSON endpoints)
 
 ---
 
@@ -298,11 +317,10 @@ The CL panel stub still exists in the main `HTML_TEMPLATE` as `<div id="cl-panel
 
 **Semantic versioning: `MAJOR.MINOR.PATCH`**
 
-When bumping version, update ALL FOUR of these:
+When bumping version, update ONE thing only:
 1. `APP_VERSION = "x.y.z"` near the bottom of `gc_tracker_app.py`
-2. `<h1>GC Used Inventory Tracker <span ...>vx.y.z</span></h1>` in the HTML
-3. `<span class="mtb-ver">vx.y.z</span>` in the `.mobile-title-bar` div
-4. `CL_TEMPLATE` doesn't have a version display — skip
+
+The desktop `<h1>` span and mobile `.mtb-ver` span both use `<!-- __VER__ -->` placeholders that are replaced at startup via `HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')`. No manual HTML edits needed. `CL_TEMPLATE` has no version display.
 
 ---
 
@@ -840,6 +858,39 @@ Navigate to `/?google_new=1` to re-trigger the modal at any time (e.g. to change
 - Select All / Clear All merged into one toggle button (`#sel-all-btn`): shows "Select All" normally, switches to "Clear All" when all visible stores checked. Logic in `toggleSelectAll()`, label updated in `updateCount()`
 - Store list scroll resets to top (`el.scrollTop = 0`) in `renderList()` — fixes mid-list positioning after favorites toggle on mobile
 - `APP_PASSWORD` env var: code was reading `RESET_PASSWORD` but Railway var is named `APP_PASSWORD`. Fixed throughout. Top-level constant `APP_PASSWORD = (os.environ.get("APP_PASSWORD") or "").strip()` defined once at startup, used everywhere.
+
+---
+
+## Recent Changes (v2.11.0 → v2.11.4)
+
+### v2.11.4 — Admin nav bar on all admin pages
+- `_admin_nav(current)` helper renders a shared top nav bar across all admin pages
+- Links: ← App | 👤 Users · 📡 Devices · 📊 Listing Patterns · 🗺 Build Coords · ✓ Validate Stores
+- Current page highlighted white; others are dimmed links
+- Injected into devices, users, listing-patterns pages and `_admin_task_page()` shared template
+- `_admin_task_page()` accepts new `nav_current` param; build-coords and validate-stores pass their own paths
+
+### v2.11.3 — Fix delete button; soft-delete with 10-day window; list/grid button moved
+- **Delete button fix**: replaced JS fetch approach (silently failing) with plain HTML form POST per row — no JS required, no CSRF header complexity, 100% reliable
+- **Soft-delete**: ✕ Delete schedules deletion 10 days out; row dims and shows "Deletes [date]" with Undo + Delete Now buttons; auto-purge of past-due accounts on page load
+- **`deleted_at TEXT` column**: added to `users` table via migration in `_init_user_db()`
+- **List/grid toggle buttons** moved to first position in the quick-filter chip bar (before ↓ Price Drops) on both desktop and mobile
+
+### v2.11.2 — Version display automated; delete button rewrite attempt
+- `HTML_TEMPLATE` now uses `<!-- __VER__ -->` placeholder (replaced at startup via `.replace()`) — `APP_VERSION` is the single source of truth; no more manual HTML edits when bumping version
+- `deleted_at` DB migration added
+
+### v2.11.1 — Remove admin password login from normal flow
+- `_require_admin()` now redirects unauthenticated users to `/` (main app) and shows a clean 403 to logged-in non-admins
+- `/admin/login` password page still exists as break-glass but is no longer reached automatically
+- Normal admin flow: log in with Google → admin footer link appears → click through
+
+### v2.11.0 — Admin overhaul (minor version bump)
+- CSRF token on admin login form
+- `ADMIN_EMAIL` env var: any Google-logged-in user matching this email gets admin privileges via `_is_admin()`
+- `POST /admin/delete-user` endpoint (at the time: JSON-based; replaced in v2.11.3 with form POST)
+- `/api/me` now returns `is_admin: bool`
+- Admin footer link (`#admin-footer-link`) in `#dev-footer`: hidden by default, revealed by JS if `/api/me` returns `is_admin: true`
 
 ---
 
