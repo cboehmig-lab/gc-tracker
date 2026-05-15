@@ -1516,7 +1516,7 @@ def _track_device(response):
         "script-src 'self' https://accounts.google.com https://apis.google.com https://www.googletagmanager.com; "
         "style-src 'self' 'unsafe-inline' https://accounts.google.com; "
         "img-src 'self' data: https://media.guitarcenter.com https://*.googleusercontent.com; "
-        "connect-src 'self' https://accounts.google.com https://oauth2.googleapis.com https://www.googleapis.com https://api.zippopotam.us; "
+        "connect-src 'self' https://accounts.google.com https://oauth2.googleapis.com https://www.googleapis.com https://api.zippopotam.us https://www.google-analytics.com; "
         "frame-src https://accounts.google.com; "
         "font-src 'self'; "
         "object-src 'none'; "
@@ -4210,10 +4210,15 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         # be treated as already-seen even if Algolia surfaces it freshly (the
         # indexing-delay protection that anchor_date was designed for).
         new_anchor = ""
-        if _cat_cache:
-            _post_dates = [v.get("date_listed", "") for v in _cat_cache.values() if v.get("date_listed")]
-            if _post_dates:
-                new_anchor = max(_post_dates)
+        if all_products:
+            # Use THIS scan's products only — not _cat_cache, which is global and
+            # shared across all users. Using _cat_cache re-introduces the contamination
+            # bug: another user's scan populates it with fresher items, inflating this
+            # user's anchor and causing 0-new on their next scan.
+            # (v2.10.18 fixed the threshold for the current scan but not persistence.)
+            _scan_dates = [p.get("date_listed", "") for p in all_products if p.get("date_listed")]
+            if _scan_dates:
+                new_anchor = max(_scan_dates)
         # Don't let the anchor regress: if the global cache somehow lost dates,
         # keep the threshold we just used (anchor_date or prev_scan_time).
         new_anchor = max(new_anchor, anchor_date or "", prev_scan_time or "")
