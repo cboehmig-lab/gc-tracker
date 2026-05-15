@@ -3171,10 +3171,24 @@ let _kwSearchTimer = null;
 function _globalKeywordSearch() {
   // Debounce — wait 400ms after user stops typing
   clearTimeout(_kwSearchTimer);
-  const q = (document.getElementById('res-search').value || '').trim();
+  // Typing in the search box exits want-list / global-search mode.
+  // Without this, _globalSearchActive=true causes _fetchBrowsePage to override
+  // filter_q with _globalSearchQuery='' and the typed text is silently ignored.
+  if (_globalSearchActive || _wantListSearchActive) {
+    _globalSearchActive = false;
+    _wantListSearchActive = false;
+    _globalSearchQuery = '';
+    _resetWantListLink();
+  }
   _kwSearchTimer = setTimeout(function() {
     _browseMode = 'server';
     _srvPage = 1;
+    // Force-clear the loading guard so a user-initiated search is never silently
+    // dropped by an in-flight background browse (page load, filter change, etc.).
+    // Every other deliberate action (clearFilters, clearGlobalSearch, scan done)
+    // already does this — _globalKeywordSearch was the only exception.
+    _srvLoading = false;
+    _srvStores = getSelected();
     _fetchBrowsePage(1);
   }, 400);
 }
@@ -3231,6 +3245,13 @@ function clearResSearch() {
   window._strictSearch = false;
   const _strictBtn = document.getElementById('strict-search-btn');
   if (_strictBtn) { _strictBtn.textContent = '≈'; _strictBtn.classList.remove('active'); _strictBtn.title = 'Whole-word search (default) — click for ≈ fuzzy (contains) mode'; }
+  // Clear want-list / global search mode so the ✕ button fully exits those states
+  // (without this, _globalSearchActive stays true and re-fetches keep returning
+  // want-list-filtered results even though the chip looks inactive)
+  _globalSearchActive = false;
+  _wantListSearchActive = false;
+  _globalSearchQuery = '';
+  _resetWantListLink();
   _srvLoading = false;
   _srvPage = 1;
   _fetchBrowsePage(1);
