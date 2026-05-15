@@ -1696,10 +1696,25 @@ def _is_admin() -> bool:
     return False
 
 def _require_admin():
-    """Return a redirect Response to admin login if not authenticated, else None."""
+    """Return a 403 or redirect if not admin, else None.
+    Normal path: log in via Google on the main app → admin footer link appears.
+    Break-glass: /admin/login still exists for password-based access if Google auth breaks."""
     if _is_admin():
         return None
-    return redirect(f"/admin/login?next={request.path}")
+    # If not logged in at all, send to main app login
+    if not session.get("user_id"):
+        return redirect("/")
+    # Logged in but not admin — show a plain 403
+    return Response(
+        "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>403</title>"
+        "<style>body{background:#111;color:#888;font-family:monospace;display:flex;"
+        "align-items:center;justify-content:center;height:100vh;margin:0}"
+        ".box{text-align:center}.box h1{color:#fff;font-size:1.4rem;margin-bottom:8px}"
+        ".box a{color:#666;font-size:.85rem}</style></head>"
+        "<body><div class='box'><h1>403 — Not authorized</h1>"
+        "<a href='/'>← Back to app</a></div></body></html>",
+        status=403, content_type="text/html"
+    )
 
 def _require_admin_api():
     """For POST API endpoints — return a JSON 401 if not admin, else None."""
@@ -4908,7 +4923,7 @@ CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 
 # ── Version ───────────────────────────────────────────────────────────────────
 
-APP_VERSION = "2.11.0"
+APP_VERSION = "2.11.1"
 
 
 
