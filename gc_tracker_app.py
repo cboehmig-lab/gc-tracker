@@ -2072,6 +2072,33 @@ def api_setup_google_account():
     session["user_username"] = new_username
     return jsonify({"status": "ok", "username": new_username, "data": _get_user_data(user_id)})
 
+_ADMIN_NAV_LINKS = [
+    ("/admin/users",            "👤 Users"),
+    ("/admin/devices",          "📡 Devices"),
+    ("/admin/listing-patterns", "📊 Listing Patterns"),
+    ("/admin/build-coords",     "🗺 Build Coords"),
+    ("/admin/validate-stores",  "✓ Validate Stores"),
+]
+
+def _admin_nav(current: str) -> str:
+    """Render a top nav bar for admin pages. `current` is the active path."""
+    links = []
+    for path, label in _ADMIN_NAV_LINKS:
+        if path == current:
+            links.append(f'<span style="color:#fff;font-weight:700">{label}</span>')
+        else:
+            links.append(f'<a href="{path}" style="color:#888;text-decoration:none">{label}</a>')
+    links_html = ' &nbsp;·&nbsp; '.join(links)
+    return (
+        '<nav style="background:#1a1a1a;border-bottom:1px solid #2e2e2e;padding:10px 24px;'
+        'margin:-24px -24px 28px -24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">'
+        f'<a href="/" style="color:#c00;font-weight:700;text-decoration:none;margin-right:8px;font-size:.85rem">← App</a>'
+        f'<span style="color:#333">|</span>'
+        f'<span style="font-size:.82rem">{links_html}</span>'
+        '</nav>'
+    )
+
+
 @app.route("/admin/devices")
 def admin_devices():
     """Session-protected device access summary page."""
@@ -2129,6 +2156,7 @@ def admin_devices():
     html += ['th{background:#1e1e1e;padding:8px 12px;text-align:left;border-bottom:2px solid #333;color:#aaa}']
     html += ['td{padding:6px 12px;border-bottom:1px solid #222}tr:hover td{background:#1a1a1a}']
     html += ['</style></head><body>']
+    html += [_admin_nav('/admin/devices')]
     html += [f'<h1>📊 Device Tracker</h1>']
     html += [f'<p style="color:#666">{len(unique_devices)} unique devices &nbsp;·&nbsp; {len(entries)} total day-visits &nbsp;·&nbsp; {len(entries) and entries[-1]["date"]} last activity</p>']
 
@@ -2149,7 +2177,8 @@ def admin_devices():
 
 
 def _admin_task_page(title: str, api_path: str, description: str,
-                     options_html: str = "", extra_body_js: str = "") -> str:
+                     options_html: str = "", extra_body_js: str = "",
+                     nav_current: str = "") -> str:
     """Shared HTML template for long-running admin task pages (build-coords, validate-stores).
 
     options_html: optional HTML snippet inserted above the Run button (e.g. checkboxes)
@@ -2173,6 +2202,7 @@ def _admin_task_page(title: str, api_path: str, description: str,
         padding:16px;min-height:120px;white-space:pre-wrap;font-size:.82rem;line-height:1.5}}
   .done{{color:#4ade80}} .err{{color:#f88}}
 </style></head><body>
+{_admin_nav(nav_current)}
 <h2>🛠 {safe_title}</h2>
 <p>{safe_desc}</p>
 {options_html}
@@ -2228,6 +2258,7 @@ def admin_build_coords():
                      '<input type="checkbox" id="force-cb" style="vertical-align:middle"> '
                      'Force re-geocode all stores (even cached ones)</label>',
         extra_body_js="force: document.getElementById('force-cb').checked",
+        nav_current="/admin/build-coords",
     )
     return Response(html, content_type="text/html")
 
@@ -2244,6 +2275,7 @@ def admin_validate_stores():
         description="Checks every store for 404s, auto-removes dead stores, "
                     "renames any whose slugs changed, then rebuilds the store list from GC live data. "
                     "Takes ~0.5s per store.",
+        nav_current="/admin/validate-stores",
     )
     return Response(html, content_type="text/html")
 
@@ -2368,6 +2400,7 @@ td{{padding:7px 14px;border-bottom:1px solid #222}}
 tr:hover td{{background:#1a1a1a}}
 a{{color:#888;text-decoration:none;font-size:.78rem}}
 </style></head><body>
+{_admin_nav('/admin/users')}
 <h1>👤 User Accounts</h1>
 <div class="sub">{len(users)} account{"s" if len(users)!=1 else ""} &nbsp;·&nbsp;
 <a href="/admin/devices">→ Device log</a></div>
@@ -2486,6 +2519,7 @@ def admin_listing_patterns():
         return f'<span class="bar" style="width:{w}px"></span> {n:,}'
 
     html = [f'<html><head><title>GC Listing Patterns</title>{S}</head><body>']
+    html.append(_admin_nav('/admin/listing-patterns'))
     html.append(f'<h2>GC Listing Pattern Analysis</h2>')
     html.append(f'<p class="note">Total items in cache: <b>{total:,}</b> &nbsp;|&nbsp; '
                 f'With date_listed: <b>{len(exact_times):,}</b> &nbsp;|&nbsp; '
@@ -4963,7 +4997,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.11.3"
+APP_VERSION = "2.11.4"
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
