@@ -1707,6 +1707,23 @@ def _require_admin_api():
         return None
     return jsonify({"error": "Unauthorized"}), 401
 
+def _admin_page_csrf() -> str:
+    """Return (creating if needed) a CSRF token for admin POST actions.
+    The login flow pops the token on success, so post-login pages call this
+    to ensure one always exists in the session."""
+    import secrets as _secrets
+    if not session.get("_admin_csrf"):
+        session["_admin_csrf"] = _secrets.token_hex(32)
+    return session["_admin_csrf"]
+
+def _check_admin_csrf_header() -> bool:
+    """Validate the X-CSRF-Token header against the session token."""
+    submitted = request.headers.get("X-CSRF-Token", "")
+    expected  = session.get("_admin_csrf") or ""
+    if not expected or not submitted:
+        return False
+    return hmac.compare_digest(submitted, expected)
+
 
 LOGIN_PAGE = """<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>GC Tracker — Login</title>
@@ -2271,7 +2288,9 @@ def admin_users():
             f'</tr>'
         )
 
+    csrf_token = _admin_page_csrf()
     html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+<meta name="csrf-token" content="{csrf_token}">
 <title>Users</title>
 <style>
 body{{background:#111;color:#ddd;font-family:monospace;padding:24px;font-size:.88rem}}
@@ -2297,7 +2316,8 @@ a{{color:#888;text-decoration:none;font-size:.78rem}}
 function delUser(id, name, btn) {{
   if (!confirm('Delete user "' + name + '" and all their data? This cannot be undone.')) return;
   btn.disabled = true; btn.textContent = '…';
-  fetch('/admin/delete-user', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{id:id}})}})
+  const csrf = (document.querySelector('meta[name="csrf-token"]') || {{}}).content || '';
+  fetch('/admin/delete-user', {{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':csrf}},body:JSON.stringify({{id:id}})}})
     .then(r => r.json()).then(d => {{
       if (d.ok) btn.closest('tr').remove();
       else {{ btn.disabled = false; btn.textContent = '✕ Delete'; alert(d.error || 'Error'); }}
@@ -2315,6 +2335,8 @@ def admin_delete_user():
     denied = _require_admin()
     if denied:
         return denied
+    if not _check_admin_csrf_header():
+        return jsonify({"ok": False, "error": "Invalid CSRF token — reload the page and try again."}), 403
     data = request.get_json(silent=True) or {}
     user_id = data.get("id")
     if not user_id:
@@ -4886,7 +4908,7 @@ CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 
 # ── Version ───────────────────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.21"
+APP_VERSION = "2.10.22"
 
 
 
