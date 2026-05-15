@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-15 · Current version: v2.10.19 · Status: deployed on Railway · Domain: gcgeartracker.com*
+*Last updated: 2026-05-15 · Current version: v2.10.20 · Status: deployed on Railway · Domain: gcgeartracker.com*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
 
@@ -839,6 +839,20 @@ Navigate to `/?google_new=1` to re-trigger the modal at any time (e.g. to change
 - Select All / Clear All merged into one toggle button (`#sel-all-btn`): shows "Select All" normally, switches to "Clear All" when all visible stores checked. Logic in `toggleSelectAll()`, label updated in `updateCount()`
 - Store list scroll resets to top (`el.scrollTop = 0`) in `renderList()` — fixes mid-list positioning after favorites toggle on mobile
 - `APP_PASSWORD` env var: code was reading `RESET_PASSWORD` but Railway var is named `APP_PASSWORD`. Fixed throughout. Top-level constant `APP_PASSWORD = (os.environ.get("APP_PASSWORD") or "").strip()` defined once at startup, used everywhere.
+
+---
+
+## Recent Changes (v2.10.19 → v2.10.20)
+
+### v2.10.20 — Search reliability fixes (two bugs)
+
+**Bug 1 — `_srvLoading` race condition (search silently dropped)**
+- `_fetchBrowsePage` guards against concurrent requests with `if (_srvLoading) return` — if any background browse (page load, filter change, store toggle) was still in-flight when the user typed, the search call was silently dropped. Results stayed showing the old state. User clears box and retypes → works, because `_srvLoading` was false by then. This caused intermittent "search doesn't work" reports.
+- **Fix**: `_globalKeywordSearch`'s debounce callback now sets `_srvLoading = false` and `_srvStores = getSelected()` before calling `_fetchBrowsePage`. Matches the pattern already used by every other deliberate user action (`clearFilters`, `clearGlobalSearch`, `toggleWatchFilter`, scan done). Also refreshes `_srvStores` from current selection so stale store state can't cause searches to query wrong stores.
+
+**Bug 2 — Want-list mode silences search box text**
+- Two related issues: (a) `clearResSearch()` (the ✕ button) cleared the input but didn't reset `_globalSearchActive` / `_wantListSearchActive`, so clicking ✕ after a want-list search left those flags true and subsequent fetches continued sending `filter_want_list_only: true` invisibly; (b) typing in the search box while want-list mode was active caused `_fetchBrowsePage` to override `filter_q` with `_globalSearchQuery = ''` instead of the typed text — results came back un-filtered or as all want-list matches.
+- **Fix**: `clearResSearch()` now resets `_globalSearchActive`, `_wantListSearchActive`, `_globalSearchQuery`, and calls `_resetWantListLink()`. `_globalKeywordSearch` does the same at the top so typing always exits want-list mode cleanly.
 
 ---
 

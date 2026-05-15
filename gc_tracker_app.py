@@ -4374,7 +4374,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </div>
 
 <header>
-  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.19</span></h1>
+  <h1>GC Used Inventory Tracker <span style="font-size:.65rem;font-weight:400;opacity:.6">v2.10.20</span></h1>
   <button id="stop-btn">⏹ Stop Running</button>
   <span id="hdr-status">Loading…</span>
   <div id="auth-widget">
@@ -4464,7 +4464,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </div>
 
 <!-- ══ GC PANEL ══ -->
-<div class="mobile-title-bar"><button class="mtb-about">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.19</span></div>
+<div class="mobile-title-bar"><button class="mtb-about">About</button><span class="mtb-title">GC Used Inventory Tracker</span><span class="mtb-ver">v2.10.20</span></div>
 <div class="layout">
 
   <div class="left" id="gc-left">
@@ -4814,7 +4814,7 @@ CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 
 # ── Version ───────────────────────────────────────────────────────────────────
 
-APP_VERSION = "2.10.19"
+APP_VERSION = "2.10.20"
 
 
 
