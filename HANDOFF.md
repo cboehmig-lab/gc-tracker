@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-14 · Current version: v2.10.18 · Status: deployed on Railway · Domain: gcgeartracker.com*
+*Last updated: 2026-05-15 · Current version: v2.10.19 · Status: deployed on Railway · Domain: gcgeartracker.com*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
 
@@ -556,7 +556,7 @@ After any JS change, open the page, open the browser console, and confirm there 
 ## 🎯 Planned Next Features
 
 - **Additional OAuth providers** (Facebook, Apple): same direct Authorization Code flow as Google — each needs its own `CLIENT_ID`/`CLIENT_SECRET` env vars, a new `/api/auth/<provider>` + callback route, and a `<provider>_id` column in `users`. Authlib is already a dependency and can simplify multi-provider registration, but the direct HTTP approach used for Google also works fine.
-- **Google Analytics**: add `gtag.js` snippet to both `HTML_TEMPLATE` and `CL_TEMPLATE`. GA4 measurement ID stored as `GA_MEASUREMENT_ID` env var (or hardcoded). Simple — no backend changes needed.
+- ~~**Google Analytics**~~: shipped in v2.10.19 — `gtag.js` loaded via `GA_MEASUREMENT_ID` env var; init IIFE in `gc.js` / `cl.js`.
 - **Account settings page/modal**: allow users to change their username or link Google at any time (not just via the `/?google_new=1` URL trick).
 
 ---
@@ -742,7 +742,7 @@ After any JS change, open the page, open the browser console, and confirm there 
 - `_run()` signature gained `device_last_anchor` + `user_id` params
 - `api_run` loads per-user `last_anchor` from `_get_user_data(user_id)` for logged-in users; accepts `device_last_anchor` in the request payload for guests
 - `_run` uses `device_last_anchor` (not the global cache max) as the anchor for threshold
-- Post-scan, `_run` persists `last_anchor + last_run` to the user's record server-side
+- Post-scan, `_run` computes `new_anchor = max(date_listed in all_products)` (THIS scan's results only — NOT `_cat_cache`, which is global; see v2.10.19 fix) and persists it to the user's record server-side
 - SSE `done` payload now includes `scan_anchor` so guests can roundtrip via localStorage
 - `/api/sync` accepts `last_anchor`; `_get_user_data` returns it; client merges with server-wins-when-newer (ISO string compare)
 - Client: `window._lastAnchorISO` initialized from `localStorage.last_anchor`, sent as `device_last_anchor` in `/api/run`, updated from `msg.scan_anchor` in the done SSE
@@ -840,6 +840,28 @@ Navigate to `/?google_new=1` to re-trigger the modal at any time (e.g. to change
 - Store list scroll resets to top (`el.scrollTop = 0`) in `renderList()` — fixes mid-list positioning after favorites toggle on mobile
 - `APP_PASSWORD` env var: code was reading `RESET_PASSWORD` but Railway var is named `APP_PASSWORD`. Fixed throughout. Top-level constant `APP_PASSWORD = (os.environ.get("APP_PASSWORD") or "").strip()` defined once at startup, used everywhere.
 
+---
+
+## Recent Changes (v2.10.18 → v2.10.19)
+
+### v2.10.19 — Domain migration, anchor persistence fix, GA CSP fix
+
+**Domain migration to gcgeartracker.com**
+- DNS moved from Squarespace (blocks CNAME on apex) to Cloudflare (supports CNAME flattening)
+- Railway custom domain `gcgeartracker.com` added, SSL auto-provisioned
+- `_redirect_old_domain()` `@app.before_request` hook: 301-redirects `gctracker.animalsintrees.com` → `gcgeartracker.com` preserving path + query string
+- Google Cloud Console OAuth credentials updated: new domain added to Authorized JavaScript Origins and Redirect URIs
+
+**New-item anchor contamination fix (0-new / reordered bug, second part)**
+- v2.10.15/v2.10.18 fixed the anchor used as the *threshold for the current scan* (using `device_last_anchor` instead of global cache max). But `new_anchor` — the value *persisted for next time* — was still computed as `max(date_listed in _cat_cache)`. Since `_cat_cache` is global and written by every user's scan, another user's scan could push this user's stored anchor forward, causing their next scan to see 0 new items.
+- **Fix**: `new_anchor` now computed from `all_products` (this scan's results only), not `_cat_cache`. Anchor only advances as far as items this user actually saw.
+
+**GA4 CSP fix**
+- Phase 5 CSP hardening (v2.10.18) added `https://www.googletagmanager.com` to `script-src` (allows gtag.js to load) but omitted `https://www.google-analytics.com` from `connect-src`. GA4 sends event beacons via `fetch()` to `https://www.google-analytics.com/g/collect` — blocked silently by the browser since that commit.
+- **Fix**: `https://www.google-analytics.com` added to `connect-src`. GA4 tracking restored.
+
+---
+
 ### Key env vars (Railway)
 | Var | Status |
 |---|---|
@@ -872,39 +894,20 @@ static/
 
 ---
 
-## 🎯 Planned Next Work: Domain Migration
+## ✅ Completed: Domain Migration (v2.10.19, 2026-05-15)
 
-**Goal:** Move the primary domain from `gctracker.animalsintrees.com` to `gcgeartracker.com` (purchased 2026-05-14).
+`gcgeartracker.com` is now the primary domain. `gctracker.animalsintrees.com` 301-redirects to it.
 
-### Steps
+### What was done
+1. **DNS**: Registered `gcgeartracker.com` on Squarespace. Squarespace blocks CNAME on apex (`@`) — worked around by moving DNS management to Cloudflare (free). Added CNAME `@` → `gaeuti41.up.railway.app` (DNS only, no proxy) and TXT `_railway-verify` record. Updated Squarespace nameservers to `kipp.ns.cloudflare.com` / `nova.ns.cloudflare.com`.
+2. **Railway**: Added `gcgeartracker.com` as a custom domain on the web service (port 8080). SSL provisioned automatically.
+3. **Flask redirect**: `_redirect_old_domain()` `@app.before_request` hook 301-redirects any request with `Host: gctracker.animalsintrees.com` to `https://gcgeartracker.com`.
+4. **Google OAuth**: Added `https://gcgeartracker.com` to Authorized JavaScript Origins and `https://gcgeartracker.com/api/auth/google/callback` to Authorized Redirect URIs. Old `animalsintrees.com` entries kept in place.
 
-1. **Point domain to Railway**
-   - In your domain registrar's DNS settings, add a `CNAME` record: `gcgeartracker.com` → Railway's generated domain (e.g. `web-production-xxxx.up.railway.app`)
-   - Or use Railway's custom domain feature: Railway dashboard → your service → Settings → Networking → Add custom domain → enter `gcgeartracker.com`
-   - Railway will provision an SSL cert automatically via Let's Encrypt (~5 min)
-
-2. **Set up redirect from old domain**
-   - Option A (simple): In Railway, also add `gctracker.animalsintrees.com` as a custom domain, then add a Flask route that redirects it:
-     ```python
-     @app.before_request
-     def _redirect_old_domain():
-         if request.host == 'gctracker.animalsintrees.com':
-             return redirect('https://gcgeartracker.com' + request.path, code=301)
-     ```
-   - Option B: Configure the redirect at the DNS/registrar level if they support URL forwarding
-
-3. **Update Google OAuth**
-   - Go to [Google Cloud Console](https://console.cloud.google.com) → APIs & Services → Credentials → your OAuth 2.0 Client
-   - Add `https://gcgeartracker.com` to **Authorized JavaScript origins**
-   - Add `https://gcgeartracker.com/api/auth/google/callback` to **Authorized redirect URIs**
-   - Keep the old `animalsintrees.com` entries in place during the transition
-
-4. **Update HANDOFF and README** — replace all references to `gctracker.animalsintrees.com` with `gcgeartracker.com`
-
-### Key risks
-- **Google OAuth breaks** if you remove the old domain from Google Cloud Console before traffic fully migrates — keep both URIs registered for at least a few weeks
-- **Session cookies**: Flask sessions are domain-scoped. Users on the old domain who get 301'd to the new domain will need to log in again once (expected behavior)
-- **`RAILWAY_ENVIRONMENT`**: Railway's ProxyFix and `Secure` cookie flags are keyed off `RAILWAY_ENVIRONMENT` being set — this will work correctly on the new domain without any code changes
+### Key notes
+- Keep both Google OAuth URIs registered — remove `animalsintrees.com` only after confirming no active users rely on it
+- Session cookies are domain-scoped; users 301'd from the old domain log in once on the new domain (expected)
+- `RAILWAY_ENVIRONMENT` ProxyFix and `Secure` cookie flags work correctly on the new domain with no code changes
 
 ---
 
