@@ -1319,6 +1319,21 @@ async function _fetchBrowsePage(page) {
     // Cache items for mobile view toggle re-render
     window._lastBrowseItems = d.items;
 
+    // Advance the per-user anchor to the newest item currently visible on page 1.
+    // This ensures "Scan For New" only flags items genuinely newer than what you've
+    // already seen at the top of the table — not stuff that was already there.
+    if (page === 1) {
+      var topDate = d.items.reduce(function(best, item) {
+        var dr = item.date_raw || '';
+        return dr > best ? dr : best;
+      }, window._lastAnchorISO || '');
+      if (topDate && topDate !== window._lastAnchorISO) {
+        window._lastAnchorISO = topDate;
+        _lsSet('last_anchor', topDate);
+        _syncToServer();
+      }
+    }
+
     // Render table + paginator
     _renderServerTable(d.items);
 

@@ -572,15 +572,6 @@ After any JS change, open the page, open the browser console, and confirm there 
 
 ---
 
-## 🐛 Known Bugs
-
-### Anchor not advancing on browse (scan-for-new threshold wrong)
-`window._lastAnchorISO` — the "max `date_listed` you've been exposed to" — is only updated after a scan completes (`scan_anchor` from server) and on login. It is **not** updated when browse results render. This means items already visible at the top of the table (from another user's earlier scan) can still be flagged NEW on your next scan, because your anchor is stuck at your last scan time rather than the top-of-table date.
-
-**Fix (small, client-side in `static/gc.js`):** After `window._lastBrowseItems = d.items` in `_fetchBrowsePage`, on page 1 only, advance `_lastAnchorISO` to `max(existing anchor, max(d.items.map(i => i.date_raw).filter(Boolean)))`, persist with `_lsSet('last_anchor', ...)`, and trigger `_syncToServer()` if logged in. Everything needed exists — just not wired together here.
-
----
-
 ## 🎯 Planned Next Features
 
 - **Sovrn affiliate approval**: site needs About page, Privacy Policy, Terms of Service, and contact info to pass manual publisher review. Next session focus.
@@ -872,6 +863,11 @@ Navigate to `/?google_new=1` to re-trigger the modal at any time (e.g. to change
 ---
 
 ## Recent Changes (v2.11.0 → v2.11.4)
+
+### v2.11.5 — Browse-anchor advancement fix
+- `_fetchBrowsePage` now advances `window._lastAnchorISO` to the max `date_raw` of page 1 results on every browse
+- Persists to localStorage via `_lsSet('last_anchor', ...)` and syncs to server via `_syncToServer()`
+- Ensures "Scan For New" only flags items genuinely newer than what was already visible at the top of the table — items you could already see won't get incorrectly flagged as NEW
 
 ### v2.11.4 — Admin nav bar on all admin pages
 - `_admin_nav(current)` helper renders a shared top nav bar across all admin pages
