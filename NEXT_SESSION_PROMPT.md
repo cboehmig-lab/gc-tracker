@@ -41,6 +41,28 @@ We suspect Sovrn will want to see:
 - The footer (`#dev-footer`) already has links — we can add more there
 - There's an About modal (`#about-modal`) already in the app — might be expandable
 
+---
+
+## Known Bug to Fix (unrelated to Sovrn — fix this first)
+
+**"Scan For New" anchor not advancing as you browse**
+
+There's a bug where items that were already visible at the top of the table before scanning still get flagged as NEW after the scan.
+
+**How it should work:** the app tracks a per-user `last_anchor` — the max `date_listed` of all items the user has been exposed to. Before scanning, the anchor is sent to the server as `device_last_anchor`. The server flags an item as NEW only if its `date_listed > anchor`. So "new" means "newer than the most recent thing you've already seen in the table."
+
+**The bug:** `window._lastAnchorISO` (the anchor) is only ever updated in two places in `gc.js`:
+1. After login/data merge (from server)
+2. After a scan completes (server sends back `scan_anchor`)
+
+It is **not** updated when browse results render. So if another user's scan ran and pushed new items to the top of the table (visible to you when you browse), those items already appear at the top — but when YOU scan, your anchor is still from your last scan, so those items incorrectly get flagged as NEW even though you could already see them.
+
+**The fix (client-side, `static/gc.js`):** After `_fetchBrowsePage` receives results and sets `window._lastBrowseItems = d.items` (around line 1320), on page 1 only, advance `_lastAnchorISO` to `max(existing anchor, max(d.items.map(i => i.date_raw).filter(Boolean)))` and persist to localStorage. Also trigger a debounced `_syncToServer()` if logged in, so the anchor persists across devices.
+
+The architecture for this already exists — `date_raw` is returned on every browse item, `_lastAnchorISO` is the right variable, `_lsSet('last_anchor', ...)` persists it, and `_syncToServer()` sends it up. It just needs to be called in `_fetchBrowsePage` after page 1 renders.
+
+---
+
 ## What I want from this session
 1. Assess what Sovrn specifically requires and what we're missing
 2. Prioritize the gaps by impact on approval likelihood
