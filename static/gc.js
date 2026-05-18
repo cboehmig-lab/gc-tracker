@@ -181,6 +181,8 @@ function _updateFilterDot() {
     (window._selectedSubs && window._selectedSubs.length) ||
     _watchFilterActive ||
     _priceDropFilterActive ||
+    window._priceMin !== null ||
+    window._priceMax !== null ||
     (document.getElementById('res-search').value.trim().length > 0);
   dot.classList.toggle('visible', !!hasFilters);
   _updateSaveSearchBtn();
@@ -1143,6 +1145,9 @@ let _browseTimer = null;
 let _skipBrowse = false;  // Set after a scan to prevent browseCache from overwriting results
 let _watchFilterActive = false;
 let _priceDropFilterActive = false;
+window._priceMin = null;   // null = no filter; number = active min price
+window._priceMax = null;   // null = no filter; number = active max price
+let _priceTimer = null;
 let _globalSearchActive = false;
 let _globalSearchQuery = '';
 let _wantListSearchActive = false;
@@ -1203,6 +1208,8 @@ function _getBrowseFilters() {
     filter_watched:         _watchFilterActive,
     filter_price_drop_only: _priceDropFilterActive,
     filter_strict:          window._strictSearch || false,
+    filter_price_min:       window._priceMin,
+    filter_price_max:       window._priceMax,
   };
 }
 
@@ -1797,7 +1804,9 @@ function _updateSaveSearchBtn() {
     (f.filter_conditions    && f.filter_conditions.length)    ||
     (f.filter_categories    && f.filter_categories.length)    ||
     (f.filter_subcategories && f.filter_subcategories.length) ||
-    f.filter_price_drop_only;
+    f.filter_price_drop_only ||
+    f.filter_price_min !== null ||
+    f.filter_price_max !== null;
   const showSave  = !!(window._authUser && hasAny);
   const showClear = !!hasAny;
   const btn   = document.getElementById('save-search-btn');
@@ -1946,6 +1955,14 @@ function _applySavedSearch(id) {
   _priceDropFilterActive = !!f.filter_price_drop_only;
   const pdBtn = document.getElementById('price-drop-toggle');
   if (pdBtn) pdBtn.classList.toggle('wl-active', _priceDropFilterActive);
+  // Restore price range
+  window._priceMin = (f.filter_price_min !== undefined && f.filter_price_min !== null) ? f.filter_price_min : null;
+  window._priceMax = (f.filter_price_max !== undefined && f.filter_price_max !== null) ? f.filter_price_max : null;
+  var _pMinStr = window._priceMin !== null ? String(window._priceMin) : '';
+  var _pMaxStr = window._priceMax !== null ? String(window._priceMax) : '';
+  ['price-min', 'price-min-dd'].forEach(function(id) { var el = document.getElementById(id); if (el) el.value = _pMinStr; });
+  ['price-max', 'price-max-dd'].forEach(function(id) { var el = document.getElementById(id); if (el) el.value = _pMaxStr; });
+  _updatePriceBtn();
   // Restore store selection
   const savedStores = new Set(ss.stores || []);
   _selectedStores = savedStores;
@@ -2877,6 +2894,7 @@ function _closeAllDropdowns() {
   _closeCondDropdown();
   _closeCatDropdown();
   _closeSubDropdown();
+  _closePriceDropdown();
 }
 
 function toggleBrandDropdown() {
@@ -2957,7 +2975,10 @@ function _updateBrandBtn() {
 
 function _setBrandList(brands) {
   window._brandList = brands || [];
-  document.getElementById('brand-dropdown').style.display = brands && brands.length ? '' : 'none';
+  const hasData = !!(brands && brands.length);
+  document.getElementById('brand-dropdown').style.display = hasData ? '' : 'none';
+  const pdd = document.getElementById('price-dropdown');
+  if (pdd) pdd.style.display = hasData ? '' : 'none';
 }
 
 // ── Condition multi-select dropdown ──────────────────────────────────────────
@@ -3028,6 +3049,58 @@ function _updateCondBtn() {
     btn.textContent = window._selectedConds[0] + ' ▾';
   } else {
     btn.textContent = window._selectedConds.length + ' Conditions ▾';
+  }
+}
+
+// ── Price range filter ────────────────────────────────────────────────────────
+
+function _updatePriceBtn() {
+  const btn = document.getElementById('price-dd-btn');
+  const clr = document.getElementById('price-dd-clear');
+  if (!btn) return;
+  const hasMin = window._priceMin !== null && window._priceMin !== undefined;
+  const hasMax = window._priceMax !== null && window._priceMax !== undefined;
+  if (!hasMin && !hasMax) {
+    btn.textContent = 'Price ▾';
+  } else {
+    const fmt = function(v) { return '$' + (Number(v) % 1 === 0 ? Number(v) : Number(v).toFixed(2)); };
+    if (hasMin && hasMax) btn.textContent = fmt(window._priceMin) + '–' + fmt(window._priceMax) + ' ▾';
+    else if (hasMin)      btn.textContent = fmt(window._priceMin) + '+ ▾';
+    else                  btn.textContent = 'Up to ' + fmt(window._priceMax) + ' ▾';
+  }
+  if (clr) clr.style.display = (hasMin || hasMax) ? '' : 'none';
+}
+
+function _clearPriceFilter() {
+  window._priceMin = null;
+  window._priceMax = null;
+  ['price-min', 'price-max', 'price-min-dd', 'price-max-dd'].forEach(function(id) {
+    var el = document.getElementById(id); if (el) el.value = '';
+  });
+  _updatePriceBtn();
+  _updateFilterDot();
+  _srvPage = 1;
+  _fetchBrowsePage(1);
+}
+
+function _closePriceDropdown() {
+  var panel = document.getElementById('price-dd-panel');
+  if (panel) panel.style.display = 'none';
+  document.removeEventListener('click', _closePriceOnOutside, true);
+}
+
+function _closePriceOnOutside(e) {
+  if (!e.target.closest('#price-dropdown')) _closePriceDropdown();
+}
+
+function togglePriceDropdown() {
+  var panel = document.getElementById('price-dd-panel');
+  if (!panel) return;
+  var isOpen = panel.style.display !== 'none';
+  _closeAllDropdowns();   // closes price panel too, so re-open if it wasn't already open
+  if (!isOpen) {
+    panel.style.display = '';
+    setTimeout(function() { document.addEventListener('click', _closePriceOnOutside, true); }, 0);
   }
 }
 
@@ -3242,6 +3315,13 @@ function clearFilters() {
     _wantListSearchActive = false;
     document.getElementById('want-list-toggle').classList.remove('wl-active');
   }
+  // Clear price range
+  window._priceMin = null;
+  window._priceMax = null;
+  ['price-min', 'price-max', 'price-min-dd', 'price-max-dd'].forEach(function(id) {
+    var el = document.getElementById(id); if (el) el.value = '';
+  });
+  _updatePriceBtn();
   // Hide action button row immediately (will be confirmed by _updateSaveSearchBtn after browse)
   const _fab = document.getElementById('filter-action-btns');
   if (_fab) _fab.style.display = 'none';
@@ -3882,6 +3962,37 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('cond-dd-btn')?.addEventListener('click', toggleCondDropdown);
   document.getElementById('cat-dd-btn')?.addEventListener('click', toggleCatDropdown);
   document.getElementById('subcat-dd-btn')?.addEventListener('click', toggleSubcatDropdown);
+
+  // Price range — desktop dropdown
+  document.getElementById('price-dd-btn')?.addEventListener('click', togglePriceDropdown);
+  document.getElementById('price-dd-clear')?.addEventListener('click', _clearPriceFilter);
+
+  // Price inputs — debounced, syncs mobile ↔ desktop, triggers browse
+  function _onPriceInput(isDesktop) {
+    clearTimeout(_priceTimer);
+    _priceTimer = setTimeout(function() {
+      var minEl = document.getElementById(isDesktop ? 'price-min-dd' : 'price-min');
+      var maxEl = document.getElementById(isDesktop ? 'price-max-dd' : 'price-max');
+      var minVal = minEl ? minEl.value : '';
+      var maxVal = maxEl ? maxEl.value : '';
+      window._priceMin = minVal !== '' ? parseFloat(minVal) : null;
+      window._priceMax = maxVal !== '' ? parseFloat(maxVal) : null;
+      // Sync the other set of inputs
+      var oMinEl = document.getElementById(isDesktop ? 'price-min' : 'price-min-dd');
+      var oMaxEl = document.getElementById(isDesktop ? 'price-max' : 'price-max-dd');
+      if (oMinEl) oMinEl.value = minVal;
+      if (oMaxEl) oMaxEl.value = maxVal;
+      _updatePriceBtn();
+      _updateFilterDot();
+      _srvPage = 1;
+      _fetchBrowsePage(1);
+    }, 400);
+  }
+  document.getElementById('price-min-dd')?.addEventListener('input', function() { _onPriceInput(true); });
+  document.getElementById('price-max-dd')?.addEventListener('input', function() { _onPriceInput(true); });
+  document.getElementById('price-min')?.addEventListener('input', function() { _onPriceInput(false); });
+  document.getElementById('price-max')?.addEventListener('input', function() { _onPriceInput(false); });
+
   document.getElementById('save-search-btn')?.addEventListener('click', _saveCurrentSearch);
   document.getElementById('clear-filters-btn')?.addEventListener('click', clearFilters);
   document.querySelector('.filter-done-btn')?.addEventListener('click', _closeAllSheets);

@@ -862,6 +862,24 @@ Navigate to `/?google_new=1` to re-trigger the modal at any time (e.g. to change
 
 ---
 
+## Recent Changes (v2.11.5 → v2.12.0)
+
+### v2.12.0 — Price min/max filter
+
+**Desktop:** `Price ▾` button added to the filter bar, consistent with Brand/Condition/Category/Subcategory dropdown pattern. When a price range is active, the button label changes to show the range inline (e.g. `$200–$500 ▾`) so it's visible without clicking. Clicking opens a popover with two number inputs (`$Min – $Max`, accepts decimals). A "✕ Clear price filter" link appears inside the popover when active.
+
+**Mobile:** Always-visible `Price` row in the filter bottom sheet, placed between keyword search and the Brand accordion. Two side-by-side `$Min – $Max` inputs, same debounce/fetch pattern as all other filters.
+
+**Both inputs stay in sync:** changing one set (desktop or mobile) updates the other automatically.
+
+**Server-side (`/api/browse`):** `filter_price_min` and `filter_price_max` applied in `_apply_base()` using `price_raw` — works with all other filters, sort, pagination, and NEW detection.
+
+**Saved searches:** price range is included in saved search data (`filter_price_min`, `filter_price_max`) and fully restored by `_applySavedSearch()`.
+
+**Clear All / filter dot / Save Search:** all updated to include price state.
+
+**Files changed:** `gc_tracker_app.py` (HTML_TEMPLATE, `/api/browse`, `/api/saved-search-counts`), `static/gc.js`, `static/gc.css`
+
 ## Recent Changes (v2.11.0 → v2.11.4)
 
 ### v2.11.5 — Browse-anchor advancement fix

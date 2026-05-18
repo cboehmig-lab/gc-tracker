@@ -2781,6 +2781,13 @@ def api_saved_search_counts():
         if f_cats:   items = [i for i in items if i.get("category") in f_cats]
         if f_subs:   items = [i for i in items if i.get("subcategory") in f_subs]
         if f_pdrop:  items = [i for i in items if (i.get("price_drop") or 0) > 0]
+        def _sc_float(v):
+            try: return float(v) if v is not None and v != '' else None
+            except (TypeError, ValueError): return None
+        sc_pmin = _sc_float(f.get("filter_price_min"))
+        sc_pmax = _sc_float(f.get("filter_price_max"))
+        if sc_pmin is not None: items = [i for i in items if (i.get("price_raw") or 0) >= sc_pmin]
+        if sc_pmax is not None: items = [i for i in items if (i.get("price_raw") or 0) <= sc_pmax]
 
         counts.append(len(items))
 
@@ -2821,6 +2828,11 @@ def api_browse():
     f_want_only = bool(data.get("filter_want_list_only"))
     f_price_drop_only = bool(data.get("filter_price_drop_only"))
     f_strict = bool(data.get("filter_strict"))
+    def _to_float(v):
+        try: return float(v) if v is not None and v != '' else None
+        except (TypeError, ValueError): return None
+    f_price_min = _to_float(data.get("filter_price_min"))
+    f_price_max = _to_float(data.get("filter_price_max"))
     force_fav_sort = bool(data.get("force_fav_sort"))
 
     _load_cat_cache()
@@ -2956,6 +2968,10 @@ def api_browse():
         if f_want_only:       r = [i for i in r if i["kwMatch"]]
         if f_price_drop_only: r = [i for i in r if i.get("price_drop", 0) > 0]
         if f_watched:         r = [i for i in r if i["watched"]]
+        if f_price_min is not None:
+            r = [i for i in r if (i.get("price_raw") or 0) >= f_price_min]
+        if f_price_max is not None:
+            r = [i for i in r if (i.get("price_raw") or 0) <= f_price_max]
         return r
 
     base_items = _apply_base(all_items)
@@ -4750,6 +4766,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               </div>
               <span id="res-search-count"></span>
             </div>
+            <!-- ── Price range (mobile: always visible; desktop: see #price-dropdown below) ── -->
+            <div class="price-range-mobile">
+              <span class="price-range-label">Price</span>
+              <div class="price-inputs-row">
+                <span class="price-sym">$</span>
+                <input id="price-min" type="number" min="0" step="0.01" placeholder="Min"
+                  class="price-inp" autocomplete="off" inputmode="decimal">
+                <span class="price-sep">–</span>
+                <span class="price-sym">$</span>
+                <input id="price-max" type="number" min="0" step="0.01" placeholder="Max"
+                  class="price-inp" autocomplete="off" inputmode="decimal">
+              </div>
+            </div>
             <!-- ── Mobile accordion sections (hidden on desktop) ── -->
             <div class="filter-accordion" id="acc-brand">
               <button class="acc-header" data-acc="brand">
@@ -4822,6 +4851,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               <button id="subcat-dd-btn" class="cat-sel" style="cursor:pointer;white-space:nowrap">All Subcategories ▾</button>
               <div id="subcat-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:240px;max-height:300px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
                 <div style="overflow-y:auto;max-height:260px;padding:4px 0" id="subcat-dd-inner"></div>
+              </div>
+            </div>
+            <!-- ── Price range — desktop dropdown (hidden on mobile via CSS) ── -->
+            <div id="price-dropdown" style="display:none;position:relative">
+              <button id="price-dd-btn" class="cat-sel" style="cursor:pointer;white-space:nowrap">Price ▾</button>
+              <div id="price-dd-panel" style="display:none;position:absolute;top:calc(100% + 4px);left:0;z-index:55;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;padding:14px 14px 10px;width:236px;box-shadow:0 8px 24px rgba(0,0,0,.5)">
+                <div style="font-size:.72rem;color:#666;margin-bottom:9px;text-transform:uppercase;letter-spacing:.05em">Price Range</div>
+                <div style="display:flex;align-items:center;gap:6px">
+                  <span style="color:#777;font-size:.82rem">$</span>
+                  <input id="price-min-dd" type="number" min="0" step="0.01" placeholder="Min"
+                    style="width:78px;padding:6px 8px;background:#252525;border:1px solid #3a3a3a;border-radius:4px;color:#eee;font-size:.85rem;outline:none;box-sizing:border-box"
+                    autocomplete="off" inputmode="decimal">
+                  <span style="color:#555;font-size:.85rem">–</span>
+                  <span style="color:#777;font-size:.82rem">$</span>
+                  <input id="price-max-dd" type="number" min="0" step="0.01" placeholder="Max"
+                    style="width:78px;padding:6px 8px;background:#252525;border:1px solid #3a3a3a;border-radius:4px;color:#eee;font-size:.85rem;outline:none;box-sizing:border-box"
+                    autocomplete="off" inputmode="decimal">
+                </div>
+                <button id="price-dd-clear" style="display:none;margin-top:10px;background:none;border:none;color:#c66;font-size:.78rem;cursor:pointer;padding:0;line-height:1.4">✕ Clear price filter</button>
               </div>
             </div>
             <!-- Action buttons row (side-by-side on mobile, inline on desktop) -->
@@ -4997,7 +5045,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.11.5"
+APP_VERSION = "2.12.0"
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
