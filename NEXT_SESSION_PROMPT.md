@@ -70,4 +70,4 @@ The architecture for this already exists — `date_raw` is returned on every bro
 4. Make sure anything we add is honest and accurate, not boilerplate spam
 5. Push all changes to Railway when done
 
-Current version: **v2.11.4**. Push commands go to: `git push https://cboehmig-lab@github.com/cboehmig-lab/gc-tracker.git main`
+Current version: **v2.11.4**. Last updated: 2026-05-18. Push commands go to: `git push https://cboehmig-lab@github.com/cboehmig-lab/gc-tracker.git main`

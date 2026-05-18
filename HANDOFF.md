@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-15 · Current version: v2.11.4 · Status: deployed on Railway · Domain: gcgeartracker.com*
+*Last updated: 2026-05-18 · Current version: v2.11.4 · Status: deployed on Railway · Domain: gcgeartracker.com*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
 
@@ -572,11 +572,21 @@ After any JS change, open the page, open the browser console, and confirm there 
 
 ---
 
+## 🐛 Known Bugs
+
+### Anchor not advancing on browse (scan-for-new threshold wrong)
+`window._lastAnchorISO` — the "max `date_listed` you've been exposed to" — is only updated after a scan completes (`scan_anchor` from server) and on login. It is **not** updated when browse results render. This means items already visible at the top of the table (from another user's earlier scan) can still be flagged NEW on your next scan, because your anchor is stuck at your last scan time rather than the top-of-table date.
+
+**Fix (small, client-side in `static/gc.js`):** After `window._lastBrowseItems = d.items` in `_fetchBrowsePage`, on page 1 only, advance `_lastAnchorISO` to `max(existing anchor, max(d.items.map(i => i.date_raw).filter(Boolean)))`, persist with `_lsSet('last_anchor', ...)`, and trigger `_syncToServer()` if logged in. Everything needed exists — just not wired together here.
+
+---
+
 ## 🎯 Planned Next Features
 
-- **Additional OAuth providers** (Facebook, Apple): same direct Authorization Code flow as Google — each needs its own `CLIENT_ID`/`CLIENT_SECRET` env vars, a new `/api/auth/<provider>` + callback route, and a `<provider>_id` column in `users`. Authlib is already a dependency and can simplify multi-provider registration, but the direct HTTP approach used for Google also works fine.
-- ~~**Google Analytics**~~: shipped in v2.10.19 — `gtag.js` loaded via `GA_MEASUREMENT_ID` env var; init IIFE in `gc.js` / `cl.js`.
-- **Account settings page/modal**: allow users to change their username or link Google at any time (not just via the `/?google_new=1` URL trick).
+- **Sovrn affiliate approval**: site needs About page, Privacy Policy, Terms of Service, and contact info to pass manual publisher review. Next session focus.
+- **Additional OAuth providers** (Facebook, Apple): same direct Authorization Code flow as Google — each needs its own `CLIENT_ID`/`CLIENT_SECRET` env vars, a new `/api/auth/<provider>` + callback route, and a `<provider>_id` column in `users`. Authlib is already a dependency.
+- ~~**Google Analytics**~~: shipped in v2.10.19.
+- **Account settings page/modal**: allow users to change username or link Google at any time (not just via `/?google_new=1`).
 
 ---
 
