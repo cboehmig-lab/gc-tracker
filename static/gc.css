@@ -531,7 +531,7 @@ tr.fav-row td:last-child{color:#4ade80}
   .price-sym{font-size:.82rem;color:#666;flex-shrink:0}
   .price-sep{color:#555;font-size:.85rem;flex-shrink:0}
   .price-inp{
-    flex:1;min-width:0;
+    flex:1 1 0;min-width:0;width:0;
     padding:9px 10px;
     background:#252525;border:1px solid #3a3a3a;border-radius:6px;
     color:#eee;font-size:.88rem;outline:none;

@@ -3099,7 +3099,18 @@ function togglePriceDropdown() {
   var isOpen = panel.style.display !== 'none';
   _closeAllDropdowns();   // closes price panel too, so re-open if it wasn't already open
   if (!isOpen) {
-    panel.style.display = '';
+    var btn = document.getElementById('price-dd-btn');
+    if (!btn) return;
+    var rect = btn.getBoundingClientRect();
+    panel.style.top  = (rect.bottom + 4) + 'px';
+    panel.style.left = rect.left + 'px';
+    panel.style.display = 'block';
+    requestAnimationFrame(function() {
+      var pRect = panel.getBoundingClientRect();
+      if (pRect.right > window.innerWidth - 8) {
+        panel.style.left = Math.max(8, window.innerWidth - pRect.width - 8) + 'px';
+      }
+    });
     setTimeout(function() { document.addEventListener('click', _closePriceOnOutside, true); }, 0);
   }
 }

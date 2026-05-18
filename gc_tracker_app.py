@@ -4856,7 +4856,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <!-- ── Price range — desktop dropdown (hidden on mobile via CSS) ── -->
             <div id="price-dropdown" style="display:none;position:relative">
               <button id="price-dd-btn" class="cat-sel" style="cursor:pointer;white-space:nowrap">Price ▾</button>
-              <div id="price-dd-panel" style="display:none;position:absolute;top:calc(100% + 4px);left:0;z-index:55;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;padding:14px 14px 10px;width:236px;box-shadow:0 8px 24px rgba(0,0,0,.5)">
+              <div id="price-dd-panel" style="display:none;position:fixed;z-index:500;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;padding:14px 14px 10px;width:236px;box-shadow:0 8px 24px rgba(0,0,0,.5)">
                 <div style="font-size:.72rem;color:#666;margin-bottom:9px;text-transform:uppercase;letter-spacing:.05em">Price Range</div>
                 <div style="display:flex;align-items:center;gap:6px">
                   <span style="color:#777;font-size:.82rem">$</span>
