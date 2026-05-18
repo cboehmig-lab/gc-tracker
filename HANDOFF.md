@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-18 · Current version: v2.11.4 · Status: deployed on Railway · Domain: gcgeartracker.com*
+*Last updated: 2026-05-18 · Current version: v2.12.1 · Status: deployed on Railway · Domain: gcgeartracker.com*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
 
@@ -109,7 +109,7 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 ### Browse flow (server-side pagination)
 - Client POST `/api/browse` with filters, sort, page, `new_ids`, `user_last_scan`
 - Server reads `gc_category_cache.json`, applies filters, returns 50 items/page
-- Filters: `filter_q` (keyword), `filter_brands`, `filter_conditions`, `filter_categories`, `filter_subcategories`, `filter_watched`, `filter_price_drop_only`
+- Filters: `filter_q` (keyword), `filter_brands`, `filter_conditions`, `filter_categories`, `filter_subcategories`, `filter_watched`, `filter_price_drop_only`, `filter_price_min`, `filter_price_max` (numeric, applied against `price_raw`)
 
 ### Algolia date fields
 - Only two top-level date fields: `startDate` (Unix seconds, can be 0) and `creationDate` (Unix ms, always set)
@@ -308,6 +308,8 @@ The CL panel stub still exists in the main `HTML_TEMPLATE` as `<div id="cl-panel
 | `_watchFilterActive` | JS var | True when filtering browse to watchlist items |
 | `_wantListSearchActive` | JS var | True when filtering browse to want list keywords |
 | `_priceDropFilterActive` | JS var | True when filtering to price-dropped items |
+| `window._priceMin` | JS var | Minimum price filter (`null` = no filter) |
+| `window._priceMax` | JS var | Maximum price filter (`null` = no filter) |
 | `_globalSearchActive` | JS var | True when a global search (all stores) is active |
 | `_syncTimer` | JS var | Debounce timer for `_syncToServer()` |
 
@@ -574,9 +576,7 @@ After any JS change, open the page, open the browser console, and confirm there 
 
 ## 🎯 Planned Next Features
 
-- **Sovrn affiliate approval**: site needs About page, Privacy Policy, Terms of Service, and contact info to pass manual publisher review. Next session focus.
 - **Additional OAuth providers** (Facebook, Apple): same direct Authorization Code flow as Google — each needs its own `CLIENT_ID`/`CLIENT_SECRET` env vars, a new `/api/auth/<provider>` + callback route, and a `<provider>_id` column in `users`. Authlib is already a dependency.
-- ~~**Google Analytics**~~: shipped in v2.10.19.
 - **Account settings page/modal**: allow users to change username or link Google at any time (not just via `/?google_new=1`).
 
 ---
@@ -859,6 +859,36 @@ Navigate to `/?google_new=1` to re-trigger the modal at any time (e.g. to change
 - Select All / Clear All merged into one toggle button (`#sel-all-btn`): shows "Select All" normally, switches to "Clear All" when all visible stores checked. Logic in `toggleSelectAll()`, label updated in `updateCount()`
 - Store list scroll resets to top (`el.scrollTop = 0`) in `renderList()` — fixes mid-list positioning after favorites toggle on mobile
 - `APP_PASSWORD` env var: code was reading `RESET_PASSWORD` but Railway var is named `APP_PASSWORD`. Fixed throughout. Top-level constant `APP_PASSWORD = (os.environ.get("APP_PASSWORD") or "").strip()` defined once at startup, used everywhere.
+
+---
+
+## Recent Changes (v2.12.0 → v2.12.1)
+
+### v2.12.1 — Price filter layout fixes
+
+**Desktop popover clipping fixed**
+- `#price-dd-panel` changed from `position:absolute` to `position:fixed`. Root cause: `.right{overflow:hidden}` clips any absolutely-positioned child that escapes the `.results-hdr` bar. Changing to `fixed` lifts the panel to the viewport stacking context so it can never be clipped.
+- `togglePriceDropdown()` updated to position the panel via `getBoundingClientRect()` on the button (same pattern as `#ss-dropdown`). Sets `top`/`left` in `style`, then clamps to viewport right edge in a `requestAnimationFrame` callback.
+- `#price-dropdown` wrapper no longer needs `position:relative` (removed from HTML). The `z-index` on the panel raised to `500` to match `#ss-dropdown`.
+
+**Mobile equal-width inputs fixed**
+- `.price-inp` changed from `flex:1` to `flex:1 1 0` with explicit `width:0`. Without `width:0`, browsers use the input's intrinsic content width as the flex-basis, which caused Min to be noticeably wider than Max. Setting `width:0` forces the flex algorithm to start both inputs from 0 and grow them equally from there.
+
+**Desktop number spinners removed**
+- Browser-native up/down spinner arrows were showing on the desktop dropdown inputs. Fixed via CSS pseudo-elements:
+  ```css
+  #price-min-dd,#price-max-dd{-moz-appearance:textfield}
+  #price-min-dd::-webkit-inner-spin-button,#price-min-dd::-webkit-outer-spin-button,
+  #price-max-dd::-webkit-inner-spin-button,#price-max-dd::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+  ```
+
+**Desktop panel text brightened**
+- "PRICE RANGE" label: `#666 → #aaa`
+- `$` symbols: `#777 → #bbb`
+- `–` separator: `#555 → #999`
+- "✕ Clear price filter" button: `#c66 → #f88`
+
+**Files changed:** `gc_tracker_app.py` (HTML inline styles on panel, `position:fixed`), `static/gc.js` (`togglePriceDropdown`), `static/gc.css` (spinner hiding, `.price-inp` flex fix)
 
 ---
 
