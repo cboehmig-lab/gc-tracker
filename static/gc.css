@@ -356,6 +356,10 @@ tr.fav-row td:last-child{color:#4ade80}
 .dd-done-bar{display:none}           /* done bar only needed on mobile */
 .filter-accordion{display:none}      /* accordion only shown on mobile */
 .price-range-mobile{display:none}    /* mobile price row hidden on desktop; shown in @media block */
+/* ── Desktop price inputs: hide number spinners ── */
+#price-min-dd,#price-max-dd{-moz-appearance:textfield}
+#price-min-dd::-webkit-inner-spin-button,#price-min-dd::-webkit-outer-spin-button,
+#price-max-dd::-webkit-inner-spin-button,#price-max-dd::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
 
 /* ══════════════════════════════════════════════════════════════════════════════
    MOBILE RESPONSIVE — all changes scoped inside @media so desktop is untouched
