@@ -1270,12 +1270,21 @@ async function _fetchBrowsePage(page) {
     _srvTotalUnfiltered = d.total_unfiltered;
     _srvTotalPages     = d.total_pages;
 
-    // Live item count near filter buttons — always reflects current view
-    const countEl2 = document.getElementById('filter-item-count');
-    if (countEl2) countEl2.textContent = _srvTotalCount.toLocaleString() + ' items';
-
     // Update header
-    const hasFilters = filters.filter_q || (filters.filter_brands && filters.filter_brands.length) || (filters.filter_conditions && filters.filter_conditions.length) || (filters.filter_categories && filters.filter_categories.length) || (filters.filter_subcategories && filters.filter_subcategories.length) || filters.filter_watched;
+    const hasFilters = filters.filter_q ||
+      (filters.filter_brands && filters.filter_brands.length) ||
+      (filters.filter_conditions && filters.filter_conditions.length) ||
+      (filters.filter_categories && filters.filter_categories.length) ||
+      (filters.filter_subcategories && filters.filter_subcategories.length) ||
+      filters.filter_watched ||
+      filters.filter_price_drop_only ||
+      filters.filter_price_min != null ||
+      filters.filter_price_max != null ||
+      _wantListSearchActive;
+
+    // Item count near filter buttons — only show when a filter is active
+    const countEl2 = document.getElementById('filter-item-count');
+    if (countEl2) countEl2.textContent = hasFilters ? _srvTotalCount.toLocaleString() + ' items' : '';
     const newCount = d.new_count || 0;
     if (_wantListSearchActive) {
       document.getElementById('res-title').textContent = _srvTotalCount > 0
