@@ -4982,9 +4982,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 <script src="/static/gc.js"></script>
 
+<div id="affiliate-disclosure">This site may earn a commission on purchases made through links to Guitar Center.</div>
+
 <div id="dev-footer">
-  <span style="color:#999;font-style:italic">This site may earn a commission on purchases made through links to Guitar Center.</span>
-  <span>·</span>
   <span>Buy the developer a pack of strings</span>
   <a href="https://paypal.me/smurfco" target="_blank" rel="noopener" title="PayPal">
     <svg width="18" height="18" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -5018,6 +5018,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div id="about-box">
     <h3>GC Used Inventory Tracker</h3>
     <div class="about-sub">Developed by CKB</div>
+    <p style="font-size:.82rem;color:#aaa;line-height:1.55;margin:12px 0 4px;text-align:center">A free tool for tracking Guitar Center's used instrument inventory. Scan for new listings, build a watch list, set up a want list, and save searches — all synced across your devices.</p>
+    <p style="font-size:.75rem;color:#666;line-height:1.45;margin:0 0 10px;text-align:center;font-style:italic">Independent tool — not affiliated with or endorsed by Guitar Center, Inc.</p>
     <div class="about-donate-row">
       <span class="about-donate-label">Donate</span>
       <a href="https://paypal.me/smurfco" target="_blank" rel="noopener" title="PayPal">
@@ -5079,8 +5081,9 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid #222;color:#555;fon
   <h1>Privacy Policy</h1>
   <p class="subtitle">Last updated: May 2026</p>
 
-  <p>GC Used Inventory Tracker ("the site", "we", "us") is a personal project that helps musicians
-  track used gear listings at Guitar Center. This policy explains what information we collect, how
+  <p>GC Used Inventory Tracker ("the site", "we", "us") is an independent personal project that
+  helps musicians track used gear listings at Guitar Center. It is not affiliated with, sponsored
+  by, or endorsed by Guitar Center, Inc. This policy explains what information we collect, how
   we use it, and your rights regarding that information.</p>
 
   <h2>Information We Collect</h2>

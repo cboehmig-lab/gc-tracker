@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-18 · Current version: v2.12.1 · Status: deployed on Railway · Domain: gcgeartracker.com*
+*Last updated: 2026-05-19 · Current version: v2.12.3 · Status: deployed on Railway · Domain: gcgeartracker.com*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
 
@@ -100,10 +100,12 @@ A Flask web app deployed on Railway that tracks Guitar Center used inventory. Us
 4. Scan runs in background thread, streams progress via SSE (`/api/progress?run_id=...`)
 5. On completion, client receives `{new_ids, scan_time}` via SSE, syncs to server via `/api/sync`
 
-### NEW detection (per-user, v2.6.3+)
-- Item is NEW if `date_listed > prev_scan_time` (Algolia's `creationDate` in ISO UTC)
-- Each user account has its own `last_run` and `new_ids` stored server-side
-- Guest users fall back to localStorage
+### NEW detection (per-user, anchor-based — v2.12.2)
+- Item is NEW if `date_listed > threshold`, where `threshold = _norm_anchor` (the max `date_listed` the user was actually exposed to at their last scan — their "top of table" high-water mark). Falls back to `prev_scan_time` only if no anchor exists yet (e.g. first scan after baseline).
+- **Critical**: `prev_scan_time` (wall-clock UTC scan time) is NOT mixed into the threshold. Before v2.12.2, `threshold = max(anchor, prev_scan_time)`. Wall-clock timestamps like `"2026-05-18T08:00:00Z"` are lexicographically larger than date-only strings like `"2026-05-17"`, so `prev_scan_time` silently won the `max()` and blocked items that were genuinely new to the user (the "5 items between the known item and the 10 new ones, none flagged" bug).
+- The new anchor persisted after each scan is `max(max_date_listed_this_scan, old_anchor)` — no wall-clock time included.
+- Each user account has its own `last_run`, `last_anchor`, and `new_ids` stored server-side in `user_data`
+- Guest users fall back to localStorage (`last_anchor` round-tripped in SSE `done` payload as `scan_anchor`)
 - Each scan replaces `_newIds` entirely — 0 new = clean slate
 
 ### Browse flow (server-side pagination)
@@ -859,6 +861,91 @@ Navigate to `/?google_new=1` to re-trigger the modal at any time (e.g. to change
 - Select All / Clear All merged into one toggle button (`#sel-all-btn`): shows "Select All" normally, switches to "Clear All" when all visible stores checked. Logic in `toggleSelectAll()`, label updated in `updateCount()`
 - Store list scroll resets to top (`el.scrollTop = 0`) in `renderList()` — fixes mid-list positioning after favorites toggle on mobile
 - `APP_PASSWORD` env var: code was reading `RESET_PASSWORD` but Railway var is named `APP_PASSWORD`. Fixed throughout. Top-level constant `APP_PASSWORD = (os.environ.get("APP_PASSWORD") or "").strip()` defined once at startup, used everywhere.
+
+---
+
+## Recent Changes (v2.12.2 → v2.12.3)
+
+### v2.12.3 — Privacy Policy, affiliate disclosure, About modal polish
+
+**Motivation**: Preparing to apply to the Guitar Center affiliate program through CJ Affiliate. CJ requires a Privacy Policy, FTC-compliant affiliate disclosure, and a site that clearly explains its purpose.
+
+**Privacy Policy (`/privacy`)**
+- New standalone route `GET /privacy` serving `PRIVACY_TEMPLATE` — a dark-themed page matching the app's aesthetic
+- Covers: account data, preferences/scan history, cookies (session, `gt_device_id`, GA4), third-party services (Google Analytics, Google OAuth, Railway), affiliate link disclosure, data retention, children's privacy, contact info
+- Intro paragraph explicitly states the site is independent and not affiliated with Guitar Center, Inc.
+- Contact email: `cboehmig@gmail.com` (to be updated to `@gcgeartracker.com` address in a future session)
+
+**Affiliate disclosure**
+- New `#affiliate-disclosure` div: `position:fixed; bottom:10px; left:12px` on desktop — italic `#999` text, clearly readable, positioned left to avoid overlapping the paginator
+- Hidden on mobile via `@media(max-width:820px)` — mobile users see the disclosure in the About modal instead
+- Text: *"This site may earn a commission on purchases made through links to Guitar Center."*
+
+**About modal**
+- Added a two-sentence description of what the tracker does (scan, watch list, want list, saved searches, cross-device sync)
+- Added non-affiliation disclaimer: *"Independent tool — not affiliated with or endorsed by Guitar Center, Inc."*
+- Added Privacy Policy link (opens in new tab) — visible on both desktop and mobile
+- Affiliate disclosure line also added to the modal (mobile coverage)
+
+**Files changed:** `gc_tracker_app.py` (PRIVACY_TEMPLATE, `/privacy` route, About modal HTML, dev-footer HTML), `static/gc.css` (`#affiliate-disclosure` styles + mobile hide)
+
+---
+
+## Affiliate Program Research (2026-05-19)
+
+**Guitar Center's affiliate program is on CJ Affiliate (Commission Junction)** — not Sovrn exclusively. Sovrn still carries GC in their merchant network but CJ is GC's primary program.
+
+**CJ program details:**
+- 4–6% commission on all sales (including used/vintage gear)
+- 14-day cookie window
+- $50 minimum payout, monthly
+- Approval rated "easy"
+- No JS required on publisher's site — deep links use CJ's redirect URL format
+
+**Implementation plan (when approved):**
+- CJ deep links use the format: `https://www.anrdoezrs.net/click-[SID]-[AID]?url=[encoded-GC-url]`
+- Add a `_gcUrl(url)` helper function in `static/gc.js` that wraps any GC product URL in the CJ redirect
+- Swap it in wherever item links are rendered (table rows, mobile cards, etc.)
+- No CSP changes needed — `<a href>` navigation is not subject to `connect-src`
+
+**Why previous Sovrn application was rejected (likely):**
+- No custom domain at the time (`animalsintrees.com` subdomain)
+- No privacy policy
+- Sovrn requires installing their Commerce JS snippet and generating real click traffic before approval
+- Their model is optimized for content/blog publishers, not utility tools
+
+**Pre-application checklist (all now complete):**
+- ✅ Real domain (`gcgeartracker.com`)
+- ✅ HTTPS + security headers
+- ✅ Privacy Policy at `/privacy`
+- ✅ FTC-compliant affiliate disclosure on every page
+- ✅ Non-affiliation disclaimer (About modal + Privacy Policy)
+- ✅ About modal explains the site's purpose
+- ⬜ Apply at `cj.com` → create publisher account → apply to Guitar Center program
+
+**Future: domain email**
+- Set up `@gcgeartracker.com` email addresses (e.g. `privacy@gcgeartracker.com`)
+- Update contact email in `PRIVACY_TEMPLATE` from `cboehmig@gmail.com`
+
+---
+
+## Recent Changes (v2.12.1 → v2.12.2)
+
+### v2.12.2 — Fix NEW-item detection: anchor-only threshold (no wall-clock contamination)
+
+**Bug**: Items that appeared in Algolia for the first time during a "0 new items" scan (due to Algolia's 6–12h indexing delay) would never be flagged NEW, even though the user had never seen them. They would silently appear in the table sorted between genuinely-new items and the previous top item, without NEW badges. Root cause: `threshold = max(anchor_date, prev_scan_time)`. Wall-clock UTC timestamps (e.g. `"2026-05-18T08:00:00Z"`) are lexicographically larger than date-only strings (e.g. `"2026-05-17"`), so `prev_scan_time` always won the `max()`, inflating the threshold above the date-only anchor and blocking items that had dates between the user's last "seen" item and the wall-clock scan time.
+
+**Fix** (two lines in `_run()`, `gc_tracker_app.py`):
+
+1. **Threshold**: changed from `max(_norm_anchor, prev_scan_time)` → `_norm_anchor if _norm_anchor else prev_scan_time`. The threshold is now purely item-date-based (the user's "top of table" high-water mark). Wall-clock time is only used as a fallback on the very first scan when no anchor exists yet.
+
+2. **New anchor persistence**: changed from `max(new_anchor, anchor_date or "", prev_scan_time or "")` → `max(new_anchor, anchor_date or "")`. The saved anchor never gets inflated by wall-clock scan times.
+
+**Effect**: Any item with `date_listed` newer than the top item in the user's table will be flagged NEW at the first scan where it appears — regardless of when that scan's wall clock reads.
+
+**Caveat**: Items already silently in the cache from before this fix cannot be retroactively flagged (their `first_seen` timestamp matches the previous scan). Going forward, this scenario won't recur.
+
+**Files changed:** `gc_tracker_app.py` only (`_run()` threshold and anchor lines, `APP_VERSION = "2.12.2"`)
 
 ---
 
