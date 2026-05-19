@@ -100,8 +100,8 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .empty-msg{padding:24px 16px;color:#555;font-size:.85rem;text-align:center}
 #affiliate-disclosure{position:fixed;bottom:10px;left:12px;z-index:50;font-size:.72rem;color:#999;font-style:italic;pointer-events:none}
 #dev-footer{position:fixed;bottom:10px;right:12px;display:flex;flex-direction:row;align-items:center;gap:8px;z-index:50;font-size:.72rem;color:#aaa;white-space:nowrap}
-#dev-footer span{pointer-events:none}
-#dev-footer a{display:inline-flex;align-items:center;color:#aaa;text-decoration:none;transition:color .2s}
+#dev-footer span{pointer-events:none;color:#888}
+#dev-footer a{display:inline-flex;align-items:center;color:#bbb;text-decoration:none;transition:color .2s}
 #dev-footer a:hover{color:#fff}
 #dev-footer svg{opacity:.7;transition:opacity .2s}
 #dev-footer a:hover svg{opacity:1}
@@ -261,7 +261,7 @@ tr.fav-row td:last-child{color:#4ade80}
 .no-res{padding:24px 20px;color:#555;font-size:.85rem}
 
 /* ── Paginator ── */
-.paginator{display:flex;align-items:center;justify-content:center;gap:2px;padding:14px 16px;border-top:1px solid #1e1e1e;user-select:none;position:sticky;bottom:0;background:#111;z-index:5}
+.paginator{display:flex;align-items:center;justify-content:center;gap:2px;padding:14px 16px;border-top:1px solid #1e1e1e;user-select:none;position:sticky;bottom:32px;background:#111;z-index:5}
 .paginator .pg-info{font-size:.75rem;color:#555;margin-right:12px;white-space:nowrap}
 .paginator button{background:none;border:1px solid transparent;color:#888;font-size:.78rem;min-width:32px;height:30px;border-radius:5px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;transition:all .15s;font-weight:500}
 .paginator button:hover:not(:disabled):not(.pg-active){background:#1e1e1e;border-color:#333;color:#ddd}

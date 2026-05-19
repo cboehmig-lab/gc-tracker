@@ -5008,12 +5008,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </svg>
   </a>
   <span style="margin-left:4px">·</span>
-  <a href="#" data-action="open-about" style="color:#666;font-size:11px">About</a>
+  <a href="#" data-action="open-about">About</a>
   <span style="margin-left:4px">·</span>
-  <a href="/privacy" style="color:#666;font-size:11px">Privacy Policy</a>
+  <a href="/privacy">Privacy Policy</a>
   <span style="margin-left:4px">·</span>
-  <a href="https://sovrn.co/5d2raqp" target="_blank" rel="noopener" style="color:#666;font-size:11px">GC Used Homepage</a>
-  <span style="color:#555;font-size:10px;margin-left:3px;font-style:italic">(affiliate link)</span>
+  <a href="https://sovrn.co/5d2raqp" target="_blank" rel="noopener">GC Used Homepage</a>
+  <span style="font-size:10px;font-style:italic">(affiliate link)</span>
   <span id="admin-footer-sep" style="display:none;margin-left:4px">·</span>
   <a id="admin-footer-link" href="/admin/users" style="display:none;margin-left:0;color:#888;font-size:11px">Admin</a>
 </div>
