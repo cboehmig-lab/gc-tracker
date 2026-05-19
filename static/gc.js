@@ -1737,6 +1737,11 @@ function toggleWatch(id, btn) {
   btn.classList.toggle('wl-on',  !isWatched);
   btn.textContent = isWatched ? '☆' : '★';
   btn.title = isWatched ? 'Add to watch list' : 'Remove from watch list';
+  // If currently in Watch List view and user just unwatched, remove the row immediately
+  if (isWatched && _watchFilterActive) {
+    const row = btn.closest('tr') || btn.closest('.item-card') || btn.closest('.compact-row');
+    if (row) row.remove();
+  }
   _syncToServer();
 }
 

@@ -598,7 +598,7 @@ tr.fav-row td:last-child{color:#4ade80}
   td:nth-child(1){width:42px}
   td:nth-child(2){width:52px}
   td:nth-child(3){width:30px}
-  td:nth-child(4){width:auto;min-width:200px;white-space:normal}
+  td:nth-child(4){width:auto;min-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:1px}
   td:nth-child(5),td:nth-child(6),td:nth-child(7),td:nth-child(8),td:nth-child(9),td:nth-child(10),td:nth-child(11),td:nth-child(12){width:auto;min-width:85px}
   th:nth-child(1){width:42px}
   th:nth-child(2){width:52px}
