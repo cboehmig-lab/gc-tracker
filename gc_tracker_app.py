@@ -2607,6 +2607,10 @@ def index():
 def cl_page():
     return CL_TEMPLATE
 
+@app.route("/privacy")
+def privacy_page():
+    return PRIVACY_TEMPLATE
+
 CL_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5001,6 +5005,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <circle cx="18" cy="16" r="3" stroke="#aaa" stroke-width="1.5"/>
     </svg>
   </a>
+  <span style="margin-left:4px">·</span>
+  <a href="/privacy" style="color:#666;font-size:11px">Privacy Policy</a>
   <span id="admin-footer-sep" style="display:none;margin-left:4px">·</span>
   <a id="admin-footer-link" href="/admin/users" style="display:none;margin-left:0;color:#888;font-size:11px">Admin</a>
 </div>
@@ -5033,10 +5039,129 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <circle cx="18" cy="16" r="3" stroke="#aaa" stroke-width="1.5"/>
       </svg>
     </a>
+    <a href="/privacy" target="_blank" rel="noopener" style="display:block;margin-top:12px;font-size:.78rem;color:#666;text-align:center;text-decoration:none">Privacy Policy</a>
     <button class="about-close-btn">Close</button>
   </div>
 </div>
 
+</body>
+</html>"""
+
+PRIVACY_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Privacy Policy — GC Used Inventory Tracker</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#111;color:#ccc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.7;padding:40px 20px 80px}
+.wrap{max-width:700px;margin:0 auto}
+a{color:#f88;text-decoration:none}
+a:hover{text-decoration:underline}
+h1{color:#fff;font-size:1.5rem;margin-bottom:6px}
+.subtitle{color:#888;font-size:.85rem;margin-bottom:36px}
+h2{color:#eee;font-size:1rem;font-weight:700;margin:32px 0 10px;padding-bottom:6px;border-bottom:1px solid #2a2a2a}
+p{margin-bottom:14px}
+ul{margin:0 0 14px 20px}
+ul li{margin-bottom:6px}
+.back{display:inline-block;margin-bottom:28px;color:#888;font-size:.85rem}
+.back:hover{color:#ccc}
+footer{margin-top:48px;padding-top:16px;border-top:1px solid #222;color:#555;font-size:.8rem}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a href="/" class="back">← Back to GC Used Inventory Tracker</a>
+  <h1>Privacy Policy</h1>
+  <p class="subtitle">Last updated: May 2026</p>
+
+  <p>GC Used Inventory Tracker ("the site", "we", "us") is a personal project that helps musicians
+  track used gear listings at Guitar Center. This policy explains what information we collect, how
+  we use it, and your rights regarding that information.</p>
+
+  <h2>Information We Collect</h2>
+
+  <p><strong style="color:#eee">Account information.</strong> If you create an account, we store
+  your chosen username, an optional email address, and a hashed (never plain-text) version of your
+  password. If you sign in with Google, we store your Google account ID and the display name Google
+  provides. Your email address is never required and is used only for account recovery if you
+  choose to provide it.</p>
+
+  <p><strong style="color:#eee">Preferences and scan history.</strong> To sync your data across
+  devices, we store your watch list, want list keywords, favorited stores, saved searches, and the
+  timestamp and item IDs from your most recent scan. This data lives on our server and is tied to
+  your account.</p>
+
+  <p><strong style="color:#eee">Technical data.</strong> When you use the site, our server
+  receives your IP address. We use it only for rate-limiting (to prevent abuse) and do not log or
+  store it persistently. We also set an anonymous device ID cookie (<code style="color:#aaa;font-size:.85em">gt_device_id</code>)
+  to count unique devices in aggregate — it contains no personal information.</p>
+
+  <p><strong style="color:#eee">Analytics.</strong> We use Google Analytics 4 to understand how
+  visitors use the site in aggregate (page views, session counts, general geography). Google
+  Analytics may set its own cookies in your browser. You can opt out using the
+  <a href="https://tools.google.com/dlpage/gaoptout" target="_blank" rel="noopener">Google Analytics
+  Opt-out Browser Add-on</a>.</p>
+
+  <h2>How We Use Your Information</h2>
+  <ul>
+    <li>To provide the core tracker functionality (scan results, watch list, want list)</li>
+    <li>To sync your preferences across your own devices when you are logged in</li>
+    <li>To prevent abuse via rate limiting on scan and login endpoints</li>
+    <li>To understand aggregate site usage through analytics</li>
+  </ul>
+  <p>We do not sell, rent, or share your personal information with third parties for their
+  marketing purposes.</p>
+
+  <h2>Cookies</h2>
+  <ul>
+    <li><strong style="color:#eee">Session cookie</strong> — keeps you logged in across browser
+    sessions. Set by Flask, signed with a server secret, HttpOnly and Secure.</li>
+    <li><strong style="color:#eee">gt_device_id</strong> — anonymous device identifier for
+    internal usage counting. Contains no personal information.</li>
+    <li><strong style="color:#eee">Google Analytics cookies</strong> (_ga, _gid, and related)
+    — set by Google's analytics script to measure aggregate traffic.</li>
+  </ul>
+
+  <h2>Third-Party Services</h2>
+  <ul>
+    <li><strong style="color:#eee">Google Analytics</strong> — aggregate usage data.
+    <a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Google Privacy Policy</a>.</li>
+    <li><strong style="color:#eee">Google Sign-In (OAuth)</strong> — optional login method.
+    We receive your Google ID and display name only. We do not receive your Google contacts,
+    Drive files, or any other Google data.</li>
+    <li><strong style="color:#eee">Railway</strong> — the cloud platform that hosts the site.
+    Your data is stored on Railway's infrastructure in the United States.</li>
+  </ul>
+
+  <h2>Affiliate Links</h2>
+  <p>This site may contain affiliate links to Guitar Center and potentially other retailers.
+  If you click an affiliate link and make a purchase, we may earn a small commission at no
+  additional cost to you. Affiliate links are used to help support the site's hosting costs.
+  We only link to products and listings that are directly relevant to the tracker's purpose.</p>
+
+  <h2>Data Retention</h2>
+  <p>Your account and associated data are retained until you request deletion. You can request
+  that your account be deleted at any time by contacting us at the address below. Guest users
+  (no account) have no data stored on our servers beyond the anonymous device ID cookie.</p>
+
+  <h2>Children's Privacy</h2>
+  <p>This site is not directed at children under 13. We do not knowingly collect personal
+  information from children.</p>
+
+  <h2>Changes to This Policy</h2>
+  <p>If we make material changes to this policy, we will update the "Last updated" date at the
+  top of this page. Continued use of the site after changes are posted constitutes acceptance
+  of the updated policy.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about this privacy policy or your data can be sent to:
+  <a href="mailto:cboehmig@gmail.com">cboehmig@gmail.com</a></p>
+
+  <footer>GC Used Inventory Tracker is an independent tool and is not affiliated with or
+  endorsed by Guitar Center, Inc.</footer>
+</div>
 </body>
 </html>"""
 
@@ -5052,7 +5177,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.2"
+APP_VERSION = "2.12.3"
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
