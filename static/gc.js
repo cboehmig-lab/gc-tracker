@@ -4037,4 +4037,8 @@ document.addEventListener('DOMContentLoaded', function() {
     if (e.target === this) _closeAboutModal();
   });
   document.querySelector('.about-close-btn')?.addEventListener('click', _closeAboutModal);
+  document.querySelector('[data-action="open-about"]')?.addEventListener('click', function(e) {
+    e.preventDefault();
+    _openAboutModal();
+  });
 });

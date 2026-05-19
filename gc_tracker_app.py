@@ -5008,6 +5008,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </svg>
   </a>
   <span style="margin-left:4px">·</span>
+  <a href="#" data-action="open-about" style="color:#666;font-size:11px">About</a>
+  <span style="margin-left:4px">·</span>
   <a href="/privacy" style="color:#666;font-size:11px">Privacy Policy</a>
   <span id="admin-footer-sep" style="display:none;margin-left:4px">·</span>
   <a id="admin-footer-link" href="/admin/users" style="display:none;margin-left:0;color:#888;font-size:11px">Admin</a>
