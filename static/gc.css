@@ -98,7 +98,6 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #zip-sort-btn:hover{border-color:#555;color:#bbb}
 
 .empty-msg{padding:24px 16px;color:#555;font-size:.85rem;text-align:center}
-#affiliate-disclosure{position:fixed;bottom:10px;left:12px;z-index:50;font-size:.72rem;color:#999;font-style:italic;pointer-events:none}
 #dev-footer{position:fixed;bottom:10px;right:12px;display:flex;flex-direction:row;align-items:center;gap:8px;z-index:50;font-size:.72rem;color:#aaa;white-space:nowrap}
 #dev-footer span{pointer-events:none;color:#888}
 #dev-footer a{display:inline-flex;align-items:center;color:#bbb;text-decoration:none;transition:color .2s}
@@ -367,7 +366,6 @@ tr.fav-row td:last-child{color:#4ade80}
    ══════════════════════════════════════════════════════════════════════════════ */
 @media(max-width:820px){
   #dev-footer{display:none}
-  #affiliate-disclosure{display:none}
 
   /* ── Base font bump + iOS tap highlight removal ── */
   body{font-size:1rem;overflow:hidden;height:100dvh}

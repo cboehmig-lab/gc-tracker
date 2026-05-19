@@ -4982,8 +4982,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 <script src="/static/gc.js"></script>
 
-<div id="affiliate-disclosure">This site may earn a commission on purchases made through links to Guitar Center.</div>
-
 <div id="dev-footer">
   <span>Buy the developer a pack of strings</span>
   <a href="https://paypal.me/smurfco" target="_blank" rel="noopener" title="PayPal">
@@ -5011,9 +5009,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <a href="#" data-action="open-about">About</a>
   <span style="margin-left:4px">·</span>
   <a href="/privacy">Privacy Policy</a>
-  <span style="margin-left:4px">·</span>
-  <a href="https://sovrn.co/5d2raqp" target="_blank" rel="noopener">GC Used Homepage</a>
-  <span style="font-size:10px;font-style:italic">(affiliate link)</span>
   <span id="admin-footer-sep" style="display:none;margin-left:4px">·</span>
   <a id="admin-footer-link" href="/admin/users" style="display:none;margin-left:0;color:#888;font-size:11px">Admin</a>
 </div>
@@ -5048,7 +5043,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <circle cx="18" cy="16" r="3" stroke="#aaa" stroke-width="1.5"/>
       </svg>
     </a>
-    <p style="margin-top:14px;font-size:.78rem;color:#999;text-align:center;font-style:italic;line-height:1.4">This site may earn a commission on purchases made through links to Guitar Center.</p>
     <a href="/privacy" target="_blank" rel="noopener" style="display:block;margin-top:8px;font-size:.78rem;color:#666;text-align:center;text-decoration:none">Privacy Policy</a>
     <button class="about-close-btn">Close</button>
   </div>
@@ -5145,12 +5139,6 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid #222;color:#555;fon
     <li><strong style="color:#eee">Railway</strong> — the cloud platform that hosts the site.
     Your data is stored on Railway's infrastructure in the United States.</li>
   </ul>
-
-  <h2>Affiliate Links</h2>
-  <p>This site may contain affiliate links to Guitar Center and potentially other retailers.
-  If you click an affiliate link and make a purchase, we may earn a small commission at no
-  additional cost to you. Affiliate links are used to help support the site's hosting costs.
-  We only link to products and listings that are directly relevant to the tracker's purpose.</p>
 
   <h2>Data Retention</h2>
   <p>Your account and associated data are retained until you request deletion. You can request
