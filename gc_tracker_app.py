@@ -4401,11 +4401,17 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         def _norm_item_date(d):
             return d + "T23:59:59Z" if d and len(d) == 10 else d
 
-        # Pick the most restrictive (most recent) threshold so we don't over-flag.
-        # Normalize anchor_date in case it's date-only.
+        # Threshold = the max date_listed the user was actually exposed to at their
+        # last scan (the "top of their table"). Anything with a newer date_listed is
+        # genuinely new to this user.
+        # We intentionally do NOT mix in prev_scan_time (wall-clock scan time) here.
+        # Wall-clock timestamps are lexicographically larger than date-only strings
+        # (e.g. "2026-05-18T08:00:00Z" > "2026-05-17"), so including prev_scan_time
+        # in a max() would inflate the threshold above items that are genuinely new —
+        # exactly the "5 items between the known item and the 10 new ones, none flagged"
+        # bug. Use anchor-only; fall back to prev_scan_time only on first scan.
         _norm_anchor = _norm_item_date(anchor_date) if anchor_date else ""
-        threshold = max(_norm_anchor, prev_scan_time) if (_norm_anchor and prev_scan_time) \
-                    else (_norm_anchor or prev_scan_time)
+        threshold = _norm_anchor if _norm_anchor else prev_scan_time
 
         new_ids_list = []
         if not baseline and threshold:
@@ -4432,9 +4438,10 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             _scan_dates = [p.get("date_listed", "") for p in all_products if p.get("date_listed")]
             if _scan_dates:
                 new_anchor = max(_scan_dates)
-        # Don't let the anchor regress: if the global cache somehow lost dates,
-        # keep the threshold we just used (anchor_date or prev_scan_time).
-        new_anchor = max(new_anchor, anchor_date or "", prev_scan_time or "")
+        # Don't let the anchor regress: preserve the old anchor if this scan
+        # produced no dates (e.g. stopped early). Never include prev_scan_time —
+        # wall-clock timestamps inflate the anchor and block same-date new items.
+        new_anchor = max(new_anchor, anchor_date or "")
 
         # Persist server-side for logged-in users (atomic with this scan completing).
         # Guests receive scan_anchor in the SSE done payload and roundtrip via localStorage.
@@ -5045,7 +5052,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.0"
+APP_VERSION = "2.12.2"
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
