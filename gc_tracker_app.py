@@ -4983,6 +4983,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <script src="/static/gc.js"></script>
 
 <div id="dev-footer">
+  <span style="color:#999;font-style:italic">This site may earn a commission on purchases made through links to Guitar Center.</span>
+  <span>·</span>
   <span>Buy the developer a pack of strings</span>
   <a href="https://paypal.me/smurfco" target="_blank" rel="noopener" title="PayPal">
     <svg width="18" height="18" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -5039,7 +5041,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <circle cx="18" cy="16" r="3" stroke="#aaa" stroke-width="1.5"/>
       </svg>
     </a>
-    <a href="/privacy" target="_blank" rel="noopener" style="display:block;margin-top:12px;font-size:.78rem;color:#666;text-align:center;text-decoration:none">Privacy Policy</a>
+    <p style="margin-top:14px;font-size:.78rem;color:#999;text-align:center;font-style:italic;line-height:1.4">This site may earn a commission on purchases made through links to Guitar Center.</p>
+    <a href="/privacy" target="_blank" rel="noopener" style="display:block;margin-top:8px;font-size:.78rem;color:#666;text-align:center;text-decoration:none">Privacy Policy</a>
     <button class="about-close-btn">Close</button>
   </div>
 </div>
