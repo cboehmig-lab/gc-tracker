@@ -2327,6 +2327,8 @@ def admin_users():
         ).fetchall()]
 
         # Count watchlist/keyword items per user
+        # Cross-reference watchlist against live catalog so sold/gone items don't inflate the count
+        _load_cat_cache()
         for u in users:
             row = conn.execute(
                 "SELECT watchlist, keywords, favorites FROM user_data WHERE user_id=?",
@@ -2335,7 +2337,7 @@ def admin_users():
             if row:
                 try:
                     _wl = json.loads(row["watchlist"] or "{}")
-                    u["wl_count"] = sum(1 for v in _wl.values() if not v.get("sold"))
+                    u["wl_count"] = sum(1 for sku in _wl if sku in _cat_cache)
                 except: u["wl_count"] = 0
                 try: u["kw_count"]  = len(json.loads(row["keywords"]  or "[]"))
                 except: u["kw_count"] = 0
@@ -5209,7 +5211,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.6"
+APP_VERSION = "2.12.7"
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
