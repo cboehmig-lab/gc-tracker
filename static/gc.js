@@ -1444,7 +1444,11 @@ function _buildRowHtml(item) {
 
 // ── Paginator builder ────────────────────────────────────────────────────────
 function _buildPaginatorHtml(currentPage, totalPages, totalCount, perPage) {
-  if (totalPages <= 1) return '';
+  if (totalPages <= 1) {
+    // Single page — still render the paginator so its sticky #111 background seals the bottom
+    const info = totalCount > 0 ? `<span class="pg-info">${totalCount.toLocaleString()} item${totalCount !== 1 ? 's' : ''}</span>` : '';
+    return `<div class="paginator">${info}<button class="pg-active" disabled>1</button></div>`;
+  }
   const startItem = (currentPage - 1) * perPage + 1;
   const endItem   = Math.min(currentPage * perPage, totalCount);
 
