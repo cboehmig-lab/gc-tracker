@@ -129,12 +129,24 @@ def _init_user_db():
             conn.execute("ALTER TABLE users ADD COLUMN deleted_at TEXT")
         except Exception:
             pass  # Column already exists
+        # Migration: add last_login column (v2.12.4)
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN last_login TEXT")
+        except Exception:
+            pass  # Column already exists
         conn.commit()
 
 def _user_by_username(username: str) -> dict | None:
     with _user_db() as conn:
         row = conn.execute("SELECT * FROM users WHERE username=?", (username.strip(),)).fetchone()
         return dict(row) if row else None
+
+def _touch_last_login(user_id: int) -> None:
+    """Stamp the current UTC time as this user's last login."""
+    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _user_db() as conn:
+        conn.execute("UPDATE users SET last_login=? WHERE id=?", (now, user_id))
+        conn.commit()
 
 def _user_by_id(user_id: int) -> dict | None:
     with _user_db() as conn:
@@ -1847,6 +1859,7 @@ def api_login():
     session.permanent = True
     session["user_id"]       = user["id"]
     session["user_username"] = username
+    _touch_last_login(user["id"])
     return jsonify({"status": "ok", "username": username, "google_linked": bool(user.get("google_id")), "data": _get_user_data(user["id"])})
 
 @app.route("/api/logout", methods=["POST"])
@@ -1945,6 +1958,7 @@ def _auth_google_callback_inner():
         session.permanent        = True
         session["user_id"]       = user["id"]
         session["user_username"] = user["username"]
+        _touch_last_login(user["id"])
         return redirect(next_url)
 
     # 2) Email matches an existing account → link & log in
@@ -1961,6 +1975,7 @@ def _auth_google_callback_inner():
             session.permanent        = True
             session["user_id"]       = user["id"]
             session["user_username"] = user["username"]
+            _touch_last_login(user["id"])
             return redirect(next_url)
 
     # 3) New Google user → create account
@@ -1980,6 +1995,7 @@ def _auth_google_callback_inner():
     session.permanent        = True
     session["user_id"]       = user_id
     session["user_username"] = username
+    _touch_last_login(user_id)
     # Flag new Google users so the frontend shows the welcome/setup modal
     sep = "&" if "?" in next_url else "?"
     return redirect(next_url + sep + "google_new=1")
@@ -2304,7 +2320,7 @@ def admin_users():
     with _user_db() as conn:
         users = [dict(r) for r in conn.execute(
             "SELECT u.id, u.username, u.email, u.created_at, u.deleted_at, "
-            "       d.last_run, d.updated_at "
+            "       u.last_login, d.last_run, d.updated_at "
             "FROM users u "
             "LEFT JOIN user_data d ON d.user_id = u.id "
             "ORDER BY u.created_at DESC"
@@ -2336,9 +2352,10 @@ def admin_users():
     csrf_token = _admin_page_csrf()
     rows_html = ""
     for u in users:
-        last_scan   = _fmt(u.get("last_run"))
-        joined      = _fmt(u.get("created_at"))
-        uid         = int(u["id"])
+        last_scan      = _fmt(u.get("last_run"))
+        joined         = _fmt(u.get("created_at"))
+        last_login_fmt = _fmt(u.get("last_login"))
+        uid            = int(u["id"])
         uname_safe  = _html.escape(str(u["username"]))
         deleted_at  = u.get("deleted_at") or ""
         if deleted_at:
@@ -2379,8 +2396,9 @@ def admin_users():
         rows_html += (
             f'<tr{row_style}>'
             f'<td>{uname_safe}</td>'
-            f'<td>{_html.escape(str(joined))}</td>'
-            f'<td>{_html.escape(str(last_scan))}</td>'
+            f'<td data-value="{_html.escape(u.get("created_at",""))}">{_html.escape(str(joined))}</td>'
+            f'<td data-value="{_html.escape(u.get("last_run","") or "")}">{_html.escape(str(last_scan))}</td>'
+            f'<td data-value="{_html.escape(u.get("last_login","") or "")}">{_html.escape(str(last_login_fmt))}</td>'
             f'<td style="text-align:center">{int(u["wl_count"])}</td>'
             f'<td style="text-align:center">{int(u["kw_count"])}</td>'
             f'<td style="text-align:center">{int(u["fav_count"])}</td>'
@@ -2393,23 +2411,36 @@ def admin_users():
 <style>
 body{{background:#111;color:#ddd;font-family:monospace;padding:24px;font-size:.88rem}}
 h1{{color:#fff;margin-bottom:4px}}
-.sub{{color:#666;margin-bottom:24px;font-size:.82rem}}
-table{{border-collapse:collapse;width:100%;max-width:960px}}
+.stat{{color:#eee;font-size:1.1rem;font-weight:bold;margin-bottom:6px}}
+.sub{{color:#666;margin-bottom:20px;font-size:.82rem}}
+table{{border-collapse:collapse;width:100%;max-width:1100px}}
 th{{background:#1e1e1e;padding:8px 14px;text-align:left;border-bottom:2px solid #333;color:#aaa}}
+th[data-col]:not([data-col="-1"]){{cursor:pointer;user-select:none}}
+th[data-col]:not([data-col="-1"]):hover{{color:#fff}}
+th.sort-asc::after{{content:" ↑";color:#7af}}
+th.sort-desc::after{{content:" ↓";color:#7af}}
 td{{padding:7px 14px;border-bottom:1px solid #222}}
 tr:hover td{{background:#1a1a1a}}
 a{{color:#888;text-decoration:none;font-size:.78rem}}
-</style></head><body>
+</style>
+<script src="/static/admin.js"></script>
+</head><body>
 {_admin_nav('/admin/users')}
 <h1>👤 User Accounts</h1>
-<div class="sub">{len(users)} account{"s" if len(users)!=1 else ""} &nbsp;·&nbsp;
-<a href="/admin/devices">→ Device log</a></div>
+<div class="stat">{len(users)} user{"s" if len(users) != 1 else ""}</div>
+<div class="sub"><a href="/admin/devices">→ Device log</a></div>
 <table>
 <tr>
-  <th>Username</th><th>Joined</th><th>Last scan</th>
-  <th>Watch</th><th>Want</th><th>Favs</th><th></th>
+  <th data-col="0">Username</th>
+  <th data-col="1">Joined</th>
+  <th data-col="2">Last scan</th>
+  <th data-col="3">Last login</th>
+  <th data-col="4" style="text-align:center">Watch</th>
+  <th data-col="5" style="text-align:center">Want</th>
+  <th data-col="6" style="text-align:center">Favs</th>
+  <th data-col="-1"></th>
 </tr>
-{rows_html if rows_html else '<tr><td colspan="7" style="color:#555;padding:20px">No accounts yet.</td></tr>'}
+{rows_html if rows_html else '<tr><td colspan="8" style="color:#555;padding:20px">No accounts yet.</td></tr>'}
 </table>
 </body></html>"""
 
@@ -5176,7 +5207,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.3"
+APP_VERSION = "2.12.4"
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
