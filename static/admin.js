@@ -10,7 +10,7 @@
       ? cell.dataset.value
       : cell.textContent.trim();
     if (v === "—" || v === "") return null; // em-dash or empty → sort to bottom
-    var n = parseFloat(v);
+    var n = Number(v);  // strict: NaN for date strings like "2025-03-15T…", numeric for "9"
     return isNaN(n) ? v.toLowerCase() : n;
   }
 

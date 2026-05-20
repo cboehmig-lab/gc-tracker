@@ -2333,7 +2333,9 @@ def admin_users():
                 (u["id"],)
             ).fetchone()
             if row:
-                try: u["wl_count"]  = len(json.loads(row["watchlist"] or "{}"))
+                try:
+                    _wl = json.loads(row["watchlist"] or "{}")
+                    u["wl_count"] = sum(1 for v in _wl.values() if not v.get("sold"))
                 except: u["wl_count"] = 0
                 try: u["kw_count"]  = len(json.loads(row["keywords"]  or "[]"))
                 except: u["kw_count"] = 0
@@ -5207,7 +5209,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.4"
+APP_VERSION = "2.12.5"
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
