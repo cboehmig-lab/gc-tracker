@@ -18,6 +18,17 @@ let allStores = [], favorites = [], running = false;
 // ── Mobile sidebar / store sheet ─────────────────────────────────────────────
 function _isMobile() { return window.innerWidth <= 820; }
 
+// Keep sticky table headers just below the sticky filter bar.
+// #results-top-bar is inside the same scroll container (.results), also sticky at top:0.
+// Table headers must use top = filter-bar height so they don't hide behind it.
+function _applyFrozenHeaderOffset() {
+  if (_isMobile()) return;
+  const topBar = document.getElementById('results-top-bar');
+  const h = topBar ? topBar.offsetHeight : 88;
+  document.documentElement.style.setProperty('--tbl-hdr-top', h + 'px');
+}
+window.addEventListener('resize', _applyFrozenHeaderOffset);
+
 function toggleMobileSidebar(which) {
   if (_isMobile()) {
     const panel = document.getElementById(which === 'gc' ? 'gc-left' : 'cl-left');
@@ -1536,6 +1547,7 @@ function _renderServerTable(items) {
   html += '</tbody></table>';
   html += _buildPaginatorHtml(_srvPage, _srvTotalPages, _srvTotalCount, 50);
   document.getElementById('res-body').innerHTML = html;
+  _applyFrozenHeaderOffset();  // update sticky-top offset to match current filter-bar height
   // Scroll to top after content renders — desktop scrolls .results, mobile scrolls #res-body
   document.getElementById('res-panel')?.scrollTo(0, 0);
   document.getElementById('res-body')?.scrollTo(0, 0);
