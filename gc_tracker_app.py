@@ -4599,19 +4599,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div style="position:absolute;inset:0;background:rgba(0,0,0,.7)" id="kw-modal-backdrop"></div>
   <div style="position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;width:420px;max-width:calc(100vw - 32px);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;z-index:1">
     <!-- pinned header: title, instructions, add input -->
-    <div style="padding:24px 24px 0;flex-shrink:0">
+    <div style="padding:16px 20px 0;flex-shrink:0">
       <h2 style="color:#fff;font-size:1.05rem;margin-bottom:4px">🎯 Want List</h2>
-      <p style="color:#aaa;font-size:.82rem;margin-bottom:16px;line-height:1.6">
-        Matching items are highlighted across all results. New matches sort to the top after a scan.<br><br>
-        <span style="color:#ccc;font-weight:600">How to write keywords:</span><br>
-        <span style="color:#4ade80">Allen</span> &nbsp;— exact word match (won't match Allentown or McAllen)<br>
-        <span style="color:#4ade80">"Jam Pedals"</span> &nbsp;— phrase match (words in that exact order)<br>
-        <span style="color:#4ade80">Thorpy, Dane</span> &nbsp;— must contain both words (comma = AND)<br>
-        <span style="color:#4ade80">OD*</span> &nbsp;— wildcard: matches OD808, OD-1, OD Pedal…<br>
-        <span style="color:#4ade80">*drive*</span> &nbsp;— wildcard on both sides: matches anything containing "drive"<br><br>
-        <span style="color:#888;font-size:.78rem">💡 Same syntax works in the search bar. Click <b style="color:#ccc">ⓘ</b> next to the search box for a quick reference.</span>
+      <p style="color:#aaa;font-size:.82rem;margin-bottom:12px;line-height:1.45">
+        Highlights matches across all results. New matches sort to top after a scan.<br><br>
+        <span style="color:#ccc;font-weight:600">Keyword syntax:</span><br>
+        <span style="color:#4ade80">Allen</span> &nbsp;— whole word (not Allentown or McAllen)<br>
+        <span style="color:#4ade80">"Jam Pedals"</span> &nbsp;— exact phrase<br>
+        <span style="color:#4ade80">Thorpy, Dane</span> &nbsp;— comma = AND (both words required)<br>
+        <span style="color:#4ade80">OD*</span> &nbsp;— wildcard (OD808, OD-1…) &nbsp;·&nbsp; <span style="color:#4ade80">*drive*</span> &nbsp;— contains "drive"<br><br>
+        <span style="color:#888;font-size:.78rem">💡 Same syntax works in the search bar — click <b style="color:#ccc">ⓘ</b> for reference.</span>
       </p>
-      <div style="display:flex;gap:6px;margin-bottom:16px">
+      <div style="display:flex;gap:6px;margin-bottom:12px">
         <input id="kw-input" type="text" placeholder="Add an item to your want list…"
                style="flex:1;padding:8px 12px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#eee;font-size:.9rem;outline:none"
                >
@@ -5216,7 +5215,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.8"
+APP_VERSION = "2.12.9"
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
