@@ -3000,9 +3000,15 @@ def api_browse():
     def _apply_base(items):
         r = items
         if fq:
-            # f_strict=True → fuzzy/contains mode (old behaviour); False → whole-word (default)
-            fq_terms = _compile_query(fq, fuzzy=f_strict)
-            r = [i for i in r if _matches_all(
+            # Split by spaces (respecting quoted phrases) so each word is an independent
+            # AND term — matches local-mode behaviour where "fender jaguar vintera" means
+            # fender AND jaguar AND vintera in any order, not an exact phrase.
+            # _compile_query handles each token's type (quoted, wildcard, word, fuzzy).
+            fq_tokens = _re.findall(r'"[^"]+"|[^\s]+', fq)
+            fq_terms = []
+            for tok in fq_tokens:
+                fq_terms.extend(_compile_query(tok, fuzzy=f_strict))
+            r = [i for i in r if fq_terms and _matches_all(
                 ((i["name"] or "") + " " + (i["brand"] or "")).lower(), fq_terms)]
         if f_want_only:       r = [i for i in r if i["kwMatch"]]
         if f_price_drop_only: r = [i for i in r if i.get("price_drop", 0) > 0]
@@ -5215,7 +5221,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.12"
+APP_VERSION = "2.12.13"
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
