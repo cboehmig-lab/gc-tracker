@@ -221,7 +221,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .dd-clear-row{padding:7px 12px;color:#f88;font-size:.78rem;cursor:pointer;border-bottom:1px solid #2a2a2a;display:flex;align-items:center;gap:4px}
 .dd-clear-row:hover{background:#1e1e1e}
 
-table{width:100%;border-collapse:collapse;font-size:.83rem;table-layout:auto}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:.83rem;table-layout:auto}
 th{background:#161616;color:#aaa;font-weight:600;text-align:left;padding:7px 10px;font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:0;z-index:1;cursor:pointer;user-select:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 th:hover{color:#ccc}
 th.sort-asc::after{content:" ▲";color:#c00;font-size:.6rem}
