@@ -4597,26 +4597,31 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 <div id="kw-modal" style="display:none;position:fixed;inset:0;z-index:100;align-items:center;justify-content:center">
   <div style="position:absolute;inset:0;background:rgba(0,0,0,.7)" id="kw-modal-backdrop"></div>
-  <div style="position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:24px 24px 20px;width:420px;max-height:80vh;overflow-y:auto;z-index:1">
-    <h2 style="color:#fff;font-size:1.05rem;margin-bottom:4px">🎯 Want List</h2>
-    <p style="color:#aaa;font-size:.82rem;margin-bottom:16px;line-height:1.6">
-      Matching items are highlighted across all results. New matches sort to the top after a scan.<br><br>
-      <span style="color:#ccc;font-weight:600">How to write keywords:</span><br>
-      <span style="color:#4ade80">Allen</span> &nbsp;— exact word match (won't match Allentown or McAllen)<br>
-      <span style="color:#4ade80">"Jam Pedals"</span> &nbsp;— phrase match (words in that exact order)<br>
-      <span style="color:#4ade80">Thorpy, Dane</span> &nbsp;— must contain both words (comma = AND)<br>
-      <span style="color:#4ade80">OD*</span> &nbsp;— wildcard: matches OD808, OD-1, OD Pedal…<br>
-      <span style="color:#4ade80">*drive*</span> &nbsp;— wildcard on both sides: matches anything containing "drive"<br><br>
-      <span style="color:#888;font-size:.78rem">💡 Same syntax works in the search bar. Click <b style="color:#ccc">ⓘ</b> next to the search box for a quick reference.</span>
-    </p>
-    <div style="display:flex;gap:6px;margin-bottom:16px">
-      <input id="kw-input" type="text" placeholder="Add an item to your want list…"
-             style="flex:1;padding:8px 12px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#eee;font-size:.9rem;outline:none"
-             >
-      <button id="kw-add-btn" style="padding:8px 16px;background:#0a5c2a;border:1px solid #2d6a2d;border-radius:5px;color:#4ade80;font-size:.85rem;cursor:pointer;white-space:nowrap">+ Add</button>
+  <div style="position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;width:420px;max-width:calc(100vw - 32px);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;z-index:1">
+    <!-- pinned header: title, instructions, add input -->
+    <div style="padding:24px 24px 0;flex-shrink:0">
+      <h2 style="color:#fff;font-size:1.05rem;margin-bottom:4px">🎯 Want List</h2>
+      <p style="color:#aaa;font-size:.82rem;margin-bottom:16px;line-height:1.6">
+        Matching items are highlighted across all results. New matches sort to the top after a scan.<br><br>
+        <span style="color:#ccc;font-weight:600">How to write keywords:</span><br>
+        <span style="color:#4ade80">Allen</span> &nbsp;— exact word match (won't match Allentown or McAllen)<br>
+        <span style="color:#4ade80">"Jam Pedals"</span> &nbsp;— phrase match (words in that exact order)<br>
+        <span style="color:#4ade80">Thorpy, Dane</span> &nbsp;— must contain both words (comma = AND)<br>
+        <span style="color:#4ade80">OD*</span> &nbsp;— wildcard: matches OD808, OD-1, OD Pedal…<br>
+        <span style="color:#4ade80">*drive*</span> &nbsp;— wildcard on both sides: matches anything containing "drive"<br><br>
+        <span style="color:#888;font-size:.78rem">💡 Same syntax works in the search bar. Click <b style="color:#ccc">ⓘ</b> next to the search box for a quick reference.</span>
+      </p>
+      <div style="display:flex;gap:6px;margin-bottom:16px">
+        <input id="kw-input" type="text" placeholder="Add an item to your want list…"
+               style="flex:1;padding:8px 12px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#eee;font-size:.9rem;outline:none"
+               >
+        <button id="kw-add-btn" style="padding:8px 16px;background:#0a5c2a;border:1px solid #2d6a2d;border-radius:5px;color:#4ade80;font-size:.85rem;cursor:pointer;white-space:nowrap">+ Add</button>
+      </div>
     </div>
-    <div id="kw-list" style="margin-bottom:16px"></div>
-    <div style="display:flex;gap:10px;justify-content:space-between;border-top:1px solid #2e2e2e;padding-top:14px">
+    <!-- scrollable keyword chips -->
+    <div id="kw-list" style="overflow-y:auto;flex:1;min-height:0;padding:0 24px 16px"></div>
+    <!-- pinned footer: always visible -->
+    <div style="display:flex;gap:10px;justify-content:space-between;border-top:1px solid #2e2e2e;padding:14px 24px 20px;flex-shrink:0">
       <button id="kw-clear-btn" style="padding:6px 14px;background:#1a1a1a;border:1px solid #5a2a2a;border-radius:5px;color:#a05050;font-size:.78rem;cursor:pointer">Clear Want List</button>
       <button id="kw-done-btn" style="padding:6px 18px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#aaa;font-size:.85rem;cursor:pointer">Done</button>
     </div>
@@ -5211,7 +5216,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.7"
+APP_VERSION = "2.12.8"
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
