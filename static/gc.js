@@ -1370,24 +1370,23 @@ async function _fetchBrowsePage(page) {
 
 function _populateFiltersFromServer(brands, conditions, categories, subcategories, currentFilters) {
   _setBrandList(brands);
-  const savedBrands = currentFilters.filter_brands || [];
-  window._selectedBrands = savedBrands.filter(b => brands.some(br => br.name === b));
+  // Use window._selected* (current user state) rather than currentFilters (stale snapshot
+  // from the request that just returned). This prevents a race condition where a slow
+  // response overwrites selections the user made while the request was in flight.
+  window._selectedBrands = (window._selectedBrands || []).filter(b => brands.some(br => br.name === b));
   _updateBrandBtn();
 
   _setCondList(conditions);
-  const savedConds = currentFilters.filter_conditions || [];
-  window._selectedConds = savedConds.filter(c => conditions.some(x => (x.name !== undefined ? x.name : x) === c));
+  window._selectedConds = (window._selectedConds || []).filter(c => conditions.some(x => (x.name !== undefined ? x.name : x) === c));
   _updateCondBtn();
 
   _setCatList(categories);
-  const savedCats = currentFilters.filter_categories || [];
-  window._selectedCats = savedCats.filter(c => categories.some(x => (x.name !== undefined ? x.name : x) === c));
+  window._selectedCats = (window._selectedCats || []).filter(c => categories.some(x => (x.name !== undefined ? x.name : x) === c));
   _updateCatBtn();
 
   if (subcategories.length && window._selectedCats.length) {
     _setSubList(subcategories);
-    const savedSubs = currentFilters.filter_subcategories || [];
-    window._selectedSubs = savedSubs.filter(s => subcategories.some(x => (x.name !== undefined ? x.name : x) === s));
+    window._selectedSubs = (window._selectedSubs || []).filter(s => subcategories.some(x => (x.name !== undefined ? x.name : x) === s));
   } else {
     _setSubList([]);
     window._selectedSubs = [];
