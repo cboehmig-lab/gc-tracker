@@ -190,6 +190,7 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .mtb-about:hover{opacity:1}
 #save-search-btn:hover{background:#1a3a1a!important}
 #filter-action-btns{display:contents}  /* desktop: wrapper invisible, children flow inline */
+#save-search-btn,#clear-filters-btn{order:-1}  /* anchor to left of results-hdr flex row */
 .ss-save-mobile-btn{padding:4px 9px;border-radius:4px;background:#1e2e1e;border:1px solid #4ade80;color:#4ade80;font-size:.75rem;cursor:pointer;white-space:nowrap}
 .badge{background:#c00;color:#fff;font-size:.7rem;font-weight:700;padding:2px 7px;border-radius:10px}.badge:empty{display:none}
 .cat-sel{padding:5px 8px;border-radius:4px;background:#1e1e1e;border:1px solid #3a3a3a;color:#eee;font-size:.78rem;outline:none;cursor:pointer;flex-shrink:1;min-width:70px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
