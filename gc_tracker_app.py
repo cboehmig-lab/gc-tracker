@@ -2646,6 +2646,10 @@ def cl_page():
 def privacy_page():
     return PRIVACY_TEMPLATE
 
+@app.route("/google73eeaa5f083d2e84.html")
+def google_site_verification():
+    return "google-site-verification: google73eeaa5f083d2e84.html", 200, {"Content-Type": "text/html"}
+
 @app.route("/robots.txt")
 def robots_txt():
     content = (
@@ -5257,7 +5261,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.18"
+APP_VERSION = "2.12.19"
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
