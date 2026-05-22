@@ -534,7 +534,9 @@ function _mobileAuthToggle() {
 
 async function _loadAndMergeServerData(serverData) {
   // Merge server data with whatever's already in localStorage.
-  // Strategy: union for sets (watchlist, keywords, favorites),
+  // Strategy: server-wins for watchlist, keywords, saved_searches (so deletions
+  // on one device propagate to all others). Fall back to local only if server
+  // record is empty (first-ever sync for this account).
   // most-recent-wins for last_run / new_ids.
   const sWl  = serverData.watchlist      || {};
   const sKw  = serverData.keywords       || [];
@@ -544,7 +546,10 @@ async function _loadAndMergeServerData(serverData) {
   const sSS  = serverData.saved_searches || [];
   const sLa  = serverData.last_anchor    || '';
 
-  const mergedWl  = Object.assign({}, sWl, window._watchlist);
+  // Watchlist: server is authoritative when logged in so that deletions on one
+  // device propagate to all others. Only fall back to local if server record is
+  // empty (first-ever sync for this account).
+  const mergedWl  = Object.keys(sWl).length > 0 ? Object.assign({}, sWl) : Object.assign({}, window._watchlist);
   // Keywords: server is authoritative when logged in so that deletions on one
   // device propagate to all others. Only fall back to local if server record is
   // empty (first-ever sync for this account).
