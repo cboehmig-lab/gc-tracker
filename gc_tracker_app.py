@@ -2646,6 +2646,31 @@ def cl_page():
 def privacy_page():
     return PRIVACY_TEMPLATE
 
+@app.route("/robots.txt")
+def robots_txt():
+    content = (
+        "User-agent: *\n"
+        "Allow: /\n"
+        "Disallow: /admin/\n"
+        "Disallow: /api/\n"
+        "\n"
+        "Sitemap: https://gcgeartracker.com/sitemap.xml\n"
+    )
+    return content, 200, {"Content-Type": "text/plain"}
+
+@app.route("/sitemap.xml")
+def sitemap_xml():
+    content = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        '  <url><loc>https://gcgeartracker.com/</loc>'
+        '<changefreq>daily</changefreq><priority>1.0</priority></url>\n'
+        '  <url><loc>https://gcgeartracker.com/privacy</loc>'
+        '<changefreq>monthly</changefreq><priority>0.3</priority></url>\n'
+        '</urlset>\n'
+    )
+    return content, 200, {"Content-Type": "application/xml"}
+
 CL_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4525,7 +4550,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>GC Used Inventory Tracker</title>
+<title>GC Used Inventory Tracker — Search Guitar Center Used Gear</title>
+<meta name="description" content="Search Guitar Center&#39;s used instrument inventory across 300+ stores in real time. Watch for new used guitars, amps, pedals, drums and more. Free watch list and want list alerts.">
+<link rel="canonical" href="https://gcgeartracker.com/">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://gcgeartracker.com/">
+<meta property="og:site_name" content="GC Used Inventory Tracker">
+<meta property="og:title" content="GC Used Inventory Tracker — Search Guitar Center Used Gear">
+<meta property="og:description" content="Search Guitar Center&#39;s used instrument inventory across 300+ stores. Watch list, want list, and price drop alerts. Free.">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="GC Used Inventory Tracker — Search Guitar Center Used Gear">
+<meta name="twitter:description" content="Search Guitar Center&#39;s used instrument inventory across 300+ stores. Free watch list and want list alerts.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%237a0000'/><text x='16' y='22' font-family='system-ui,sans-serif' font-size='14' font-weight='700' fill='%23ffcccc' text-anchor='middle'>GC</text></svg>">
 <link rel="stylesheet" href="/static/gc.css">
 <!-- __GA__ -->
 </head>
@@ -5221,7 +5257,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.17"
+APP_VERSION = "2.12.18"
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
