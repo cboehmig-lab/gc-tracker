@@ -1,7 +1,21 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-19 · Current version: v2.12.3 · Status: deployed on Railway · Domain: gcgeartracker.com*
+*Last updated: 2026-05-22 · Current version: v2.12.20 · Status: deployed ✅ · Domain: gcgeartracker.com*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
+
+---
+
+## AI Behavior Rules
+
+These rules apply to any AI assistant working on this project. Read them before making any changes.
+
+- **Be blunt and skeptical.** Don't validate bad ideas to be nice. Push back when something is over-engineered for the team's scale (solo developer, ~61 users, hobby project).
+- **Prefer simple, maintainable solutions.** Clever is a liability. If a fix requires understanding 3 layers of abstraction to maintain, it's the wrong fix.
+- **Always think production-first.** Consider how a change behaves under real conditions: concurrent users, Railway restart wiping in-memory state, a scan running while an admin page loads, etc.
+- **Always use full name + acronym** when first referencing AWS (Amazon Web Services) services or other technology acronyms (e.g. "Content Security Policy (CSP)", "Server-Sent Events (SSE)", "Google Cloud Platform (GCP)").
+- **Git pushes must come from the Mac terminal.** The Cowork sandbox gets a proxy 403 on GitHub pushes.
+- **Never write inline JS.** All JS lives in `static/gc.js`. Content Security Policy (CSP) blocks inline scripts.
+- **No inline onclick attributes.** Use `data-*` attributes + `addEventListener`.
 
 ---
 
@@ -864,68 +878,288 @@ Navigate to `/?google_new=1` to re-trigger the modal at any time (e.g. to change
 
 ---
 
-## Recent Changes (v2.12.2 → v2.12.3)
+## Recent Changes (v2.12.3 → v2.12.8)
 
-### v2.12.3 — Privacy Policy, affiliate disclosure, About modal polish
+> **Deploy note**: Railway experienced a platform-wide outage on 2026-05-19 (Google Cloud Platform (GCP) suspended their account without warning for ~8 hours). v2.12.4–v2.12.9 were held back during recovery and pushed together once deploys resumed.
 
-**Motivation**: Preparing to apply to the Guitar Center affiliate program through CJ Affiliate. CJ requires a Privacy Policy, FTC-compliant affiliate disclosure, and a site that clearly explains its purpose.
+### v2.12.4 — Admin: last_login column, sortable table, prominent user count
 
-**Privacy Policy (`/privacy`)**
-- New standalone route `GET /privacy` serving `PRIVACY_TEMPLATE` — a dark-themed page matching the app's aesthetic
-- Covers: account data, preferences/scan history, cookies (session, `gt_device_id`, GA4), third-party services (Google Analytics, Google OAuth, Railway), affiliate link disclosure, data retention, children's privacy, contact info
-- Intro paragraph explicitly states the site is independent and not affiliated with Guitar Center, Inc.
-- Contact email: `cboehmig@gmail.com` (to be updated to `@gcgeartracker.com` address in a future session)
+**`last_login` tracking**
+- New `last_login TEXT` column added to `users` table via migration-safe `ALTER TABLE` in `_init_user_db()`
+- `_touch_last_login(user_id)` helper writes current UTC timestamp
+- Called at every login path: username/password login (`api_login`), and all three Google OAuth (Open Authorization) callback paths (existing user by google_id, existing user by email link, new Google user)
 
-**Affiliate disclosure**
-- New `#affiliate-disclosure` div: `position:fixed; bottom:10px; left:12px` on desktop — italic `#999` text, clearly readable, positioned left to avoid overlapping the paginator
-- Hidden on mobile via `@media(max-width:820px)` — mobile users see the disclosure in the About modal instead
-- Text: *"This site may earn a commission on purchases made through links to Guitar Center."*
+**`/admin/users` page improvements**
+- SQL query now selects `u.last_login`
+- User count displayed prominently as `"N users"` stat above the table (was buried in muted subtitle)
+- New **Last login** column between Last scan and Watch
+- All column headers have `data-col="N"` attributes; date `<td>` cells have `data-value="ISO timestamp"` for correct chronological sorting
+- `static/admin.js` — new file; lightweight click-to-sort for admin tables. Uses `Number()` (not `parseFloat()`) to distinguish ISO date strings from integers. `"—"` always sorts to bottom. Asc/desc toggle with ↑/↓ indicator.
+- Sort bug note: `parseFloat("2025-03-15T...")` returns `2025` (strips after first non-digit) — makes all dates look equal. `Number("2025-03-15T...")` returns `NaN`, so dates sort as strings (ISO format sorts correctly as strings).
 
-**About modal**
-- Added a two-sentence description of what the tracker does (scan, watch list, want list, saved searches, cross-device sync)
-- Added non-affiliation disclaimer: *"Independent tool — not affiliated with or endorsed by Guitar Center, Inc."*
-- Added Privacy Policy link (opens in new tab) — visible on both desktop and mobile
-- Affiliate disclosure line also added to the modal (mobile coverage)
+### v2.12.5 — Admin: watch count fix (sort bug fix)
 
-**Files changed:** `gc_tracker_app.py` (PRIVACY_TEMPLATE, `/privacy` route, About modal HTML, dev-footer HTML), `static/gc.css` (`#affiliate-disclosure` styles + mobile hide)
+- `Number()` fix applied in `static/admin.js` (was shipping broken in v2.12.4 — `parseFloat` bug described above)
+
+### v2.12.6 — Single-page results: paginator always renders
+
+- `_buildPaginatorHtml()` previously returned `''` when `totalPages <= 1`, leaving the bottom of the results area visually transparent (no `#111` background anchor)
+- Now renders a minimal `<div class="paginator">` with item count and a disabled "1" button — the sticky `bottom:0; background:#111` always seals the bottom regardless of result count
+
+### v2.12.7 — Admin watch count: cross-reference live catalog
+
+- Previous fix (filtering `sold: True`) was wrong — the per-user SQLite watchlist synced from the client doesn't carry a `sold` field; that flag only exists in the global `gc_watchlist.json` server file
+- Root cause: items that sell stay in `window._watchlist` (localStorage) and therefore in `user_data.watchlist` (SQLite) — they're simply absent from `_cat_cache` (the live inventory). The Watch List tab shows only items whose IDs are in the catalog; the admin count should match
+- Fix: `_load_cat_cache()` called before the count loop; `wl_count = sum(1 for sku in _wl if sku in _cat_cache)` — matches exactly what the Watch List tab shows
+
+### v2.12.8 — Want List modal: Done button always visible on mobile
+
+- **Bug**: on mobile, a long want list caused the modal to grow taller than the viewport, pushing "Clear Want List" and "Done" off the bottom of the screen with no way to reach them
+- **Fix**: modal inner div restructured as a flex column (`display:flex; flex-direction:column; overflow:hidden; max-height:80vh`)
+  - Title, instructions, and Add input: pinned header section (`flex-shrink:0`)
+  - Keyword chips (`#kw-list`): scrollable middle section (`overflow-y:auto; flex:1; min-height:0`)
+  - Clear / Done buttons: pinned footer (`flex-shrink:0`) — always visible regardless of keyword count
+- `max-width:calc(100vw - 32px)` added to prevent modal from overflowing narrow phone screens
+
+### v2.12.9 — Want List modal: shorten instructions to fix Done button visibility
+
+The pinned header section was tall enough on small phones to fill the entire viewport even after the flex restructure in v2.12.8, keeping the footer out of view.
+
+- Combined two wildcard lines into one: `OD*` and `*drive*` on a single line with `·` separator — saves one full line
+- Shortened all descriptions (e.g. "phrase match (words in that exact order)" → "exact phrase")
+- "How to write keywords:" → "Keyword syntax:"
+- Tip shortened: "Same syntax works in the search bar — click ⓘ for reference."
+- `line-height` 1.6 → 1.45, `margin-bottom` 16px → 12px on `<p>` and input row
+- Top padding 24px → 16px
+
+**Files changed (v2.12.4–v2.12.9):** `gc_tracker_app.py`, `static/gc.js`, `static/admin.js` (new file)
 
 ---
 
-## Affiliate Program Research (2026-05-19)
+## Recent Changes (v2.12.9 → v2.12.16)
 
-**Guitar Center's affiliate program is on CJ Affiliate (Commission Junction)** — not Sovrn exclusively. Sovrn still carries GC in their merchant network but CJ is GC's primary program.
+### v2.12.10 — Filter bar overflow: wrong fix (immediately superseded)
+- Added `order:-1` to `#save-search-btn,#clear-filters-btn` in CSS — this moved the buttons to the left of the filter bar, which was wrong. Superseded immediately by v2.12.11.
 
-**CJ program details:**
-- 4–6% commission on all sales (including used/vintage gear)
-- 14-day cookie window
-- $50 minimum payout, monthly
-- Approval rated "easy"
-- No JS required on publisher's site — deep links use CJ's redirect URL format
+### v2.12.11 — Two-row filter bar + table overflow guard
 
-**Implementation plan (when approved):**
-- CJ deep links use the format: `https://www.anrdoezrs.net/click-[SID]-[AID]?url=[encoded-GC-url]`
-- Add a `_gcUrl(url)` helper function in `static/gc.js` that wraps any GC product URL in the CJ redirect
-- Swap it in wherever item links are rendered (table rows, mobile cards, etc.)
-- No CSP changes needed — `<a href>` navigation is not subject to `connect-src`
+**Problem**: Save Search / Clear All buttons overflowed off the right edge of the filter bar on narrower desktops when all four dropdowns were visible.
 
-**Why previous Sovrn application was rejected (likely):**
-- No custom domain at the time (`animalsintrees.com` subdomain)
-- No privacy policy
-- Sovrn requires installing their Commerce JS snippet and generating real click traffic before approval
-- Their model is optimized for content/blog publishers, not utility tools
+**Fix — two-row layout for `#results-top-bar`**:
+- Changed `#results-top-bar` from `flex-direction:row` to `flex-direction:column` so the quick-filter chip row (Watch/Want/Price Drops/Saved Searches chips) sits on row 1 and the filter/search/action bar (dropdowns, search, Save/Clear buttons) sits on row 2.
+- CSS:
+  ```css
+  #results-top-bar{display:flex;flex-direction:column;align-items:stretch;flex-shrink:0;position:sticky;top:0;z-index:2;background:#111}
+  #results-top-bar .quick-filter-bar{border-bottom:1px solid #2e2e2e;background:none;padding:4px 8px 4px 16px;flex-shrink:0}
+  #results-top-bar .results-hdr{flex:none;border-bottom:none;background:none;box-shadow:none}
+  ```
+- Mobile: `#results-top-bar` already uses `display:contents` inside the mobile `@media` block (no-op wrapper — children flow as direct children of `#res-panel`). **Zero mobile change.**
 
-**Pre-application checklist (all now complete):**
-- ✅ Real domain (`gcgeartracker.com`)
-- ✅ HTTPS + security headers
-- ✅ Privacy Policy at `/privacy`
-- ✅ FTC-compliant affiliate disclosure on every page
-- ✅ Non-affiliation disclaimer (About modal + Privacy Policy)
-- ✅ About modal explains the site's purpose
-- ⬜ Apply at `cj.com` → create publisher account → apply to Guitar Center program
+**Fix — table horizontal overflow guard**:
+- Added `overflow-x:hidden` to `.results` as a backstop — clips horizontal overflow within the results scroll container rather than causing a page-level horizontal scrollbar.
 
-**Future: domain email**
-- Set up `@gcgeartracker.com` email addresses (e.g. `privacy@gcgeartracker.com`)
-- Update contact email in `PRIVACY_TEMPLATE` from `cboehmig@gmail.com`
+### v2.12.12 — Multi-category selection race condition fix
+
+**Bug**: Selecting a second category (e.g. Bass then Guitars) sometimes showed only the first selection. Root cause: `_populateFiltersFromServer()` received a stale server response (from request #1, triggered by the first category click) AFTER the user had already clicked the second category, and it overwrote `window._selectedCats` using `currentFilters.filter_cats` (the stale request's filter state) instead of the live selection.
+
+**Fix** (`static/gc.js`, `_populateFiltersFromServer()`): replace all `currentFilters.filter_xxx` reads with the live `window._selectedXxx` variables so stale responses never overwrite a more recent user action:
+```javascript
+function _populateFiltersFromServer(brands, conditions, categories, subcategories, currentFilters) {
+  _setBrandList(brands);
+  window._selectedBrands = (window._selectedBrands || []).filter(b => brands.some(br => br.name === b));
+  _updateBrandBtn();
+  _setCondList(conditions);
+  window._selectedConds = (window._selectedConds || []).filter(c => conditions.some(x => (x.name !== undefined ? x.name : x) === c));
+  _updateCondBtn();
+  _setCatList(categories);
+  window._selectedCats = (window._selectedCats || []).filter(c => categories.some(x => (x.name !== undefined ? x.name : x) === c));
+  _updateCatBtn();
+  if (subcategories.length && window._selectedCats.length) {
+    _setSubList(subcategories);
+    window._selectedSubs = (window._selectedSubs || []).filter(s => subcategories.some(x => (x.name !== undefined ? x.name : x) === s));
+  } else {
+    _setSubList([]);
+    window._selectedSubs = [];
+  }
+  _updateSubcatBtn();
+}
+```
+
+### v2.12.13 — In-page search: space-split AND matching (not exact phrase)
+
+**Bug**: The in-page search bar sent `filter_q` to `/api/browse`. The server passed the whole query string to `_compile_query()`, which splits by commas (want-list syntax). So "fender jaguar vintera" became a single term compiled to `\bfender jaguar vintera\b` — an exact phrase match. Typing "fender jaguar" would not match "Jaguar Vintera by Fender".
+
+**Fix** (`gc_tracker_app.py`, `_apply_base()`): pre-split `filter_q` by spaces (respecting quoted phrases) before calling `_compile_query()` on each token:
+```python
+if fq:
+    # Split by spaces (respecting quoted phrases) so each word is an independent
+    # AND term — "fender jaguar vintera" means fender AND jaguar AND vintera in
+    # any order, not an exact phrase.
+    fq_tokens = _re.findall(r'"[^"]+"|[^\s]+', fq)
+    fq_terms = []
+    for tok in fq_tokens:
+        fq_terms.extend(_compile_query(tok, fuzzy=f_strict))
+    r = [i for i in r if fq_terms and _matches_all(
+        ((i["name"] or "") + " " + (i["brand"] or "")).lower(), fq_terms)]
+```
+Quoted phrases (e.g. `"Jam Pedals"`) are preserved as a single token and still do exact-phrase matching.
+
+### v2.12.14 — Sticky table column headers: initial attempt (insufficient)
+
+- Changed `th` color to `#aaa` (lighter — easier to read against dark `#161616` background)
+- Added `position:sticky; top:0; z-index:1` to `th`
+- This was insufficient: `#results-top-bar` is INSIDE `.results` (the scroll container), also sticky at `top:0` with `z-index:2`. Column headers were sticking but immediately hidden behind the filter bar when scrolled.
+
+### v2.12.15 — Sticky table headers: `border-collapse:separate` fix
+
+- `border-collapse:collapse` is a documented browser bug that prevents `position:sticky` from working on `th` elements.
+- Changed table CSS to `border-collapse:separate; border-spacing:0`. This enables stickiness but `top:0` was still wrong (headers hide behind the filter bar).
+
+### v2.12.16 — Sticky table headers: correct offset via CSS variable (working)
+
+**Key architectural insight**: `#results-top-bar` and the `th` elements are BOTH sticky within the same scroll container (`.results{overflow-y:auto}`). `#results-top-bar` is `position:sticky; top:0; z-index:2`. For `th` to appear below the filter bar (not hidden behind it), `th`'s `top` must equal `#results-top-bar.offsetHeight`.
+
+**Implementation**:
+
+New JS function `_applyFrozenHeaderOffset()` (added after `_isMobile()` in `static/gc.js`):
+```javascript
+function _applyFrozenHeaderOffset() {
+  if (_isMobile()) return;
+  const topBar = document.getElementById('results-top-bar');
+  const h = topBar ? topBar.offsetHeight : 88;
+  document.documentElement.style.setProperty('--tbl-hdr-top', h + 'px');
+}
+window.addEventListener('resize', _applyFrozenHeaderOffset);
+```
+- Called after each `_renderServerTable()` sets `innerHTML` (table height may vary after render)
+- Called on `window resize` (filter bar height can change)
+
+CSS variable `--tbl-hdr-top` used in `th` rule (`static/gc.css`):
+```css
+th{background:#161616;color:#aaa;font-weight:600;text-align:left;padding:7px 10px;
+   font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;
+   position:sticky;top:var(--tbl-hdr-top,88px);z-index:1;
+   cursor:pointer;user-select:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+```
+Default fallback of `88px` covers the initial render before JS runs.
+
+**Files changed (v2.12.10–v2.12.16):** `gc_tracker_app.py`, `static/gc.js`, `static/gc.css`
+
+---
+
+## Recent Changes (v2.12.16 → v2.12.20)
+
+### v2.12.17 — Watchlist deletion cross-device sync fix
+
+**Bug**: Removing items from the watch list on one device (e.g. desktop) did not propagate to other devices (e.g. mobile). The server was updated correctly, but the other device's stale localStorage re-added the deleted items on the next `/api/me` merge.
+
+**Root cause** (`static/gc.js`, `_loadAndMergeServerData()`): watchlist was merged with `Object.assign({}, sWl, window._watchlist)` — local storage spread last, so it always won over the server copy. Keywords and saved searches had already been fixed to server-wins in v2.9.0 and v2.10.0 respectively, but watchlist was left on the old union strategy.
+
+**Fix**: Same server-wins pattern as keywords and saved_searches:
+```javascript
+const mergedWl = Object.keys(sWl).length > 0
+  ? Object.assign({}, sWl)
+  : Object.assign({}, window._watchlist);
+```
+Server is authoritative when non-empty; falls back to local only on first-ever sync (empty server record). Also updated the stale comment that still said "union for sets".
+
+**Files changed:** `static/gc.js` only
+
+### v2.12.18 — SEO fundamentals
+
+Added all missing SEO and social-sharing infrastructure:
+
+- **`<title>`**: changed from bare "GC Used Inventory Tracker" to "GC Used Inventory Tracker — Search Guitar Center Used Gear"
+- **`<meta name="description">`**: 155-char description targeting used gear search intent
+- **`<link rel="canonical">`**: `https://gcgeartracker.com/`
+- **Open Graph tags**: `og:type`, `og:url`, `og:site_name`, `og:title`, `og:description`
+- **Twitter card**: `summary` card with title + description
+- **SVG favicon** (data URI): dark red `#7a0000` rounded square with "GC" text in `#ffcccc` — no more blank browser tab
+- **`GET /robots.txt`**: allows `/`, disallows `/admin/` and `/api/`, links to sitemap
+- **`GET /sitemap.xml`**: lists `/` (priority 1.0, daily) and `/privacy` (priority 0.3, monthly)
+
+Google Search Console and Bing Webmaster Tools both verified and sitemaps submitted same day.
+
+**Files changed:** `gc_tracker_app.py`
+
+### v2.12.19 — Google Search Console verification route
+
+- Added `GET /google73eeaa5f083d2e84.html` serving the Google-provided verification string
+- Serves `Content-Type: text/html`
+- Google Search Console ownership verified via this route
+
+**Files changed:** `gc_tracker_app.py`
+
+### v2.12.20 — OG image
+
+- `static/og-image.svg`: 1200×630 dark-themed social preview image
+  - Top bar with app title + `gcgeartracker.com` domain
+  - Three stats cards: 92,000+ items · 300+ stores · Free
+  - Faux results table (5 sample rows with NEW badges, prices in green)
+  - Footer strip: "Browse and track GC's used inventory across all stores." + subtitle
+- `og:image` and `twitter:image` meta tags added pointing to `/static/og-image.svg`
+- `twitter:card` upgraded from `summary` to `summary_large_image` for full-width preview on Twitter/X
+
+**Note**: SVG OG images work on most modern platforms. If a platform requires PNG/JPG in future, convert with `cairosvg static/og-image.svg -o static/og-image.png`.
+
+**Files changed:** `gc_tracker_app.py`, `static/og-image.svg` (new file)
+
+---
+
+## Recent Changes (v2.12.2 → v2.12.3)
+
+### v2.12.3 — Privacy Policy, About modal, UX fixes, affiliate removal
+
+**Privacy Policy (`/privacy`)**
+- New standalone route `GET /privacy` serving `PRIVACY_TEMPLATE` — dark-themed page matching the app's aesthetic
+- Covers: account data, preferences/scan history, cookies (session, `gt_device_id`, GA4), third-party services (Google Analytics, Google OAuth, Railway), data retention, children's privacy, contact info
+- Intro paragraph explicitly states the site is independent and not affiliated with Guitar Center, Inc.
+- Contact email: `cboehmig@gmail.com`
+
+**About modal**
+- Added two-sentence description of what the tracker does (scan, watch list, want list, saved searches, cross-device sync)
+- Added non-affiliation disclaimer: *"Independent tool — not affiliated with or endorsed by Guitar Center, Inc."*
+- Added Privacy Policy link — visible on both desktop and mobile
+- "About" link added to `#dev-footer` (desktop-accessible for the first time)
+
+**Footer "About" link** (`static/gc.js`)
+- `[data-action="open-about"]` link in `#dev-footer` — `addEventListener` in DOMContentLoaded calls `_openAboutModal()`
+
+**Paginator / footer overlap fix** (`static/gc.css`)
+- Paginator uses `position:sticky; bottom:0` inside `.results{overflow-y:auto}` scroll container
+- Increased paginator `padding-bottom` to `36px` so its `#111` background visually covers the fixed `#dev-footer` zone — no gap, no clipping
+
+**Footer link colors** (`static/gc.css`)
+- `#dev-footer a { color:#bbb }` — all footer links now clearly readable against the dark background
+- `#dev-footer span { color:#888 }` — separator dots and static text dimmer than links
+
+**Item name ellipsis** (`static/gc.css`, desktop only)
+- `td:nth-child(4)` in `@media(min-width:821px)`: `white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:1px`
+- `max-width:1px` trick forces ellipsis in `table-layout:auto` tables
+
+**Instant row removal on unwatch** (`static/gc.js`)
+- In Watch List view: when user unstars an item, the row is immediately removed from the DOM before the server sync
+- Uses `btn.closest('tr') || btn.closest('.item-card') || btn.closest('.compact-row')` to handle all three view modes
+
+**Filter item count — only when active** (`static/gc.js`)
+- `#filter-item-count` element now only shows filtered count text when at least one filter is active
+- When no filters active, the element is blank — catalog total in the status bar (`s-known`) is the only count shown
+- Avoids confusion between status bar count (~92,390 total catalog) and browse count (~92,295 visible — items hidden until next scan for NEW detection)
+
+**Affiliate language removed** (all files)
+- Removed `#affiliate-disclosure` div from `gc_tracker_app.py` and all related CSS from `gc.css`
+- Removed Sovrn "GC Used Homepage" affiliate link from `#dev-footer`
+- Removed affiliate disclosure paragraph from About modal
+- Removed "Affiliate Links" section from `PRIVACY_TEMPLATE`
+- Reason: applied to Sovrn affiliate program, was denied ("quality, security, or transparency"); GC is not on CJ Affiliate network either; all affiliate language stripped
+
+**Files changed:** `gc_tracker_app.py`, `static/gc.css`, `static/gc.js`
+
+---
+
+## Affiliate Program Research (2026-05-19) — CLOSED
+
+Applied to Sovrn (the only available network carrying GC) — was denied. Guitar Center is **not** currently on CJ Affiliate either (confirmed by search). Removed all affiliate language from the site. Not pursuing affiliate links further unless GC joins a network in the future.
 
 ---
 
@@ -1150,6 +1384,25 @@ static/
 
 ## 🎯 Future Ideas
 
-- **Capacitor mobile app**: wrap the existing web app in a Capacitor WebView shell for iOS/Android App Store distribution. No backend changes needed — Capacitor loads `gcgeartracker.com` in a native WebView. Requires Xcode (Mac) for iOS build, Android Studio for Android.
+### Android App (next priority)
+Goal is Play Store discoverability. Approach: WebView wrapper (fastest path) with enough native touches to pass Google Play review.
+
+**Google Play requirements (as of 2026):**
+- $25 one-time developer account fee at play.google.com/console
+- Personal accounts created after 2023-11-13 must complete 14 consecutive days of closed testing with ≥12 opted-in testers before publishing to production. Testers need to be opted in (clicked the invite link) but don't need to actively use the app daily — they just can't opt out. Recruit 15–16 to have a buffer.
+- Testers must have Android devices (cannot test on iPhone)
+- Google Play rejects bare WebView wrappers — need at least a couple native touches: push notifications (Firebase Cloud Messaging (FCM)), offline error screen, custom back/loading behavior
+- Recommended build tool: Android Studio (free, Mac-compatible) with built-in Android Virtual Device (AVD) emulator — no physical Android device needed for development
+
+**Steps:**
+1. Create Play Console account (starts the clock on account verification)
+2. Build Android Studio project: WebView + Firebase Cloud Messaging (FCM) push notifications
+3. Recruit 15+ Android-owning testers (r/guitar, r/guitarpedals are good sources)
+4. Run 14-day closed test, then flip to production
+5. iOS second — App Store is $99/year, stricter WebView policy, longer review times
+
+### Other Future Ideas
 - **Additional OAuth providers** (Facebook, Apple): same Authorization Code flow as Google — each needs `CLIENT_ID`/`CLIENT_SECRET` env vars + a new callback route + a `<provider>_id` column in `users`.
 - **Account settings page**: allow users to change username or link Google without the `/?google_new=1` URL trick.
+- **Reddit outreach**: r/guitar, r/guitarpedals, r/geartalk, r/WeAreTheMusicMakers — site is ready. First post got ~200 visitors and 61 signups (strong conversion). Repost with better framing: lead with the deal-finding angle, not "I built a tool."
+- **Domain email**: set up `@gcgeartracker.com` address and update Privacy Policy contact from `cboehmig@gmail.com`
