@@ -4562,9 +4562,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <meta property="og:site_name" content="GC Used Inventory Tracker">
 <meta property="og:title" content="GC Used Inventory Tracker — Search Guitar Center Used Gear">
 <meta property="og:description" content="Search Guitar Center&#39;s used instrument inventory across 300+ stores. Watch list, want list, and price drop alerts. Free.">
-<meta name="twitter:card" content="summary">
+<meta property="og:image" content="https://gcgeartracker.com/static/og-image.svg">
+<meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="GC Used Inventory Tracker — Search Guitar Center Used Gear">
 <meta name="twitter:description" content="Search Guitar Center&#39;s used instrument inventory across 300+ stores. Free watch list and want list alerts.">
+<meta name="twitter:image" content="https://gcgeartracker.com/static/og-image.svg">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%237a0000'/><text x='16' y='22' font-family='system-ui,sans-serif' font-size='14' font-weight='700' fill='%23ffcccc' text-anchor='middle'>GC</text></svg>">
 <link rel="stylesheet" href="/static/gc.css">
 <!-- __GA__ -->
@@ -5261,7 +5263,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.19"
+APP_VERSION = "2.12.20"
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

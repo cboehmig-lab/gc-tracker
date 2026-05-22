@@ -1,0 +1,60 @@
+<svg viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg" width="1200" height="630">
+  <rect width="1200" height="630" fill="#111111"/>
+  <rect width="1200" height="60" fill="#1a1a1a"/>
+  <rect width="1200" height="3" fill="#7a0000"/>
+  <text x="40" y="40" font-family="system-ui,sans-serif" font-size="26" fill="#ffffff" font-weight="700">GC Used Inventory Tracker</text>
+  <text x="1160" y="40" font-family="system-ui,sans-serif" font-size="20" fill="#666666" text-anchor="end">gcgeartracker.com</text>
+  <rect x="20" y="75" width="340" height="100" rx="8" fill="#1a1a1a" stroke="#2e2e2e" stroke-width="1"/>
+  <text x="40" y="115" font-family="system-ui,sans-serif" font-size="44" fill="#ffffff" font-weight="700">92,000+</text>
+  <text x="40" y="148" font-family="system-ui,sans-serif" font-size="20" fill="#666666">used items tracked</text>
+  <rect x="380" y="75" width="340" height="100" rx="8" fill="#1a1a1a" stroke="#2e2e2e" stroke-width="1"/>
+  <text x="400" y="115" font-family="system-ui,sans-serif" font-size="44" fill="#ffffff" font-weight="700">300+</text>
+  <text x="400" y="148" font-family="system-ui,sans-serif" font-size="20" fill="#666666">GC stores</text>
+  <rect x="740" y="75" width="440" height="100" rx="8" fill="#1a1a1a" stroke="#2e2e2e" stroke-width="1"/>
+  <text x="760" y="115" font-family="system-ui,sans-serif" font-size="44" fill="#4ade80" font-weight="700">Free</text>
+  <text x="760" y="148" font-family="system-ui,sans-serif" font-size="20" fill="#666666">watch list · want list · alerts</text>
+  <rect x="20" y="195" width="1160" height="36" fill="#161616"/>
+  <text x="30" y="219" font-family="system-ui,sans-serif" font-size="14" fill="#777777" font-weight="600" letter-spacing="1">ITEM</text>
+  <text x="560" y="219" font-family="system-ui,sans-serif" font-size="14" fill="#777777" font-weight="600" letter-spacing="1">BRAND</text>
+  <text x="720" y="219" font-family="system-ui,sans-serif" font-size="14" fill="#777777" font-weight="600" letter-spacing="1">PRICE</text>
+  <text x="870" y="219" font-family="system-ui,sans-serif" font-size="14" fill="#777777" font-weight="600" letter-spacing="1">CONDITION</text>
+  <text x="1060" y="219" font-family="system-ui,sans-serif" font-size="14" fill="#777777" font-weight="600" letter-spacing="1">DATE</text>
+  <rect x="20" y="231" width="1160" height="48" fill="#181818"/>
+  <rect x="30" y="244" width="38" height="20" rx="3" fill="#9a2020"/>
+  <text x="49" y="258" font-family="system-ui,sans-serif" font-size="12" fill="#ffffff" font-weight="700" text-anchor="middle">NEW</text>
+  <text x="80" y="261" font-family="system-ui,sans-serif" font-size="18" fill="#eeeeee">PRS SE Silver Sky Stone Blue Solid Body Electric Guitar</text>
+  <text x="560" y="261" font-family="system-ui,sans-serif" font-size="18" fill="#cccccc">PRS</text>
+  <text x="720" y="261" font-family="system-ui,sans-serif" font-size="18" fill="#4ade80" font-weight="600">$549.99</text>
+  <text x="870" y="261" font-family="system-ui,sans-serif" font-size="18" fill="#cccccc">Good</text>
+  <text x="1060" y="261" font-family="system-ui,sans-serif" font-size="18" fill="#666666">5/21/26</text>
+  <rect x="20" y="279" width="1160" height="48" fill="#141414"/>
+  <rect x="30" y="292" width="38" height="20" rx="3" fill="#9a2020"/>
+  <text x="49" y="306" font-family="system-ui,sans-serif" font-size="12" fill="#ffffff" font-weight="700" text-anchor="middle">NEW</text>
+  <text x="80" y="309" font-family="system-ui,sans-serif" font-size="18" fill="#eeeeee">Keeley delay workstation Effect Pedal</text>
+  <text x="560" y="309" font-family="system-ui,sans-serif" font-size="18" fill="#cccccc">Keeley</text>
+  <text x="720" y="309" font-family="system-ui,sans-serif" font-size="18" fill="#4ade80" font-weight="600">$169.99</text>
+  <text x="870" y="309" font-family="system-ui,sans-serif" font-size="18" fill="#cccccc">Good</text>
+  <text x="1060" y="309" font-family="system-ui,sans-serif" font-size="18" fill="#666666">5/21/26</text>
+  <rect x="20" y="327" width="1160" height="48" fill="#181818"/>
+  <text x="80" y="357" font-family="system-ui,sans-serif" font-size="18" fill="#eeeeee">BOSS GT-1000CORE Effect Processor</text>
+  <text x="560" y="357" font-family="system-ui,sans-serif" font-size="18" fill="#cccccc">BOSS</text>
+  <text x="720" y="357" font-family="system-ui,sans-serif" font-size="18" fill="#cccccc">$479.99</text>
+  <text x="870" y="357" font-family="system-ui,sans-serif" font-size="18" fill="#cccccc">Great</text>
+  <text x="1060" y="357" font-family="system-ui,sans-serif" font-size="18" fill="#666666">5/21/26</text>
+  <rect x="20" y="375" width="1160" height="48" fill="#141414"/>
+  <text x="80" y="405" font-family="system-ui,sans-serif" font-size="18" fill="#eeeeee">Fender American Professional II Stratocaster</text>
+  <text x="560" y="405" font-family="system-ui,sans-serif" font-size="18" fill="#cccccc">Fender</text>
+  <text x="720" y="405" font-family="system-ui,sans-serif" font-size="18" fill="#cccccc">$1,299.99</text>
+  <text x="870" y="405" font-family="system-ui,sans-serif" font-size="18" fill="#cccccc">Excellent</text>
+  <text x="1060" y="405" font-family="system-ui,sans-serif" font-size="18" fill="#666666">5/21/26</text>
+  <rect x="20" y="423" width="1160" height="48" fill="#181818"/>
+  <text x="80" y="453" font-family="system-ui,sans-serif" font-size="18" fill="#eeeeee">Tech 21 FLY RIG RK5 Effect Processor</text>
+  <text x="560" y="453" font-family="system-ui,sans-serif" font-size="18" fill="#cccccc">Tech 21</text>
+  <text x="720" y="453" font-family="system-ui,sans-serif" font-size="18" fill="#cccccc">$159.99</text>
+  <text x="870" y="453" font-family="system-ui,sans-serif" font-size="18" fill="#cccccc">Good</text>
+  <text x="1060" y="453" font-family="system-ui,sans-serif" font-size="18" fill="#666666">5/21/26</text>
+  <rect x="0" y="490" width="1200" height="140" fill="#0d0d0d"/>
+  <rect x="0" y="490" width="1200" height="2" fill="#2e2e2e"/>
+  <text x="600" y="572" font-family="system-ui,sans-serif" font-size="42" fill="#ffffff" text-anchor="middle" font-weight="600">Browse and track GC&#39;s used inventory across all stores.</text>
+  <text x="600" y="618" font-family="system-ui,sans-serif" font-size="24" fill="#666666" text-anchor="middle">Real-time scanning · Watch list · Want list · Free</text>
+</svg>
