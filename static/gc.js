@@ -1354,7 +1354,11 @@ async function _fetchBrowsePage(page) {
     // Advance the per-user anchor to the newest item currently visible on page 1.
     // This ensures "Scan For New" only flags items genuinely newer than what you've
     // already seen at the top of the table — not stuff that was already there.
-    if (page === 1) {
+    // Only advance the anchor when viewing the fully unfiltered table — any active
+    // filter (want list, watch list, price drop, brand, category, search, price
+    // range) means we're seeing a subset, so its dates must not push the anchor
+    // forward and silently hide genuinely-new items on the next scan.
+    if (page === 1 && !hasFilters && !_globalSearchActive) {
       var topDate = d.items.reduce(function(best, item) {
         var dr = item.date_raw || '';
         return dr > best ? dr : best;
@@ -1805,6 +1809,7 @@ function togglePriceDropFilter() {
   btn.classList.toggle('wl-active', _priceDropFilterActive);
   _updateFilterDot();
   _srvPage = 1;
+  _srvLoading = false;  // cancel any in-flight request so the toggle always lands
   _fetchBrowsePage(1);
 }
 
@@ -2263,6 +2268,7 @@ function searchWantList() {
   document.getElementById('price-drop-toggle').classList.remove('wl-active');
   document.getElementById('want-list-toggle').classList.add('wl-active');
   _updateWantListCount();
+  _srvLoading = false;  // cancel any in-flight request so the toggle always lands
   _fetchBrowsePage(1);
 }
 
@@ -2546,6 +2552,7 @@ function onCatFilterChange() {
     // In server mode, changing category resets subcategory and fetches page 1
     window._selectedSubs = []; _updateSubcatBtn();
     _srvPage = 1;
+    _srvLoading = false;  // cancel any in-flight request so filter always lands
     _fetchBrowsePage(1);
     return;
   }
@@ -3410,6 +3417,7 @@ function filterResults() {
     clearTimeout(_filterTimer);
     _filterTimer = setTimeout(() => {
       _srvPage = 1;
+      _srvLoading = false;  // cancel any in-flight request so filter always lands
       _fetchBrowsePage(1);
     }, 250);
     return;
