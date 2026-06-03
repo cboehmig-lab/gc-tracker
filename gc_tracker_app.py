@@ -2683,10 +2683,28 @@ def api_clear_blocklist():
         f.unlink()
     return jsonify({"status": "Blocklist cleared. Run Validate Stores to re-check all stores."})
 
+def _build_stores_noscript() -> str:
+    """Build a <noscript> block listing all known GC store locations for SEO.
+    Generated at request time so it always reflects the live store cache."""
+    try:
+        stores = json.loads(STORES_CACHE.read_text()).get("stores", []) if STORES_CACHE.exists() else []
+    except Exception:
+        stores = []
+    if not stores:
+        return ''
+    return (
+        '<noscript><p style="padding:12px 20px;text-align:center;color:#666;'
+        'font-size:.72rem;line-height:1.7">'
+        'GC Used Inventory Tracker requires JavaScript. '
+        'This tool searches used guitar gear at Guitar Center locations nationwide including: '
+        + _html.escape(", ".join(stores)) +
+        '.</p></noscript>'
+    )
+
 @app.route("/")
 @optional_user_context
 def index():
-    return HTML_TEMPLATE
+    return HTML_TEMPLATE.replace('<!-- __STORES_NOSCRIPT__ -->', _build_stores_noscript())
 
 @app.route("/cl")
 def cl_page():
@@ -5572,30 +5590,14 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.26"
+APP_VERSION = "2.12.27"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 NEWDEALS_TEMPLATE = NEWDEALS_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 
-# Build noscript block from stores cache so Google can associate the page with all locations.
-# <noscript> is invisible to JS users but fully crawlable — a legitimate no-JS fallback message.
-try:
-    _cached_stores = json.loads(STORES_CACHE.read_text()).get("stores", []) if STORES_CACHE.exists() else []
-except Exception:
-    _cached_stores = []
-if _cached_stores:
-    _store_list_text = ", ".join(_cached_stores)
-    _stores_noscript = (
-        '<noscript><p style="padding:12px 20px;text-align:center;color:#666;font-size:.72rem;line-height:1.7">'
-        'GC Used Inventory Tracker requires JavaScript to run. '
-        'This tool searches used guitar gear at Guitar Center locations nationwide including: '
-        + _html.escape(_store_list_text) +
-        '.</p></noscript>'
-    )
-else:
-    _stores_noscript = ''
-HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __STORES_NOSCRIPT__ -->', _stores_noscript)
+# __STORES_NOSCRIPT__ is replaced at request time in index() so it always reflects
+# the live store cache — see the index() route handler below.
 
 
 
