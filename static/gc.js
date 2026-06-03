@@ -140,6 +140,7 @@ document.addEventListener('click', function(e) {
   const dd = document.getElementById('ss-dropdown');
   if (!dd) return;
   dd.addEventListener('click', function(e) {
+    if (e.target.closest('[data-ss-restore]')) { _closeSavedSearchesDropdown(); _restoreFilterState(); return; }
     if (e.target.closest('[data-ss-clear]')) { _closeSavedSearchesDropdown(); clearFilters(); return; }
     const delBtn = e.target.closest('[data-ss-del]');
     if (delBtn) { e.stopPropagation(); _deleteSavedSearch(delBtn.dataset.ssDel); return; }
@@ -1168,6 +1169,88 @@ let _globalSearchActive = false;
 let _globalSearchQuery = '';
 let _wantListSearchActive = false;
 
+// ── Special-view state save / restore ─────────────────────────────────────────
+// Holds a snapshot of filter+store state taken before entering Watch List,
+// Want List, or Saved Searches view so we can restore on toggle-off / "← Back".
+let _preSpecialViewState = null;
+
+function _captureFilterState() {
+  return {
+    srvStores:      _srvStores.slice(),
+    selectedStores: new Set(_selectedStores),
+    brands:         (window._selectedBrands || []).slice(),
+    conds:          (window._selectedConds  || []).slice(),
+    cats:           (window._selectedCats   || []).slice(),
+    subs:           (window._selectedSubs   || []).slice(),
+    priceMin:       window._priceMin,
+    priceMax:       window._priceMax,
+    searchQ:        (document.getElementById('res-search') || {}).value || '',
+    strictSearch:   window._strictSearch || false,
+    watchActive:    _watchFilterActive,
+    priceDropActive:_priceDropFilterActive,
+    wantListActive: _wantListSearchActive,
+    globalActive:   _globalSearchActive,
+    globalQuery:    _globalSearchQuery,
+    sortField:      _srvSortField,
+    sortDir:        _srvSortDir,
+  };
+}
+
+function _restoreFilterState() {
+  const state = _preSpecialViewState;
+  if (!state) return;
+  _preSpecialViewState = null;
+  // Restore stores
+  _selectedStores = new Set(state.selectedStores);
+  _srvStores = state.srvStores;
+  renderList();
+  updateCount && updateCount();
+  // Restore filter chips
+  _watchFilterActive = state.watchActive;
+  const wtBtn = document.getElementById('watchlist-toggle');
+  if (wtBtn) wtBtn.classList.toggle('wl-active', _watchFilterActive);
+  _priceDropFilterActive = state.priceDropActive;
+  const pdBtn = document.getElementById('price-drop-toggle');
+  if (pdBtn) pdBtn.classList.toggle('wl-active', _priceDropFilterActive);
+  // Restore want list state
+  _wantListSearchActive = state.wantListActive;
+  _globalSearchActive   = state.globalActive;
+  _globalSearchQuery    = state.globalQuery;
+  const wlBtn = document.getElementById('want-list-toggle');
+  if (wlBtn) wlBtn.classList.toggle('wl-active', _wantListSearchActive);
+  _updateWantListCount && _updateWantListCount();
+  // Restore filter dropdowns
+  window._selectedBrands = state.brands;
+  window._selectedConds  = state.conds;
+  window._selectedCats   = state.cats;
+  window._selectedSubs   = state.subs;
+  _updateBrandBtn(); _updateCondBtn(); _updateCatBtn(); _updateSubcatBtn();
+  _accRenderBrand && _accRenderBrand();
+  _accRenderCond  && _accRenderCond();
+  _accRenderCat   && _accRenderCat();
+  _accRenderSub   && _accRenderSub();
+  _accUpdateSummaries && _accUpdateSummaries();
+  // Restore price
+  window._priceMin = state.priceMin;
+  window._priceMax = state.priceMax;
+  var pMinStr = window._priceMin !== null ? String(window._priceMin) : '';
+  var pMaxStr = window._priceMax !== null ? String(window._priceMax) : '';
+  ['price-min','price-min-dd'].forEach(function(id){var el=document.getElementById(id);if(el)el.value=pMinStr;});
+  ['price-max','price-max-dd'].forEach(function(id){var el=document.getElementById(id);if(el)el.value=pMaxStr;});
+  _updatePriceBtn && _updatePriceBtn();
+  // Restore search box + strict toggle
+  const rsEl = document.getElementById('res-search');
+  if (rsEl) { rsEl.value = state.searchQ; }
+  _updateResSearchClear && _updateResSearchClear();
+  window._strictSearch = state.strictSearch;
+  const strictBtn = document.getElementById('strict-search-btn');
+  if (strictBtn) strictBtn.classList.toggle('active', window._strictSearch);
+  _updateFilterDot && _updateFilterDot();
+  _srvLoading = false;
+  _srvPage = 1;
+  _fetchBrowsePage(1);
+}
+
 // Mode: 'server' = browse with server-side pagination, 'local' = scan/watchlist with client data
 let _browseMode = 'server';
 // Server-side pagination state
@@ -1247,10 +1330,11 @@ async function _fetchBrowsePage(page) {
     user_last_scan: window._lastRunISO || '',
     ...filters,
   };
-  if (_globalSearchActive) {
+  if (_globalSearchActive || _watchFilterActive) {
     body.all_stores = true;
-    body.filter_q = _globalSearchQuery;
-    // force_fav_sort removed — sorting is now purely by user's column choice
+    if (_globalSearchActive) {
+      body.filter_q = _globalSearchQuery;
+    }
     if (_wantListSearchActive) {
       body.filter_want_list_only = true;
     }
@@ -1312,8 +1396,8 @@ async function _fetchBrowsePage(page) {
         : 'No price drops found in selected stores';
     } else if (_watchFilterActive) {
       document.getElementById('res-title').textContent = _srvTotalCount > 0
-        ? `Watch List — ${_srvTotalCount.toLocaleString()} item${_srvTotalCount !== 1 ? 's' : ''} found`
-        : 'Watch List — no matches in selected stores';
+        ? `Watch List — ${_srvTotalCount.toLocaleString()} item${_srvTotalCount !== 1 ? 's' : ''} nationwide`
+        : 'Watch List — none of your watched items are currently available';
       document.getElementById('res-badge').textContent = '';
     } else if (_globalSearchActive) {
       const label = _srvTotalCount > 0
@@ -1779,17 +1863,39 @@ function toggleWatch(id, btn) {
 }
 
 function toggleWatchFilter() {
-  _watchFilterActive = !_watchFilterActive;
   const btn = document.getElementById('watchlist-toggle');
-  btn.classList.toggle('wl-active', _watchFilterActive);
-  // Deactivate Want List when activating Watch List (they're mutually exclusive)
-  if (_watchFilterActive && _wantListSearchActive) {
-    _wantListSearchActive = false;
-    _globalSearchActive = false;
-    _globalSearchQuery = '';
-    _resetWantListLink();
-    _srvStores = getSelected();
-    if (!_srvStores.length) { document.getElementById('res-panel').style.display = 'none'; return; }
+  if (!_watchFilterActive) {
+    // Activating — save current state, then clear all other filters for a clean view
+    _preSpecialViewState = _captureFilterState();
+    // Clear all filter state
+    window._selectedBrands = []; _updateBrandBtn();
+    window._selectedConds  = []; _updateCondBtn();
+    window._selectedCats   = []; _updateCatBtn();
+    window._selectedSubs   = []; _updateSubcatBtn(); _setSubList([]);
+    window._priceMin = null; window._priceMax = null;
+    ['price-min','price-max','price-min-dd','price-max-dd'].forEach(function(id){var el=document.getElementById(id);if(el)el.value='';});
+    _updatePriceBtn && _updatePriceBtn();
+    const rsEl = document.getElementById('res-search'); if (rsEl) rsEl.value = '';
+    _updateResSearchClear && _updateResSearchClear();
+    // Deactivate Want List / Price Drop if active
+    if (_wantListSearchActive) {
+      _wantListSearchActive = false;
+      _globalSearchActive = false;
+      _globalSearchQuery = '';
+      _resetWantListLink();
+    }
+    if (_priceDropFilterActive) {
+      _priceDropFilterActive = false;
+      const pdBtn = document.getElementById('price-drop-toggle');
+      if (pdBtn) pdBtn.classList.remove('wl-active');
+    }
+    _watchFilterActive = true;
+    btn.classList.add('wl-active');
+  } else {
+    // Deactivating — restore pre-watch state
+    _watchFilterActive = false;
+    btn.classList.remove('wl-active');
+    if (_preSpecialViewState) { _restoreFilterState(); return; }
   }
   _updateFilterDot();
   _browseMode = 'server';
@@ -1886,13 +1992,17 @@ function _renderSavedSearchesDropdown() {
   const dd = document.getElementById('ss-dropdown');
   if (!dd) return;
   const searches = window._savedSearches || [];
+  // "← Back" button — only shown when there's a saved pre-state to restore
+  const backBtn = _preSpecialViewState
+    ? '<button class="ss-back-btn" data-ss-restore="1">← Back</button>'
+    : '';
   if (!searches.length) {
     dd.innerHTML =
-      '<div class="ss-dropdown-hdr"><span>Saved Searches</span></div>' +
+      '<div class="ss-dropdown-hdr"><span>Saved Searches</span>' + backBtn + '</div>' +
       '<div class="ss-empty">No saved searches yet.<br>Set filters then click <b>💾 Save Search</b>.</div>';
     return;
   }
-  let html = '<div class="ss-dropdown-hdr"><span>Saved Searches</span><button class="ss-clear-all-btn" data-ss-clear="1">Clear</button></div><div class="ss-list">';
+  let html = '<div class="ss-dropdown-hdr"><span>Saved Searches</span>' + backBtn + '<button class="ss-clear-all-btn" data-ss-clear="1">Clear</button></div><div class="ss-list">';
   searches.forEach(function(ss) {
     html +=
       '<div class="ss-item" data-ss-id="' + _ssEsc(ss.id) + '">' +
@@ -1959,6 +2069,8 @@ async function _fetchSavedSearchCounts() {
 function _applySavedSearch(id) {
   const ss = (window._savedSearches || []).find(function(s) { return s.id === id; });
   if (!ss) return;
+  // Save current state before applying so the "← Back" button can restore it
+  _preSpecialViewState = _captureFilterState();
   _closeSavedSearchesDropdown();
   const f = ss.filters || {};
   // Restore filter state
@@ -2239,15 +2351,25 @@ function clearGlobalSearch() {
 }
 
 function searchWantList() {
-  // Toggle: if already searching want list, clear it
+  // Toggle: if already active, restore pre-want-list state
   if (_wantListSearchActive) {
-    clearGlobalSearch();
+    _wantListSearchActive = false;
+    _globalSearchActive = false;
+    _globalSearchQuery = '';
+    _resetWantListLink();
+    if (_preSpecialViewState) { _restoreFilterState(); return; }
+    _srvStores = getSelected();
+    _srvPage = 1;
+    _srvLoading = false;
+    _fetchBrowsePage(1);
     return;
   }
   if (!window._keywords || !window._keywords.length) {
     openKeywords();
     return;
   }
+  // Activating — save current state before clearing
+  _preSpecialViewState = _captureFilterState();
   _globalSearchActive = true;
   _wantListSearchActive = true;
   _globalSearchQuery = '';
@@ -2262,6 +2384,10 @@ function searchWantList() {
   window._selectedConds = []; _updateCondBtn();
   window._selectedCats = []; _updateCatBtn();
   window._selectedSubs = []; _updateSubcatBtn(); _setSubList([]);
+  // Clear price filter too
+  window._priceMin = null; window._priceMax = null;
+  ['price-min','price-max','price-min-dd','price-max-dd'].forEach(function(id){var el=document.getElementById(id);if(el)el.value='';});
+  _updatePriceBtn && _updatePriceBtn();
   _watchFilterActive = false;
   document.getElementById('watchlist-toggle').classList.remove('wl-active');
   _priceDropFilterActive = false;

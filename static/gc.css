@@ -172,6 +172,8 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 .ss-delete-btn:hover{color:#f88;background:#2a1a1a}
 .ss-clear-all-btn{background:none;border:none;color:#888;font-size:.72rem;cursor:pointer;padding:2px 6px;border-radius:3px;white-space:nowrap}
 .ss-clear-all-btn:hover{color:#f88}
+.ss-back-btn{background:none;border:1px solid #444;color:#93c5fd;font-size:.72rem;cursor:pointer;padding:2px 8px;border-radius:3px;white-space:nowrap;margin-right:4px}
+.ss-back-btn:hover{background:#1e2a3a;color:#bfdbfe}
 /* ── About modal ── */
 #about-modal{display:none;position:fixed;inset:0;z-index:900;background:rgba(0,0,0,.7);align-items:center;justify-content:center}
 #about-modal.open{display:flex}
