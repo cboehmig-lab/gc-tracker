@@ -781,12 +781,16 @@ def fetch_page(store_name: str = None, page: int = 1) -> dict:
 # ── New Deals helpers ──────────────────────────────────────────────────────────
 _new_deals_cache: dict | None = None
 
-_SOFTWARE_CATS = {"software", "plug-in", "plug in", "plugin", "virtual instrument",
-                  "digital download", "pro audio software", "apps", "ilok"}
+_SOFTWARE_KEYWORDS = {
+    "software", "plug-in", "plug in", "plugin", "virtual instrument",
+    "digital download", "pro audio software", "ilok", "(download)",
+    "sample pack", "sample library", "expansion pack", "loop library",
+}
 
-def _is_software_cat(category: str) -> bool:
-    cat = (category or "").lower()
-    return any(kw in cat for kw in _SOFTWARE_CATS)
+def _is_software_item(name: str, category: str) -> bool:
+    """Return True if the item appears to be software/a plugin (by name or category)."""
+    text = ((name or "") + " " + (category or "")).lower()
+    return any(kw in text for kw in _SOFTWARE_KEYWORDS)
 
 def _fetch_new_page(page: int):
     """Fetch one page of new GC inventory from Algolia. Returns (hits, nb_pages)."""
@@ -2732,18 +2736,25 @@ def api_new_scan():
         if price <= 0:
             continue
         pct_off = int((1.0 - price / list_price) * 100) if list_price > price > 0 else 0
-        # Pick most useful category level — skip "New" / bare product-line strings
-        cat_ids = hit.get("categoryPageIds") or []
-        category = next((c for c in cat_ids if c and c.lower() not in ("new", "used", "")), "")
+        # Category: prefer the structured categories array (same as used gear parsing)
+        cats_arr = hit.get("categories") or []
+        if cats_arr and isinstance(cats_arr, list) and isinstance(cats_arr[0], dict):
+            category = cats_arr[0].get("lvl0") or ""
+        else:
+            # Fallback: categoryPageIds — skip bare "New"/"Used" sentinel values
+            cat_ids  = hit.get("categoryPageIds") or []
+            category = next((c for c in cat_ids if c and c.lower() not in ("new", "used", "")), "")
+        brand    = (hit.get("brand") or "").strip()
         seo_url  = hit.get("seoUrl") or ""
         items[sku] = {
-            "name":       name,
-            "brand":      (hit.get("brand") or "").strip(),
-            "category":   category,
-            "price":      price,
-            "list_price": list_price,
-            "pct_off":    pct_off,
-            "url":        ("https://www.guitarcenter.com" + seo_url) if seo_url else "",
+            "name":        name,
+            "brand":       brand,
+            "category":    category,
+            "price":       price,
+            "list_price":  list_price,
+            "pct_off":     pct_off,
+            "url":         ("https://www.guitarcenter.com" + seo_url) if seo_url else "",
+            "is_software": _is_software_item(name, category),
         }
 
     last_updated = _dt2.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -2766,7 +2777,7 @@ def api_new_browse():
 
     # Software/plugin filter (excluded by default)
     if not bool(data.get("include_software")):
-        items = [i for i in items if not _is_software_cat(i.get("category", ""))]
+        items = [i for i in items if not i.get("is_software", False)]
 
     # Keyword search
     fq = (data.get("filter_q") or "").strip().lower()
@@ -5553,7 +5564,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.23"
+APP_VERSION = "2.12.24"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
