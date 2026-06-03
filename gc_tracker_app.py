@@ -5439,9 +5439,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 
+<!-- __STORES_NOSCRIPT__ -->
 <footer class="seo-footer">
-  <p>GC Used Inventory Tracker searches used guitar gear at Guitar Center locations nationwide — including Winter Park, Natick, Plymouth Meeting, Little Rock, Huntsville, Totowa, Braintree, Danvers, Albany, Carle Place, Pasadena, Overland Park, Plano, Greensboro, Savannah, and 300+ more stores. Browse used guitars, amps, effects pedals, drums, and pro audio by store, condition, price, and category.</p>
-  <p><a href="/privacy">Privacy Policy</a> &middot; Not affiliated with Guitar Center, Inc.</p>
+  <a href="/privacy">Privacy Policy</a> &middot; Not affiliated with Guitar Center, Inc.
 </footer>
 
 </body>
@@ -5572,11 +5572,30 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.25"
+APP_VERSION = "2.12.26"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 NEWDEALS_TEMPLATE = NEWDEALS_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
+
+# Build noscript block from stores cache so Google can associate the page with all locations.
+# <noscript> is invisible to JS users but fully crawlable — a legitimate no-JS fallback message.
+try:
+    _cached_stores = json.loads(STORES_CACHE.read_text()).get("stores", []) if STORES_CACHE.exists() else []
+except Exception:
+    _cached_stores = []
+if _cached_stores:
+    _store_list_text = ", ".join(_cached_stores)
+    _stores_noscript = (
+        '<noscript><p style="padding:12px 20px;text-align:center;color:#666;font-size:.72rem;line-height:1.7">'
+        'GC Used Inventory Tracker requires JavaScript to run. '
+        'This tool searches used guitar gear at Guitar Center locations nationwide including: '
+        + _html.escape(_store_list_text) +
+        '.</p></noscript>'
+    )
+else:
+    _stores_noscript = ''
+HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __STORES_NOSCRIPT__ -->', _stores_noscript)
 
 
 

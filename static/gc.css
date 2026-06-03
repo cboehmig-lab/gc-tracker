@@ -772,13 +772,11 @@ tr.fav-row td:last-child{color:#4ade80}
 
 /* ── SEO footer ── */
 .seo-footer{
-  padding:18px 24px 24px;
+  padding:12px 24px 20px;
   border-top:1px solid #1e1e1e;
   text-align:center;
-  color:#3a3a3a;
-  font-size:.7rem;
-  line-height:1.7;
+  color:#555;
+  font-size:.72rem;
 }
-.seo-footer p+p{margin-top:4px}
-.seo-footer a{color:#3a3a3a;text-decoration:none}
-.seo-footer a:hover{color:#666}
+.seo-footer a{color:#666;text-decoration:none}
+.seo-footer a:hover{color:#aaa}
