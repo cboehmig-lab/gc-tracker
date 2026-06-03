@@ -769,3 +769,16 @@ tr.fav-row td:last-child{color:#4ade80}
   .compact-row-watch{background:none;border:none;cursor:pointer;color:#444;font-size:1rem;padding:2px 6px;min-height:36px;display:inline-flex;align-items:center}
   .compact-row-watch.active{color:#f5c518}
 }
+
+/* ── SEO footer ── */
+.seo-footer{
+  padding:18px 24px 24px;
+  border-top:1px solid #1e1e1e;
+  text-align:center;
+  color:#3a3a3a;
+  font-size:.7rem;
+  line-height:1.7;
+}
+.seo-footer p+p{margin-top:4px}
+.seo-footer a{color:#3a3a3a;text-decoration:none}
+.seo-footer a:hover{color:#666}
