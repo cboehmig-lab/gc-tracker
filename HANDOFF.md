@@ -1047,6 +1047,69 @@ Default fallback of `88px` covers the initial render before JS runs.
 
 ---
 
+## Recent Changes (v2.12.21 → v2.12.27)
+
+### v2.12.22 — Filter bypass + state restore for Watch List, Want List, Saved Searches
+
+**Feature**: Activating Watch List, Want List, or a Saved Search now clears all current filters and searches nationwide. Toggling any of them off restores the exact prior state.
+
+**Implementation** (`static/gc.js`):
+- `_preSpecialViewState` — module-level variable, holds captured state or `null`
+- `_captureFilterState()` — snapshots all filter state: stores, brands, conds, cats, subs, price min/max, search query, strict search, active special views, sort field/dir
+- `_restoreFilterState()` — restores all captured state, fires all UI update functions, triggers a fresh fetch
+- `toggleWatchFilter()` rewrote: on activation, captures state, clears all filters, sets `all_stores: true` via `_watchFilterActive`; on deactivation, calls `_restoreFilterState()` if state is saved
+- `searchWantList()` same pattern: captures state on activation, restores on toggle-off; clears price filter too
+- `_applySavedSearch()`: captures state before applying each saved search
+- `_renderSavedSearchesDropdown()`: renders a "← Back" button when `_preSpecialViewState` is non-null; click calls `_restoreFilterState()`
+- `_fetchBrowsePage()`: sends `all_stores: true` when `_globalSearchActive || _watchFilterActive`
+
+**CSS** (`static/gc.css`): `.ss-back-btn` — styled as a small blue-tinted chip inside the saved searches dropdown.
+
+### v2.12.23 — /newdeals admin page
+
+**Feature**: Private admin-only page at `/newdeals` for browsing new GC inventory discounted from MSRP. Manual refresh scans all new inventory via Algolia.
+
+**Backend** (`gc_tracker_app.py`):
+- `NEW_DEALS_CACHE_FILE = DATA_DIR / "gc_new_deals_cache.json"`
+- `_fetch_new_page(page)` — fetches `condition.lvl0:New` from Algolia, 240 hits/page
+- `_load_new_deals_cache()` / `_save_new_deals_cache()` — in-memory + disk cache
+- `GET /newdeals` — `_require_admin()` gate; returns `NEWDEALS_TEMPLATE`
+- `POST /api/new-scan` — `_require_admin_api()` gate; parallel fetch all pages via `ThreadPoolExecutor(max_workers=12)`, dedupes by SKU, saves cache
+- `POST /api/new-browse` — `_require_admin_api()` gate; filters by include_software, keyword search, brand, category, pct_off, price range, want list keywords; returns paginated results + brand/category facets
+
+**Frontend**: `static/newdeals.js`, `static/newdeals.css` — self-contained, dark-themed, matching main app aesthetic. Column sorting, sticky headers, paginator, want list chip, "Include Software" checkbox.
+
+**Note**: `_require_admin()` / `_require_admin_api()` are NOT decorator factories. Call inline: `denied = _require_admin(); if denied: return denied`.
+
+### v2.12.24 — Fix software/plugin filtering on /newdeals
+
+**Bug**: `_is_software_cat(category)` always returned False because `categoryPageIds` for new Algolia items only contains `["New"]` — no category hierarchy. Category column was also empty for all rows.
+
+**Fix**:
+- `_SOFTWARE_KEYWORDS` (renamed from `_SOFTWARE_CATS`) — extended set including name-based keywords: "plug-in", "plugin", "software", "virtual instrument", "ilok", "(download)", "sample pack", "sample library", "expansion pack", "loop library"
+- `_is_software_item(name, category)` — new function checking both name AND category against keywords
+- `api_new_scan`: stores `"is_software": _is_software_item(name, category)` on each cached item at scan time
+- `api_new_scan`: category now uses `hit.get("categories")[0].get("lvl0")` (same as `parse_products` for used gear). Falls back to `categoryPageIds` excluding bare "New"/"Used" values.
+- `api_new_browse`: filter changed to `items = [i for i in items if not i.get("is_software", False)]`
+
+**⚠️ Admin must click "↻ Refresh Data" on /newdeals after deploy** to rebuild cache with `is_software` and `category` fields.
+
+### v2.12.25–v2.12.27 — SEO improvements
+
+**Context**: Google Search Console data showed 40+ location-specific queries ("guitar center [city] inventory") with page-1 rankings (positions 6–10) but zero clicks — a CTR problem. Store names weren't in indexable HTML (all loaded via JS).
+
+**Changes**:
+- **Title**: "Guitar Center Used Gear Tracker — Browse Inventory by Store Location" (was: "GC Used Inventory Tracker — Search Guitar Center Used Gear")
+- **Meta description**: "Browse used gear at any Guitar Center location. Search guitars, amps, pedals, drums, and more by store, city, condition, and price — updated in real time. Free watch list and want list."
+- **OG + Twitter tags**: updated to match
+- **JSON-LD** (`<script type="application/ld+json">`): `WebSite` schema with `SearchAction`. Not blocked by CSP `script-src 'self'` (data block, not executable JS).
+- **Visible footer** (`.seo-footer`): "Privacy Policy · Not affiliated with Guitar Center, Inc." — color `#555`, links `#666`. Compact, on-brand.
+- **`_build_stores_noscript()`**: generates `<noscript>` block listing all stores from `STORES_CACHE`. Called at request time in `index()` (not startup) so it always reflects the live cache. `<!-- __STORES_NOSCRIPT__ -->` placeholder stays in `HTML_TEMPLATE` string; replaced per-request.
+
+**Files changed**: `gc_tracker_app.py`, `static/gc.css`
+
+---
+
 ## Recent Changes (v2.12.16 → v2.12.20)
 
 ### v2.12.17 — Watchlist deletion cross-device sync fix
