@@ -56,7 +56,8 @@ FAVORITES_FILE = DATA_DIR / "gc_favorites.json"
 CAT_CACHE_FILE = DATA_DIR / "gc_category_cache.json"
 WATCHLIST_FILE   = DATA_DIR / "gc_watchlist.json"
 KEYWORDS_FILE    = DATA_DIR / "gc_keywords.json"
-STORE_COORDS_FILE = DATA_DIR / "gc_store_coords.json"
+STORE_COORDS_FILE    = DATA_DIR / "gc_store_coords.json"
+NEW_DEALS_CACHE_FILE = DATA_DIR / "gc_new_deals_cache.json"
 
 
 PORT              = int(os.environ.get("PORT", 5050))
@@ -777,6 +778,51 @@ def fetch_page(store_name: str = None, page: int = 1) -> dict:
     return r.json()
 
 
+# ── New Deals helpers ──────────────────────────────────────────────────────────
+_new_deals_cache: dict | None = None
+
+_SOFTWARE_CATS = {"software", "plug-in", "plug in", "plugin", "virtual instrument",
+                  "digital download", "pro audio software", "apps", "ilok"}
+
+def _is_software_cat(category: str) -> bool:
+    cat = (category or "").lower()
+    return any(kw in cat for kw in _SOFTWARE_CATS)
+
+def _fetch_new_page(page: int):
+    """Fetch one page of new GC inventory from Algolia. Returns (hits, nb_pages)."""
+    import time as _time
+    ts = int(_time.time())
+    payload = {"requests": [{
+        "indexName":     ALGOLIA_INDEX,
+        "analyticsTags": ["Did Not Search"],
+        "facetFilters":  ["condition.lvl0:New"],
+        "facets":        ["*"],
+        "hitsPerPage":   240,
+        "numericFilters": [f"startDate<={ts}"],
+        "page":          page,
+    }]}
+    r = _http.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=30)
+    r.raise_for_status()
+    res = r.json()["results"][0]
+    return res["hits"], res.get("nbPages", 1)
+
+def _load_new_deals_cache() -> dict | None:
+    global _new_deals_cache
+    if _new_deals_cache is not None:
+        return _new_deals_cache
+    if NEW_DEALS_CACHE_FILE.exists():
+        try:
+            _new_deals_cache = json.loads(NEW_DEALS_CACHE_FILE.read_text())
+            return _new_deals_cache
+        except Exception:
+            pass
+    return None
+
+def _save_new_deals_cache(items: dict, last_updated: str):
+    global _new_deals_cache
+    data = {"last_updated": last_updated, "items": items}
+    NEW_DEALS_CACHE_FILE.write_text(json.dumps(data, separators=(',', ':')))
+    _new_deals_cache = data
 
 
 
@@ -2642,6 +2688,163 @@ def index():
 def cl_page():
     return CL_TEMPLATE
 
+@app.route("/newdeals")
+def newdeals_page():
+    denied = _require_admin()
+    if denied: return denied
+    return NEWDEALS_TEMPLATE
+
+@app.route("/api/new-scan", methods=["POST"])
+def api_new_scan():
+    """Fetch all new GC inventory from Algolia, dedupe by SKU, cache to disk."""
+    denied = _require_admin_api()
+    if denied: return denied
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import datetime as _dt2
+    try:
+        hits0, nb_pages = _fetch_new_page(0)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    all_hits = list(hits0)
+    if nb_pages > 1:
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            futs = {pool.submit(_fetch_new_page, p): p for p in range(1, nb_pages)}
+            for fut in as_completed(futs):
+                try:
+                    hits, _ = fut.result()
+                    all_hits.extend(hits)
+                except Exception:
+                    pass
+
+    items = {}
+    for hit in all_hits:
+        sku = str(hit.get("sku") or hit.get("objectID") or "").strip()
+        if not sku or sku in items:
+            continue
+        name = _clean_name(hit.get("displayName") or hit.get("name") or "")
+        if not name:
+            continue
+        try:    price      = float(hit.get("price") or 0)
+        except: continue
+        try:    list_price = float(hit.get("listPrice") or 0)
+        except: list_price = 0.0
+        if price <= 0:
+            continue
+        pct_off = int((1.0 - price / list_price) * 100) if list_price > price > 0 else 0
+        # Pick most useful category level — skip "New" / bare product-line strings
+        cat_ids = hit.get("categoryPageIds") or []
+        category = next((c for c in cat_ids if c and c.lower() not in ("new", "used", "")), "")
+        seo_url  = hit.get("seoUrl") or ""
+        items[sku] = {
+            "name":       name,
+            "brand":      (hit.get("brand") or "").strip(),
+            "category":   category,
+            "price":      price,
+            "list_price": list_price,
+            "pct_off":    pct_off,
+            "url":        ("https://www.guitarcenter.com" + seo_url) if seo_url else "",
+        }
+
+    last_updated = _dt2.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    _save_new_deals_cache(items, last_updated)
+    return jsonify({"ok": True, "count": len(items), "last_updated": last_updated})
+
+
+@app.route("/api/new-browse", methods=["POST"])
+def api_new_browse():
+    """Browse cached new deals with filters + pagination."""
+    denied = _require_admin_api()
+    if denied: return denied
+    import re as _re2
+    data    = request.json or {}
+    cache   = _load_new_deals_cache()
+    if not cache:
+        return jsonify({"no_cache": True, "items": [], "total": 0})
+
+    items = list(cache.get("items", {}).values())
+
+    # Software/plugin filter (excluded by default)
+    if not bool(data.get("include_software")):
+        items = [i for i in items if not _is_software_cat(i.get("category", ""))]
+
+    # Keyword search
+    fq = (data.get("filter_q") or "").strip().lower()
+    if fq:
+        tokens = fq.split()
+        items = [i for i in items if all(
+            t in (i["name"] + " " + i["brand"]).lower() for t in tokens)]
+
+    # Brand / category filters
+    brands = [b for b in (data.get("filter_brands") or []) if b]
+    if brands:
+        items = [i for i in items if i["brand"] in brands]
+    cats = [c for c in (data.get("filter_categories") or []) if c]
+    if cats:
+        items = [i for i in items if i["category"] in cats]
+
+    # % off minimum
+    min_pct = int(data.get("filter_min_pct_off") or 0)
+    if min_pct > 0:
+        items = [i for i in items if i["pct_off"] >= min_pct]
+
+    # Price range
+    try:
+        pmin = float(data["filter_price_min"]) if data.get("filter_price_min") not in (None, "") else None
+    except (TypeError, ValueError):
+        pmin = None
+    try:
+        pmax = float(data["filter_price_max"]) if data.get("filter_price_max") not in (None, "") else None
+    except (TypeError, ValueError):
+        pmax = None
+    if pmin is not None: items = [i for i in items if i["price"] >= pmin]
+    if pmax is not None: items = [i for i in items if i["price"] <= pmax]
+
+    # Want list keyword filter — whole-word match per keyword, OR logic across keywords
+    if bool(data.get("filter_want_list")):
+        keywords = [k.lstrip("=").strip() for k in (data.get("keywords") or []) if k.strip()]
+        if keywords:
+            pats = [_re2.compile(r'\b' + _re2.escape(k) + r'\b', _re2.IGNORECASE) for k in keywords]
+            items = [i for i in items if any(
+                p.search(i["name"] + " " + i["brand"]) for p in pats)]
+
+    # Collect available brand + category facets for dropdowns
+    all_brands = sorted(set(i["brand"] for i in items if i["brand"]))
+    all_cats   = sorted(set(i["category"] for i in items if i["category"]))
+    total      = len(items)
+
+    # Sort
+    sort_field = data.get("sort") or "pct_off"
+    reverse    = (data.get("dir") or "desc") == "desc"
+    if sort_field == "price":
+        items.sort(key=lambda i: i["price"], reverse=reverse)
+    elif sort_field == "list_price":
+        items.sort(key=lambda i: i["list_price"], reverse=reverse)
+    elif sort_field == "name":
+        items.sort(key=lambda i: i["name"].lower(), reverse=reverse)
+    elif sort_field == "brand":
+        items.sort(key=lambda i: i["brand"].lower(), reverse=reverse)
+    elif sort_field == "category":
+        items.sort(key=lambda i: i["category"].lower(), reverse=reverse)
+    else:  # pct_off default
+        items.sort(key=lambda i: i["pct_off"], reverse=reverse)
+
+    # Paginate
+    per_page    = 50
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page        = max(1, min(int(data.get("page") or 1), total_pages))
+    offset      = (page - 1) * per_page
+
+    return jsonify({
+        "items":        items[offset:offset + per_page],
+        "total":        total,
+        "page":         page,
+        "total_pages":  total_pages,
+        "brands":       all_brands,
+        "categories":   all_cats,
+        "last_updated": cache.get("last_updated", ""),
+    })
+
 @app.route("/privacy")
 def privacy_page():
     return PRIVACY_TEMPLATE
@@ -2674,6 +2877,93 @@ def sitemap_xml():
         '</urlset>\n'
     )
     return content, 200, {"Content-Type": "application/xml"}
+
+NEWDEALS_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GC New Deals — Admin</title>
+<link rel="icon" type="image/svg+xml" href="/static/og-image.svg">
+<link rel="stylesheet" href="/static/gc.css">
+<link rel="stylesheet" href="/static/newdeals.css">
+<!-- __GA__ -->
+</head>
+<body>
+<div class="nd-page">
+
+  <div class="nd-header">
+    <a href="/" class="nd-back-link">&#8592; Tracker</a>
+    <h1 class="nd-title">GC New Deals <span class="nd-admin-badge">Admin</span></h1>
+  </div>
+
+  <div class="nd-status">
+    <span id="nd-refresh-time">No data cached yet &#8212; click Refresh to load.</span>
+    <span id="nd-item-count"></span>
+    <button id="nd-refresh-btn" data-action="refresh">&#8635; Refresh Data</button>
+  </div>
+
+  <div class="nd-top-bar" id="nd-top-bar">
+    <div class="nd-chips">
+      <button class="chip-btn" id="nd-wl-btn" data-action="toggle-wantlist">&#127919; Want List</button>
+      <label class="nd-sw-label">
+        <input type="checkbox" id="nd-include-sw"> Include Software / Plugins
+      </label>
+    </div>
+    <div class="nd-filter-bar">
+      <div class="nd-search-wrap">
+        <input type="text" id="nd-search" placeholder="Search items&#8230;" autocomplete="off">
+      </div>
+      <select id="nd-brand-sel"><option value="">All Brands</option></select>
+      <select id="nd-cat-sel"><option value="">All Categories</option></select>
+      <select id="nd-pct-sel">
+        <option value="0">Any discount</option>
+        <option value="20">20%+ off</option>
+        <option value="30">30%+ off</option>
+        <option value="40" selected>40%+ off</option>
+        <option value="50">50%+ off</option>
+        <option value="60">60%+ off</option>
+      </select>
+      <input type="number" id="nd-price-min" placeholder="$Min" min="0">
+      <span class="nd-price-sep">&#8211;</span>
+      <input type="number" id="nd-price-max" placeholder="$Max" min="0">
+      <button id="nd-clear-btn" data-action="clear-filters">&#10005; Clear</button>
+    </div>
+  </div>
+
+  <div class="nd-results-hdr">
+    <span id="nd-result-count"></span>
+  </div>
+
+  <div id="nd-empty-msg" class="nd-empty">No data cached yet &#8212; click &#8635; Refresh Data to load inventory.</div>
+
+  <div id="nd-results-wrap" style="display:none">
+    <table class="nd-table">
+      <thead>
+        <tr>
+          <th class="nd-th" data-sort="pct_off">% Off</th>
+          <th class="nd-th" data-sort="price">Sale Price</th>
+          <th class="nd-th" data-sort="list_price">MSRP</th>
+          <th class="nd-th nd-th-name" data-sort="name">Name</th>
+          <th class="nd-th" data-sort="brand">Brand</th>
+          <th class="nd-th" data-sort="category">Category</th>
+        </tr>
+      </thead>
+      <tbody id="nd-tbody"></tbody>
+    </table>
+  </div>
+
+  <div id="nd-paginator" class="nd-paginator"></div>
+
+  <div id="dev-footer">
+    <span><a href="/">&#8592; Main Tracker</a> &nbsp;&#183;&nbsp; GC New Deals (Admin)</span>
+  </div>
+
+</div>
+<script src="/static/newdeals.js" defer></script>
+</body>
+</html>
+"""
 
 CL_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -5263,10 +5553,11 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.22"
-HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
-HTML_TEMPLATE = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
-CL_TEMPLATE   = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
+APP_VERSION = "2.12.23"
+HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
+HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
+CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
+NEWDEALS_TEMPLATE = NEWDEALS_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 
 
 
