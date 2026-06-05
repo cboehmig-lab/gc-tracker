@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-06-03 · Version: v2.12.27 · Live at: gcgeartracker.com*
+*Generated: 2026-06-05 · Version: v2.12.28 · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,10 +88,11 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.12.27 (deployed ✅)
+## Current State: v2.12.28 (ready to deploy)
 
 ### Recent changes (this session)
 
+- **v2.12.28** — Security audit: hardened three unprotected endpoints. `/api/stop` now requires `run_id` echo (prevents unauthenticated scan-stopping). `/api/populate-store-data` and `/api/fill-gaps` now require admin session. `/api/favorites` now requires logged-in session. Full audit log in HANDOFF.md.
 - **v2.12.27** — SEO: `_build_stores_noscript()` moved to request-time (was startup-time) so it always reflects the live store cache. Clean footer with only Privacy Policy + affiliation notice.
 - **v2.12.26** — SEO: visible footer simplified; store location content moved to `<noscript>`.
 - **v2.12.25** — SEO: updated title/description/OG/Twitter tags to match location-inventory search intent; added JSON-LD `WebSite` schema with `SearchAction`.
@@ -113,30 +114,14 @@ No known issues. v2.12.27 is live. Admin should hit "↻ Refresh Data" on `/newd
 
 ---
 
-## 🔐 Priority Next Session: Security Audit
+## ✅ Security Audit: DONE (v2.12.28)
 
-A Reddit commenter said "this still isn't secure, but it's better than the last time you shared it." We don't know what they mean specifically. Do a thorough audit before the next Reddit post or Product Hunt push.
+Full audit completed 2026-06-05. See HANDOFF.md v2.12.28 entry for detailed findings. Summary:
 
-**Known security work already done** (from HANDOFF.md history):
-- CSP: `script-src 'self'`, `default-src 'none'`, `object-src 'none'`
-- HSTS on Railway
-- X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy
-- Passwords hashed with werkzeug `generate_password_hash`
-- Admin gated by `ADMIN_EMAIL` env var + session check
-- `/api/*` endpoints return 403 for unauthenticated requests
-- `robots.txt` disallows `/admin/` and `/api/`
+- **Fixed in v2.12.28**: `/api/stop` (run_id validation), `/api/populate-store-data` (admin guard), `/api/fill-gaps` (admin guard), `/api/favorites` (require login).
+- **All other attack surface confirmed clean**: rate limiting, SECRET_KEY enforcement, session cookies, CSRF, admin guards, password hashing, XSS escaping, CSP/HSTS headers.
 
-**Likely attack surface to audit** (not confirmed fixed):
-- CSRF protection on auth forms and state-changing POSTs
-- Rate limiting on `/api/login`, `/api/register`, `/api/logout`
-- Brute-force protection on admin routes
-- Session secret key strength (`SECRET_KEY` env var — is it set in Railway or falling back to a weak default?)
-- Any routes that reflect user input back into HTML without escaping
-- Whether `ADMIN_EMAIL` check can be bypassed
-- API endpoints that might be callable without auth (scan carefully — `_require_admin_api()` must be called on every admin API route)
-- Information disclosure in error responses
-
-**Suggested approach**: use the `security-review` skill at the start of the session, then read `gc_tracker_app.py` in full with security eyes.
+App is now ready for Reddit posts and Product Hunt.
 
 ---
 

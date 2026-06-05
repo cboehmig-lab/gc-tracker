@@ -2423,7 +2423,11 @@ async function stopRun() {
   const btn = document.getElementById('stop-btn');
   btn.textContent = '⏹ Stopping…';
   btn.disabled = true;
-  await fetch('/api/stop', {method:'POST'});
+  await fetch('/api/stop', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({run_id: window._activeRunId || ''})
+  });
 }
 
 async function startRun(payload, isBaseline) {
@@ -2457,6 +2461,7 @@ async function startRun(payload, isBaseline) {
   // status "joined" means another user's scan is already running — we subscribe to it.
   const runData = await resp.json();
   const runId = runData.run_id || '';
+  window._activeRunId = runId;  // used by stopRun() to authenticate the stop request
   const scanRunTime = runData.run_time || '';
   if (runData.status === 'joined') {
     appendLog('⏳ Scan already in progress — joining…', 'log-dim');
@@ -2473,6 +2478,7 @@ async function startRun(payload, isBaseline) {
     if (msg.type === 'progress') { appendLog(msg.msg); return; }
     if (msg.type === 'done') {
       es.close(); running = false;
+      window._activeRunId = '';  // clear so a stale runId can't be replayed
       stopBtn.style.display = 'none';
       _skipBrowse = true;  // Prevent browseCache from overwriting scan results
       updateCount(); _updateMobileBottomBar(); loadState(); showResults(msg, isBaseline);

@@ -3102,6 +3102,12 @@ def api_stores_refresh():
 @app.route("/api/favorites", methods=["POST"])
 @optional_user_context
 def api_favorites():
+    # Require a logged-in session — this endpoint writes to a server-side file
+    # and is not called by the main frontend (favorites are stored in SQLite via
+    # /api/sync).  Leaving it open would let unauthenticated requests corrupt
+    # the global favorites file.
+    if not session.get("user_id"):
+        return jsonify({"error": "Not logged in."}), 401
     data = request.json
     favs = load_favorites()
     name = data.get("store", "")
@@ -4174,6 +4180,15 @@ def api_debug_condition_diag():
 @app.route("/api/stop", methods=["POST"])
 @optional_user_context
 def api_stop():
+    # Require the run_id of the active scan so external actors cannot stop
+    # someone else's scan without first knowing the ID.  The client receives
+    # run_id from /api/run and must echo it here.  Admin sessions are exempt
+    # so the admin clear-lock page still works without a run_id.
+    if not _is_admin():
+        data   = request.json or {}
+        req_id = (data.get("run_id") or "").strip()
+        if not req_id or req_id != _current_run_id:
+            return jsonify({"error": "Invalid or missing run_id."}), 403
     _stop_event.set()
     # Force-release lock after a short delay to prevent stuck state
     def _force_unlock():
@@ -4188,6 +4203,9 @@ def api_stop():
 @optional_user_context
 def api_populate_store_data():
     """One-time migration: scan stores to tag cache entries with their store name."""
+    denied = _require_admin_api()
+    if denied:
+        return denied
     if not _lock.acquire(blocking=False):
         return jsonify({"error": "A run is already in progress."}), 409
     _stop_event.clear()
@@ -4325,6 +4343,9 @@ def api_build_store_coords():
 @optional_user_context
 def api_fill_gaps():
     """Re-scrape listing pages for selected stores to fill missing condition/category data."""
+    denied = _require_admin_api()
+    if denied:
+        return denied
     if not _lock.acquire(blocking=False):
         return jsonify({"error": "A run is already in progress."}), 409
     _stop_event.clear()
@@ -5590,7 +5611,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.27"
+APP_VERSION = "2.12.28"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

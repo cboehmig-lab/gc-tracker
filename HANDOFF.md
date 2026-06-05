@@ -1047,6 +1047,39 @@ Default fallback of `88px` covers the initial render before JS runs.
 
 ---
 
+## Recent Changes (v2.12.27 → v2.12.28)
+
+### v2.12.28 — Security audit: three unprotected endpoints hardened
+
+**Context**: Reddit commenter said the app "still isn't secure." A full audit was run.
+
+**Issues found and fixed:**
+
+- **`/api/stop` — DoS via unauthenticated scan-stopping** (Critical): Any internet user could send `POST /api/stop` to abort an active scan. Fixed by requiring the caller to echo back the `run_id` returned by `/api/run`. Non-admins with a wrong or missing `run_id` get 403. Admin sessions remain exempt (needed for `/admin/clear-lock`).
+  - `gc.js`: added `window._activeRunId = runId` when scan starts; `stopRun()` now sends `{run_id: window._activeRunId}` in the POST body; clears `_activeRunId` when scan completes.
+  - `gc_tracker_app.py`: `api_stop()` validates `run_id` against `_current_run_id`.
+
+- **`/api/populate-store-data` — no admin guard** (High): Any user could trigger hundreds of parallel Algolia API calls (quota exhaustion/resource abuse). Added `_require_admin_api()` guard.
+
+- **`/api/fill-gaps` — no admin guard** (High): Same issue — expensive per-store Algolia scraping callable by any user. Added `_require_admin_api()` guard.
+
+- **`/api/favorites` — unauthenticated write to global server file** (Medium): Endpoint writes to `gc_favorites.json` on disk with no auth check. This is dead code (not called from `gc.js` — per-user favorites live in SQLite via `/api/sync`). Added `user_id` session check; returns 401 if not logged in.
+
+**Everything else audited and confirmed OK:**
+- Rate limiting on `/api/login`, `/api/register`, `/api/setup-google-account`, `/admin/login`, `/login` ✅
+- `SECRET_KEY` crashes app on startup if not set ✅
+- Session cookies: HttpOnly, SameSite=Lax, Secure on Railway ✅
+- CSRF: Origin/Referer check on all state-changing requests + form tokens on admin pages ✅
+- Admin endpoints: all properly gated with `_require_admin_api()` ✅
+- Password hashing (werkzeug), timing-safe compares (hmac.compare_digest) ✅
+- XSS: admin pages use `html.escape()` on all user data ✅
+- CSP, HSTS, X-Frame-Options, X-Content-Type-Options ✅
+- SSRF in `/api/cl-search` fixed (city allowlist) ✅
+
+**Files changed:** `gc_tracker_app.py`, `static/gc.js`
+
+---
+
 ## Recent Changes (v2.12.21 → v2.12.27)
 
 ### v2.12.22 — Filter bypass + state restore for Watch List, Want List, Saved Searches
