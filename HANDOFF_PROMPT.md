@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-06-05 · Version: v2.12.28 · Live at: gcgeartracker.com*
+*Generated: 2026-06-05 · Version: v2.12.30 · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,11 +88,13 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.12.28 (ready to deploy)
+## Current State: v2.12.30 (ready to deploy)
 
 ### Recent changes (this session)
 
-- **v2.12.28** — Security audit: hardened three unprotected endpoints. `/api/stop` now requires `run_id` echo (prevents unauthenticated scan-stopping). `/api/populate-store-data` and `/api/fill-gaps` now require admin session. `/api/favorites` now requires logged-in session. Full audit log in HANDOFF.md.
+- **v2.12.30** — Security: `/api/saved-search-counts` DoS fix — added login check and 50-search hard cap. No UX impact.
+- **v2.12.29** — Security: fixed admin privilege escalation. `_is_admin()` now requires `google_id` to be set before trusting the email match — blocks password-account users from claiming admin by self-reporting the admin email at registration.
+- **v2.12.28** — Security audit: hardened three unprotected endpoints. `/api/stop` now requires `run_id` echo. `/api/populate-store-data` and `/api/fill-gaps` now require admin session. `/api/favorites` now requires logged-in session. Full audit log in HANDOFF.md.
 - **v2.12.27** — SEO: `_build_stores_noscript()` moved to request-time (was startup-time) so it always reflects the live store cache. Clean footer with only Privacy Policy + affiliation notice.
 - **v2.12.26** — SEO: visible footer simplified; store location content moved to `<noscript>`.
 - **v2.12.25** — SEO: updated title/description/OG/Twitter tags to match location-inventory search intent; added JSON-LD `WebSite` schema with `SearchAction`.
@@ -119,6 +121,8 @@ No known issues. v2.12.27 is live. Admin should hit "↻ Refresh Data" on `/newd
 Full audit completed 2026-06-05. See HANDOFF.md v2.12.28 entry for detailed findings. Summary:
 
 - **Fixed in v2.12.28**: `/api/stop` (run_id validation), `/api/populate-store-data` (admin guard), `/api/fill-gaps` (admin guard), `/api/favorites` (require login).
+- **Fixed in v2.12.29**: `_is_admin()` privilege escalation via self-reported email — now requires `google_id` to be set.
+- **Fixed in v2.12.30**: `/api/saved-search-counts` CPU DoS — requires login + capped at 50 searches.
 - **All other attack surface confirmed clean**: rate limiting, SECRET_KEY enforcement, session cookies, CSRF, admin guards, password hashing, XSS escaping, CSP/HSTS headers.
 
 App is now ready for Reddit posts and Product Hunt.

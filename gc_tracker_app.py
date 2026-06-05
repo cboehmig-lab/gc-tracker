@@ -1751,14 +1751,21 @@ def admin_logout():
 def _is_admin() -> bool:
     """Check if the current request has admin access.
     Two paths: (1) explicit admin session from /admin/login password form,
-    (2) logged-in Google user whose email matches ADMIN_EMAIL env var."""
+    (2) logged-in Google user whose email matches ADMIN_EMAIL env var.
+
+    IMPORTANT: the email check requires google_id to be set (i.e. the account
+    must have authenticated via Google, not just claimed the email at registration).
+    Without this guard, any user who registers with ADMIN_EMAIL as their
+    self-reported email would pass the check."""
     if bool(session.get("admin")) and bool(APP_PASSWORD):
         return True
     if ADMIN_EMAIL:
         user_id = session.get("user_id")
         if user_id:
             user = _user_by_id(user_id)
-            if user and (user.get("email") or "").strip().lower() == ADMIN_EMAIL:
+            if (user
+                    and user.get("google_id")   # must have authenticated via Google
+                    and (user.get("email") or "").strip().lower() == ADMIN_EMAIL):
                 return True
     return False
 
@@ -3122,10 +3129,17 @@ def api_favorites():
 @app.route("/api/saved-search-counts", methods=["POST"])
 def api_saved_search_counts():
     """Return match counts for each saved search in a single batch call."""
+    # Require a logged-in session — this endpoint loads the full 92K-item cache
+    # and filters it for each search entry, so an unbounded unauthenticated
+    # request would be a trivial CPU DoS.
+    if not session.get("user_id"):
+        return jsonify({"error": "Not logged in."}), 401
     data     = request.json or {}
     searches = data.get("searches", [])
     if not searches:
         return jsonify({"counts": []})
+    # Hard cap so even authenticated users can't send thousands of searches.
+    searches = searches[:50]
     try:
         with open(CAT_CACHE_FILE) as f:
             cache = json.load(f)
@@ -5611,7 +5625,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.28"
+APP_VERSION = "2.12.30"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

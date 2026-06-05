@@ -1047,6 +1047,41 @@ Default fallback of `88px` covers the initial render before JS runs.
 
 ---
 
+## Recent Changes (v2.12.29 → v2.12.30)
+
+### v2.12.30 — Security: `/api/saved-search-counts` DoS fix
+
+**Vulnerability**: `/api/saved-search-counts` had no authentication check and no cap on the `searches` array. Each entry triggers a full filter pass over the 92K-item inventory cache. Sending 5,000 entries would peg a CPU core indefinitely.
+
+**Fix**: Added `user_id` session check (returns 401 if not logged in) and capped the `searches` array to 50 entries. The endpoint is only ever called from the saved searches dropdown UI (max ~20 entries), so the cap has no practical impact on legitimate use.
+
+**Files changed:** `gc_tracker_app.py`
+
+---
+
+## Recent Changes (v2.12.28 → v2.12.29)
+
+### v2.12.29 — Security: close admin privilege escalation via self-reported email
+
+**Vulnerability**: `_is_admin()` granted admin to any user whose stored `email` matched `ADMIN_EMAIL`, regardless of how that email got into the database. `/api/register` accepts an optional self-reported email field. If the admin's email was not already in the database (fresh deploy, DB reset, etc.), a malicious user could register with that email and receive admin privileges.
+
+**Fix**: Added `user.get("google_id")` guard to the email-based admin check. Admin via email is now only granted if the account has authenticated via Google OAuth (where the email is verified by Google), not to password-based accounts with self-reported emails.
+
+```python
+# Before:
+if user and (user.get("email") or "").strip().lower() == ADMIN_EMAIL:
+    return True
+# After:
+if user and user.get("google_id") and (user.get("email") or "").strip().lower() == ADMIN_EMAIL:
+    return True
+```
+
+The break-glass `/admin/login` password path is unaffected.
+
+**Files changed:** `gc_tracker_app.py`
+
+---
+
 ## Recent Changes (v2.12.27 → v2.12.28)
 
 ### v2.12.28 — Security audit: three unprotected endpoints hardened
