@@ -1047,7 +1047,7 @@ Default fallback of `88px` covers the initial render before JS runs.
 
 ---
 
-## 🔒 Security Audit Round 2 (v2.12.31 → v2.12.35) — 2026-06-05
+## 🔒 Security Audit Round 2 (v2.12.31 → v2.12.36) — 2026-06-05
 
 **Context**: A Reddit commenter said the app "still isn't secure, but it's better than the last time you shared it." A second, full adversarial review was run over `gc_tracker_app.py` (all ~5650 lines), `static/gc.js`, and `static/gc.css`. Every `@app.route` was re-inventoried against its guard; injection/SSRF/CSRF/OAuth/info-disclosure/DoS were all re-examined. The headline result: **the v2.12.28 favorites fix was one of a family of three identical "unauthenticated write to a global file" endpoints — the other two (`/api/watchlist`, `/api/keywords`) were missed.** Also found: an unauthenticated DoS on `/api/browse`, an unauthenticated scrape/cache-wipe on `/api/stores/refresh`, and an open-redirect bypass in `?next=`.
 
@@ -1088,6 +1088,16 @@ These endpoints are **not called by any frontend** (verified by grepping all of 
 - **Fix**: HTML-escape every scraped field at render time. Added `_clEsc()` + `_clSafeUrl()` to `cl.js` and reused `_ssEsc()` + new `_safeHttpUrl()` in `gc.js`. All of `title`, `price`, `location`, `date`, `cityId`, and the `data-*` attributes are now escaped; `url`/`image` are passed through an `^https?://` allowlist (drops `javascript:`/`data:`) and then escaped. The main GC table (`_buildRowHtml`) already escaped item text; its `href`/`img` sinks (GC-sourced, low risk) were hardened the same way for consistency. Verified by `node --check` on all three files + escape-behavior unit tests (`<img onerror>` → inert, style-overlay breakout neutralized, `javascript:` URL → dropped, legit https URL preserved).
 - **Note**: `static/newdeals.js` was checked and is already fully escaped (`_ndEsc` on every field); admin pages escape server-side via `html.escape()`. `cl.js`'s watch-star uses an inline `onclick` that the CSP already blocks (a pre-existing *functional* bug on `/cl`, not a security one) — its attribute value is now escaped regardless so it's not an injection surface. Recommend converting it to the `data-action` delegation pattern `gc.js` uses, as a future cleanup.
 
+### v2.12.36 — Security posture: COOP header + security.txt (hardening / perception)
+
+Not vulnerabilities — these raise the externally-visible posture (what automated scanners and security-minded visitors actually check) and give researchers a channel to report privately.
+
+- **`Cross-Origin-Opener-Policy: same-origin-allow-popups`** added to every response. Isolates the top-level browsing context (defense against cross-window reference attacks) and is credited by Mozilla Observatory / securityheaders.com. Safe here because OAuth is redirect-based — no popup relies on `window.opener`. The `-allow-popups` variant is used (vs bare `same-origin`) purely as belt-and-suspenders in case any Google widget ever opens a popup.
+- **Deliberately did NOT set `Cross-Origin-Resource-Policy`** — a global `same-origin` CORP would stop Twitter/Slack/Facebook crawlers from fetching the cross-origin OG image (`/static/og-image.svg`) and break social previews. Noted so nobody "completes the set" later and breaks SEO.
+- **`GET /.well-known/security.txt`** (RFC 9116): `Contact: mailto:cboehmig@gmail.com`, `Expires: 2027-06-05` (⚠️ renew before it lapses or scanners flag it as expired), `Canonical`, `Preferred-Languages: en`. Gives researchers a private place to report instead of posting "it's not secure" publicly, and reads as a maturity signal.
+- **Left as-is (documented future work)**: CSP still carries `style-src 'unsafe-inline'` because the templates use hundreds of inline `style=` attributes. This is the one remaining CSP weakness a scanner will flag. It's no longer an *active* hole (the v2.12.35 escaping closed the injection that would have abused it), but fully removing it means migrating every inline style into `gc.css` — a large, mechanical refactor for a future session. `script-src` is already clean (no `unsafe-inline`), which is the part that matters most.
+- **Verified** with a Flask test client: security.txt returns 200 + `text/plain`, COOP present on responses, CORP absent, CSP intact.
+
 ### ✅ Confirmed correctly handled (re-verified, NOT issues)
 
 - **SSRF in `/api/cl-search`**: the city allowlist is an exact-membership check against `_CL_CITIES`, and `q` is `requests.utils.quote()`-encoded so `&`, `#`, `:` can't inject params or change the host. Tight. (Only the *rate*/*auth* of the endpoint was the problem, now fixed.)
@@ -1110,7 +1120,7 @@ Per the audit scope, these were left for a future pass. None is remotely exploit
 - **L4 — Robustness (not security).** A few endpoints do `request.json.get(...)` or `int(data.get(...))` without guarding `None`/non-int, returning a 500 on malformed input (`/api/set-cookies` [admin], `/api/favorites`, `/api/watchlist`, `/api/browse` page/per_page casts). Just error noise, no vuln; defensive `or {}` / `try/except` would clean it up. (`/api/watchlist` POST was already hardened to `request.json or {}` as part of v2.12.32.)
 - **L5 — `/api/run` accepts an unbounded `stores` array.** In practice bounded by the global scan `_lock` (one scan at a time) + the 60s guest cooldown, but a logged-in user could submit a huge list to pin the single scan slot for a long time. Consider capping `stores` to the known store count (~240) if abuse is ever seen.
 
-**Files changed (v2.12.31–v2.12.34):** `gc_tracker_app.py`. **(v2.12.35):** `static/cl.js`, `static/gc.js`, and `APP_VERSION` in `gc_tracker_app.py`. (`static/gc.css` clean; `static/newdeals.js` already escaped.)
+**Files changed (v2.12.31–v2.12.34):** `gc_tracker_app.py`. **(v2.12.35):** `static/cl.js`, `static/gc.js`, `APP_VERSION`. **(v2.12.36):** `gc_tracker_app.py` (COOP header + `/.well-known/security.txt` route + version). (`static/gc.css` clean; `static/newdeals.js` already escaped.)
 
 ---
 

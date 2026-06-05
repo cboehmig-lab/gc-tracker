@@ -1596,6 +1596,12 @@ def _track_device(response):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy",        "strict-origin-when-cross-origin")
     response.headers.setdefault("Permissions-Policy",     "camera=(), microphone=(), geolocation=()")
+    # Cross-origin isolation for the top-level document. OAuth here is redirect-based
+    # (no popup relies on window.opener), so 'same-origin-allow-popups' is safe and
+    # earns the security-scanner credit. NOTE: we deliberately do NOT set
+    # Cross-Origin-Resource-Policy globally — it would stop social crawlers (Twitter/
+    # Slack/Facebook) from fetching the cross-origin OG image.
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin-allow-popups")
     # HSTS — only on Railway (HTTPS); tells browsers to always use HTTPS for this domain
     if os.environ.get("RAILWAY_ENVIRONMENT"):
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
@@ -2924,6 +2930,18 @@ def sitemap_xml():
         '</urlset>\n'
     )
     return content, 200, {"Content-Type": "application/xml"}
+
+@app.route("/.well-known/security.txt")
+def security_txt():
+    # RFC 9116 — gives researchers a private channel to report issues instead of
+    # posting "this isn't secure" publicly. Update Expires before it lapses.
+    content = (
+        "Contact: mailto:cboehmig@gmail.com\n"
+        "Expires: 2027-06-05T00:00:00Z\n"
+        "Preferred-Languages: en\n"
+        "Canonical: https://gcgeartracker.com/.well-known/security.txt\n"
+    )
+    return content, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
 NEWDEALS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -5684,7 +5702,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.35"
+APP_VERSION = "2.12.36"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
