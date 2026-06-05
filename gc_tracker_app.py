@@ -1501,6 +1501,20 @@ def _client_ip() -> str:
     X-Forwarded-For header directly (which clients can spoof)."""
     return request.remote_addr or "unknown"
 
+def _safe_next(raw: str, default: str) -> str:
+    """Validate a ?next= redirect target so it can only point back at this site.
+    Rejects anything that isn't a single-slash relative path. In particular this
+    blocks '//host' (protocol-relative) AND the backslash trick '/\\host', which
+    browsers normalize to '//host' → an off-site open redirect. Also rejects any
+    embedded CR/LF/TAB to avoid header/redirect smuggling."""
+    if (not raw
+            or not raw.startswith("/")
+            or raw.startswith("//")
+            or "\\" in raw
+            or any(c in raw for c in ("\r", "\n", "\t"))):
+        return default
+    return raw
+
 _q              = queue.Queue()        # legacy fallback (kept for non-run endpoints)
 _run_queues: dict[str, list[queue.Queue]] = {}  # run_id → list of subscriber queues (fan-out)
 _run_queues_lock = threading.Lock()
@@ -1738,9 +1752,7 @@ def admin_login():
             status=401, content_type="text/html")
     session["admin"] = True
     session.pop("_admin_csrf", None)
-    next_url = request.args.get("next", "/admin/users")
-    if not next_url.startswith("/") or next_url.startswith("//"):
-        next_url = "/admin/users"
+    next_url = _safe_next(request.args.get("next", "/admin/users"), "/admin/users")
     return redirect(next_url)
 
 @app.route("/admin/logout", methods=["POST"])
@@ -1933,10 +1945,9 @@ def auth_google():
         return "Google Sign-In is not configured.", 501
     import secrets as _sec, urllib.parse as _up
     from flask import url_for
-    next_url     = request.args.get("next", "/")
-    # Prevent open redirect — only allow relative paths
-    if not next_url.startswith("/") or next_url.startswith("//"):
-        next_url = "/"
+    # Prevent open redirect — only allow same-site relative paths (also blocks the
+    # '/\\host' backslash trick that browsers turn into a protocol-relative '//host').
+    next_url     = _safe_next(request.args.get("next", "/"), "/")
     redirect_uri = url_for("auth_google_callback", _external=True)
     # Store state server-side — avoids session cookie issues on Railway proxy
     state = _sec.token_urlsafe(32)
@@ -3101,6 +3112,13 @@ def api_stores():
 @app.route("/api/stores/refresh", methods=["POST"])
 @optional_user_context
 def api_stores_refresh():
+    # Admin only: this fans out dozens of synchronous outbound requests to
+    # guitarcenter.com AND overwrites the shared store-list cache. Left open it was
+    # both an unauthenticated outbound-amplification DoS and a way for anyone to wipe
+    # the global store list. Not called by any frontend — it's a maintenance action.
+    denied = _require_admin_api()
+    if denied:
+        return denied
     stores = refresh_store_list()
     info   = get_store_info()
     return jsonify({"stores": stores,
@@ -3226,7 +3244,10 @@ def api_browse():
     user_last_scan = (data.get("user_last_scan") or "").strip()
 
     # Filter params — all dropdowns are multi-select arrays
-    fq       = (data.get("filter_q") or "").lower().strip()
+    # Cap query length: filter_q compiles to regex (incl. '*' → '.*') that runs over
+    # every cached item. An unbounded query with many wildcards is an unauthenticated
+    # CPU DoS over the ~92K-item cache, so clamp it to a sane length.
+    fq       = (data.get("filter_q") or "").lower().strip()[:200]
     f_brands = data.get("filter_brands") or []
     f_conds  = data.get("filter_conditions") or []
     f_cats   = data.get("filter_categories") or []
@@ -3248,6 +3269,13 @@ def api_browse():
     # Watchlist and keywords now come from the client (localStorage)
     wl_ids     = set(data.get("watchlist_ids", []))
     keywords   = data.get("keywords", [])
+    # Each keyword compiles to a regex that is evaluated against every cached item,
+    # so an unbounded keyword list is an unauthenticated CPU DoS (same class as the
+    # /api/saved-search-counts cap). 50 entries is far above any real want list.
+    if isinstance(keywords, list):
+        keywords = [str(k)[:100] for k in keywords[:50]]
+    else:
+        keywords = []
     new_ids    = set(data.get("new_ids", []))
     store_set  = set(stores) if not search_all else None
 
@@ -3503,6 +3531,10 @@ def api_browse():
 @app.route("/api/watchlist", methods=["GET"])
 @optional_user_context
 def api_watchlist_get():
+    # Dead legacy endpoint (per-user watchlists live in SQLite). Gate it so the global
+    # file isn't read by anonymous callers.
+    if not session.get("user_id"):
+        return jsonify({"error": "Not logged in."}), 401
     wl = load_watchlist()
     return jsonify({"watchlist": wl})
 
@@ -3510,7 +3542,13 @@ def api_watchlist_get():
 @app.route("/api/watchlist", methods=["POST"])
 @optional_user_context
 def api_watchlist_post():
-    data = request.json
+    # Require login — this writes the global gc_watchlist.json (consumed by the scan
+    # loop and /api/watchlist/items). Dead code (per-user watchlists live in SQLite via
+    # /api/sync), but left unauthenticated anyone could corrupt shared server state.
+    # Same class as the /api/favorites fix in v2.12.28.
+    if not session.get("user_id"):
+        return jsonify({"error": "Not logged in."}), 401
+    data = request.json or {}
     sku  = data.get("id", "")
     action = data.get("action", "")
     if not sku:
@@ -3544,6 +3582,9 @@ def api_watchlist_post():
 @optional_user_context
 def api_watchlist_items():
     """Return watchlist items formatted for display."""
+    # Dead legacy endpoint — reads the global watchlist file. Gate to logged-in users.
+    if not session.get("user_id"):
+        return jsonify({"error": "Not logged in."}), 401
     wl         = load_watchlist()
     item_dates = load_state().get("item_dates", {})
     items = []
@@ -3584,12 +3625,20 @@ def api_watchlist_items():
 @app.route("/api/keywords", methods=["GET"])
 @optional_user_context
 def api_keywords_get():
+    # Dead legacy endpoint — reads the global keywords file. Gate to logged-in users.
+    if not session.get("user_id"):
+        return jsonify({"error": "Not logged in."}), 401
     return jsonify({"keywords": load_keywords()})
 
 
 @app.route("/api/keywords", methods=["POST"])
 @optional_user_context
 def api_keywords_post():
+    # Require login — writes the global gc_keywords.json. Dead code (per-user want
+    # lists live in SQLite via /api/sync); left open it allowed unauthenticated writes
+    # to shared server state. Same class as the /api/favorites fix in v2.12.28.
+    if not session.get("user_id"):
+        return jsonify({"error": "Not logged in."}), 401
     data = request.json or {}
     action = data.get("action", "")
     kw_list = load_keywords()
@@ -3752,7 +3801,12 @@ def api_import_data():
 @app.route("/api/cl-search")
 @optional_user_context
 def api_cl_search():
-    q = request.args.get("q", "").strip()
+    # Require login. Each call fans out to up to ~75 Craigslist markets (10 concurrent,
+    # 12s timeouts each), so leaving it open was an unauthenticated outbound-request
+    # amplification / resource-abuse vector. The CL feature is sign-in-only by design.
+    if not session.get("user_id"):
+        return jsonify({"error": "Not logged in."}), 401
+    q = request.args.get("q", "").strip()[:200]
     cities_param = request.args.get("cities", "").strip()
     if not q:
         return jsonify({"error": "No search term provided."})
@@ -3762,8 +3816,9 @@ def api_cl_search():
     try:
         results = _cl_search(q, cities or None, title_only=title_only)
         return jsonify({"results": results, "count": len(results)})
-    except Exception as e:
-        return jsonify({"error": str(e)})
+    except Exception:
+        # Don't leak internal exception text to the caller.
+        return jsonify({"error": "Search failed. Please try again."})
 
 
 _CL_CITIES = [
@@ -3979,6 +4034,10 @@ def api_cl_parse_test():
     if denied:
         return denied
     city = request.args.get("city", "sfbay")
+    # Allowlist the city before interpolating it into an outbound URL (matches
+    # /api/cl-debug). Admin-only, but removes the SSRF primitive entirely.
+    if city not in _CL_CITIES:
+        return jsonify({"error": "Unknown city."}), 400
     q    = request.args.get("q", "telecaster")
     try:
         url  = f"https://{city}.craigslist.org/search/msa?query={http.utils.quote(q)}&sort=date"
@@ -5625,7 +5684,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.30"
+APP_VERSION = "2.12.34"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

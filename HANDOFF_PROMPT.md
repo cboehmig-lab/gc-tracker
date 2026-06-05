@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-06-05 · Version: v2.12.30 · Live at: gcgeartracker.com*
+*Generated: 2026-06-05 · Version: v2.12.34 · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,10 +88,14 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.12.30 (ready to deploy)
+## Current State: v2.12.34 (ready to deploy)
 
 ### Recent changes (this session)
 
+- **v2.12.34** — Security: `/api/cl-search` now requires login (was an unauthenticated outbound-amplification vector — one call fans out to ~75 Craigslist markets); stopped leaking raw exception text; added the `_CL_CITIES` allowlist to `/api/cl-parse-test` (admin SSRF primitive). No UX impact (CL is sign-in-only by design).
+- **v2.12.33** — Security: fixed an open-redirect bypass in the `?next=` param on `/api/auth/google` and `/admin/login`. `/\evil.com` passed the old `startswith("/")` check but browsers normalize it to `//evil.com`. New `_safe_next()` helper rejects backslashes, `//`, and control chars.
+- **v2.12.32** — Security: closed three unauthenticated "write to a global file" endpoints that the v2.12.28 favorites fix missed. `/api/stores/refresh` → admin-only (it scrapes GC and overwrites the shared store cache — anyone could wipe the store list). `/api/watchlist` + `/api/keywords` (GET & POST) → require login. All are dead code (not called by any frontend).
+- **v2.12.31** — Security: `/api/browse` unauthenticated CPU-DoS fix — capped the client `keywords` array (≤50, ≤100 chars each) and `filter_q` (≤200 chars). Each keyword compiles to a regex run over the ~92K-item cache; the array was previously unbounded. Same class as the v2.12.30 saved-search-counts cap.
 - **v2.12.30** — Security: `/api/saved-search-counts` DoS fix — added login check and 50-search hard cap. No UX impact.
 - **v2.12.29** — Security: fixed admin privilege escalation. `_is_admin()` now requires `google_id` to be set before trusting the email match — blocks password-account users from claiming admin by self-reporting the admin email at registration.
 - **v2.12.28** — Security audit: hardened three unprotected endpoints. `/api/stop` now requires `run_id` echo. `/api/populate-store-data` and `/api/fill-gaps` now require admin session. `/api/favorites` now requires logged-in session. Full audit log in HANDOFF.md.
@@ -116,16 +120,24 @@ No known issues. v2.12.27 is live. Admin should hit "↻ Refresh Data" on `/newd
 
 ---
 
-## ✅ Security Audit: DONE (v2.12.28)
+## ✅ Security Audit: TWO ROUNDS DONE (v2.12.28 + v2.12.31–34)
 
-Full audit completed 2026-06-05. See HANDOFF.md v2.12.28 entry for detailed findings. Summary:
+**Round 1 (v2.12.28–30)** — see HANDOFF.md:
+- v2.12.28: `/api/stop` (run_id validation), `/api/populate-store-data` + `/api/fill-gaps` (admin guard), `/api/favorites` (require login).
+- v2.12.29: `_is_admin()` privilege escalation via self-reported email — now requires `google_id`.
+- v2.12.30: `/api/saved-search-counts` CPU DoS — login + 50-search cap.
 
-- **Fixed in v2.12.28**: `/api/stop` (run_id validation), `/api/populate-store-data` (admin guard), `/api/fill-gaps` (admin guard), `/api/favorites` (require login).
-- **Fixed in v2.12.29**: `_is_admin()` privilege escalation via self-reported email — now requires `google_id` to be set.
-- **Fixed in v2.12.30**: `/api/saved-search-counts` CPU DoS — requires login + capped at 50 searches.
-- **All other attack surface confirmed clean**: rate limiting, SECRET_KEY enforcement, session cookies, CSRF, admin guards, password hashing, XSS escaping, CSP/HSTS headers.
+**Round 2 (v2.12.31–34, this session)** — full adversarial re-review. Round 1's "all other surface clean" was overconfident; round 2 found a related family of bugs and fixed them. See the "Security Audit Round 2" section in HANDOFF.md for the complete log (attack vector + severity + fix for each):
+- **v2.12.31 (High)**: `/api/browse` unauthenticated CPU-DoS — capped `keywords` (≤50) and `filter_q` (≤200). The single biggest remaining public-abuse surface.
+- **v2.12.32 (High+Med)**: `/api/stores/refresh` → admin (unauth scrape + store-list wipe); `/api/watchlist` + `/api/keywords` → login (the favorites fix's two missed siblings).
+- **v2.12.33 (Med)**: open-redirect via `/\evil.com` backslash bypass in `?next=` — new `_safe_next()`.
+- **v2.12.34 (Med+Low)**: `/api/cl-search` → login (outbound amplification) + no more leaked exception text; `/api/cl-parse-test` city allowlist.
+- **Confirmed clean (re-verified)**: SSRF (cl-search allowlist + quoting), SQLi (parameterized), ReDoS (`re.escape` + new caps), SSTI, CSRF "no-Origin" path (SameSite=Lax + JSON content-type + admin tokens make it non-exploitable), admin escalation, OAuth state/email_verified, SECRET_KEY/CSP/HSTS/cookies, client-side manipulation.
+- **Documented Low (deferred)**: L1 dead `/login` + GET `/logout` CSRF (recommend deleting both routes — `session["logged_in"]` is confirmed dead code); L3 SSE exception strings; L4 malformed-input 500s; L5 unbounded `/api/run` stores array. Full detail in HANDOFF.md.
 
-App is now ready for Reddit posts and Product Hunt.
+**Reddit comment ("still isn't secure")**: round 2 closed the most likely candidates — an unauthenticated endpoint that wipes shared state (`/api/stores/refresh`), trivial unauthenticated CPU-DoS (`/api/browse`), and an OAuth open-redirect. We can't know exactly what the commenter meant, but the unauthenticated-write-to-global-file family and the browse DoS are the kind of thing a casual prober finds first.
+
+App is ready for Reddit posts and Product Hunt once v2.12.34 is deployed.
 
 ---
 

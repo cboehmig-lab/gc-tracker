@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-05-22 · Current version: v2.12.20 · Status: deployed ✅ · Domain: gcgeartracker.com*
+*Last updated: 2026-06-05 · Current version: v2.12.34 · Status: ready to deploy ✅ · Domain: gcgeartracker.com*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
 
@@ -1044,6 +1044,66 @@ th{background:#161616;color:#aaa;font-weight:600;text-align:left;padding:7px 10p
 Default fallback of `88px` covers the initial render before JS runs.
 
 **Files changed (v2.12.10–v2.12.16):** `gc_tracker_app.py`, `static/gc.js`, `static/gc.css`
+
+---
+
+## 🔒 Security Audit Round 2 (v2.12.31 → v2.12.34) — 2026-06-05
+
+**Context**: A Reddit commenter said the app "still isn't secure, but it's better than the last time you shared it." A second, full adversarial review was run over `gc_tracker_app.py` (all ~5650 lines), `static/gc.js`, and `static/gc.css`. Every `@app.route` was re-inventoried against its guard; injection/SSRF/CSRF/OAuth/info-disclosure/DoS were all re-examined. The headline result: **the v2.12.28 favorites fix was one of a family of three identical "unauthenticated write to a global file" endpoints — the other two (`/api/watchlist`, `/api/keywords`) were missed.** Also found: an unauthenticated DoS on `/api/browse`, an unauthenticated scrape/cache-wipe on `/api/stores/refresh`, and an open-redirect bypass in `?next=`.
+
+All Critical/High and all Medium fixes that were < 10 lines were implemented. Low items are documented at the bottom of this section.
+
+### v2.12.31 — Security: `/api/browse` unauthenticated CPU-DoS caps (High)
+
+- **Attack**: `/api/browse` is public (guests browse). It loads the ~92K-item cache and, for every item, evaluates each entry of the client-supplied `keywords` array as a compiled regex (`_kw_match`). `keywords` had **no length cap**. `POST /api/browse {"all_stores":true,"keywords":[<10,000 strings>]}` → ~10K × 92K regex evaluations per request, no auth, no rate limit → repeatable CPU exhaustion. The `filter_q` string (which compiles `*` → `.*`) was likewise unbounded, allowing pathological wildcard regexes over the full cache.
+- **Severity**: High (trivial, unauthenticated, repeatable resource exhaustion).
+- **Fix**: cap `keywords` to 50 entries and 100 chars each; clamp `filter_q` to 200 chars. Same philosophy as the v2.12.30 `/api/saved-search-counts` cap — that fix capped the sibling endpoint but not this, the more heavily-used one. No impact on real use (a real want list is a handful of terms).
+- **Why it matters**: this is the single highest-traffic public endpoint; it was the largest remaining unauthenticated-abuse surface.
+
+### v2.12.32 — Security: auth gates on three dead "global write" endpoints (High + Medium)
+
+These endpoints are **not called by any frontend** (verified by grepping all of `static/*.js`). They are legacy from the pre-multi-user era; per-user data now lives in SQLite via `/api/sync`. Left unauthenticated they let anonymous callers mutate shared server state.
+
+- **`/api/stores/refresh` (POST)** — *High*. No auth. Calls `refresh_store_list()`, which fires dozens of synchronous outbound requests to guitarcenter.com (parallel state-page scraping) **and unconditionally overwrites `gc_stores_cache.json`**. Two problems: (1) outbound-request amplification / worker exhaustion (the request blocks until the whole scrape finishes), and (2) if the scrape returns few/no stores (GC blocks the server, transient failure, or an attacker times it during an outage) the **near-empty result is written, wiping the store list for every user** until an admin rebuilds it. **Fix: `_require_admin_api()`** (it's a maintenance action, not a user action).
+- **`/api/watchlist` (POST)** — *Medium*. Unauthenticated write to global `gc_watchlist.json`, which is consumed by the scan loop (sold-item marking) and `/api/watchlist/items`. **Fix: require login** (matches the v2.12.28 `/api/favorites` precedent).
+- **`/api/keywords` (POST)** — *Medium*. Unauthenticated write to global `gc_keywords.json`. **Fix: require login.**
+- The matching GET readers (`/api/watchlist`, `/api/watchlist/items`, `/api/keywords` GET) were also gated to logged-in users — they're dead too and there's no reason to serve the global files anonymously.
+
+### v2.12.33 — Security: open-redirect via backslash in `?next=` (Medium)
+
+- **Attack**: both `/api/auth/google?next=` and `/admin/login?next=` validated the redirect target with `next_url.startswith("/") and not startswith("//")`. That misses `/\evil.com`: it starts with a single `/`, isn't `//`, so it passed — but browsers normalize the backslash to `/`, turning `/\evil.com` into the protocol-relative `//evil.com` → `https://evil.com`. After a **legitimate** Google login the user is redirected off-site from the trusted domain — a clean phishing primitive.
+- **Severity**: Medium (open redirect; the OAuth one is reachable pre-auth and chains with a real Google login; the admin one is post-auth).
+- **Fix**: new `_safe_next(raw, default)` helper used at both sites. It rejects anything not starting with a single `/`, plus `//`, any backslash, and embedded CR/LF/TAB. Unit-tested against legit paths (`/`, `/cl`, `/?google_new=1`, `/admin/users`) and bypass attempts (`//evil.com`, `/\evil.com`, `https://evil.com`, tab-injection).
+
+### v2.12.34 — Security: `/api/cl-search` abuse + info-disclosure hardening (Medium + Low)
+
+- **`/api/cl-search` unauthenticated outbound amplification** — *Medium*. No auth, no rate limit. One call with no `cities` fans out to all ~75 Craigslist markets (10 concurrent, 12s timeouts). Repeatable → resource abuse, outbound amplification, and risk of the server IP getting blocked by Craigslist. The CL feature is **sign-in-only by design** (the `/cl` page shows a login modal), so the backend should enforce it too. **Fix: require login**; also clamp `q` to 200 chars.
+- **Info disclosure** — *Low*. `/api/cl-search` returned `str(e)` (raw exception text) to the caller. **Fix: generic error message.** (Flask runs `debug=False`, so full tracebacks were never exposed — this was only the exception string.)
+- **`/api/cl-parse-test` admin SSRF primitive** — *Low*. Admin-only, but unlike its sibling `/api/cl-debug` it interpolated `city` into an outbound URL without the `_CL_CITIES` allowlist. **Fix: added the same allowlist check** (defense-in-depth; closes the primitive even though it's admin-gated).
+
+### ✅ Confirmed correctly handled (re-verified, NOT issues)
+
+- **SSRF in `/api/cl-search`**: the city allowlist is an exact-membership check against `_CL_CITIES`, and `q` is `requests.utils.quote()`-encoded so `&`, `#`, `:` can't inject params or change the host. Tight. (Only the *rate*/*auth* of the endpoint was the problem, now fixed.)
+- **SQL injection**: every query uses parameterized `?` placeholders. The one dynamic-column write (`_set_user_data`'s `f"UPDATE ... SET {field}=?"`) takes `field` only from a hardcoded allowlist, never user input.
+- **ReDoS**: all regexes built from user input use `re.escape()`; there is no user-controlled raw-regex path. The only residual (wildcard `.*` expansion) is bounded by the new `filter_q`/`keywords` length caps (v2.12.31).
+- **Template injection (SSTI)**: `render_template_string` is used only on the static `LOGIN_PAGE` with a boolean flag — no user data is interpolated. All admin-page HTML escapes user-derived values via `html.escape()`; the `<noscript>` store list is escaped too.
+- **CSRF — the "no Origin AND no Referer ⇒ allow" path (deep-dived)**: **not exploitable** for a real cross-origin browser attack. Three independent layers stop it: (1) the session cookie is `SameSite=Lax`, so cross-site POSTs don't carry it (the request arrives unauthenticated and the endpoint's own auth rejects it); (2) JSON endpoints require `Content-Type: application/json`, which a cross-site HTML form cannot set without a CORS preflight the server never answers; (3) the only sensitive **form** POSTs (`/admin/login`, `/admin/delete-user`) carry their own hmac-validated CSRF tokens. The no-Origin allowance exists for legitimate non-browser clients (curl/server-to-server) and is fine. The one residual real CSRF is GET-based state change — see Low item L1 (`/logout`).
+- **Admin privilege escalation**: `_is_admin()` requires `google_id` for the email path (v2.12.29) and `APP_PASSWORD` set for the session path; `is_admin` is computed server-side and cannot be set by the client (the JS only toggles a footer-link's visibility).
+- **OAuth**: state is server-side, single-use (`pop`), expiry-checked; `email_verified` is required before linking by email; tokens are exchanged server-side; callback errors redirect to `/?google_error=1` with no detail leak. Only gap was the `?next=` backslash (fixed v2.12.33).
+- **Secrets / headers**: `SECRET_KEY` is mandatory (app refuses to start without it); CSP `default-src 'none'` + allowlists, HSTS on Railway, `X-Frame-Options`, `nosniff`, `frame-ancestors 'none'`; cookies `HttpOnly`/`SameSite=Lax`/`Secure`(on Railway). Flask `debug=False` (no Werkzeug console).
+- **Client-side manipulation (gc.js)**: client-supplied browse inputs (`new_ids`, `user_last_scan`, `device_last_anchor`, filter arrays) affect only the caller's own *view* of public data and the NEW-badge cosmetics — no security decision is made client-side. The only server-affecting client input was the unbounded filter arrays, fixed in v2.12.31. `gc.css` is clean (no `expression()`, `@import`, external `url()`, or `javascript:`).
+
+### ⚠️ Low-severity items — documented only (not yet implemented)
+
+Per the audit scope, these were left for a future pass. None is remotely exploitable on its own.
+
+- **L1 — Dead `/login` route + GET `/logout` CSRF.** `/login` sets `session["logged_in"]`, which **nothing in the codebase ever reads** (confirmed: the only `logged_in` *reads* are the `/api/me` JSON field and the JS that consumes it — unrelated to this session key). It is genuinely dead code. Separately, `/logout` is a **GET** that calls `session.clear()`; under `SameSite=Lax` a top-level cross-site navigation (`window.open`, a link, a top-level form GET) still carries the cookie, so an attacker page can force-log-out a visitor (annoyance only — no data loss, server-side data persists). **Recommended fix: delete both `/login` and `/logout` routes and the `LOGIN_PAGE` constant** (the app uses `/api/login` and `/api/logout`). This answers the standing question — yes, `session["logged_in"]` is dead; remove it. Deferred only because deleting routes is slightly outside the "< 10 line Medium" line and touches auth flow; trivial to apply.
+- **L2 — `/api/cl-parse-test` city allowlist** — *fixed in v2.12.34* (folded in because it was a 2-line consistency fix matching `/api/cl-debug`).
+- **L3 — Exception strings over SSE.** Background jobs (`_run`, `_validate_stores`, `_fill_gaps`, `_populate_store_data`) emit `{"error": str(e)}` in their SSE `done` payload, and a few **admin-only** debug endpoints return `str(e)`. The only *public* `str(e)` (cl-search) was fixed in v2.12.34. The SSE ones are reachable by the guest who started the scan and could leak an Algolia/library error string; Low. Recommend generic messages if revisited.
+- **L4 — Robustness (not security).** A few endpoints do `request.json.get(...)` or `int(data.get(...))` without guarding `None`/non-int, returning a 500 on malformed input (`/api/set-cookies` [admin], `/api/favorites`, `/api/watchlist`, `/api/browse` page/per_page casts). Just error noise, no vuln; defensive `or {}` / `try/except` would clean it up. (`/api/watchlist` POST was already hardened to `request.json or {}` as part of v2.12.32.)
+- **L5 — `/api/run` accepts an unbounded `stores` array.** In practice bounded by the global scan `_lock` (one scan at a time) + the 60s guest cooldown, but a logged-in user could submit a huge list to pin the single scan slot for a long time. Consider capping `stores` to the known store count (~240) if abuse is ever seen.
+
+**Files changed (v2.12.31–v2.12.34):** `gc_tracker_app.py` only. (`static/gc.js`, `static/gc.css` reviewed — no client changes required.)
 
 ---
 
