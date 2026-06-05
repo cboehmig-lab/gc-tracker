@@ -1502,10 +1502,10 @@ function _buildRowHtml(item) {
   const priceNum = parseFloat((item.price||'').replace(/[^0-9.]/g,'')) || 0;
   const esc = s => (s||'').replace(/"/g,'&quot;').replace(/</g,'&lt;');
   const nameLink = item.url
-    ? `<a href="${item.url}" target="_blank">${esc(item.name)}</a>`
+    ? `<a href="${esc(_safeHttpUrl(item.url))}" target="_blank">${esc(item.name)}</a>`
     : esc(item.name);
   const thumbSrc = item.image_id
-    ? `https://media.guitarcenter.com/is/image/MMGS7/${item.image_id}-00-200x200.jpg`
+    ? `https://media.guitarcenter.com/is/image/MMGS7/${esc(item.image_id)}-00-200x200.jpg`
     : '';
   const thumbHtml = thumbSrc
     ? `<img class="row-thumb" src="${thumbSrc}" alt="" loading="lazy" onerror="this.style.display='none'">`
@@ -1970,7 +1970,12 @@ function _updateSavedSearchesUI() {
 }
 
 function _ssEsc(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+// Only allow http(s) hrefs — blocks javascript:/data: URIs in scraped/listed URLs.
+function _safeHttpUrl(u) {
+  u = String(u == null ? '' : u);
+  return /^https?:\/\//i.test(u) ? u : '';
 }
 
 function _ssDescription(ss) {
@@ -3902,18 +3907,19 @@ function clRenderResults() {
     const star  = isFav ? '<span class="cl-fav-star">★</span>' : '';
     const clId  = 'cl:' + (r.url || r.title || '');
     const isWatched = (window._clWatchlist || {})[clId];
-    const watchStar = `<button class="watch-btn ${isWatched ? 'active' : ''}" data-action="clToggleWatch" data-id="${clId.replace(/"/g,'&quot;')}" data-title="${(r.title||'').replace(/"/g,'&quot;')}" data-url="${(r.url||'').replace(/"/g,'&quot;')}" data-price="${(r.price||'').replace(/"/g,'&quot;')}" data-location="${(r.location||'').replace(/"/g,'&quot;')}" title="${isWatched ? 'Remove from' : 'Add to'} watch list">${isWatched ? '★' : '☆'}</button>`;
+    const watchStar = `<button class="watch-btn ${isWatched ? 'active' : ''}" data-action="clToggleWatch" data-id="${_ssEsc(clId)}" data-title="${_ssEsc(r.title||'')}" data-url="${_ssEsc(_safeHttpUrl(r.url))}" data-price="${_ssEsc(r.price||'')}" data-location="${_ssEsc(r.location||'')}" title="${isWatched ? 'Remove from' : 'Add to'} watch list">${isWatched ? '★' : '☆'}</button>`;
     const wantMatch = _clMatchesWantList(r.title || '');
-    const title = r.url
-      ? star + '<a href="' + r.url + '" target="_blank" rel="noopener">' + (r.title || '(no title)') + '</a>'
-      : star + (r.title || '(no title)');
-    html += '<tr class="' + (isFav ? 'cl-fav-result' : '') + '" data-city="' + (r.cityId||'') + '" data-cl-id="' + clId.replace(/"/g,'&quot;') + '" data-cl-image="' + (r.image||'').replace(/"/g,'&quot;') + '">' +
+    const safeClUrl = _safeHttpUrl(r.url);
+    const title = safeClUrl
+      ? star + '<a href="' + _ssEsc(safeClUrl) + '" target="_blank" rel="noopener">' + _ssEsc(r.title || '(no title)') + '</a>'
+      : star + _ssEsc(r.title || '(no title)');
+    html += '<tr class="' + (isFav ? 'cl-fav-result' : '') + '" data-city="' + _ssEsc(r.cityId||'') + '" data-cl-id="' + _ssEsc(clId) + '" data-cl-image="' + _ssEsc(_safeHttpUrl(r.image)) + '">' +
             '<td style="text-align:center">' + watchStar + '</td>' +
             '<td style="text-align:center">' + (wantMatch ? '<span class="tag-kw">WANT</span>' : '') + '</td>' +
-            '<td title="' + (r.title||'').replace(/"/g,'&quot;') + '">' + title + '</td>' +
-            '<td>' + (r.price||'') + '</td>' +
-            '<td>' + (r.location||'') + '</td>' +
-            '<td>' + (r.date||'') + '</td></tr>';
+            '<td title="' + _ssEsc(r.title||'') + '">' + title + '</td>' +
+            '<td>' + _ssEsc(r.price||'') + '</td>' +
+            '<td>' + _ssEsc(r.location||'') + '</td>' +
+            '<td>' + _ssEsc(r.date||'') + '</td></tr>';
   });
   html += '</tbody></table>';
   body.innerHTML = html;

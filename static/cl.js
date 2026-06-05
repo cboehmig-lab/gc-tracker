@@ -13,6 +13,20 @@
   gtag('config', gaId);
 })();
 
+// ── HTML-escape helper ────────────────────────────────────────────────────────
+// Craigslist titles/prices/locations are scraped from listings that ANYONE on the
+// internet can post, so every such value must be escaped before it touches innerHTML.
+function _clEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+// Only allow http(s) links — blocks javascript:/data: URIs in scraped post URLs.
+function _clSafeUrl(u) {
+  u = String(u == null ? '' : u);
+  return /^https?:\/\//i.test(u) ? u : '';
+}
+
 // ── localStorage helpers ──────────────────────────────────────────────────────
 function _lsGet(key, fallback) {
   try { const v = localStorage.getItem('gt_' + key); return v ? JSON.parse(v) : fallback; }
@@ -301,17 +315,24 @@ function clRenderResults() {
     const isFav = isFavR(r);
     const clId  = 'cl:' + (r.url||r.title||'');
     const isWatched = !!(window._clWatchlist||{})[clId];
-    const watchBtn = '<button class="watch-btn'+(isWatched?' active':'')+'" onclick="clToggleWatch('+JSON.stringify(clId)+','+JSON.stringify(r.title||'')+','+JSON.stringify(r.url||'')+','+JSON.stringify(r.price||'')+','+JSON.stringify(r.location||'')+',this)" title="'+(isWatched?'Remove from':'Add to')+' watch list">'+(isWatched?'★':'☆')+'</button>';
+    const safeTitle = _clEsc(r.title||'(no title)');
+    const safeUrl   = _clSafeUrl(r.url);
+    // The whole onclick is escaped as an HTML attribute value. It's CSP-inert
+    // anyway, but escaping prevents a crafted title/url from breaking out of the
+    // attribute (e.g. injecting an inline style overlay).
+    const onclickJs = 'clToggleWatch('+JSON.stringify(clId)+','+JSON.stringify(r.title||'')+','+JSON.stringify(r.url||'')+','+JSON.stringify(r.price||'')+','+JSON.stringify(r.location||'')+',this)';
+    const watchBtn = '<button class="watch-btn'+(isWatched?' active':'')+'" onclick="'+_clEsc(onclickJs)+'" title="'+(isWatched?'Remove from':'Add to')+' watch list">'+(isWatched?'★':'☆')+'</button>';
     const wantMatch = _clMatchesWantList(r.title||'');
-    const titleCell = r.url ? (isFav?'<span class="cl-fav-star">★</span>':'')+' <a href="'+r.url+'" target="_blank" rel="noopener">'+(r.title||'(no title)')+'</a>'
-                             : (isFav?'<span class="cl-fav-star">★</span>':'')+' '+(r.title||'(no title)');
-    html += '<tr class="'+(isFav?'cl-fav-result':'')+'" data-city="'+(r.cityId||'')+'" data-cl-id="'+clId.replace(/"/g,'&quot;')+'">'
+    const star = isFav ? '<span class="cl-fav-star">★</span>' : '';
+    const titleCell = safeUrl ? star+' <a href="'+_clEsc(safeUrl)+'" target="_blank" rel="noopener">'+safeTitle+'</a>'
+                              : star+' '+safeTitle;
+    html += '<tr class="'+(isFav?'cl-fav-result':'')+'" data-city="'+_clEsc(r.cityId||'')+'" data-cl-id="'+_clEsc(clId)+'">'
       + '<td>'+watchBtn+'</td>'
       + '<td style="text-align:center">'+(wantMatch?'<span class="tag-kw">WANT</span>':'')+'</td>'
-      + '<td title="'+(r.title||'').replace(/"/g,'&quot;')+'">'+titleCell+'</td>'
-      + '<td>'+(r.price||'')+'</td>'
-      + '<td>'+(r.location||'')+'</td>'
-      + '<td>'+(r.date||'')+'</td></tr>';
+      + '<td title="'+_clEsc(r.title||'')+'">'+titleCell+'</td>'
+      + '<td>'+_clEsc(r.price||'')+'</td>'
+      + '<td>'+_clEsc(r.location||'')+'</td>'
+      + '<td>'+_clEsc(r.date||'')+'</td></tr>';
   });
   html += '</tbody></table>';
   body.innerHTML = html;

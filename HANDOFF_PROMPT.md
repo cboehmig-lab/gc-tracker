@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-06-05 · Version: v2.12.34 · Live at: gcgeartracker.com*
+*Generated: 2026-06-05 · Version: v2.12.35 · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,10 +88,11 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.12.34 (ready to deploy)
+## Current State: v2.12.35 (ready to deploy)
 
 ### Recent changes (this session)
 
+- **v2.12.35** — Security: fixed a stored XSS in the Craigslist render path. CL listing fields (title/price/location/url/image) are scraped from a world-writable source and were concatenated into `innerHTML` unescaped in `static/cl.js` and `static/gc.js` (`clRenderResults`). Now HTML-escaped + URL-allowlisted. (CSP `script-src 'self'` blocked script execution, but inline-style overlay phishing was live — Medium.) `newdeals.js` was already escaped.
 - **v2.12.34** — Security: `/api/cl-search` now requires login (was an unauthenticated outbound-amplification vector — one call fans out to ~75 Craigslist markets); stopped leaking raw exception text; added the `_CL_CITIES` allowlist to `/api/cl-parse-test` (admin SSRF primitive). No UX impact (CL is sign-in-only by design).
 - **v2.12.33** — Security: fixed an open-redirect bypass in the `?next=` param on `/api/auth/google` and `/admin/login`. `/\evil.com` passed the old `startswith("/")` check but browsers normalize it to `//evil.com`. New `_safe_next()` helper rejects backslashes, `//`, and control chars.
 - **v2.12.32** — Security: closed three unauthenticated "write to a global file" endpoints that the v2.12.28 favorites fix missed. `/api/stores/refresh` → admin-only (it scrapes GC and overwrites the shared store cache — anyone could wipe the store list). `/api/watchlist` + `/api/keywords` (GET & POST) → require login. All are dead code (not called by any frontend).
@@ -127,17 +128,18 @@ No known issues. v2.12.27 is live. Admin should hit "↻ Refresh Data" on `/newd
 - v2.12.29: `_is_admin()` privilege escalation via self-reported email — now requires `google_id`.
 - v2.12.30: `/api/saved-search-counts` CPU DoS — login + 50-search cap.
 
-**Round 2 (v2.12.31–34, this session)** — full adversarial re-review. Round 1's "all other surface clean" was overconfident; round 2 found a related family of bugs and fixed them. See the "Security Audit Round 2" section in HANDOFF.md for the complete log (attack vector + severity + fix for each):
+**Round 2 (v2.12.31–35, this session)** — full adversarial re-review. Round 1's "all other surface clean" was overconfident; round 2 found a related family of bugs and fixed them. See the "Security Audit Round 2" section in HANDOFF.md for the complete log (attack vector + severity + fix for each):
 - **v2.12.31 (High)**: `/api/browse` unauthenticated CPU-DoS — capped `keywords` (≤50) and `filter_q` (≤200). The single biggest remaining public-abuse surface.
 - **v2.12.32 (High+Med)**: `/api/stores/refresh` → admin (unauth scrape + store-list wipe); `/api/watchlist` + `/api/keywords` → login (the favorites fix's two missed siblings).
 - **v2.12.33 (Med)**: open-redirect via `/\evil.com` backslash bypass in `?next=` — new `_safe_next()`.
 - **v2.12.34 (Med+Low)**: `/api/cl-search` → login (outbound amplification) + no more leaked exception text; `/api/cl-parse-test` city allowlist.
-- **Confirmed clean (re-verified)**: SSRF (cl-search allowlist + quoting), SQLi (parameterized), ReDoS (`re.escape` + new caps), SSTI, CSRF "no-Origin" path (SameSite=Lax + JSON content-type + admin tokens make it non-exploitable), admin escalation, OAuth state/email_verified, SECRET_KEY/CSP/HSTS/cookies, client-side manipulation.
+- **v2.12.35 (Med)**: stored XSS in the Craigslist render path — scraped (world-writable) listing fields went into `innerHTML` unescaped in `cl.js` + `gc.js`. Now escaped + URL-allowlisted. Script exec was already blocked by CSP, but inline-style overlay phishing was live. (`newdeals.js` was already escaped; admin pages escape server-side.)
+- **Confirmed clean (re-verified)**: SSRF (cl-search allowlist + quoting), SQLi (parameterized), ReDoS (`re.escape` + new caps), SSTI, CSRF "no-Origin" path (SameSite=Lax + JSON content-type + admin tokens make it non-exploitable), admin escalation, OAuth state/email_verified, SECRET_KEY/CSP/HSTS/cookies, client-side *manipulation* of server behavior (the render-path XSS was the one client-side gap — now fixed in v2.12.35).
 - **Documented Low (deferred)**: L1 dead `/login` + GET `/logout` CSRF (recommend deleting both routes — `session["logged_in"]` is confirmed dead code); L3 SSE exception strings; L4 malformed-input 500s; L5 unbounded `/api/run` stores array. Full detail in HANDOFF.md.
 
-**Reddit comment ("still isn't secure")**: round 2 closed the most likely candidates — an unauthenticated endpoint that wipes shared state (`/api/stores/refresh`), trivial unauthenticated CPU-DoS (`/api/browse`), and an OAuth open-redirect. We can't know exactly what the commenter meant, but the unauthenticated-write-to-global-file family and the browse DoS are the kind of thing a casual prober finds first.
+**Reddit comment ("still isn't secure")**: round 2 closed the most likely candidates — an unauthenticated endpoint that wipes shared state (`/api/stores/refresh`), trivial unauthenticated CPU-DoS (`/api/browse`), an OAuth open-redirect, and a **stored XSS in the CL search results** (post a Craigslist listing with HTML in the title, search for it — it rendered). That XSS is probably the single most likely thing a security-minded redditor actually poked at. We still can't know for sure what they meant, but these are the things a casual prober finds first.
 
-App is ready for Reddit posts and Product Hunt once v2.12.34 is deployed.
+App is ready for Reddit posts and Product Hunt once v2.12.35 is deployed.
 
 ---
 

@@ -1047,7 +1047,7 @@ Default fallback of `88px` covers the initial render before JS runs.
 
 ---
 
-## 🔒 Security Audit Round 2 (v2.12.31 → v2.12.34) — 2026-06-05
+## 🔒 Security Audit Round 2 (v2.12.31 → v2.12.35) — 2026-06-05
 
 **Context**: A Reddit commenter said the app "still isn't secure, but it's better than the last time you shared it." A second, full adversarial review was run over `gc_tracker_app.py` (all ~5650 lines), `static/gc.js`, and `static/gc.css`. Every `@app.route` was re-inventoried against its guard; injection/SSRF/CSRF/OAuth/info-disclosure/DoS were all re-examined. The headline result: **the v2.12.28 favorites fix was one of a family of three identical "unauthenticated write to a global file" endpoints — the other two (`/api/watchlist`, `/api/keywords`) were missed.** Also found: an unauthenticated DoS on `/api/browse`, an unauthenticated scrape/cache-wipe on `/api/stores/refresh`, and an open-redirect bypass in `?next=`.
 
@@ -1081,6 +1081,13 @@ These endpoints are **not called by any frontend** (verified by grepping all of 
 - **Info disclosure** — *Low*. `/api/cl-search` returned `str(e)` (raw exception text) to the caller. **Fix: generic error message.** (Flask runs `debug=False`, so full tracebacks were never exposed — this was only the exception string.)
 - **`/api/cl-parse-test` admin SSRF primitive** — *Low*. Admin-only, but unlike its sibling `/api/cl-debug` it interpolated `city` into an outbound URL without the `_CL_CITIES` allowlist. **Fix: added the same allowlist check** (defense-in-depth; closes the primitive even though it's admin-gated).
 
+### v2.12.35 — Security: stored XSS in the Craigslist render path (Medium)
+
+- **Attack**: `/api/cl-search` returns listings scraped from Craigslist (`title`, `price`, `location`, `date`, `url`, `image`). **Anyone on the internet can post a Craigslist listing**, so these fields are attacker-controlled. Both renderers — `clRenderResults()` in `static/gc.js` (the in-app CL panel) and the equivalent in `static/cl.js` (the `/cl` page) — concatenated those values straight into `innerHTML` with **no HTML escaping** (only a partial `"`→`&quot;` on the `title` attribute). A listing titled `<img src=x onerror=…>` or, more usefully, `"><div style="position:fixed;inset:0;…">fake login</div>` would inject markup into any victim who searched a matching term.
+- **What saved it from being worse**: the app's CSP is `script-src 'self'` with **no** `'unsafe-inline'`, so injected inline scripts / `onerror=` handlers / `javascript:` URLs **don't execute**, and `img-src`/`connect-src` allowlists block exfiltration to attacker domains. So this was **not** a cookie-stealing XSS. **But** `style-src` allows `'unsafe-inline'`, so a crafted listing could still inject a full-page **inline-style overlay** for phishing/defacement, plus generic content injection and layout breakage. Real, hence Medium — and exactly the kind of thing a security-minded prober tries first ("post a CL listing with HTML in the title, search for it").
+- **Fix**: HTML-escape every scraped field at render time. Added `_clEsc()` + `_clSafeUrl()` to `cl.js` and reused `_ssEsc()` + new `_safeHttpUrl()` in `gc.js`. All of `title`, `price`, `location`, `date`, `cityId`, and the `data-*` attributes are now escaped; `url`/`image` are passed through an `^https?://` allowlist (drops `javascript:`/`data:`) and then escaped. The main GC table (`_buildRowHtml`) already escaped item text; its `href`/`img` sinks (GC-sourced, low risk) were hardened the same way for consistency. Verified by `node --check` on all three files + escape-behavior unit tests (`<img onerror>` → inert, style-overlay breakout neutralized, `javascript:` URL → dropped, legit https URL preserved).
+- **Note**: `static/newdeals.js` was checked and is already fully escaped (`_ndEsc` on every field); admin pages escape server-side via `html.escape()`. `cl.js`'s watch-star uses an inline `onclick` that the CSP already blocks (a pre-existing *functional* bug on `/cl`, not a security one) — its attribute value is now escaped regardless so it's not an injection surface. Recommend converting it to the `data-action` delegation pattern `gc.js` uses, as a future cleanup.
+
 ### ✅ Confirmed correctly handled (re-verified, NOT issues)
 
 - **SSRF in `/api/cl-search`**: the city allowlist is an exact-membership check against `_CL_CITIES`, and `q` is `requests.utils.quote()`-encoded so `&`, `#`, `:` can't inject params or change the host. Tight. (Only the *rate*/*auth* of the endpoint was the problem, now fixed.)
@@ -1091,7 +1098,7 @@ These endpoints are **not called by any frontend** (verified by grepping all of 
 - **Admin privilege escalation**: `_is_admin()` requires `google_id` for the email path (v2.12.29) and `APP_PASSWORD` set for the session path; `is_admin` is computed server-side and cannot be set by the client (the JS only toggles a footer-link's visibility).
 - **OAuth**: state is server-side, single-use (`pop`), expiry-checked; `email_verified` is required before linking by email; tokens are exchanged server-side; callback errors redirect to `/?google_error=1` with no detail leak. Only gap was the `?next=` backslash (fixed v2.12.33).
 - **Secrets / headers**: `SECRET_KEY` is mandatory (app refuses to start without it); CSP `default-src 'none'` + allowlists, HSTS on Railway, `X-Frame-Options`, `nosniff`, `frame-ancestors 'none'`; cookies `HttpOnly`/`SameSite=Lax`/`Secure`(on Railway). Flask `debug=False` (no Werkzeug console).
-- **Client-side manipulation (gc.js)**: client-supplied browse inputs (`new_ids`, `user_last_scan`, `device_last_anchor`, filter arrays) affect only the caller's own *view* of public data and the NEW-badge cosmetics — no security decision is made client-side. The only server-affecting client input was the unbounded filter arrays, fixed in v2.12.31. `gc.css` is clean (no `expression()`, `@import`, external `url()`, or `javascript:`).
+- **Client-side manipulation (gc.js)**: client-supplied browse inputs (`new_ids`, `user_last_scan`, `device_last_anchor`, filter arrays) affect only the caller's own *view* of public data and the NEW-badge cosmetics — no security decision is made client-side. The only server-affecting client input was the unbounded filter arrays, fixed in v2.12.31. `gc.css` is clean (no `expression()`, `@import`, external `url()`, or `javascript:`). **Update:** a second pass over the *rendering* path (not just manipulation) found the Craigslist-data XSS — fixed in v2.12.35 above.
 
 ### ⚠️ Low-severity items — documented only (not yet implemented)
 
@@ -1103,7 +1110,7 @@ Per the audit scope, these were left for a future pass. None is remotely exploit
 - **L4 — Robustness (not security).** A few endpoints do `request.json.get(...)` or `int(data.get(...))` without guarding `None`/non-int, returning a 500 on malformed input (`/api/set-cookies` [admin], `/api/favorites`, `/api/watchlist`, `/api/browse` page/per_page casts). Just error noise, no vuln; defensive `or {}` / `try/except` would clean it up. (`/api/watchlist` POST was already hardened to `request.json or {}` as part of v2.12.32.)
 - **L5 — `/api/run` accepts an unbounded `stores` array.** In practice bounded by the global scan `_lock` (one scan at a time) + the 60s guest cooldown, but a logged-in user could submit a huge list to pin the single scan slot for a long time. Consider capping `stores` to the known store count (~240) if abuse is ever seen.
 
-**Files changed (v2.12.31–v2.12.34):** `gc_tracker_app.py` only. (`static/gc.js`, `static/gc.css` reviewed — no client changes required.)
+**Files changed (v2.12.31–v2.12.34):** `gc_tracker_app.py`. **(v2.12.35):** `static/cl.js`, `static/gc.js`, and `APP_VERSION` in `gc_tracker_app.py`. (`static/gc.css` clean; `static/newdeals.js` already escaped.)
 
 ---
 
