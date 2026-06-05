@@ -109,15 +109,42 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ## Nothing Currently Broken
 
-No known issues. Admin should hit "↻ Refresh Data" on `/newdeals` after v2.12.24 deploys to rebuild cache with `is_software` flags.
+No known issues. v2.12.27 is live. Admin should hit "↻ Refresh Data" on `/newdeals` to rebuild cache with `is_software` flags if not already done.
 
 ---
 
-## Next Steps
+## 🔐 Priority Next Session: Security Audit
 
-- **Product Hunt listing** — ready to submit. Prep: screenshots, short description, pick a launch day with a few upvoters lined up.
-- **Reddit posts** — proven to convert. Targets: `r/guitarpedals`, `r/WeAreTheMusicMakers`, `r/Bass`, `r/drums`. Lead with category-specific deal-finding angle.
-- **SEO — watch Search Console** — give it 4–6 weeks after v2.12.25–27. Expect CTR improvement on existing impressions first (description change), then possible ranking lift on location queries (noscript store list). Request Indexing in Search Console to speed up recrawl.
+A Reddit commenter said "this still isn't secure, but it's better than the last time you shared it." We don't know what they mean specifically. Do a thorough audit before the next Reddit post or Product Hunt push.
+
+**Known security work already done** (from HANDOFF.md history):
+- CSP: `script-src 'self'`, `default-src 'none'`, `object-src 'none'`
+- HSTS on Railway
+- X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy
+- Passwords hashed with werkzeug `generate_password_hash`
+- Admin gated by `ADMIN_EMAIL` env var + session check
+- `/api/*` endpoints return 403 for unauthenticated requests
+- `robots.txt` disallows `/admin/` and `/api/`
+
+**Likely attack surface to audit** (not confirmed fixed):
+- CSRF protection on auth forms and state-changing POSTs
+- Rate limiting on `/api/login`, `/api/register`, `/api/logout`
+- Brute-force protection on admin routes
+- Session secret key strength (`SECRET_KEY` env var — is it set in Railway or falling back to a weak default?)
+- Any routes that reflect user input back into HTML without escaping
+- Whether `ADMIN_EMAIL` check can be bypassed
+- API endpoints that might be callable without auth (scan carefully — `_require_admin_api()` must be called on every admin API route)
+- Information disclosure in error responses
+
+**Suggested approach**: use the `security-review` skill at the start of the session, then read `gc_tracker_app.py` in full with security eyes.
+
+---
+
+## Next Steps (after security)
+
+- **Product Hunt listing** — hold until after security audit. Good fit for indie tool launch.
+- **Reddit posts** — proven to convert. Targets: `r/guitarpedals`, `r/WeAreTheMusicMakers`, `r/Bass`, `r/drums`. Hold until security is buttoned up.
+- **SEO — watch Search Console** — give it 4–6 weeks after v2.12.25–27. Expect CTR improvement on existing impressions first, then possible ranking lift on location queries. URL Inspection → Request Indexing already done.
 - **Android app** — WebView wrapper is the fastest path to Play Store. Needs 14-day closed test with 12+ opted-in testers before production.
 - **Monetization** — Reverb affiliate (ShareASale) is the cleanest fit — inline sponsored rows contextual to nearby items. Freemium (email/SMS alerts, more watch list slots) avoids ads entirely.
 
