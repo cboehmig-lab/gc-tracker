@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-06-05 · Version: v2.12.36 · Live at: gcgeartracker.com*
+*Generated: 2026-06-08 · Version: v2.13.0 · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,10 +88,11 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.12.36 (ready to deploy)
+## Current State: v2.13.0 (ready to deploy)
 
 ### Recent changes (this session)
 
+- **v2.13.0** — Want-list fix + `/api/browse` performance overhaul (minor bump; `gc_tracker_app.py` only, no JS, no cache rebuild). (1) **Want lists >50 terms no longer drop matches** — the v2.12.31 `keywords[:50]` DoS cap was silently breaking power users (real cases: 220 and 73 terms). The matcher was rewritten (plain words → set membership; phrases/wildcards → one alternation regex), verified behavior-identical (32K fuzz cases, 0 mismatches), and the cap raised to **750 logged-in / 250 guest** after dedupe. (2) **`_load_cat_cache()` no longer re-parses the 53MB cache on every browse** — memoized by mtime (**~400ms → ~1µs/call**), which also un-serializes concurrent request threads (GIL was held during the parse). (3) Defense-in-depth: `filter_q` token cap (12) + `/api/saved-search-counts` clamp. Full writeup: HANDOFF.md "Recent Changes (v2.12.36 → v2.13.0)".
 - **v2.12.36** — Security posture (not a vuln): added `Cross-Origin-Opener-Policy: same-origin-allow-popups` to every response (scanner credit + cross-window isolation; safe with redirect-based OAuth) and an RFC 9116 `/.well-known/security.txt` (private report channel). Deliberately did NOT add CORP (would break OG-image social previews). Documented the one remaining CSP weakness (`style-src 'unsafe-inline'`) as a future refactor — no longer an active hole after the v2.12.35 escaping.
 - **v2.12.35** — Security: fixed a stored XSS in the Craigslist render path. CL listing fields (title/price/location/url/image) are scraped from a world-writable source and were concatenated into `innerHTML` unescaped in `static/cl.js` and `static/gc.js` (`clRenderResults`). Now HTML-escaped + URL-allowlisted. (CSP `script-src 'self'` blocked script execution, but inline-style overlay phishing was live — Medium.) `newdeals.js` was already escaped.
 - **v2.12.34** — Security: `/api/cl-search` now requires login (was an unauthenticated outbound-amplification vector — one call fans out to ~75 Craigslist markets); stopped leaking raw exception text; added the `_CL_CITIES` allowlist to `/api/cl-parse-test` (admin SSRF primitive). No UX impact (CL is sign-in-only by design).
@@ -118,7 +119,7 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ## Nothing Currently Broken
 
-No known issues. v2.12.27 is live. Admin should hit "↻ Refresh Data" on `/newdeals` to rebuild cache with `is_software` flags if not already done.
+**v2.13.0 (ready to deploy)** fixes the one bug found this session — want lists over 50 terms silently dropping matches (the v2.12.31 DoS cap was too blunt) — and removes the ~400ms-per-browse cache reparse. Once pushed, no known issues. Admin should hit "↻ Refresh Data" on `/newdeals` to rebuild cache with `is_software` flags if not already done.
 
 ---
 

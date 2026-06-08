@@ -280,14 +280,30 @@ def _rotate_ua():
 
 # ── Category cache ────────────────────────────────────────────────────────────
 _cat_cache: dict = {}
+_cat_cache_mtime = None   # mtime of the file at last parse; skip re-parse when unchanged
 
 def _load_cat_cache():
-    global _cat_cache
-    if CAT_CACHE_FILE.exists():
-        try:
-            _cat_cache = json.loads(CAT_CACHE_FILE.read_text())
-        except Exception:
-            _cat_cache = {}
+    # The category cache is a ~50MB JSON of ~92K items. It used to be re-read and
+    # re-parsed from disk on EVERY call — and /api/browse calls it on every keystroke,
+    # filter, sort, and page flip. That parse is ~400ms and holds the GIL, so on the
+    # threaded dev server it serialized all request threads behind it. Memoize by file
+    # mtime: only re-parse when the file actually changed (i.e. after a scan saves).
+    # A stat() guard costs ~1µs. (v2.13.0)
+    global _cat_cache, _cat_cache_mtime
+    try:
+        mtime = CAT_CACHE_FILE.stat().st_mtime
+    except OSError:
+        # File missing (fresh deploy, or an admin reset deleted it) — leave whatever is
+        # in memory. Reset sets _cat_cache = {} itself, so this won't resurrect data.
+        return
+    if mtime == _cat_cache_mtime and _cat_cache:
+        return
+    try:
+        _cat_cache = json.loads(CAT_CACHE_FILE.read_text())
+        _cat_cache_mtime = mtime
+    except Exception:
+        _cat_cache = {}
+        _cat_cache_mtime = None
 
 def _save_cat_cache():
     try:
@@ -3188,7 +3204,7 @@ def api_saved_search_counts():
     for search in searches:
         stores   = set(search.get("stores") or [])
         f        = search.get("filters") or {}
-        fq       = (f.get("filter_q") or "").lower().strip()
+        fq       = (f.get("filter_q") or "").lower().strip()[:200]   # clamp len, parity with /api/browse (v2.13.0)
         f_brands = set(f.get("filter_brands") or [])
         f_conds  = set(f.get("filter_conditions") or [])
         f_cats   = set(f.get("filter_categories") or [])
@@ -3287,11 +3303,29 @@ def api_browse():
     # Watchlist and keywords now come from the client (localStorage)
     wl_ids     = set(data.get("watchlist_ids", []))
     keywords   = data.get("keywords", [])
-    # Each keyword compiles to a regex that is evaluated against every cached item,
-    # so an unbounded keyword list is an unauthenticated CPU DoS (same class as the
-    # /api/saved-search-counts cap). 50 entries is far above any real want list.
+    # Want-list keywords are matched against every cached item (see _kw_match below).
+    # An unbounded list is a CPU-DoS over the ~92K-item cache, but the old flat
+    # keywords[:50] silently dropped matches for real power users — guitar want
+    # lists of 70-220+ terms are common. Guard in two steps:
+    #   1. Dedupe case-insensitively (cheap; kills redundant regexes from re-adds) and
+    #      clamp each term to 100 chars.
+    #   2. Cap by accountability: logged-in users own large, cross-device-synced want
+    #      lists and are account-rate-limitable, so they get generous headroom;
+    #      anonymous callers are the real DoS vector (their list is localStorage-only),
+    #      so they stay tighter.
+    # The matcher below keeps plain single-word terms ~free regardless of count, so the
+    # cap mainly bounds the rarer phrase/wildcard terms.
     if isinstance(keywords, list):
-        keywords = [str(k)[:100] for k in keywords[:50]]
+        _seen = set()
+        _dedup = []
+        for k in keywords:
+            ks = str(k)[:100]
+            kl = ks.strip().lower()
+            if kl and kl not in _seen:
+                _seen.add(kl)
+                _dedup.append(ks)
+        _kw_cap = 750 if session.get("user_id") else 250
+        keywords = _dedup[:_kw_cap]
     else:
         keywords = []
     new_ids    = set(data.get("new_ids", []))
@@ -3299,6 +3333,13 @@ def api_browse():
 
     # ── Unified query matching (shared by keyword list and filter_q) ─────────
     import re as _re
+
+    # Helpers for the fast want-list matcher (see _kw_match). \w and \W share the
+    # same character-class definition, so \W+ tokenization is exactly equivalent to
+    # \bword\b matching for a single-word term — that equivalence is what lets the
+    # plain-word fast path stay semantically identical to the regex path.
+    _SIMPLE_KW_RE = _re.compile(r'^\w+$')   # a single word token
+    _KW_SPLIT_RE  = _re.compile(r'\W+')     # tokenizer matching \b boundaries
 
     def _compile_query(query_str, fuzzy=False):
         """Parse a query string into AND-joined terms.
@@ -3335,14 +3376,58 @@ def api_browse():
                     return False
         return bool(terms)
 
-    # Compile each want-list keyword into its term list; an item matches if ANY entry matches
-    # Strip leading '=' prefix (legacy strict marker — whole-word is now the default)
-    _kw_compiled = [_compile_query(kw.lstrip('=').strip()) for kw in keywords if kw.strip().lstrip('=')]
-    _kw_compiled = [t for t in _kw_compiled if t]
+    def _kw_or_pattern(base):
+        """Regex pattern string for one OR-able want-list keyword, mirroring the
+        single-term branches of _compile_query so the alternation matches identically:
+          "phrase"  -> escaped substring (exact, no boundaries)
+          od*       -> escaped pieces joined by .*  (wildcard)
+          big muff  -> \\bbig\\ muff\\b             (whole-word / phrase)
+        Compiled case-insensitively by the caller."""
+        if base.startswith('"') and base.endswith('"') and len(base) > 2:
+            return _re.escape(base[1:-1])
+        if '*' in base:
+            return '.*'.join(_re.escape(p) for p in base.split('*'))
+        return r'\b' + _re.escape(base) + r'\b'
+
+    # ── Want-list keyword matcher (fast path) ────────────────────────────────
+    # Matching each keyword as its own \bword\b regex is O(items × keywords); at ~92K
+    # items a 200-term want list cost seconds per browse (the cause of the >50-term
+    # "missing matches" bug — the old fix just truncated the list). Bucket instead:
+    #   • plain single word (^\w+$)  -> lowercased SET, tested via token membership once
+    #     per item — O(items), independent of how many such keywords there are.
+    #   • phrase / quoted / wildcard -> folded into ONE alternation regex, searched once
+    #     per item instead of once per keyword.
+    #   • comma-AND ("a, b")         -> rare; kept on the per-keyword term-list path.
+    # '=' is the legacy strict marker (whole-word is the default now), stripped first.
+    _kw_word_set = set()
+    _kw_or_pats  = []
+    _kw_and      = []
+    for _kw in keywords:
+        _base = _kw.lstrip('=').strip()
+        if not _base:
+            continue
+        if _SIMPLE_KW_RE.match(_base):
+            _kw_word_set.add(_base.lower())
+        elif ',' in _base:
+            _t = _compile_query(_base)
+            if _t:
+                _kw_and.append(_t)
+        else:
+            _p = _kw_or_pattern(_base)
+            if _p:
+                _kw_or_pats.append(_p)
+    _kw_combo = _re.compile('|'.join(_kw_or_pats), _re.IGNORECASE) if _kw_or_pats else None
+    _has_kw = bool(_kw_word_set or _kw_combo or _kw_and)
 
     def _kw_match(name_l, brand_l):
         text = name_l + " " + brand_l
-        return any(_matches_all(text, terms) for terms in _kw_compiled)
+        if _kw_word_set and not _kw_word_set.isdisjoint(_KW_SPLIT_RE.split(text)):
+            return True
+        if _kw_combo is not None and _kw_combo.search(text):
+            return True
+        if _kw_and:
+            return any(_matches_all(text, terms) for terms in _kw_and)
+        return False
 
     # Check if any cache entries have store field
     has_store_data = any(v.get("store") for v in _cat_cache.values())
@@ -3352,7 +3437,10 @@ def api_browse():
 
     # ── Build full item list for selected stores (lightweight dicts) ──────
     all_items = []
-    for sku, cached in _cat_cache.items():
+    # Snapshot via list() so a concurrent scan thread mutating _cat_cache in place can't
+    # raise "dictionary changed size during iteration" — the cache is now one shared
+    # in-memory object across request threads (v2.13.0), not a per-call private parse.
+    for sku, cached in list(_cat_cache.items()):
         if store_set is not None and cached.get("store") not in store_set:
             continue
         if not cached.get("available", True):
@@ -3377,7 +3465,7 @@ def api_browse():
         # Check keyword match
         name_lower = name.lower()
         brand_lower = brand.lower()
-        kw_hit = _kw_match(name_lower, brand_lower) if _kw_compiled else False
+        kw_hit = _kw_match(name_lower, brand_lower) if _has_kw else False
 
         pd_amt   = cached.get("price_drop", 0) or 0
         lp_raw   = cached.get("list_price", 0) or 0
@@ -3418,7 +3506,10 @@ def api_browse():
             # AND term — matches local-mode behaviour where "fender jaguar vintera" means
             # fender AND jaguar AND vintera in any order, not an exact phrase.
             # _compile_query handles each token's type (quoted, wildcard, word, fuzzy).
-            fq_tokens = _re.findall(r'"[^"]+"|[^\s]+', fq)
+            # Cap token count: filter_q is clamped to 200 chars but could still pack
+            # ~100 single-char tokens, each a regex over the full cache (O(items×tokens),
+            # an unauthenticated cost). No human search has >12 words. (v2.13.0)
+            fq_tokens = _re.findall(r'"[^"]+"|[^\s]+', fq)[:12]
             fq_terms = []
             for tok in fq_tokens:
                 fq_terms.extend(_compile_query(tok, fuzzy=f_strict))
@@ -5702,7 +5793,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.12.36"
+APP_VERSION = "2.13.0"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

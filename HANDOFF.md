@@ -1,7 +1,40 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-06-05 · Current version: v2.12.34 · Status: ready to deploy ✅ · Domain: gcgeartracker.com*
+*Last updated: 2026-06-08 · Current version: v2.13.0 · Status: ready to deploy ✅ · Domain: gcgeartracker.com*
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
+
+---
+
+## ⭐ Recent Changes (v2.12.36 → v2.13.0) — 2026-06-08
+
+**Minor bump — not a new feature: one correctness bug fix + a hot-path performance overhaul on `/api/browse`, plus two defense-in-depth caps. `gc_tracker_app.py` only — no client/JS changes, no cache rebuild needed.**
+
+### The bug — want-list matches dropped past 50 terms (the reason for this release)
+
+Users with large want lists (real cases: **220** and **73** keywords) only got their first ~50 want-list items matched / highlighted in the results table. Everything past the 50th (alphabetically — keywords sync sorted) silently went unmatched, and in Want List view (which filters to matches) those items vanished entirely.
+
+**Root cause**: the v2.12.31 DoS guard truncated the client `keywords` array to 50 (`keywords[:50]`). Each want-list keyword compiles to a regex evaluated against every item in the ~92K cache (`_kw_match` in `api_browse`), so the array was capped to bound `O(items × keywords)`. Real protection, but blunt — it broke power users.
+
+### v2.13.0 changes
+
+**1. Want-list matcher rewritten (fixes the bug without re-introducing the DoS).** Per-keyword `O(items × keywords)` regex → bucketed matching in `api_browse`:
+- plain single-word terms (`^\w+$` — the bulk of any want list) → one lowercased **set**, tested by token membership once per item. O(items), independent of keyword count. Exact-equivalent to `\bword\b` because `\W+` tokenization shares `\w`'s character-class definition.
+- phrase / quoted / wildcard terms → folded into **one alternation regex**, searched once per item instead of once per keyword.
+- comma-AND terms (`a, b`, rare) → unchanged per-keyword path.
+- Verified **behavior-identical** to the old matcher: 32,000 fuzz comparisons across adversarial inputs (`=` prefix, punctuation, quoted, wildcard, unicode, comma-AND) → **0 mismatches**. ~3× faster on a phrase-heavy 220-term list; far more on word-heavy lists (single words go from O(items×N) to ~free).
+
+**2. Keyword cap kept as a DoS backstop, but generous + accountability-tiered.** After case-insensitive **dedupe** (kills redundant regexes from re-adds), cap = **750 logged-in, 250 logged-out** (was a flat 50). Both real users covered whether or not they're signed in. Knob: `_kw_cap = 750 if session.get("user_id") else 250` in `api_browse`.
+
+**3. Per-browse cache parse memoized — the big perf win.** `_load_cat_cache()` re-read and re-parsed the **53MB / ~92K-item `gc_category_cache.json` from disk on every call**, and `/api/browse` calls it on every keystroke, filter, sort, and page flip. Measured **~400ms per call**, holding the GIL — so on the threaded dev server (`app.run(threaded=True)`, single process) it serialized every request thread behind it. Now memoized by file **mtime**: re-parses only when the file actually changes (i.e. after a scan saves). Steady-state cost ~400ms → ~1µs (`stat()`). Safe across the lifecycle: admin reset deletes the file (`stat` raises → in-memory `{}` preserved, not resurrected); a scan save bumps mtime → next browse reloads. Browse iteration now snapshots via `list(_cat_cache.items())` so a concurrent scan mutating the now-shared in-memory cache can't raise "dictionary changed size during iteration."
+
+**4. `filter_q` / saved-search DoS caps (defense-in-depth, same class as the want-list cap).** The in-page search splits `filter_q` (already ≤200 chars) into AND-tokens, each a regex over the full cache — a 200-char query packed with single-char tokens was ~100 regexes × 92K, unauthenticated. Token count now capped to **12** (no human search has >12 words). `/api/saved-search-counts` `filter_q` clamped to 200 chars for parity (it was uncapped; login-gated, so lower risk).
+
+### Decisions / non-changes
+- **Siblings left alone (deliberate):** `/api/saved-search-counts` caps *saved searches* (50), not keywords — different unit, login-gated, nobody hand-saves 50 searches. `/api/new-browse` is admin-only and already uncapped over the much smaller new-deals cache — adding a cap there would *introduce* the >50 bug. Only `/api/browse` had it.
+- **Client (`static/gc.js`) confirmed NOT truncating** — it sends the full `window._keywords` in the browse body + `/api/sync`. No JS changed (so no CSP / inline-script concerns).
+- **Verification:** `py_compile` clean; matcher fuzzed (0/32,000 mismatches); memoization unit-tested (1 parse for 5 unchanged calls, reparse on mtime change, no clobber on delete).
+
+**Files changed:** `gc_tracker_app.py` only. **Deploy:** no cache rebuild needed; takes effect on the next browse after Railway redeploys.
 
 ---
 
