@@ -302,12 +302,26 @@ def _load_cat_cache():
         _cat_cache = json.loads(CAT_CACHE_FILE.read_text())
         _cat_cache_mtime = mtime
     except Exception:
-        _cat_cache = {}
-        _cat_cache_mtime = None
+        # Corrupt/partial file (e.g. a crash during a non-atomic write on an older
+        # build). Do NOT blank the catalog for every user — keep the last good
+        # in-memory cache. If we have data, advance mtime so we stop re-reading the
+        # bad file on every browse; a later good write bumps mtime and we reload.
+        # If we have nothing yet, leave mtime unset so we keep retrying.
+        if not _cat_cache:
+            _cat_cache_mtime = None
+        else:
+            _cat_cache_mtime = mtime
 
 def _save_cat_cache():
+    # Atomic write: a crash/redeploy partway through writing the ~53MB file used to
+    # leave it truncated, after which json.loads raised and the in-memory catalog was
+    # reset to {} — an empty site for every user until the next full scan. Write to a
+    # temp file then os.replace() (atomic on POSIX) so readers only ever see a complete
+    # file.
     try:
-        CAT_CACHE_FILE.write_text(json.dumps(_cat_cache))
+        tmp = CAT_CACHE_FILE.parent / (CAT_CACHE_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(_cat_cache))
+        os.replace(tmp, CAT_CACHE_FILE)
     except Exception:
         pass
 
@@ -3399,30 +3413,72 @@ def api_browse():
     #     per item instead of once per keyword.
     #   • comma-AND ("a, b")         -> rare; kept on the per-keyword term-list path.
     # '=' is the legacy strict marker (whole-word is the default now), stripped first.
+    #
+    # Cost is NOT uniform across term types, so the DoS guard is per-type, not a flat
+    # cap (a flat cap on "complex" terms would drop real multi-word want-list entries
+    # like "Big Muff" / "OD-1" once a user had >N of them — re-introducing the >50-term
+    # bug this whole rewrite exists to fix). Benchmarked over the full ~92K cache:
+    #   • plain single word (^\w+$)  -> lowercased SET, token-membership once per item.
+    #     O(items) regardless of count. Stays at the generous _kw_cap (750/250).
+    #   • ordinary phrase / hyphenated ("Big Muff", "OD-1") -> exact \b...\b regex, but
+    #     gated by a cheap SOUND pre-filter: all of the phrase's word-tokens must be
+    #     present in the item before the regex runs. Since few items contain every word
+    #     of a given phrase, the regex almost never fires → ~free for real lists
+    #     (a realistic 220-term list of 160 words + 60 phrases benches ~0.35s). Given a
+    #     generous cap (300) purely as a backstop; real want lists are far below it.
+    #   • wildcard (*) / quoted-exact / comma-AND -> the genuinely expensive paths
+    #     ('.*' can't be pre-filtered; quoted-exact is a raw substring). Folded into one
+    #     alternation / term-list and capped HARD at 30 — these are advanced syntax a
+    #     real want list uses a handful of, but 250 wildcards alone cost ~8s/browse,
+    #     GIL-held, on the public unbounded /api/browse (unauthenticated CPU-DoS). (v2.13.1)
+    _PHRASE_KW_CAP = 300
+    _EXOTIC_KW_CAP = 30
+    _phrase_n = 0
+    _exotic_n = 0
     _kw_word_set = set()
-    _kw_or_pats  = []
-    _kw_and      = []
+    _kw_phrases  = []   # (compiled \b...\b regex, set-of-required-word-tokens) — pre-filtered
+    _kw_or_pats  = []   # wildcard + quoted-exact patterns -> one alternation (capped)
+    _kw_and      = []   # comma-AND term lists (capped)
     for _kw in keywords:
         _base = _kw.lstrip('=').strip()
         if not _base:
             continue
         if _SIMPLE_KW_RE.match(_base):
             _kw_word_set.add(_base.lower())
+        elif '*' in _base or (_base.startswith('"') and _base.endswith('"') and len(_base) > 2):
+            if _exotic_n < _EXOTIC_KW_CAP:
+                _p = _kw_or_pattern(_base)
+                if _p:
+                    _kw_or_pats.append(_p)
+                    _exotic_n += 1
         elif ',' in _base:
-            _t = _compile_query(_base)
-            if _t:
-                _kw_and.append(_t)
+            if _exotic_n < _EXOTIC_KW_CAP:
+                _t = _compile_query(_base)
+                if _t:
+                    _kw_and.append(_t)
+                    _exotic_n += 1
         else:
-            _p = _kw_or_pattern(_base)
-            if _p:
-                _kw_or_pats.append(_p)
+            # Ordinary phrase or punctuated single term -> exact whole-word match, but
+            # cheap to skip via the required-tokens subset test below.
+            if _phrase_n < _PHRASE_KW_CAP:
+                _words = set(_KW_SPLIT_RE.split(_base.lower())) - {''}
+                _kw_phrases.append((_re.compile(r'\b' + _re.escape(_base) + r'\b', _re.IGNORECASE), _words))
+                _phrase_n += 1
     _kw_combo = _re.compile('|'.join(_kw_or_pats), _re.IGNORECASE) if _kw_or_pats else None
-    _has_kw = bool(_kw_word_set or _kw_combo or _kw_and)
+    _has_kw = bool(_kw_word_set or _kw_phrases or _kw_combo or _kw_and)
 
     def _kw_match(name_l, brand_l):
         text = name_l + " " + brand_l
-        if _kw_word_set and not _kw_word_set.isdisjoint(_KW_SPLIT_RE.split(text)):
+        _toks = set(_KW_SPLIT_RE.split(text)) if (_kw_word_set or _kw_phrases) else None
+        if _kw_word_set and not _kw_word_set.isdisjoint(_toks):
             return True
+        if _kw_phrases:
+            for _rx, _words in _kw_phrases:
+                # Sound pre-filter: a whole-word phrase can only match if every one of
+                # its word-tokens is present; the regex confirms order/adjacency/exact
+                # separators, so this stays behavior-identical to the per-keyword path.
+                if _words <= _toks and _rx.search(text):
+                    return True
         if _kw_combo is not None and _kw_combo.search(text):
             return True
         if _kw_and:
@@ -5793,7 +5849,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.13.0"
+APP_VERSION = "2.13.1"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
