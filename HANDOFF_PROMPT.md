@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-06-08 · Version: v2.13.0 · Live at: gcgeartracker.com*
+*Generated: 2026-06-12 · Version: v2.13.3 · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -21,7 +21,7 @@ Use this at the start of a new session to bring Claude up to speed instantly.
 
 1. **Never write inline JS** — all JS lives in `static/gc.js` (main app) or `static/newdeals.js` (/newdeals). CSP blocks inline scripts.
 2. **No inline onclick attributes** — use `data-*` attributes + `addEventListener`.
-3. **Git pushes must come from the Mac terminal** — the Cowork sandbox gets a proxy 403 on GitHub pushes. SSH is configured; always use: `git push git@github.com:cboehmig-lab/gc-tracker.git main`
+3. **Git pushes must come from the Mac terminal** — the Cowork sandbox gets a proxy 403 on GitHub pushes. As of v2.13.3, `origin` points at the SSH URL (`git@github.com:cboehmig-lab/gc-tracker.git`), so the normal `git push origin main` works AND keeps the ahead/behind count accurate. (Previously pushes went to the raw SSH URL while `origin` was HTTPS — pushes landed but `origin/main` tracking never updated, causing a phantom "ahead N" forever.)
 4. **Sandbox git lock files**: if `git commit` fails with "cannot lock ref HEAD", the Mac owns the lock. Tell the user: `rm ~/Desktop/gc_tracker/.git/HEAD.lock && rm ~/Desktop/gc_tracker/.git/refs/heads/main.lock` then re-run.
 5. **Version bump**: only change `APP_VERSION` in `gc_tracker_app.py` — the `<!-- __VER__ -->` placeholder in `HTML_TEMPLATE` auto-propagates it everywhere.
 6. **`_require_admin()` / `_require_admin_api()` are NOT decorators** — they return None or a response. Call inline: `denied = _require_admin(); if denied: return denied`. Never use as `@_require_admin`.
@@ -88,10 +88,13 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.13.0 (ready to deploy)
+## Current State: v2.13.3 (deployed)
 
 ### Recent changes (this session)
 
+- **v2.13.3** — Mobile ZIP apply fix: iOS's `inputmode="numeric"` keypad has no Return/Go key, so the ZIP input now auto-applies ZIP Sort when 5 digits are present (covers AutoFill too), with `blur()` on mobile to dismiss the keypad; `enterkeyhint="go"` added for Android. Also fixed the phantom "ahead N" git state (see Critical Rule 3).
+- **v2.13.2** — **ZIP distance filter** (the planned feature — now done). "Within [Any/5/10/25/50/100 mi]" select under the ZIP input, shown only in ZIP Sort mode; filters the store list AND narrows `_selectedStores` (snapshot/restore via `_preRadiusSelection`, same pattern as `_preFavsSelection`) so browse results actually filter. Un-geocoded "(?)" stores excluded by any finite radius; Watch/Want List unaffected (`all_stores:true`); Favorites toggle and saved-search apply reset radius to Any. Not persisted, like the ZIP. Full detail in HANDOFF.md "Recent Changes (v2.13.1 → v2.13.2)".
+- **v2.13.1** — Full-site audit fixes: per-type want-list keyword caps (preserves large lists, bounds wildcard DoS); atomic 53MB cat-cache write (temp + `os.replace`, no more truncation-wipe). See HANDOFF.md + `AUDIT_REPORT_2026-06-12.md`.
 - **v2.13.0** — Want-list fix + `/api/browse` performance overhaul (minor bump; `gc_tracker_app.py` only, no JS, no cache rebuild). (1) **Want lists >50 terms no longer drop matches** — the v2.12.31 `keywords[:50]` DoS cap was silently breaking power users (real cases: 220 and 73 terms). The matcher was rewritten (plain words → set membership; phrases/wildcards → one alternation regex), verified behavior-identical (32K fuzz cases, 0 mismatches), and the cap raised to **750 logged-in / 250 guest** after dedupe. (2) **`_load_cat_cache()` no longer re-parses the 53MB cache on every browse** — memoized by mtime (**~400ms → ~1µs/call**), which also un-serializes concurrent request threads (GIL was held during the parse). (3) Defense-in-depth: `filter_q` token cap (12) + `/api/saved-search-counts` clamp. Full writeup: HANDOFF.md "Recent Changes (v2.12.36 → v2.13.0)".
 - **v2.12.36** — Security posture (not a vuln): added `Cross-Origin-Opener-Policy: same-origin-allow-popups` to every response (scanner credit + cross-window isolation; safe with redirect-based OAuth) and an RFC 9116 `/.well-known/security.txt` (private report channel). Deliberately did NOT add CORP (would break OG-image social previews). Documented the one remaining CSP weakness (`style-src 'unsafe-inline'`) as a future refactor — no longer an active hole after the v2.12.35 escaping.
 - **v2.12.35** — Security: fixed a stored XSS in the Craigslist render path. CL listing fields (title/price/location/url/image) are scraped from a world-writable source and were concatenated into `innerHTML` unescaped in `static/cl.js` and `static/gc.js` (`clRenderResults`). Now HTML-escaped + URL-allowlisted. (CSP `script-src 'self'` blocked script execution, but inline-style overlay phishing was live — Medium.) `newdeals.js` was already escaped.
@@ -119,7 +122,7 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ## Nothing Currently Broken
 
-**v2.13.0 (ready to deploy)** fixes the one bug found this session — want lists over 50 terms silently dropping matches (the v2.12.31 DoS cap was too blunt) — and removes the ~400ms-per-browse cache reparse. Once pushed, no known issues. Admin should hit "↻ Refresh Data" on `/newdeals` to rebuild cache with `is_software` flags if not already done.
+v2.13.0–v2.13.3 all pushed and deployed. No known issues. Still-open recommendations from the 2026-06-12 audit (not bugs): memoize the browse base list by cache mtime, single gunicorn worker instead of Flask dev server, SQLite WAL, back up `gc_users.db` — see `AUDIT_REPORT_2026-06-12.md`. Run `/admin/build-coords` if store coords coverage looks thin (un-geocoded stores are excluded by any ZIP radius).
 
 ---
 
