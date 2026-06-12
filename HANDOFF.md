@@ -1,5 +1,11 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-06-12 · Current version: v2.13.2 (ZIP distance filter, pending push) · Domain: gcgeartracker.com*
+*Last updated: 2026-06-12 · Current version: v2.13.3 (ZIP distance filter + mobile ZIP apply, pending push) · Domain: gcgeartracker.com*
+
+---
+
+## ⭐ Recent Changes (v2.13.2 → v2.13.3) — 2026-06-12 (mobile ZIP apply fix — PENDING PUSH)
+
+**Bug**: on iOS, the ZIP input's `inputmode="numeric"` keypad has **no Return/Go key**, so mobile users couldn't trigger ZIP Sort after typing (the "📍 ZIP Sort" button works but reads as a label). **Fix**: the input listener now auto-applies `applyZipSort()` the moment 5 digits are present (also covers iOS AutoFill), with `blur()` on mobile to dismiss the keypad; added `enterkeyhint="go"` to `#zip-input` for keyboards that do show a key (Android). Desktop Enter unchanged. Files: `static/gc.js`, `gc_tracker_app.py` (attribute + version).
 
 ---
 

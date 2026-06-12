@@ -5367,7 +5367,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div class="zip-sort-row">
         <button id="zip-sort-btn" title="Sort stores by distance from ZIP">📍 ZIP Sort</button>
         <input id="zip-input" type="text" maxlength="5" placeholder="ZIP code…"
-          autocomplete="postal-code" inputmode="numeric"
+          autocomplete="postal-code" inputmode="numeric" enterkeyhint="go"
 >
       </div>
       <div class="zip-radius-row" id="zip-radius-row" style="display:none">
@@ -5860,7 +5860,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.13.2"
+APP_VERSION = "2.13.3"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

@@ -4208,7 +4208,16 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('zip-sort-btn')?.addEventListener('click', toggleZipSort);
   const zipInput = document.getElementById('zip-input');
   if (zipInput) {
-    zipInput.addEventListener('input', function() { this.value = this.value.replace(/\D/g, ''); });
+    zipInput.addEventListener('input', function() {
+      this.value = this.value.replace(/\D/g, '');
+      // iOS's numeric keypad (inputmode="numeric") has no Return/Go key, so
+      // auto-apply as soon as 5 digits are in. On mobile also blur() to
+      // dismiss the keypad. Desktop Enter still works via keydown below.
+      if (this.value.length === 5) {
+        if (_isMobile()) this.blur();
+        applyZipSort();
+      }
+    });
     zipInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') applyZipSort(); });
   }
   document.getElementById('zip-radius-select')?.addEventListener('change', function() {
