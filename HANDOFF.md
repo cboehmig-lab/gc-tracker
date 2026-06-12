@@ -1,7 +1,42 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-06-08 · Current version: v2.13.0 · Status: ready to deploy ✅ · Domain: gcgeartracker.com*
+*Last updated: 2026-06-12 · Current version: v2.13.2 (ZIP distance filter, pending push) · Domain: gcgeartracker.com*
+
+---
+
+## ⭐ Recent Changes (v2.13.1 → v2.13.2) — 2026-06-12 (ZIP distance filter — PENDING PUSH)
+
+**Feature**: When ZIP Sort is active, a "Within [Any / 5 / 10 / 25 / 50 / 100 mi]" `<select>` (`#zip-radius-select` in `.zip-radius-row`, under the ZIP input) filters both the store list AND the active store selection to stores within X miles of the entered ZIP — so browse results actually narrow, not just the visible list. One control covers desktop + mobile (`#gc-left` is the same DOM element in both layouts). Files: `gc_tracker_app.py` (HTML row + version), `static/gc.js`, `static/gc.css`.
+
+**Implementation** (`static/gc.js`, all in the ZIP-sort block ~line 950):
+- `window._zipRadiusMi` (null = Any; **not persisted**, matching the ZIP itself) + `_preRadiusSelection` — a selection snapshot taken before the first narrowing (same pattern as `_preFavsSelection`). Narrowing always recomputes from the snapshot, so widening 5 → 25 re-adds stores; "Any" restores the prior selection exactly.
+- `_applyZipRadius(radius)` — snapshots/narrows `_selectedStores`, then `renderList()`; `updateCount()` auto-triggers `browseCache()` so the browse re-fetches with the narrowed store set. `_clearZipRadius()` — reset to Any + restore selection (ZIP-sort off, Favorites toggle). `_resetZipRadiusState()` — drop radius state *without* touching the selection (saved-search apply, `_restoreFilterState`).
+- `renderList()` adds `.hidden` to out-of-radius rows (Select All / `updateCount` visible-only logic already respect `.hidden`); shows an `.empty-msg` ("No stores within X mi…") when a radius hides everything.
+- Wiring: `change` listener on `#zip-radius-select` in DOMContentLoaded — no inline JS (CSP).
+
+**Decisions / edge handling**:
+- **Un-geocoded stores** (`_storeDistance` → Infinity, the "(?)" rows) are **excluded by any finite radius** — documented in the select's `title` tooltip. Run `/admin/build-coords` after deploy to maximize coords coverage.
+- **Watch/Want List**: unaffected — they send `all_stores: true` and bypass the store selection entirely, so the radius is naturally ignored there. Toggling them off goes through `_restoreFilterState`, which resets the radius to Any.
+- **Favorites**: the favorites and radius snapshots don't compose, so toggling Favorites (either direction) resets the radius to Any first (visible in the select — nothing changes silently).
+- **Saved searches**: applying one takes ownership of the store selection → radius state dropped (`_resetZipRadiusState`).
+- Re-applying ZIP Sort with a new ZIP while a radius is chosen re-narrows from the snapshot using the new distances.
+- Verified: `py_compile` clean; `node --check` clean; radius snapshot logic unit-tested in Node (narrow/tighten/widen/restore/ZIP-off, un-geocoded exclusion — all pass). **Browser smoke test still needed** (CSP console check, mobile sheet).
 
 > **Search syntax note (v2.10.5+):** `filter_strict: true` now means **fuzzy/contains mode** (old behavior). The default (`filter_strict: false`) is whole-word matching. This is the opposite of what v2.10.4 sent — saved searches stored before v2.10.5 that had `filter_strict: true` will behave differently (they'll use fuzzy mode, not strict, which is the safer fallback).
+
+---
+
+## ⭐ Recent Changes (v2.13.0 → v2.13.1) — 2026-06-12 (full-site audit fixes — PENDING PUSH)
+
+A fresh adversarial full-site audit (security + efficiency + logic + data integrity). Security held up — no new exploitable hole. Two real fixes shipped into `gc_tracker_app.py` (bumped `APP_VERSION = "2.13.1"`); **not yet pushed** (push from the Mac). Full write-up: `AUDIT_REPORT_2026-06-12.md`. Pre-edit revert snapshot: `_audit_snapshot_2026-06-12/`.
+
+1. **DoS regression in the v2.13.0 want-list matcher (the headline).** The v2.13.0 caps (750 logged-in / 250 guest) were tuned on the free plain-word *set* path but never benchmarked on the *complex* path. Over the real ~92K cache: **250 wildcard terms = ~8s/browse, 750 = ~27s**, GIL-held, on the public unbounded `/api/browse` → unauthenticated CPU-DoS. The fix is **per-type caps** (a flat "complex" cap would drop real multi-word names like "Big Muff"/"OD-1" and re-create the >50-term bug):
+   - plain words → set, stays at 750/250 (free).
+   - ordinary phrase / hyphenated → exact `\b…\b` regex gated by a **sound required-tokens pre-filter** (all the phrase's word-tokens must be present before the regex runs) → ~free for real lists. Backstop cap **300** (`_PHRASE_KW_CAP`).
+   - wildcard (`*`) / quoted-exact / comma-AND → one alternation/term-list, capped **hard at 30** (`_EXOTIC_KW_CAP`).
+   - Verified **0 mismatches over 80,000 fuzz cases** vs the old matcher; realistic 220-term list benches ~0.35s with nothing dropped; wildcard worst case bounded to ~0.96s. All in `api_browse` (~line 3416).
+2. **Non-atomic 53MB cache write (data loss).** `_save_cat_cache` did `write_text(json.dumps(...))`; a crash/redeploy mid-write left the file truncated, then `_load_cat_cache`'s `json.loads` raised and reset `_cat_cache = {}` → **empty catalog for every user** until the next full scan. Fix: write temp + `os.replace` (atomic), and on a parse failure **keep the last good in-memory cache** instead of blanking it. (`_save_cat_cache` / `_load_cat_cache`, ~line 300.)
+
+**Still open (recommended, not yet done):** browse still rebuilds 91K dicts + ~6–8 full passes per call (~110–230ms, GIL-held) — memoize a base list keyed by cache mtime (the real speed win); run a single `gunicorn` worker instead of the Flask dev server (can't add *workers* — shared globals); enable SQLite WAL; back up `gc_users.db`. See `AUDIT_REPORT_2026-06-12.md`.
 
 ---
 
@@ -624,6 +659,8 @@ After any JS change, open the page, open the browser console, and confirm there 
 ---
 
 ## 🎯 Planned Next Features
+
+- ~~**ZIP distance filter**~~ — **DONE in v2.13.2** (see Recent Changes at top). Original spec kept below for reference. When ZIP Sort is active, add a "Within [distance]" control (Any / 5 / 10 / 25 / 50 / 100 mi) under the ZIP input that filters the store list — and the active store *selection* — to stores within X miles of the entered ZIP. **Highly feasible, mostly client-side (`static/gc.js`):** the machinery already exists — `_geocodeZip()` sets `window._userLat/_userLng` from `api.zippopotam.us` (already in CSP `connect-src`), `_haversine()` + `_storeDistance(name)` are implemented, `window._storeCoords` is loaded from `/api/store-coords`, and `renderList()` (~line 1073) already sorts the store list by distance and renders per-store mileage. The feature = (1) a distance dropdown shown only when `window._zipSortMode` is true (desktop store panel `.left` **and** mobile store bottom-sheet); (2) in `renderList()`, after the existing distance sort, hide stores with `_storeDistance(name) > radius` (add `.hidden`); (3) crucially, narrow `_selectedStores` to in-radius stores so `/api/browse` results actually filter (browse filters by the selected-store set via `getSelected()`). **Gotchas:** stores without coords return `Infinity` (the "(?)" rows) → excluded by any finite radius — run `/admin/build-coords` first to maximize coverage and decide explicit handling; Watch/Want List views force `all_stores:true` and bypass store selection, so the radius must be ignored/cleared there; use the `_preFavsSelection`/`_captureFilterState` snapshot pattern so toggling the radius off restores the prior selection; **no inline JS/onclick** (CSP — use `data-*` + `addEventListener`); persisting the chosen radius is optional (ZIP itself is deliberately not persisted). Likely no backend change required.
 
 - **Additional OAuth providers** (Facebook, Apple): same direct Authorization Code flow as Google — each needs its own `CLIENT_ID`/`CLIENT_SECRET` env vars, a new `/api/auth/<provider>` + callback route, and a `<provider>_id` column in `users`. Authlib is already a dependency.
 - **Account settings page/modal**: allow users to change username or link Google at any time (not just via `/?google_new=1`).

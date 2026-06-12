@@ -96,6 +96,11 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #zip-sort-btn{padding:5px 9px;background:#222;border:1px solid #3a3a3a;border-radius:5px;color:#888;font-size:.78rem;cursor:pointer;white-space:nowrap;transition:all .15s}
 #zip-sort-btn.active{background:#1a2a1a;border-color:#3a6a3a;color:#7bc97b}
 #zip-sort-btn:hover{border-color:#555;color:#bbb}
+.zip-radius-row{display:flex;align-items:center;gap:6px;margin-top:7px}
+.zip-radius-row label{font-size:.78rem;color:#888;white-space:nowrap}
+#zip-radius-select{flex:1;min-width:0;padding:5px 9px;border-radius:5px;background:#252525;border:1px solid #3a3a3a;color:#eee;font-size:.82rem;outline:none;cursor:pointer}
+#zip-radius-select:focus{border-color:#555;box-shadow:0 0 0 2px rgba(255,255,255,.05)}
+#zip-radius-select.zr-active{background:#1a2a1a;border-color:#3a6a3a;color:#7bc97b}
 
 .empty-msg{padding:24px 16px;color:#555;font-size:.85rem;text-align:center}
 #dev-footer{position:fixed;bottom:10px;right:12px;display:flex;flex-direction:row;align-items:center;gap:8px;z-index:50;font-size:.72rem;color:#aaa;white-space:nowrap}

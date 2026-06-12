@@ -950,6 +950,67 @@ function _storeDistance(name) {
   return _haversine(window._userLat, window._userLng, c.lat, c.lng);
 }
 
+// ── ZIP distance radius (v2.13.2) ──────────────────────────────────────────
+// Only meaningful while _zipSortMode is on. null = "Any" (no limit).
+// Like the ZIP itself, deliberately NOT persisted across sessions.
+window._zipRadiusMi = null;
+// Selection snapshot taken just before the first radius narrowing, so widening
+// (5 → 25) re-adds stores and "Any" restores the prior selection exactly
+// (same pattern as _preFavsSelection).
+let _preRadiusSelection = null;
+
+function _updateZipRadiusUI() {
+  const row = document.getElementById('zip-radius-row');
+  if (row) row.style.display = window._zipSortMode ? 'flex' : 'none';
+  const sel = document.getElementById('zip-radius-select');
+  if (sel) {
+    sel.value = window._zipRadiusMi === null ? '' : String(window._zipRadiusMi);
+    sel.classList.toggle('zr-active', window._zipRadiusMi !== null);
+  }
+}
+
+// Apply a radius (miles) or null (Any) to the store list + active selection.
+// Narrowing always starts from the pre-radius snapshot, never the already-
+// narrowed set. Stores without coords (_storeDistance → Infinity, the "(?)"
+// rows) are excluded by any finite radius — run /admin/build-coords to
+// maximize coverage. renderList() → updateCount() re-triggers the browse
+// fetch automatically, so results re-filter without an explicit call.
+function _applyZipRadius(radius) {
+  if (radius !== null) {
+    if (!_preRadiusSelection) _preRadiusSelection = new Set(_selectedStores);
+    window._zipRadiusMi = radius;
+    _selectedStores = new Set([..._preRadiusSelection].filter(n => _storeDistance(n) <= radius));
+  } else {
+    window._zipRadiusMi = null;
+    if (_preRadiusSelection) {
+      _selectedStores = new Set(_preRadiusSelection);
+      _preRadiusSelection = null;
+    }
+  }
+  _updateZipRadiusUI();
+  renderList();
+}
+
+// Reset to "Any" and restore the pre-radius selection, without re-rendering
+// (callers render). Used when ZIP sort turns off or Favorites toggles —
+// the radius snapshot doesn't compose with other selection-swapping flows.
+function _clearZipRadius() {
+  window._zipRadiusMi = null;
+  if (_preRadiusSelection) {
+    _selectedStores = new Set(_preRadiusSelection);
+    _preRadiusSelection = null;
+  }
+  _updateZipRadiusUI();
+}
+
+// Drop radius state WITHOUT touching _selectedStores — used when another flow
+// (saved search apply, special-view restore) takes ownership of the selection.
+function _resetZipRadiusState() {
+  window._zipRadiusMi = null;
+  _preRadiusSelection = null;
+  _updateZipRadiusUI();
+}
+
 function _setZipStatus(msg, active) {
   const inp = document.getElementById('zip-input');
   const btn = document.getElementById('zip-sort-btn');
@@ -1000,7 +1061,14 @@ async function applyZipSort() {
   // (ZIP sort state is not persisted — cleared on page load)
   document.getElementById('zip-sort-btn').classList.add('active');
   document.getElementById('zip-sort-btn').textContent = '↕ A-Z Sort';
-  renderList();
+  if (window._zipRadiusMi !== null) {
+    // Re-applying with a (possibly new) ZIP while a radius is chosen:
+    // re-narrow from the snapshot using the new ZIP's distances.
+    _applyZipRadius(window._zipRadiusMi);
+  } else {
+    _updateZipRadiusUI();
+    renderList();
+  }
 }
 
 function toggleZipSort() {
@@ -1010,6 +1078,7 @@ function toggleZipSort() {
     // (not persisted)
     document.getElementById('zip-sort-btn').classList.remove('active');
     document.getElementById('zip-sort-btn').textContent = '📍 ZIP Sort';
+    _clearZipRadius();  // restore pre-radius selection, hide the radius row
     renderList();
   } else {
     applyZipSort();
@@ -1032,6 +1101,11 @@ function _getCheckedStores() {
 }
 
 function toggleFavsFilter() {
+  // ZIP radius and favorites both snapshot/swap _selectedStores; the two
+  // snapshots don't compose. Reset radius to "Any" (restoring the pre-radius
+  // selection) before the favorites swap in either direction — the select
+  // visibly shows "Any distance" so nothing changes silently.
+  if (window._zipRadiusMi !== null) _clearZipRadius();
   favsOnly = !favsOnly;
   const btn = document.getElementById('favs-btn');
   btn.classList.toggle('active', favsOnly);
@@ -1093,6 +1167,11 @@ function renderList() {
 
   el.innerHTML = '';
   el.scrollTop = 0;
+  // ZIP radius active? Rows beyond the radius get .hidden (Select All and
+  // updateCount's visible-only logic already respect .hidden). Un-geocoded
+  // stores (dist === Infinity, the "(?)" rows) are excluded by any radius.
+  const radiusOn = window._zipSortMode && window._userLat && window._zipRadiusMi !== null;
+  let visibleCount = 0;
   filtered.forEach(name => {
     const isFav = favorites.includes(name);
     const dist  = (window._zipSortMode && window._userLat) ? _storeDistance(name) : null;
@@ -1100,8 +1179,10 @@ function renderList() {
     const distSuffix = dist !== null && dist !== Infinity
       ? ` <span class="store-dist-inline">(${dist.toLocaleString()} mi)</span>`
       : (window._zipSortMode ? ' <span class="store-dist-inline">(?)</span>' : '');
+    const outOfRadius = radiusOn && (dist === Infinity || dist > window._zipRadiusMi);
+    if (!outOfRadius) visibleCount++;
     const div   = document.createElement('div');
-    div.className = 'store-row';
+    div.className = 'store-row' + (outOfRadius ? ' hidden' : '');
     div.dataset.name = name;
     const id = 'cb_' + name.replace(/[^a-zA-Z0-9]/g,'_');
     const isChecked = _selectedStores.has(name);
@@ -1117,6 +1198,12 @@ function renderList() {
     });
     el.appendChild(div);
   });
+  if (radiusOn && visibleCount === 0) {
+    const msg = document.createElement('div');
+    msg.className = 'empty-msg';
+    msg.innerHTML = 'No stores within ' + window._zipRadiusMi + ' mi of that ZIP.<br>Try a larger radius.';
+    el.appendChild(msg);
+  }
   updateCount();
 }
 
@@ -1200,7 +1287,10 @@ function _restoreFilterState() {
   const state = _preSpecialViewState;
   if (!state) return;
   _preSpecialViewState = null;
-  // Restore stores
+  // Restore stores. The snapshot owns the selection from here — reset any ZIP
+  // radius to "Any" (without touching the selection) so the restored set
+  // isn't visually hidden or re-narrowed by stale radius state.
+  _resetZipRadiusState();
   _selectedStores = new Set(state.selectedStores);
   _srvStores = state.srvStores;
   renderList();
@@ -2076,6 +2166,9 @@ function _applySavedSearch(id) {
   if (!ss) return;
   // Save current state before applying so the "← Back" button can restore it
   _preSpecialViewState = _captureFilterState();
+  // The saved search takes ownership of the store selection — drop any ZIP
+  // radius narrowing state so a stale snapshot can't restore wrong stores later.
+  _resetZipRadiusState();
   _closeSavedSearchesDropdown();
   const f = ss.filters || {};
   // Restore filter state
@@ -4118,6 +4211,9 @@ document.addEventListener('DOMContentLoaded', function() {
     zipInput.addEventListener('input', function() { this.value = this.value.replace(/\D/g, ''); });
     zipInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') applyZipSort(); });
   }
+  document.getElementById('zip-radius-select')?.addEventListener('change', function() {
+    _applyZipRadius(this.value === '' ? null : parseInt(this.value, 10));
+  });
 
   // Status bar
   document.getElementById('check-now-btn')?.addEventListener('click', runTracker);

@@ -5370,6 +5370,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           autocomplete="postal-code" inputmode="numeric"
 >
       </div>
+      <div class="zip-radius-row" id="zip-radius-row" style="display:none">
+        <label for="zip-radius-select">Within</label>
+        <select id="zip-radius-select" title="Only show and search stores within this distance of your ZIP. Stores without a map location — the (?) rows — are excluded by any distance limit.">
+          <option value="">Any distance</option>
+          <option value="5">5 mi</option>
+          <option value="10">10 mi</option>
+          <option value="25">25 mi</option>
+          <option value="50">50 mi</option>
+          <option value="100">100 mi</option>
+        </select>
+      </div>
     </div>
 
     <div id="store-list"></div>
@@ -5849,7 +5860,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.13.1"
+APP_VERSION = "2.13.2"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
