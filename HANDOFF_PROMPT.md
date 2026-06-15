@@ -88,7 +88,7 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.14.0 (built locally — push from the Mac to deploy)
+## Current State: v2.14.0 (deployed)
 
 ### Recent changes (this session)
 

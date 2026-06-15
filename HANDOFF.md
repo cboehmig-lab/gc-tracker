@@ -1,9 +1,9 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-06-15 · Current version: v2.14.0 (Vintage filter, pending push) · Domain: gcgeartracker.com*
+*Last updated: 2026-06-15 · Current version: v2.14.0 (Vintage filter, deployed) · Domain: gcgeartracker.com*
 
 ---
 
-## ⭐ Recent Changes (v2.13.3 → v2.14.0) — 2026-06-15 (Vintage filter — PENDING PUSH)
+## ⭐ Recent Changes (v2.13.3 → v2.14.0) — 2026-06-15 (Vintage filter — DEPLOYED, scan run, confirmed working)
 
 **Feature**: a "🎸 Vintage" quick-filter chip (right of Price Drops) that shows only gear GC classifies as vintage.
 
