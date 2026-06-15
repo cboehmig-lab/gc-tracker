@@ -3272,6 +3272,48 @@ def api_saved_search_counts():
     return jsonify({"counts": counts})
 
 
+# ── Algolia key health check ────────────────────────────────────────────────
+# The Algolia search key is the single point of failure for scans: if GC ever
+# rotates it, scans start returning 401/403 and silently stop finding inventory.
+# This endpoint runs the same used-inventory query the scanner uses (hitsPerPage:0)
+# so an external monitor can catch a dead key / schema drift within a day. Result
+# is cached ~15 min so it can't be hammered to burn GC's Algolia quota
+# (≤ ~96 real probes/day no matter how often it's hit). Public, returns no secret.
+_ALGOLIA_HEALTH = {"ts": 0.0, "result": None}
+_ALGOLIA_HEALTH_TTL = 900  # seconds
+
+@app.route("/api/health/algolia")
+def api_health_algolia():
+    import time as _t
+    now = _t.time()
+    cached = _ALGOLIA_HEALTH["result"]
+    if cached is not None and (now - _ALGOLIA_HEALTH["ts"]) < _ALGOLIA_HEALTH_TTL:
+        return jsonify(dict(cached, cached=True))
+    result = {
+        "ok": False, "nbHits": 0, "http_status": None,
+        "checked_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "cached": False,
+    }
+    try:
+        payload = {"requests": [{
+            "indexName":    ALGOLIA_INDEX,
+            "facetFilters": ["condition.lvl0:Used"],
+            "hitsPerPage":  0,
+            "page":         0,
+            "query":        "",
+        }]}
+        r = _http.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=15)
+        result["http_status"] = r.status_code
+        if r.status_code == 200:
+            result["nbHits"] = (r.json().get("results") or [{}])[0].get("nbHits", 0)
+            result["ok"] = result["nbHits"] > 0
+    except Exception as e:
+        result["error"] = type(e).__name__
+    _ALGOLIA_HEALTH["ts"] = now
+    _ALGOLIA_HEALTH["result"] = result
+    return jsonify(result)
+
+
 @app.route("/api/browse", methods=["POST"])
 @optional_user_context
 def api_browse():
@@ -5871,7 +5913,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.14.0"
+APP_VERSION = "2.14.1"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

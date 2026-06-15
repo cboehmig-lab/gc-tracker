@@ -1,5 +1,15 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-06-15 · Current version: v2.14.0 (Vintage filter, deployed) · Domain: gcgeartracker.com*
+*Last updated: 2026-06-15 · Current version: v2.14.1 (Algolia health endpoint, pending push) · Domain: gcgeartracker.com*
+
+---
+
+## ⭐ Recent Changes (v2.14.0 → v2.14.1) — 2026-06-15 (Algolia key health endpoint — PENDING PUSH)
+
+**Why**: the GC Algolia search key is the single point of failure for scans — it's an intentional public search-only key (Algolia's model requires it in the client), but GC can still rotate it, and when I probed live this session GC's browse pages render server-side (no client Algolia calls), so a rotated key may not be easy to re-grab from the network tab. If it rotates, scans 401/403 and silently stop finding inventory. This adds early detection.
+
+- **`GET /api/health/algolia`** (new, `gc_tracker_app.py`, just above `/api/browse`): runs the scanner's used-inventory query at `hitsPerPage:0` and returns `{ok, nbHits, http_status, checked_at, cached}`. `ok = (status 200 and nbHits > 0)`. Result cached ~15 min (`_ALGOLIA_HEALTH`, TTL 900s) so it can't be hammered to burn GC's Algolia quota (≤ ~96 real probes/day regardless of hit rate). Public, returns no secret.
+- **Daily monitor**: Cowork scheduled task `gc-algolia-key-health` (08:00 local) fetches that endpoint and alerts on 401/403 (key dead), nbHits 0 (schema drift, e.g. the `condition.lvl0:"Used"` facet changing), unusually low count, or unreachable. Stored at `~/Documents/Claude/Scheduled/gc-algolia-key-health/`.
+- No JS, no cache rebuild — just push + deploy. The monitor reports "not deployed yet" until the endpoint is live.
 
 ---
 

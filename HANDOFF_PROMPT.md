@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-06-15 · Version: v2.14.0 · Live at: gcgeartracker.com*
+*Generated: 2026-06-15 · Version: v2.14.1 · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,10 +88,11 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.14.0 (deployed)
+## Current State: v2.14.1 (health endpoint pending push; v2.14.0 Vintage filter live)
 
 ### Recent changes (this session)
 
+- **v2.14.1** — **Algolia key health endpoint** (`GET /api/health/algolia`) + daily Cowork monitor (`gc-algolia-key-health`, 08:00 local). The GC Algolia search key is the single point of failure for scans (rotation → 401/403 → silent scan death). The endpoint runs the scanner's used query at `hitsPerPage:0`, returns `{ok, nbHits, http_status}`, cached ~15 min (≤ ~96 probes/day — no quota abuse, public, no secret leaked). Monitor alerts on key death / 0 results / unreachable. Pending push.
 - **v2.14.0** — **Vintage filter** (new feature). "🎸 Vintage" quick-filter chip (right of Price Drops) showing only gear GC classifies as vintage. Uses GC's own authoritative signal — the raw Algolia hit's **`premiumGear == "Vintage"`** field (~2,127 used items) — captured at scan time as a per-item `is_vintage` flag (the `is_software` pattern). `/api/browse` takes a `vintage_only` boolean → `_apply_base()` keeps `is_vintage` items (plain boolean, no regex/DoS surface). The chip is a **composable** content filter like Price Drops: respects store selection, folded into `_captureFilterState`/`_restoreFilterState` + saved searches; it is NOT a Watch/Want-style nationwide takeover. Verified cleaner than a title heuristic — `premiumGear` excludes the modern "Fender American Vintage"/"American Vintage II" reissues, Vintage Reissue amps, and the modern "Vintage" brand (overlap 0–3 items) while keeping genuine vintage; the `name.startswith("Vintage")` heuristic carried ~128 false positives. ⚠️ The cache has no `is_vintage` until the **first scan after deploy** — the chip is empty until then (same caveat as the v2.12.24 software-flag rollout). Algolia findings documented by `probe_vintage*.py` (gitignored).
 - **v2.13.3** — Mobile ZIP apply fix: iOS's `inputmode="numeric"` keypad has no Return/Go key, so the ZIP input now auto-applies ZIP Sort when 5 digits are present (covers AutoFill too), with `blur()` on mobile to dismiss the keypad; `enterkeyhint="go"` added for Android. Also fixed the phantom "ahead N" git state (see Critical Rule 3).
 - **v2.13.2** — **ZIP distance filter** (the planned feature — now done). "Within [Any/5/10/25/50/100 mi]" select under the ZIP input, shown only in ZIP Sort mode; filters the store list AND narrows `_selectedStores` (snapshot/restore via `_preRadiusSelection`, same pattern as `_preFavsSelection`) so browse results actually filter. Un-geocoded "(?)" stores excluded by any finite radius; Watch/Want List unaffected (`all_stores:true`); Favorites toggle and saved-search apply reset radius to Any. Not persisted, like the ZIP. Full detail in HANDOFF.md "Recent Changes (v2.13.1 → v2.13.2)".
