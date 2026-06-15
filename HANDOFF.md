@@ -1,5 +1,24 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-06-12 · Current version: v2.13.3 (ZIP distance filter + mobile ZIP apply, pending push) · Domain: gcgeartracker.com*
+*Last updated: 2026-06-15 · Current version: v2.14.0 (Vintage filter, pending push) · Domain: gcgeartracker.com*
+
+---
+
+## ⭐ Recent Changes (v2.13.3 → v2.14.0) — 2026-06-15 (Vintage filter — PENDING PUSH)
+
+**Feature**: a "🎸 Vintage" quick-filter chip (right of Price Drops) that shows only gear GC classifies as vintage.
+
+**The signal — GC's own `premiumGear` field.** The raw Algolia hit carries `premiumGear`, which GC sets to `"Vintage"` on genuine vintage items (~2,127 in the used set; the signal behind the public `/Vintage` department, `N=1077`). We previously discarded it. Vintage items still have `condition.lvl0 == "Used"`, so they already arrive through the existing `condition.lvl0:Used` + `categoryPageIds:Used` scan — we just now store the flag. Confirmed clean against the reissue traps: `premiumGear:Vintage` overlaps "Fender American Vintage" only 3/202, "American Vintage II" 0/146, "Vintage Reissue Amplifiers" 0/30, modern brand `Vintage` 0/36 — while keeping genuine vintage (e.g. Fender Vintage Stratocasters 103/103). A `name.startswith("Vintage")` title heuristic carried ~128 false positives by contrast. (Investigation scripts: `probe_vintage.py` / `probe_vintage2.py`, gitignored.)
+
+**Implementation:**
+- **Scan** (`parse_products`, ~L956): `is_vintage = (premiumGear == "Vintage")` (list-tolerant) stored on each product; persisted in the authoritative cache write in `_run` (~L4964). Mirrors the `is_software` pattern.
+- **Browse** (`/api/browse`): new `vintage_only` body flag → `_apply_base()` keeps `i.get("is_vintage")`. Plain boolean predicate — no per-keyword regex, so it adds no DoS surface (cf. v2.12.31 / v2.13.1).
+- **Chip** (`static/gc.js` + `HTML_TEMPLATE`): `#vintage-toggle`, classes `qf-chip`/`wl-active`, wired exactly like `togglePriceDropFilter` — a **composable** content filter. Respects store selection (does NOT set `all_stores`), composes with brand/cond/cat/price/search, is captured/restored via `_captureFilterState`/`_restoreFilterState` (so Watch/Want/Saved-Search reset it and restore it on toggle-off), and rides `_getBrowseFilters()` so saved searches persist it. Listener registered alongside the other quick-filter chips.
+
+**⚠️ Cache rebuild required**: the live `gc_category_cache.json` predates the flag, so the Vintage chip returns nothing until the **first scan after deploy** repopulates `is_vintage`. Same operational caveat as the v2.12.24 software-flag change.
+
+**Decision (asked the user)**: Vintage respects the current store selection rather than going nationwide like Watch/Want — vintage is rare (~2,127 across ~150 stores) so local-store users may see few/zero, but this keeps it a consistent, composable filter.
+
+Files: `gc_tracker_app.py` (scan capture, cache write, browse param + predicate, chip markup, `APP_VERSION`), `static/gc.js` (chip state + wiring), `.gitignore` (probe scripts).
 
 ---
 

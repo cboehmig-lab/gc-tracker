@@ -953,6 +953,10 @@ def parse_products(data, store_name: str = None) -> list[dict]:
                 store = store_name or (hit_stores[0] if hit_stores else "")
                 # Image ID for thumbnail hover
                 image_id = hit.get("imageId") or ""
+                # GC's own vintage classification (premiumGear == "Vintage") — the
+                # signal behind the public /Vintage dept. List-tolerant just in case.
+                _pg = hit.get("premiumGear")
+                is_vintage = (_pg == "Vintage") or (isinstance(_pg, list) and "Vintage" in _pg)
                 products.append({
                     "id":             sku,
                     "name":           name,
@@ -968,6 +972,7 @@ def parse_products(data, store_name: str = None) -> list[dict]:
                     "subcategory":    subcategory,
                     "date_listed":    date_str,
                     "image_id":       image_id,
+                    "is_vintage":     is_vintage,
                 })
         except Exception:
             pass
@@ -3303,6 +3308,7 @@ def api_browse():
     f_watched = bool(data.get("filter_watched"))
     f_want_only = bool(data.get("filter_want_list_only"))
     f_price_drop_only = bool(data.get("filter_price_drop_only"))
+    f_vintage_only = bool(data.get("vintage_only"))
     f_strict = bool(data.get("filter_strict"))
     def _to_float(v):
         try: return float(v) if v is not None and v != '' else None
@@ -3544,6 +3550,7 @@ def api_browse():
             "date":             _fmt_date(date_raw),
             "date_raw":         date_raw,
             "image_id":         cached.get("image_id", ""),
+            "is_vintage":       bool(cached.get("is_vintage")),
             "watched":          sku in wl_ids,
             "isNew":            sku in new_ids,
             "kwMatch":          kw_hit,
@@ -3573,6 +3580,7 @@ def api_browse():
                 ((i["name"] or "") + " " + (i["brand"] or "")).lower(), fq_terms)]
         if f_want_only:       r = [i for i in r if i["kwMatch"]]
         if f_price_drop_only: r = [i for i in r if i.get("price_drop", 0) > 0]
+        if f_vintage_only:    r = [i for i in r if i.get("is_vintage")]
         if f_watched:         r = [i for i in r if i["watched"]]
         if f_price_min is not None:
             r = [i for i in r if (i.get("price_raw") or 0) >= f_price_min]
@@ -4954,6 +4962,8 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                 "available":         True,
                 "date_listed":       p.get("date_listed") or cached.get("date_listed", ""),
                 "image_id":          p.get("image_id") or cached.get("image_id", ""),
+                # GC vintage flag (premiumGear=="Vintage"), captured at scan time
+                "is_vintage":        bool(p.get("is_vintage", cached.get("is_vintage", False))),
                 # first_seen: when our system first encountered this item
                 "first_seen":        cached.get("first_seen", run_time),
             }
@@ -5406,6 +5416,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <button id="view-toggle-chip"       class="qf-chip view-toggle-chip-btn" title="Switch list / card view">☰</button>
         <button id="desktop-thumb-toggle" class="qf-chip" title="Show thumbnail grid view">⊞</button>
         <button id="price-drop-toggle" class="qf-chip">↓ Price Drops</button>
+        <button id="vintage-toggle" class="qf-chip" title="Show only genuine vintage gear (GC's own classification)">🎸 Vintage</button>
         <div id="ss-wrap" style="display:none;position:relative">
           <button id="saved-searches-btn" class="qf-chip" title="Your saved filter combinations">🔖 Saved Searches</button>
         </div>
@@ -5860,7 +5871,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.13.3"
+APP_VERSION = "2.14.0"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

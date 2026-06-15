@@ -193,6 +193,7 @@ function _updateFilterDot() {
     (window._selectedSubs && window._selectedSubs.length) ||
     _watchFilterActive ||
     _priceDropFilterActive ||
+    _vintageFilterActive ||
     window._priceMin !== null ||
     window._priceMax !== null ||
     (document.getElementById('res-search').value.trim().length > 0);
@@ -238,7 +239,7 @@ function _updateMobileBottomBar() {
     (window._selectedConds && window._selectedConds.length) ||
     (window._selectedCats && window._selectedCats.length) ||
     (window._selectedSubs && window._selectedSubs.length) ||
-    _watchFilterActive || _priceDropFilterActive ||
+    _watchFilterActive || _priceDropFilterActive || _vintageFilterActive ||
     (document.getElementById('res-search')?.value.trim().length > 0);
   const dot = document.getElementById('mbb-filter-dot');
   if (dot) dot.classList.toggle('visible', !!hasFilters);
@@ -1249,6 +1250,7 @@ let _browseTimer = null;
 let _skipBrowse = false;  // Set after a scan to prevent browseCache from overwriting results
 let _watchFilterActive = false;
 let _priceDropFilterActive = false;
+let _vintageFilterActive = false;
 window._priceMin = null;   // null = no filter; number = active min price
 window._priceMax = null;   // null = no filter; number = active max price
 let _priceTimer = null;
@@ -1275,6 +1277,7 @@ function _captureFilterState() {
     strictSearch:   window._strictSearch || false,
     watchActive:    _watchFilterActive,
     priceDropActive:_priceDropFilterActive,
+    vintageActive:  _vintageFilterActive,
     wantListActive: _wantListSearchActive,
     globalActive:   _globalSearchActive,
     globalQuery:    _globalSearchQuery,
@@ -1302,6 +1305,9 @@ function _restoreFilterState() {
   _priceDropFilterActive = state.priceDropActive;
   const pdBtn = document.getElementById('price-drop-toggle');
   if (pdBtn) pdBtn.classList.toggle('wl-active', _priceDropFilterActive);
+  _vintageFilterActive = state.vintageActive;
+  const vnBtn = document.getElementById('vintage-toggle');
+  if (vnBtn) vnBtn.classList.toggle('wl-active', _vintageFilterActive);
   // Restore want list state
   _wantListSearchActive = state.wantListActive;
   _globalSearchActive   = state.globalActive;
@@ -1396,6 +1402,7 @@ function _getBrowseFilters() {
     filter_subcategories:  window._selectedSubs || [],
     filter_watched:         _watchFilterActive,
     filter_price_drop_only: _priceDropFilterActive,
+    vintage_only:           _vintageFilterActive,
     filter_strict:          window._strictSearch || false,
     filter_price_min:       window._priceMin,
     filter_price_max:       window._priceMax,
@@ -1468,6 +1475,7 @@ async function _fetchBrowsePage(page) {
       (filters.filter_subcategories && filters.filter_subcategories.length) ||
       filters.filter_watched ||
       filters.filter_price_drop_only ||
+      filters.vintage_only ||
       filters.filter_price_min != null ||
       filters.filter_price_max != null ||
       _wantListSearchActive;
@@ -1484,6 +1492,10 @@ async function _fetchBrowsePage(page) {
       document.getElementById('res-title').textContent = _srvTotalCount > 0
         ? `↓ Price Drops — ${_srvTotalCount.toLocaleString()} item${_srvTotalCount !== 1 ? 's' : ''}`
         : 'No price drops found in selected stores';
+    } else if (_vintageFilterActive) {
+      document.getElementById('res-title').textContent = _srvTotalCount > 0
+        ? `🎸 Vintage — ${_srvTotalCount.toLocaleString()} item${_srvTotalCount !== 1 ? 's' : ''}`
+        : 'No vintage gear found in selected stores';
     } else if (_watchFilterActive) {
       document.getElementById('res-title').textContent = _srvTotalCount > 0
         ? `Watch List — ${_srvTotalCount.toLocaleString()} item${_srvTotalCount !== 1 ? 's' : ''} nationwide`
@@ -1517,7 +1529,7 @@ async function _fetchBrowsePage(page) {
       countEl.textContent = '';
     }
     const clearBtn = document.getElementById('clear-filters-btn');
-    if (clearBtn) clearBtn.style.display = (filters.filter_q || (filters.filter_brands && filters.filter_brands.length) || (filters.filter_conditions && filters.filter_conditions.length) || (filters.filter_categories && filters.filter_categories.length) || (filters.filter_subcategories && filters.filter_subcategories.length) || filters.filter_strict || filters.filter_price_drop_only || filters.filter_watched) ? '' : 'none';
+    if (clearBtn) clearBtn.style.display = (filters.filter_q || (filters.filter_brands && filters.filter_brands.length) || (filters.filter_conditions && filters.filter_conditions.length) || (filters.filter_categories && filters.filter_categories.length) || (filters.filter_subcategories && filters.filter_subcategories.length) || filters.filter_strict || filters.filter_price_drop_only || filters.filter_watched || filters.vintage_only) ? '' : 'none';
 
     // Populate filter dropdowns from server-provided options
     _populateFiltersFromServer(d.brands || [], d.conditions || [], d.categories || [], d.subcategories || [], filters);
@@ -1979,6 +1991,11 @@ function toggleWatchFilter() {
       const pdBtn = document.getElementById('price-drop-toggle');
       if (pdBtn) pdBtn.classList.remove('wl-active');
     }
+    if (_vintageFilterActive) {
+      _vintageFilterActive = false;
+      const vnBtn = document.getElementById('vintage-toggle');
+      if (vnBtn) vnBtn.classList.remove('wl-active');
+    }
     _watchFilterActive = true;
     btn.classList.add('wl-active');
   } else {
@@ -2003,6 +2020,16 @@ function togglePriceDropFilter() {
   _priceDropFilterActive = !_priceDropFilterActive;
   const btn = document.getElementById('price-drop-toggle');
   btn.classList.toggle('wl-active', _priceDropFilterActive);
+  _updateFilterDot();
+  _srvPage = 1;
+  _srvLoading = false;  // cancel any in-flight request so the toggle always lands
+  _fetchBrowsePage(1);
+}
+
+function toggleVintageFilter() {
+  _vintageFilterActive = !_vintageFilterActive;
+  const btn = document.getElementById('vintage-toggle');
+  btn.classList.toggle('wl-active', _vintageFilterActive);
   _updateFilterDot();
   _srvPage = 1;
   _srvLoading = false;  // cancel any in-flight request so the toggle always lands
@@ -2040,6 +2067,7 @@ function _updateSaveSearchBtn() {
     (f.filter_categories    && f.filter_categories.length)    ||
     (f.filter_subcategories && f.filter_subcategories.length) ||
     f.filter_price_drop_only ||
+    f.vintage_only ||
     f.filter_price_min !== null ||
     f.filter_price_max !== null;
   const showSave  = !!(window._authUser && hasAny);
@@ -2204,6 +2232,9 @@ function _applySavedSearch(id) {
   _priceDropFilterActive = !!f.filter_price_drop_only;
   const pdBtn = document.getElementById('price-drop-toggle');
   if (pdBtn) pdBtn.classList.toggle('wl-active', _priceDropFilterActive);
+  _vintageFilterActive = !!f.vintage_only;
+  const vnBtn = document.getElementById('vintage-toggle');
+  if (vnBtn) vnBtn.classList.toggle('wl-active', _vintageFilterActive);
   // Restore price range
   window._priceMin = (f.filter_price_min !== undefined && f.filter_price_min !== null) ? f.filter_price_min : null;
   window._priceMax = (f.filter_price_max !== undefined && f.filter_price_max !== null) ? f.filter_price_max : null;
@@ -2490,6 +2521,8 @@ function searchWantList() {
   document.getElementById('watchlist-toggle').classList.remove('wl-active');
   _priceDropFilterActive = false;
   document.getElementById('price-drop-toggle').classList.remove('wl-active');
+  _vintageFilterActive = false;
+  document.getElementById('vintage-toggle').classList.remove('wl-active');
   document.getElementById('want-list-toggle').classList.add('wl-active');
   _updateWantListCount();
   _srvLoading = false;  // cancel any in-flight request so the toggle always lands
@@ -3593,6 +3626,10 @@ function clearFilters() {
     _priceDropFilterActive = false;
     document.getElementById('price-drop-toggle').classList.remove('wl-active');
   }
+  if (_vintageFilterActive) {
+    _vintageFilterActive = false;
+    document.getElementById('vintage-toggle').classList.remove('wl-active');
+  }
   if (_wantListSearchActive) {
     _wantListSearchActive = false;
     document.getElementById('want-list-toggle').classList.remove('wl-active');
@@ -4231,6 +4268,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // Quick filter chips
   document.getElementById('price-drop-toggle')?.addEventListener('click', togglePriceDropFilter);
+  document.getElementById('vintage-toggle')?.addEventListener('click', toggleVintageFilter);
   document.getElementById('saved-searches-btn')?.addEventListener('click', _toggleSavedSearchesDropdown);
   document.getElementById('watchlist-toggle')?.addEventListener('click', toggleWatchFilter);
   document.getElementById('want-list-toggle')?.addEventListener('click', searchWantList);

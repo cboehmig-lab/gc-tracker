@@ -15,6 +15,10 @@ __pycache__/
 analyze_listings.py
 probe_geoloc.py
 seed_coords.py
+probe_vintage.py
+probe_vintage2.py
+vintage_probe_output.json
+vintage_probe2_output.json
 
 # OS files
 .DS_Store
