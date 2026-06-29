@@ -1640,8 +1640,8 @@ function _buildRowHtml(item) {
     `<td>${nameCell}${soldBadge}</td>` +
     (_isMobile() ? priceCell + brandCell : brandCell + priceCell) +
     `<td>${esc(item.condition)}</td>` +
-    `<td>${esc(item.category)}</td>` +
-    `<td>${esc(item.subcategory)}</td>` +
+    `<td title="${esc(item.category)}">${esc(item.category)}</td>` +
+    `<td title="${esc(item.subcategory)}">${esc(item.subcategory)}</td>` +
     `<td>${esc(item.date||'')}</td>` +
     `<td>${esc(item.store||item.location)}</td>` +
     `</tr>`;
@@ -3201,11 +3201,29 @@ function _closeAllDropdowns() {
   _closePriceDropdown();
 }
 
+// Position a fixed-position dropdown panel just under its button, clamped to the
+// viewport's right edge. Fixed positioning lets the panel escape the
+// #results-top-bar stacking context (z-index:2) so it paints above the sticky
+// paginator (z-index:5) — same pattern the Price/Saved-Search dropdowns use.
+function _positionFixedPanel(panel, btn) {
+  if (!panel || !btn) return;
+  const rect = btn.getBoundingClientRect();
+  panel.style.top  = (rect.bottom + 4) + 'px';
+  panel.style.left = rect.left + 'px';
+  requestAnimationFrame(function() {
+    const pRect = panel.getBoundingClientRect();
+    if (pRect.right > window.innerWidth - 8) {
+      panel.style.left = Math.max(8, window.innerWidth - pRect.width - 8) + 'px';
+    }
+  });
+}
+
 function toggleBrandDropdown() {
   const panel = document.getElementById('brand-dd-panel');
   if (panel.style.display === 'none') {
     _closeAllDropdowns();
-    panel.style.display = '';
+    _positionFixedPanel(panel, document.getElementById('brand-dd-btn'));
+    panel.style.display = 'block';
     document.getElementById('brand-dd-search').value = '';
     _renderBrandList();
     document.getElementById('brand-dd-search').focus();
@@ -3293,7 +3311,8 @@ function toggleCondDropdown() {
   const panel = document.getElementById('cond-dd-panel');
   if (panel.style.display === 'none') {
     _closeAllDropdowns();
-    panel.style.display = '';
+    _positionFixedPanel(panel, document.getElementById('cond-dd-btn'));
+    panel.style.display = 'block';
     _renderCondList();
     setTimeout(() => document.addEventListener('click', _closeCondOnOutside, true), 0);
   } else {
@@ -3433,7 +3452,8 @@ function toggleCatDropdown() {
   const panel = document.getElementById('cat-dd-panel');
   if (panel.style.display === 'none') {
     _closeAllDropdowns();
-    panel.style.display = '';
+    _positionFixedPanel(panel, document.getElementById('cat-dd-btn'));
+    panel.style.display = 'block';
     _renderCatList();
     setTimeout(() => document.addEventListener('click', _closeCatOnOutside, true), 0);
   } else { _closeCatDropdown(); }
@@ -3497,7 +3517,8 @@ function toggleSubcatDropdown() {
   const panel = document.getElementById('subcat-dd-panel');
   if (panel.style.display === 'none') {
     _closeAllDropdowns();
-    panel.style.display = '';
+    _positionFixedPanel(panel, document.getElementById('subcat-dd-btn'));
+    panel.style.display = 'block';
     _renderSubList();
     setTimeout(() => document.addEventListener('click', _closeSubOnOutside, true), 0);
   } else { _closeSubDropdown(); }

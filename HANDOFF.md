@@ -1,5 +1,19 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-06-15 · Current version: v2.14.1 (Algolia health endpoint, pending push) · Domain: gcgeartracker.com*
+*Last updated: 2026-06-29 · Current version: v2.14.2 (dropdown/paginator fix, "(none)" brand, category truncation — pending push) · Domain: gcgeartracker.com*
+
+---
+
+## ⭐ Recent Changes (v2.14.1 → v2.14.2) — 2026-06-29 (three user-reported fixes — PENDING PUSH)
+
+Three fixes from a user (Discord). No cache rebuild, no new endpoints. Files: `gc_tracker_app.py`, `static/gc.js`, `static/gc.css`.
+
+**1. Filter dropdowns were painted over by the paginator (stacking-context bug).** The Brand/Condition/Category/Subcategory panels were `position:absolute; z-index:50` nested inside `#results-top-bar` (`position:sticky; z-index:2`), which creates a stacking context — so their `z-index:50` only ranked them against siblings *inside* the top bar, not against the sticky `.paginator` (`z-index:5`, opaque `#111`) one level up in `#res-panel`. With a short result set (≲5 items) the bottom-sticky paginator rides up under the table, into the open dropdown, and covers its lower entries. **Fix**: the four panels are now `position:fixed; z-index:500` (matching the already-correct Price + Saved-Search panels), positioned on open by a new `_positionFixedPanel(panel, btn)` helper in `gc.js` (`getBoundingClientRect` → top/left + a `requestAnimationFrame` right-edge clamp). Fixed positioning escapes the top-bar stacking context so they paint above the paginator. Desktop-only — these panels are `display:none` on mobile (accordion replaces them). Did NOT touch the paginator (its opaque bg intentionally "seals the bottom" as rows scroll under).
+
+**2. Brandless items are now filterable via a synthetic "(none)" brand.** ~108 used items (e.g. pedals) have `brand == ""`. The facet builder skipped empties and the brand filter is a membership test, so they were unreachable by brand filter (only findable via show-all + sort-by-brand). Added module constant `NO_BRAND_LABEL = "(none)"`. In `/api/browse`, `_ctx_counts` now counts the empty-brand bucket under an `empty_label` arg, and a `_brand_ok(b, bs)` helper matches `brand==""` items when "(none)" is selected (used in both the facet pre-filter and the final apply-filters step). `/api/saved-search-counts`' brand filter was updated to the same semantics so a saved "(none)" search counts correctly. Flows through the existing generic `{name,count}` brand dropdown UI — **no frontend change**. Plain equality, no regex/DoS surface. "(none)" sorts by count like any brand and only shows when brandless items exist in the current context. (Only wired in the live server browse path; the legacy client-side `renderTable` brand filter was left as-is.)
+
+**3. Long Category/Subcategory no longer push Store + Date Added off-screen.** The results table is `table-layout:auto`; Category (col 8) + Subcategory (col 9) were `white-space:nowrap` with no `max-width`, so a long value like "Folk & Traditional Instruments" plus long subcategory names widened the table. `.results` is `overflow-x:hidden`, so the rightmost columns (Date Listed, Location/Store) were clipped with no scrollbar, and the existing `text-overflow:ellipsis` never engaged. **Fix** (per user pref — truncate, not a horizontal scrollbar): `max-width:160px` on Category and `max-width:200px` on Subcategory in `gc.css` (existing nowrap+overflow:hidden+ellipsis now truncates), plus `title="…"` on both cells in `_buildRowHtml` so the full value shows on hover.
+
+**Manual checks after deploy** (no automated UI test): (a) select a single store with ≤5 results and open the Brand menu — it should overlay the paginator fully; (b) open Brand and confirm "(none)" appears and filtering by it surfaces the brandless items; (c) browse "Folk & Traditional Instruments" — Store + Date Added stay on screen and the long subcategory truncates with a hover tooltip.
 
 ---
 

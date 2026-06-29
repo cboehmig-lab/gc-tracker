@@ -244,8 +244,8 @@ th:nth-child(4),td:nth-child(4){max-width:420px}
 th:nth-child(5),td:nth-child(5){white-space:nowrap}
 th:nth-child(6),td:nth-child(6){white-space:nowrap;text-align:left}
 th:nth-child(7),td:nth-child(7){white-space:nowrap}
-th:nth-child(8),td:nth-child(8){white-space:nowrap}
-th:nth-child(9),td:nth-child(9){white-space:nowrap}
+th:nth-child(8),td:nth-child(8){white-space:nowrap;max-width:160px}   /* Category — cap width so long names truncate (…) instead of pushing Date/Store off-screen */
+th:nth-child(9),td:nth-child(9){white-space:nowrap;max-width:200px}   /* Subcategory — same; full text shown via title= tooltip on hover */
 th:nth-child(10),td:nth-child(10){white-space:nowrap}
 th:nth-child(11),td:nth-child(11){white-space:nowrap}
 table.no-new th:nth-child(3),table.no-new td:nth-child(3){display:none}

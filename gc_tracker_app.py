@@ -3197,6 +3197,11 @@ def api_favorites():
     return jsonify({"favorites": sorted(favs)})
 
 
+# Synthetic brand-facet label so brandless items (brand == "") are filterable
+# in both /api/browse and /api/saved-search-counts.
+NO_BRAND_LABEL = "(none)"
+
+
 @app.route("/api/saved-search-counts", methods=["POST"])
 def api_saved_search_counts():
     """Return match counts for each saved search in a single batch call."""
@@ -3254,7 +3259,7 @@ def api_saved_search_counts():
                                    i.get("category") or "", i.get("subcategory") or ""]).lower()
                     for w in words)]
 
-        if f_brands: items = [i for i in items if i.get("brand") in f_brands]
+        if f_brands: items = [i for i in items if (i.get("brand") in f_brands) or (not i.get("brand") and NO_BRAND_LABEL in f_brands)]
         if f_conds:  items = [i for i in items if i.get("condition") in f_conds]
         if f_cats:   items = [i for i in items if i.get("category") in f_cats]
         if f_subs:   items = [i for i in items if i.get("subcategory") in f_subs]
@@ -3632,12 +3637,18 @@ def api_browse():
 
     base_items = _apply_base(all_items)
 
+    # Brandless items are stored with brand == "". Surface them under the synthetic
+    # NO_BRAND_LABEL facet entry so they become filterable — otherwise they're
+    # unreachable, since the facet builder skips empties and the filter is membership.
+    def _brand_ok(b, bs):
+        return (b in bs) if b else (NO_BRAND_LABEL in bs)
+
     # Step 2: for each facet, count items passing all OTHER facet filters
     def _ctx_counts(count_field, excl_brands=False, excl_conds=False,
-                    excl_cats=False, excl_subs=False):
+                    excl_cats=False, excl_subs=False, empty_label=None):
         r = base_items
         if f_brands and not excl_brands:
-            bs = set(f_brands); r = [i for i in r if i["brand"] in bs]
+            bs = set(f_brands); r = [i for i in r if _brand_ok(i["brand"], bs)]
         if f_conds and not excl_conds:
             cs = set(f_conds); r = [i for i in r if i["condition"] in cs]
         if f_cats and not excl_cats:
@@ -3648,9 +3659,10 @@ def api_browse():
         for i in r:
             v = i.get(count_field) or ""
             if v: counts[v] = counts.get(v, 0) + 1
+            elif empty_label: counts[empty_label] = counts.get(empty_label, 0) + 1
         return counts
 
-    brand_ctx = _ctx_counts("brand",       excl_brands=True)
+    brand_ctx = _ctx_counts("brand",       excl_brands=True, empty_label=NO_BRAND_LABEL)
     cond_ctx  = _ctx_counts("condition",   excl_conds=True)
     cat_ctx   = _ctx_counts("category",    excl_cats=True)
     sub_ctx   = _ctx_counts("subcategory", excl_subs=True)
@@ -3669,7 +3681,7 @@ def api_browse():
     # ── Apply filters ─────────────────────────────────────────────────────
     filtered = base_items
     if f_brands:
-        bs = set(f_brands); filtered = [i for i in filtered if i["brand"] in bs]
+        bs = set(f_brands); filtered = [i for i in filtered if _brand_ok(i["brand"], bs)]
     if f_conds:
         cs = set(f_conds); filtered = [i for i in filtered if i["condition"] in cs]
     if f_cats:
@@ -5569,7 +5581,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <!-- ── Desktop dropdown filters (hidden on mobile) ── -->
             <div id="brand-dropdown" class="brand-dd" style="display:none;position:relative">
               <button id="brand-dd-btn" class="cat-sel" style="cursor:pointer;white-space:nowrap">All Brands ▾</button>
-              <div id="brand-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:260px;max-height:320px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
+              <div id="brand-dd-panel" style="display:none;position:fixed;z-index:500;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;width:260px;max-height:320px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
                 <div style="padding:6px">
                   <input id="brand-dd-search" type="text" placeholder="Search brands…"
                     style="width:100%;padding:6px 10px;background:#252525;border:1px solid #3a3a3a;border-radius:4px;color:#eee;font-size:.82rem;outline:none;box-sizing:border-box"
@@ -5580,19 +5592,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </div>
             <div id="cond-dropdown" class="cond-dd" style="display:none;position:relative">
               <button id="cond-dd-btn" class="cat-sel" style="cursor:pointer;white-space:nowrap">All Conditions ▾</button>
-              <div id="cond-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:220px;max-height:300px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
+              <div id="cond-dd-panel" style="display:none;position:fixed;z-index:500;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;width:220px;max-height:300px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
                 <div style="overflow-y:auto;max-height:260px;padding:4px 0" id="cond-dd-inner"></div>
               </div>
             </div>
             <div id="cat-dropdown" class="cond-dd" style="display:none;position:relative">
               <button id="cat-dd-btn" class="cat-sel" style="cursor:pointer;white-space:nowrap">All Categories ▾</button>
-              <div id="cat-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:240px;max-height:300px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
+              <div id="cat-dd-panel" style="display:none;position:fixed;z-index:500;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;width:240px;max-height:300px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
                 <div style="overflow-y:auto;max-height:260px;padding:4px 0" id="cat-dd-inner"></div>
               </div>
             </div>
             <div id="subcat-dropdown" class="cond-dd" style="display:none;position:relative">
               <button id="subcat-dd-btn" class="cat-sel" style="cursor:pointer;white-space:nowrap">All Subcategories ▾</button>
-              <div id="subcat-dd-panel" style="display:none;position:absolute;top:100%;left:0;z-index:50;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;margin-top:4px;width:240px;max-height:300px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
+              <div id="subcat-dd-panel" style="display:none;position:fixed;z-index:500;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;width:240px;max-height:300px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)">
                 <div style="overflow-y:auto;max-height:260px;padding:4px 0" id="subcat-dd-inner"></div>
               </div>
             </div>
@@ -5913,7 +5925,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.14.1"
+APP_VERSION = "2.14.2"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
