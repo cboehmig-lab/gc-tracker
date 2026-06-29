@@ -1,9 +1,17 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-06-29 · Current version: v2.14.2 (dropdown/paginator fix, "(none)" brand, category truncation — pending push) · Domain: gcgeartracker.com*
+*Last updated: 2026-06-29 · Current version: v2.14.3 (results-table horizontal scroll — pending push; v2.14.2 deployed) · Domain: gcgeartracker.com*
 
 ---
 
-## ⭐ Recent Changes (v2.14.1 → v2.14.2) — 2026-06-29 (three user-reported fixes — PENDING PUSH)
+## ⭐ Recent Changes (v2.14.2 → v2.14.3) — 2026-06-29 (results table: horizontal scroll + brandless "(none)" label — PENDING PUSH)
+
+**Follow-up to v2.14.2 #3.** Truncating Category/Subcategory wasn't enough — with a wide enough row (Item is capped at 420px, plus Brand/Price/Condition/Date) the table still exceeded the panel and `.results`'s `overflow-x:hidden` clipped Date Added + Location/Store with no scrollbar. User asked for horizontal scrolling after all. **Fix** (`gc.css`, 2 properties): `.results` → `overflow-x:auto` (desktop horizontal scrollbar appears only when the table is wider than the panel), and `#results-top-bar` gets `left:0` added to its existing `position:sticky;top:0` so the filter bar stays pinned while the table scrolls under it (sticky-left is a no-op when there's no overflow, so no regression when the table fits). The sticky table header is untouched — vertical scroll stays on `.results`, so `--tbl-hdr-top` / `_applyFrozenHeaderOffset()` are unaffected. Mobile is unaffected: the `@media(max-width:820px)` block overrides `.results` to `overflow:hidden` and scrolls `#res-body` (which already scrolls both axes). Kept the v2.14.2 truncation + `title=` tooltips — usually you don't need to scroll for Category (hover shows the full value); the scroll is there for the rightmost columns. **Manual check**: on a desktop window narrow enough to clip Location, a horizontal scrollbar should appear under the table, and the filter bar should stay put while you scroll right to reveal Location.
+
+**Also folded in** (same version): brandless items now render a muted **"(none)"** in the Brand column instead of a blank cell — matching the v2.14.2 filter label. `_buildRowHtml` outputs `<span class="brand-none">(none)</span>` when `item.brand` is empty; `.brand-none` is muted italic (`#888`). `data-brand` stays `""`, so sort-by-brand and any brand-click logic are unchanged.
+
+---
+
+## ⭐ Recent Changes (v2.14.1 → v2.14.2) — 2026-06-29 (three user-reported fixes — DEPLOYED)
 
 Three fixes from a user (Discord). No cache rebuild, no new endpoints. Files: `gc_tracker_app.py`, `static/gc.js`, `static/gc.css`.
 

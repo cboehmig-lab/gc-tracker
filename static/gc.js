@@ -1622,7 +1622,7 @@ function _buildRowHtml(item) {
   const soldBadge = isSold ? ' <span class="tag-sold">Sold</span>' : '';
   const isNew = item.isNew || (item.id && window._newIds && window._newIds.has(item.id));
   const rowClass = [isSold ? 'sold-row' : '', item.isFav ? 'fav-row' : ''].filter(Boolean).join(' ');
-  const brandCell = `<td>${item.brand ? esc(item.brand) : ''}</td>`;
+  const brandCell = `<td>${item.brand ? esc(item.brand) : '<span class="brand-none">(none)</span>'}</td>`;
   const hasDrop = item.price_drop > 0;
   const dropSinceLabel = hasDrop && item.price_drop_since
     ? ` · dropped ${_fmtDropDate(item.price_drop_since)}`
