@@ -74,8 +74,55 @@ def _user_db():
     conn.row_factory = sqlite3.Row
     return conn
 
+
+# ── Daily user-DB backup (v2.15.3, 2026-07 audit "do now" #1) ─────────────────
+# gc_users.db is the only non-regenerable data on the volume. VACUUM INTO makes an
+# atomic snapshot from a live DB; we keep the last 7 dailies in DATA_DIR/backups.
+# Piggybacks on the after_request hook — first request of each UTC day pays ~ms.
+_BACKUP_DIR  = DATA_DIR / "backups"
+_BACKUP_KEEP = 7
+_backup_lock = threading.Lock()
+_last_backup_day = None
+
+def _maybe_backup_users_db():
+    global _last_backup_day
+    today = datetime.utcnow().strftime("%Y%m%d")
+    if _last_backup_day == today:
+        return
+    if not _backup_lock.acquire(blocking=False):
+        return  # another request thread is on it
+    try:
+        if _last_backup_day == today:
+            return
+        dest = _BACKUP_DIR / f"gc_users_{today}.db"
+        if not dest.exists() and USER_DB.exists():
+            _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = _BACKUP_DIR / f".gc_users_{today}.db.tmp"
+            if tmp.exists():
+                tmp.unlink()
+            conn = sqlite3.connect(str(USER_DB))
+            try:
+                conn.execute(f"VACUUM INTO '{tmp}'")  # path is fully server-controlled
+            finally:
+                conn.close()
+            os.replace(tmp, dest)
+            for old in sorted(_BACKUP_DIR.glob("gc_users_*.db"))[:-_BACKUP_KEEP]:
+                old.unlink()
+        _last_backup_day = today  # set even on skip; retry next UTC day
+    except Exception as e:
+        print(f"[backup] users-db backup failed: {type(e).__name__}: {e}")
+        _last_backup_day = today  # don't hammer a persistently failing backup
+    finally:
+        _backup_lock.release()
+
 def _init_user_db():
     with _user_db() as conn:
+        # WAL: better concurrent read/write behavior on the threaded server; the
+        # setting is persistent in the DB file, so once is enough. (2026-07 audit)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError:
+            pass
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1645,6 +1692,7 @@ def _track_device(response):
     # Skip SSE streams for device tracking (cookie/logging only, headers already set above)
     if request.path.startswith("/api/progress"):
         return response
+    _maybe_backup_users_db()
     device_id = request.cookies.get("gt_device_id")
     if not device_id:
         device_id = str(_uuid.uuid4())
@@ -4587,7 +4635,10 @@ def _populate_store_data(selected_stores: list = None):
               "scanned": total, "new_count": 0, "new_items": [], "all_items": [],
               "gap_fill": True, "fixed": updated})
     except Exception as e:
-        send({"type": "done", "error": str(e), "scanned": 0, "new_count": 0, "new_items": []})
+        # Don't leak exception text over the (public) SSE stream — log it server-side.
+        # (2026-07 audit / round-2 deferred L3)
+        print(f"[scan] operation failed: {type(e).__name__}: {e}")
+        send({"type": "done", "error": "Operation failed — see server logs.", "scanned": 0, "new_count": 0, "new_items": []})
     finally:
         _lock.release()
 
@@ -4798,7 +4849,10 @@ def _validate_stores():
               "scanned": total, "new_count": 0, "new_items": [], "all_items": [],
               "gap_fill": True, "fixed": len(removed)})
     except Exception as e:
-        send({"type": "done", "error": str(e), "scanned": 0, "new_count": 0, "new_items": []})
+        # Don't leak exception text over the (public) SSE stream — log it server-side.
+        # (2026-07 audit / round-2 deferred L3)
+        print(f"[scan] operation failed: {type(e).__name__}: {e}")
+        send({"type": "done", "error": "Operation failed — see server logs.", "scanned": 0, "new_count": 0, "new_items": []})
     finally:
         _lock.release()
 
@@ -4865,7 +4919,10 @@ def _fill_gaps(selected_stores: list[str]):
               "scanned": fixed, "new_count": 0, "new_items": [], "all_items": [],
               "gap_fill": True, "fixed": fixed})
     except Exception as e:
-        send({"type": "done", "error": str(e), "scanned": 0, "new_count": 0, "new_items": []})
+        # Don't leak exception text over the (public) SSE stream — log it server-side.
+        # (2026-07 audit / round-2 deferred L3)
+        print(f"[scan] operation failed: {type(e).__name__}: {e}")
+        send({"type": "done", "error": "Operation failed — see server logs.", "scanned": 0, "new_count": 0, "new_items": []})
     finally:
         _lock.release()
 
@@ -5941,7 +5998,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.15.2"
+APP_VERSION = "2.15.3"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

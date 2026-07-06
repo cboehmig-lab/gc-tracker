@@ -1,5 +1,17 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-07-06 · Current version: v2.15.2 (store-page → app deep link — pending push; v2.15.1 deployed) · Domain: gcgeartracker.com*
+*Last updated: 2026-07-06 · Current version: v2.15.3 (daily DB backup + WAL + SSE error-leak fix — pending push; v2.15.2 deployed) · Domain: gcgeartracker.com*
+
+---
+
+## ⭐ Recent Changes (v2.15.2 → v2.15.3) — 2026-07-06 (audit "do now" items: daily DB backup + WAL + SSE error-leak fix — PENDING PUSH)
+
+The three remaining "do now" items from `AUDIT_REPORT_2026-07.md` Phase 5, in one bump (`gc_tracker_app.py` only):
+
+- **Daily `gc_users.db` backup** — new `_maybe_backup_users_db()` (near `_user_db`), called from the `after_request` hook (after the SSE skip). First request of each UTC day runs `VACUUM INTO` (atomic snapshot from a live DB) to `DATA_DIR/backups/gc_users_YYYYMMDD.db`, keeps the last **7**, prunes older. Double-checked locking (`_backup_lock`, non-blocking) so concurrent requests can't double-run; failures log to stdout and skip until the next UTC day (never break a request over a backup). ~ms cost once/day. The user DB was the only non-regenerable data on the volume with zero recovery path.
+- **SQLite WAL** — `PRAGMA journal_mode=WAL` in `_init_user_db` (persistent in the DB file; June audit #5 closed).
+- **SSE error-leak fix (round-2 deferred L3, closed)** — the three populate/fill-gaps `except` handlers broadcast `str(e)` over the progress stream; now a generic message + server-side log.
+
+Verified: `py_compile` clean; test client — first request creates the backup file (opens as valid SQLite, users table readable), second request same day does nothing, `PRAGMA journal_mode` returns `wal`. **Note for ops:** WAL creates `gc_users.db-wal`/`-shm` siblings on the volume — expected; the existing `.gitignore` `gc_users.db*`-adjacent entries don't cover them but they only exist in `/data` on the server.
 
 ---
 
