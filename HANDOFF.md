@@ -1,9 +1,17 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-07-06 · Current version: v2.15.0 (audit bundle + per-store SEO pages — pending push; v2.14.4 deployed) · Domain: gcgeartracker.com*
+*Last updated: 2026-07-06 · Current version: v2.15.1 (store-page meta double-escape fix — pending push; v2.15.0 deployed) · Domain: gcgeartracker.com*
 
 ---
 
-## ⭐ Recent Changes (v2.14.4 → v2.15.0) — 2026-07-06 (2026-07 audit bundle + per-store SEO landing pages — PENDING PUSH)
+## ⭐ Recent Changes (v2.15.0 → v2.15.1) — 2026-07-06 (store-page meta description double-escape fix — PENDING PUSH)
+
+**Bug (found in the GSC sitemap session, live on all ~298 store pages):** meta description + og:description rendered `&amp;` literally (e.g. "Amplifiers &amp; Effects (173)") — exactly what Google shows in the snippet, so it undercut the entire point of the store pages. **Root cause:** v2.15.0's `_render_store_page` escaped category names while *building* the `desc` string AND escaped the whole string again at interpolation (`content="{esc(desc)}"`) — classic double-escape. **Fix:** `desc` is now built as plain text (raw `store_name` + raw category names); it's escaped exactly once at each interpolation point. Verified against the **rendered** attribute (html.unescape of the content attr) on boise/nashville/austin — plain `&`, no `&amp;amp;` in source. `py_compile` clean. No other interpolation in the store page has this pattern (`cats_html`/rows escape once for HTML body; JSON-LD uses `json.dumps` on raw values; `title` escapes once).
+
+**Also noted from the GSC session (no action taken):** sitemap shows **298 store pages** (not ~240 — the live `/data` store cache is fresher than the stale local repo copy; 298 is GC's real store count); GSC sitemap resubmitted + processed successfully (300 URLs); indexing requested on 10 priority city pages; store-page titles run 60–64 chars (at Google's truncation edge — cosmetic, deferred); metro aggregator pages (/chicago etc.) raised as a design question — being scoped, no code.
+
+---
+
+## ⭐ Recent Changes (v2.14.4 → v2.15.0) — 2026-07-06 (2026-07 audit bundle + per-store SEO landing pages — DEPLOYED)
 
 One version bump bundling the apply-now findings from the July 2026 full-site audit (Phases 1–3 done; full detail + exact line refs in `AUDIT_REPORT_2026-07.md`) plus the audit's headline SEO feature. Verified: `py_compile` clean, `node --check` clean, and a Flask test-client suite (store page 200 + city title, bad slug 404, sitemap 242 URLs w/ lastmod, homepage noscript 240 store links, deleted routes 404, 2 MB body → 413, browse + saved-search-counts behavior unchanged).
 

@@ -2753,8 +2753,12 @@ def _render_store_page(store_name: str, slug: str) -> str:
     esc = _html.escape
     city = esc(store_name)
     title = f"Guitar Center {city} Used Gear — Live Inventory ({count} items)"
-    desc = (f"Browse {count} used items currently at the Guitar Center {city} store: "
-            + ", ".join(f"{esc(c)} ({n})" for c, n in sorted(cat_counts.items(), key=lambda x: -x[1])[:4])
+    # Build desc as PLAIN text — it gets esc()'d exactly once at each interpolation
+    # point below. v2.15.0 escaped category names here too, so "&" reached the
+    # rendered meta description as a literal "&amp;" (double-escape; Google showed
+    # it verbatim in snippets). v2.15.1 fix.
+    desc = (f"Browse {count} used items currently at the Guitar Center {store_name} store: "
+            + ", ".join(f"{c} ({n})" for c, n in sorted(cat_counts.items(), key=lambda x: -x[1])[:4])
             + ". Updated after every scan — free watch list and want list at GC Used Inventory Tracker.")
     rows = []
     for i in items[:50]:
@@ -5937,7 +5941,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.15.0"
+APP_VERSION = "2.15.1"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
