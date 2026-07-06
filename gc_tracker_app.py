@@ -3479,19 +3479,25 @@ def api_browse():
     #     of a given phrase, the regex almost never fires → ~free for real lists
     #     (a realistic 220-term list of 160 words + 60 phrases benches ~0.35s). Given a
     #     generous cap (300) purely as a backstop; real want lists are far below it.
-    #   • wildcard (*) / quoted-exact / comma-AND -> the genuinely expensive paths
-    #     ('.*' can't be pre-filtered; quoted-exact is a raw substring). Folded into one
-    #     alternation / term-list and capped HARD at 30 — these are advanced syntax a
-    #     real want list uses a handful of, but 250 wildcards alone cost ~8s/browse,
-    #     GIL-held, on the public unbounded /api/browse (unauthenticated CPU-DoS). (v2.13.1)
+    #   • wildcard (*) / quoted-exact -> the genuinely expensive paths ('.*' can't be
+    #     pre-filtered; quoted-exact is a raw substring). Folded into one alternation and
+    #     capped HARD at 30 — advanced syntax a real want list uses a handful of, but 250
+    #     wildcards alone cost ~8s/browse, GIL-held, on the public unbounded /api/browse
+    #     (unauthenticated CPU-DoS). (v2.13.1)
+    #   • comma-AND ("a, b") -> a whole-word subterm matches iff its token is present, so
+    #     it takes the SAME cheap required-tokens pre-filter as phrases and gets its own
+    #     generous cap — no longer starved by the wildcard/quoted cap, which silently
+    #     dropped comma terms once a want list had >30 combined exotic terms. (v2.14.4)
     _PHRASE_KW_CAP = 300
-    _EXOTIC_KW_CAP = 30
+    _EXOTIC_KW_CAP = 30    # wildcard (*) + quoted-exact only — the expensive alternation
+    _AND_KW_CAP    = 200   # comma-AND — cheap once sound-prefiltered, so its own cap
     _phrase_n = 0
     _exotic_n = 0
+    _and_n    = 0
     _kw_word_set = set()
     _kw_phrases  = []   # (compiled \b...\b regex, set-of-required-word-tokens) — pre-filtered
     _kw_or_pats  = []   # wildcard + quoted-exact patterns -> one alternation (capped)
-    _kw_and      = []   # comma-AND term lists (capped)
+    _kw_and      = []   # comma-AND: (term-list, set-of-required-plain-word-tokens) — pre-filtered
     for _kw in keywords:
         _base = _kw.lstrip('=').strip()
         if not _base:
@@ -3505,11 +3511,18 @@ def api_browse():
                     _kw_or_pats.append(_p)
                     _exotic_n += 1
         elif ',' in _base:
-            if _exotic_n < _EXOTIC_KW_CAP:
+            if _and_n < _AND_KW_CAP:
                 _t = _compile_query(_base)
                 if _t:
-                    _kw_and.append(_t)
-                    _exotic_n += 1
+                    # Required tokens = words of the plain (non-wildcard/quoted) subterms;
+                    # all must be present before the per-term regexes run (cheap gate).
+                    _req = set()
+                    for _part in _base.split(','):
+                        _pp = _part.strip().lower()
+                        if _pp and '*' not in _pp and not (_pp.startswith('"') and _pp.endswith('"') and len(_pp) > 2):
+                            _req |= set(_KW_SPLIT_RE.split(_pp)) - {''}
+                    _kw_and.append((_t, _req))
+                    _and_n += 1
         else:
             # Ordinary phrase or punctuated single term -> exact whole-word match, but
             # cheap to skip via the required-tokens subset test below.
@@ -3522,7 +3535,7 @@ def api_browse():
 
     def _kw_match(name_l, brand_l):
         text = name_l + " " + brand_l
-        _toks = set(_KW_SPLIT_RE.split(text)) if (_kw_word_set or _kw_phrases) else None
+        _toks = set(_KW_SPLIT_RE.split(text)) if (_kw_word_set or _kw_phrases or _kw_and) else None
         if _kw_word_set and not _kw_word_set.isdisjoint(_toks):
             return True
         if _kw_phrases:
@@ -3535,7 +3548,11 @@ def api_browse():
         if _kw_combo is not None and _kw_combo.search(text):
             return True
         if _kw_and:
-            return any(_matches_all(text, terms) for terms in _kw_and)
+            # Same sound pre-filter as phrases: all plain-word subterm tokens must be
+            # present before running the per-term regexes (behavior-identical, just cheap).
+            for _terms, _req in _kw_and:
+                if _req <= _toks and _matches_all(text, _terms):
+                    return True
         return False
 
     # Check if any cache entries have store field
@@ -5925,7 +5942,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.14.3"
+APP_VERSION = "2.14.4"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

@@ -1,9 +1,21 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-06-29 · Current version: v2.14.3 (results-table horizontal scroll — pending push; v2.14.2 deployed) · Domain: gcgeartracker.com*
+*Last updated: 2026-07-06 · Current version: v2.14.4 (want-list comma-AND fix — pending push; v2.14.3 deployed) · Domain: gcgeartracker.com*
 
 ---
 
-## ⭐ Recent Changes (v2.14.2 → v2.14.3) — 2026-06-29 (results table: horizontal scroll + brandless "(none)" label — PENDING PUSH)
+## ⭐ Recent Changes (v2.14.3 → v2.14.4) — 2026-07-06 (want-list comma-AND fix — PENDING PUSH)
+
+**Bug (user-reported):** multi-term Want List entries using the **comma-AND** operator (e.g. `Whirlwind, box`) stopped matching once a want list had **>30 combined "exotic" terms** (wildcards + quoted + commas). Root cause: v2.13.1's anti-DoS cap `_EXOTIC_KW_CAP = 30` was **shared** across wildcard, quoted-exact, AND comma-AND terms. Quoted terms sort to the top of the alphabetically-sorted want list (they start with `"`), so they fill the 30 slots first and survive, while comma terms later in the list are silently dropped — exactly why the reporter saw "quotes still work, commas don't." Regular search was unaffected (`filter_q` doesn't use this cap). **Not caused by the v2.14.x work** — the cap dates to v2.13.1 (commit `8b77925`); the reporter (56 exotic terms) likely just crossed the threshold. Reproduced: 42 exotic terms → `Whirlwind, box` fails to match `Whirlwind Red Box Compressor Pedal`.
+
+**Fix** (`gc_tracker_app.py`, want-list matcher in `/api/browse`): comma-AND now gets its **own** cap (`_AND_KW_CAP = 200`) instead of sharing the wildcard/quoted cap, plus a **sound pre-filter** so it stays cheap on the unauthenticated endpoint. For each comma-AND term, the union of its plain-word subterms' tokens must all be present in the item (`_req <= _toks`) before the per-term regexes run — the same required-tokens trick the phrase path uses. A whole-word subterm matches iff its token is present, so the pre-filter is behavior-identical, just fast. The wildcard/quoted alternation keeps its tight 30-cap (those are the real DoS vector — 250 wildcards ≈ 8s/browse).
+
+**Verification:** replicated the matcher and diffed old vs new match-sets across the full **91,686-item cache** for plain/phrase/wildcard/quoted/comma keywords → **0 differences** (behavior-identical for the common case). The 42-exotic reproduction now matches; `Whirlwind, box` → `Whirlwind Red Box Compressor Pedal` matches (4 items in cache). Comma-AND is now pre-filtered like phrases, so the 200-cap benches in line with the 300-phrase path — safe for the public browse endpoint.
+
+**Known pre-existing edge (unchanged):** a term combining a wildcard AND a comma (e.g. `OD*, boss`) is still treated as a single wildcard pattern, not an AND, because the `*` branch is checked before the `,` branch. Not reported; left as-is.
+
+---
+
+## ⭐ Recent Changes (v2.14.2 → v2.14.3) — 2026-06-29 (results table: horizontal scroll + brandless "(none)" label — DEPLOYED)
 
 **Follow-up to v2.14.2 #3.** Truncating Category/Subcategory wasn't enough — with a wide enough row (Item is capped at 420px, plus Brand/Price/Condition/Date) the table still exceeded the panel and `.results`'s `overflow-x:hidden` clipped Date Added + Location/Store with no scrollbar. User asked for horizontal scrolling after all. **Fix** (`gc.css`, 2 properties): `.results` → `overflow-x:auto` (desktop horizontal scrollbar appears only when the table is wider than the panel), and `#results-top-bar` gets `left:0` added to its existing `position:sticky;top:0` so the filter bar stays pinned while the table scrolls under it (sticky-left is a no-op when there's no overflow, so no regression when the table fits). The sticky table header is untouched — vertical scroll stays on `.results`, so `--tbl-hdr-top` / `_applyFrozenHeaderOffset()` are unaffected. Mobile is unaffected: the `@media(max-width:820px)` block overrides `.results` to `overflow:hidden` and scrolls `#res-body` (which already scrolls both axes). Kept the v2.14.2 truncation + `title=` tooltips — usually you don't need to scroll for Category (hover shows the full value); the scroll is there for the rightmost columns. **Manual check**: on a desktop window narrow enough to clip Location, a horizontal scrollbar should appear under the table, and the filter bar should stay put while you scroll right to reveal Location.
 
