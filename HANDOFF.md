@@ -1,9 +1,37 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-07-06 · Current version: v2.14.4 (want-list comma-AND fix — pending push; v2.14.3 deployed) · Domain: gcgeartracker.com*
+*Last updated: 2026-07-06 · Current version: v2.15.0 (audit bundle + per-store SEO pages — pending push; v2.14.4 deployed) · Domain: gcgeartracker.com*
 
 ---
 
-## ⭐ Recent Changes (v2.14.3 → v2.14.4) — 2026-07-06 (want-list comma-AND fix — PENDING PUSH)
+## ⭐ Recent Changes (v2.14.4 → v2.15.0) — 2026-07-06 (2026-07 audit bundle + per-store SEO landing pages — PENDING PUSH)
+
+One version bump bundling the apply-now findings from the July 2026 full-site audit (Phases 1–3 done; full detail + exact line refs in `AUDIT_REPORT_2026-07.md`) plus the audit's headline SEO feature. Verified: `py_compile` clean, `node --check` clean, and a Flask test-client suite (store page 200 + city title, bad slug 404, sitemap 242 URLs w/ lastmod, homepage noscript 240 store links, deleted routes 404, 2 MB body → 413, browse + saved-search-counts behavior unchanged).
+
+**NEW — Per-store SEO landing pages (audit S1/S3/S4; the fix for the Search Console CTR problem).** `GET /store/<slug>` (e.g. `/store/boise`) — server-rendered, **zero-JS**, purely additive pages so Google has a city-specific URL/title/snippet for "guitar center [city] inventory" queries (the homepage ranked page-1 for these with ~0 CTR because it only ever shows the generic title). Implementation: `_store_slug()` / `_store_slug_map()` (from `STORES_CACHE`), `_render_store_page()` (city title with live item count, category counts, newest-50 table linking to GC product pages, `ItemList` + `BreadcrumbList` JSON-LD, canonical, og tags), route memoized per store in `_STORE_PAGE_CACHE` keyed by **cat-cache mtime** (unauthenticated route over the 92K cache — same discipline as `/api/browse`; ≤240 renders per scan cycle, then served from memory). `sitemap.xml` now emits all ~240 store URLs with `lastmod` = last scan date; the homepage `<noscript>` city list now **links** each city to its store page (crawl path). **After deploy: resubmit the sitemap in Search Console.** Main app untouched.
+
+**Security (audit M1/L1/L2/L3):**
+- `MAX_CONTENT_LENGTH = 1 MB` (M1) — 413 before parsing; closes the unauthenticated giant-JSON-body memory DoS that all the per-keyword caps ran *after*.
+- `/api/run` stores array capped `[:300]` (L2, deferred since June).
+- Deleted dead `/login` + GET `/logout` + `LOGIN_PAGE` (L3 — `session["logged_in"]` was read nowhere; GET /logout was a CSRF force-logout).
+- `/api/health/algolia` refresh serialized behind `_ALGOLIA_HEALTH_LOCK` (L1 — concurrent TTL-expiry misses each fired a live GC probe; losers now return the cached value). Probe body moved to `_algolia_health_probe()`.
+
+**Efficiency (audit E1/E3/E6):**
+- **E1**: `/api/saved-search-counts` now uses the mtime-memoized `_load_cat_cache()` instead of re-reading + re-parsing the 51 MB cache from disk on **every call** (~400 ms GIL-held, stalled all threads — the one endpoint v2.13.0's memoization missed). ~48 ms/call in tests.
+- **E3**: deleted dead legacy endpoints `/api/favorites` POST, `/api/watchlist` GET+POST, `/api/watchlist/items`, `/api/keywords` GET+POST (zero references in any static/*.js) and orphaned helpers `load_favorites`/`save_favorites`/`load_keywords`/`save_keywords`. **Kept** `load_watchlist`/`save_watchlist` (the scan loop still updates the legacy global watchlist sold-flags) and the `FAVORITES_FILE`/`KEYWORDS_FILE` constants (admin export/import/reset reference the paths).
+- **E6**: `_save_new_deals_cache` now writes atomically (temp + `os.replace`) — the v2.13.1 atomic-write fix had missed this sibling.
+
+**SEO quick wins (audit S2/S5/S8):**
+- `og:image`/`twitter:image` → new **`static/og-image.png`** (1200×630, rendered from the SVG) — Reddit/Discord/Facebook/X don't render SVG og-images, so shares had no card image. Fixed before any Reddit/PH post.
+- Favicon → real file **`static/favicon.svg`** + `<link rel="icon">` (was a `data:` URI, which Google's SERP-favicon crawler can't fetch → generic globe in mobile results).
+- Dropped `maximum-scale=1,user-scalable=no` from both viewport metas (a11y/Lighthouse; iOS ignored it anyway).
+
+**Repo hygiene (audit E5, same push):** `git rm --cached` the ignored-but-tracked files (51 MB `gc_category_cache.json` — the reason `.git` was 37 MB — plus `__pycache__/*.pyc`, `.DS_Store`, `gc_device_log.jsonl`, `gc_last_scan.txt`, `gc_state.json`, `gc_favorites.json`, `gc_new_inventory.xlsx`), deleted dead v1 script `gc_inventory_tracker.py`, `.gitignore` updated to cover the newly-untracked names. Safe: verified `DATA_DIR=/data` on Railway (repo data copies were inert).
+
+**Deferred (see `AUDIT_REPORT_2026-07.md` backlog):** E2 browse base-list memoization (own session), E4 local-render consolidation (decision needed — small scans ≤1000 items still render client-side and that path lacks the "(none)" brand filter), S6 `?q=`/`?store=` deep links, S7 static cache-busting (verify Railway gzip first), E7 gunicorn (`-w 1 --threads 32` if ever), E8 module split, `gc_users.db` backup.
+
+---
+
+## ⭐ Recent Changes (v2.14.3 → v2.14.4) — 2026-07-06 (want-list comma-AND fix — DEPLOYED)
 
 **Bug (user-reported):** multi-term Want List entries using the **comma-AND** operator (e.g. `Whirlwind, box`) stopped matching once a want list had **>30 combined "exotic" terms** (wildcards + quoted + commas). Root cause: v2.13.1's anti-DoS cap `_EXOTIC_KW_CAP = 30` was **shared** across wildcard, quoted-exact, AND comma-AND terms. Quoted terms sort to the top of the alphabetically-sorted want list (they start with `"`), so they fill the 30 slots first and survive, while comma terms later in the list are silently dropped — exactly why the reporter saw "quotes still work, commas don't." Regular search was unaffected (`filter_q` doesn't use this cap). **Not caused by the v2.14.x work** — the cap dates to v2.13.1 (commit `8b77925`); the reporter (56 exotic terms) likely just crossed the threshold. Reproduced: 42 exotic terms → `Whirlwind, box` fails to match `Whirlwind Red Box Compressor Pedal`.
 

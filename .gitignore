@@ -36,3 +36,6 @@ gc_store_coords.json
 gc_last_scan.txt
 gc_device_log.jsonl
 gc_invalid_stores.json
+gc_state.json
+gc_favorites.json
+gc_new_inventory.xlsx

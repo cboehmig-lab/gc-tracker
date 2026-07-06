@@ -704,19 +704,9 @@ def get_store_info() -> dict:
 
 
 # ── Favorites ─────────────────────────────────────────────────────────────────
-
-def load_favorites() -> list[str]:
-    if FAVORITES_FILE.exists():
-        try:
-            return json.loads(FAVORITES_FILE.read_text())
-        except Exception:
-            pass
-    return []
-
-
-def save_favorites(favs: list[str]):
-    FAVORITES_FILE.write_text(json.dumps(sorted(set(favs))))
-
+# (load_favorites/save_favorites and load_keywords/save_keywords removed in v2.14.5
+#  along with their dead API routes — 2026-07 audit E3. The FAVORITES_FILE /
+#  KEYWORDS_FILE constants stay: admin export/import/reset reference the paths.)
 
 def load_watchlist() -> dict:
     """Returns {sku: {name, price, store, url, condition, category, date_added, sold}}"""
@@ -730,19 +720,6 @@ def load_watchlist() -> dict:
 
 def save_watchlist(wl: dict):
     WATCHLIST_FILE.write_text(json.dumps(wl, indent=2))
-
-
-def load_keywords() -> list:
-    if KEYWORDS_FILE.exists():
-        try:
-            return json.loads(KEYWORDS_FILE.read_text())
-        except Exception:
-            pass
-    return []
-
-
-def save_keywords(kw: list):
-    KEYWORDS_FILE.write_text(json.dumps(sorted(set(kw))))
 
 
 # ── GC scraping ───────────────────────────────────────────────────────────────
@@ -855,7 +832,11 @@ def _load_new_deals_cache() -> dict | None:
 def _save_new_deals_cache(items: dict, last_updated: str):
     global _new_deals_cache
     data = {"last_updated": last_updated, "items": items}
-    NEW_DEALS_CACHE_FILE.write_text(json.dumps(data, separators=(',', ':')))
+    # Atomic write (temp + os.replace) — same truncation-on-crash class the category
+    # cache had before v2.13.1; a redeploy mid-write left a corrupt file. (2026-07 audit E6)
+    tmp = NEW_DEALS_CACHE_FILE.parent / (NEW_DEALS_CACHE_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(data, separators=(',', ':')))
+    os.replace(tmp, NEW_DEALS_CACHE_FILE)
     _new_deals_cache = data
 
 
@@ -1490,6 +1471,11 @@ app.secret_key  = _secret
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"]   = os.environ.get("RAILWAY_ENVIRONMENT") is not None
+# Cap request bodies (413 before parsing). /api/browse is unauthenticated and parses
+# request.json in full before any per-field cap applies; without this a huge JSON body
+# is a memory DoS. Largest legit payload (240-store array + 750-keyword want list +
+# admin import) is well under 1 MB. (2026-07 audit M1)
+app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024  # 1 MB
 
 # ProxyFix: Railway terminates TLS so Flask sees HTTP; this makes url_for() produce https://
 if os.environ.get("RAILWAY_ENVIRONMENT"):
@@ -1867,50 +1853,10 @@ def _check_admin_csrf_header() -> bool:
     return hmac.compare_digest(submitted, expected)
 
 
-LOGIN_PAGE = """<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>GC Tracker — Login</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#111;display:flex;align-items:center;justify-content:center;height:100vh;font-family:-apple-system,sans-serif}
-.box{background:#1a1a1a;border:1px solid #2e2e2e;border-radius:10px;padding:40px;width:320px}
-h1{color:#fff;font-size:1.2rem;margin-bottom:6px}
-p{color:#666;font-size:.85rem;margin-bottom:24px}
-input{width:100%;padding:10px 12px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#eee;font-size:.95rem;outline:none;margin-bottom:14px}
-input:focus{border-color:#c00}
-button{width:100%;padding:11px;background:#c00;color:#fff;border:none;border-radius:5px;font-size:1rem;font-weight:700;cursor:pointer}
-button:hover{background:#e00}
-.err{color:#f88;font-size:.82rem;margin-bottom:12px}
-</style></head>
-<body><div class="box">
-  <h1>🎸 GC Tracker</h1>
-  <p>Enter your password to continue.</p>
-  {% if error %}<div class="err">Incorrect password.</div>{% endif %}
-  <form method="POST">
-    <input type="password" name="password" placeholder="Password" autofocus>
-    <button type="submit">Sign In</button>
-  </form>
-</div></body></html>"""
-
-
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    from flask import render_template_string
-    if request.method == "POST":
-        ip = _client_ip()
-        if not _check_login_rate(ip):
-            return render_template_string(LOGIN_PAGE, error=True)
-        if APP_PASSWORD and hmac.compare_digest((request.form.get("password") or "").strip(), APP_PASSWORD):
-            session["logged_in"] = True
-            return redirect("/")
-        _record_login_failure(ip)
-        return render_template_string(LOGIN_PAGE, error=True)
-    return render_template_string(LOGIN_PAGE, error=False)
-
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect("/login")
-
+# (Dead sitewide-password login page + /login + GET /logout removed in v2.14.5 —
+#  session["logged_in"] was written there and read nowhere; GET /logout was also a
+#  CSRF force-logout. Admin auth lives at /admin/login; user auth is /api/login +
+#  Google OAuth. 2026-07 audit L3/E3.)
 
 # ── User account API ──────────────────────────────────────────────────────────
 
@@ -2751,12 +2697,18 @@ def _build_stores_noscript() -> str:
         stores = []
     if not stores:
         return ''
+    # City names link to the per-store landing pages — the crawl path from "/" to
+    # all ~240 store pages (sitemap alone is weaker than real links). (2026-07 audit S4)
+    links = ", ".join(
+        f'<a href="/store/{_store_slug(s)}" style="color:#777">{_html.escape(s)}</a>'
+        for s in stores
+    )
     return (
         '<noscript><p style="padding:12px 20px;text-align:center;color:#666;'
         'font-size:.72rem;line-height:1.7">'
         'GC Used Inventory Tracker requires JavaScript. '
         'This tool searches used guitar gear at Guitar Center locations nationwide including: '
-        + _html.escape(", ".join(stores)) +
+        + links +
         '.</p></noscript>'
     )
 
@@ -2764,6 +2716,138 @@ def _build_stores_noscript() -> str:
 @optional_user_context
 def index():
     return HTML_TEMPLATE.replace('<!-- __STORES_NOSCRIPT__ -->', _build_stores_noscript())
+
+
+# ── Per-store SEO landing pages (v2.14.5, 2026-07 audit S1) ──────────────────
+# Server-rendered, zero-JS pages so Google has a city-specific URL/title/snippet
+# to rank for "guitar center <city> inventory" queries (the homepage was ranking
+# page-1 for these with ~zero CTR because it shows a generic title). Purely
+# additive — the main app is untouched. Unauthenticated route over the 92K cache,
+# so pages are memoized per store keyed by cache mtime (same discipline as
+# /api/browse: no per-request full-cache pass beyond the first hit after a scan).
+
+_STORE_PAGE_CACHE: dict = {}   # slug -> (cat_cache_mtime, html)
+
+def _store_slug(name: str) -> str:
+    s = re.sub(r'[^a-z0-9]+', '-', (name or '').lower())
+    return re.sub(r'-+', '-', s).strip('-')
+
+def _store_slug_map() -> dict:
+    """slug -> store name, from the live store cache (4KB read; cheap per request)."""
+    try:
+        stores = json.loads(STORES_CACHE.read_text()).get("stores", []) if STORES_CACHE.exists() else []
+    except Exception:
+        stores = []
+    return {_store_slug(s): s for s in stores if s}
+
+def _render_store_page(store_name: str, slug: str) -> str:
+    _load_cat_cache()
+    items = [v for _, v in list(_cat_cache.items())
+             if v.get("store") == store_name and v.get("available", True)]
+    items.sort(key=lambda i: i.get("date_listed") or "", reverse=True)
+    count = len(items)
+    cat_counts: dict = {}
+    for i in items:
+        c = i.get("category") or "Other"
+        cat_counts[c] = cat_counts.get(c, 0) + 1
+    esc = _html.escape
+    city = esc(store_name)
+    title = f"Guitar Center {city} Used Gear — Live Inventory ({count} items)"
+    desc = (f"Browse {count} used items currently at the Guitar Center {city} store: "
+            + ", ".join(f"{esc(c)} ({n})" for c, n in sorted(cat_counts.items(), key=lambda x: -x[1])[:4])
+            + ". Updated after every scan — free watch list and want list at GC Used Inventory Tracker.")
+    rows = []
+    for i in items[:50]:
+        price = i.get("price") or 0
+        rows.append(
+            "<tr><td><a href=\"" + esc(i.get("url") or "https://www.guitarcenter.com/") + "\" rel=\"nofollow noopener\">"
+            + esc(i.get("name") or "") + "</a></td>"
+            + "<td>" + esc(i.get("brand") or "") + "</td>"
+            + "<td>" + (f"${price:,.2f}" if price else "") + "</td>"
+            + "<td>" + esc(i.get("condition") or "") + "</td>"
+            + "<td>" + esc(_fmt_date(i.get("date_listed") or "")) + "</td></tr>"
+        )
+    cats_html = " · ".join(
+        esc(c) + " <b>" + str(n) + "</b>"
+        for c, n in sorted(cat_counts.items(), key=lambda x: -x[1])
+    )
+    item_list_ld = json.dumps({
+        "@context": "https://schema.org", "@type": "ItemList",
+        "name": f"Used gear at Guitar Center {store_name}",
+        "numberOfItems": count,
+        "itemListElement": [
+            {"@type": "ListItem", "position": n + 1,
+             "name": i.get("name") or "", "url": i.get("url") or ""}
+            for n, i in enumerate(items[:20])
+        ],
+    }, separators=(",", ":"))
+    breadcrumb_ld = json.dumps({
+        "@context": "https://schema.org", "@type": "BreadcrumbList",
+        "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "GC Used Inventory Tracker", "item": "https://gcgeartracker.com/"},
+            {"@type": "ListItem", "position": 2, "name": f"Guitar Center {store_name}", "item": f"https://gcgeartracker.com/store/{slug}"},
+        ],
+    }, separators=(",", ":"))
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title}</title>
+<meta name="description" content="{esc(desc)}">
+<link rel="canonical" href="https://gcgeartracker.com/store/{slug}">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://gcgeartracker.com/store/{slug}">
+<meta property="og:title" content="{title}">
+<meta property="og:description" content="{esc(desc)}">
+<meta property="og:image" content="https://gcgeartracker.com/static/og-image.png">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<script type="application/ld+json">{item_list_ld}</script>
+<script type="application/ld+json">{breadcrumb_ld}</script>
+<style>
+body{{background:#111;color:#ddd;font-family:-apple-system,system-ui,sans-serif;margin:0;padding:20px;line-height:1.5}}
+main{{max-width:960px;margin:0 auto}}
+h1{{color:#fff;font-size:1.35rem;margin:8px 0 4px}}
+.sub{{color:#888;font-size:.9rem;margin-bottom:14px}}
+.cats{{color:#aaa;font-size:.82rem;margin-bottom:18px}} .cats b{{color:#eee}}
+.cta{{display:inline-block;background:#c00;color:#fff;padding:9px 16px;border-radius:6px;text-decoration:none;font-weight:600;margin-bottom:20px}}
+table{{width:100%;border-collapse:collapse;font-size:.85rem}}
+th{{text-align:left;color:#888;font-weight:600;padding:7px 10px;border-bottom:1px solid #333}}
+td{{padding:7px 10px;border-bottom:1px solid #222}}
+td a{{color:#e88;text-decoration:none}} td a:hover{{text-decoration:underline}}
+.foot{{color:#555;font-size:.75rem;margin-top:22px}} .foot a{{color:#888}}
+</style>
+</head>
+<body><main>
+<p class="sub"><a href="/" style="color:#888">← GC Used Inventory Tracker</a></p>
+<h1>Guitar Center {city} — Used Gear Inventory</h1>
+<p class="sub">{count} used items currently tracked at this store. Newest 50 shown below; the full list is in the free tracker.</p>
+<p class="cats">{cats_html}</p>
+<a class="cta" href="/">Browse all {count} {city} items in the tracker →</a>
+<table>
+<thead><tr><th>Item</th><th>Brand</th><th>Price</th><th>Condition</th><th>Listed</th></tr></thead>
+<tbody>{"".join(rows) if rows else '<tr><td colspan="5" style="color:#777">No used items at this store right now — check back after the next scan.</td></tr>'}</tbody>
+</table>
+<p class="foot">Prices and availability change constantly — click any item for the live Guitar Center listing.
+Independent tool — not affiliated with Guitar Center, Inc. · <a href="/privacy">Privacy Policy</a></p>
+</main></body>
+</html>"""
+
+@app.route("/store/<slug>")
+def store_page(slug):
+    name = _store_slug_map().get(slug)
+    if not name:
+        return "Not found", 404
+    try:
+        mtime = CAT_CACHE_FILE.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    hit = _STORE_PAGE_CACHE.get(slug)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    html_out = _render_store_page(name, slug)
+    _STORE_PAGE_CACHE[slug] = (mtime, html_out)
+    return html_out
 
 @app.route("/cl")
 def cl_page():
@@ -2955,14 +3039,33 @@ def robots_txt():
 
 @app.route("/sitemap.xml")
 def sitemap_xml():
+    # Per-store landing pages included with lastmod = last scan date, so Google
+    # recrawls city pages after every scan day. (2026-07 audit S3)
+    lastmod = ""
+    try:
+        last_scan_file = DATA_DIR / "gc_last_scan.txt"
+        if last_scan_file.exists():
+            raw = last_scan_file.read_text().strip()[:10]  # YYYY-MM-DD
+            if len(raw) == 10:
+                lastmod = f"<lastmod>{raw}</lastmod>"
+    except Exception:
+        pass
+    urls = [
+        f'  <url><loc>https://gcgeartracker.com/</loc>{lastmod}'
+        '<changefreq>daily</changefreq><priority>1.0</priority></url>',
+        '  <url><loc>https://gcgeartracker.com/privacy</loc>'
+        '<changefreq>monthly</changefreq><priority>0.3</priority></url>',
+    ]
+    for slug in sorted(_store_slug_map()):
+        urls.append(
+            f'  <url><loc>https://gcgeartracker.com/store/{slug}</loc>{lastmod}'
+            '<changefreq>daily</changefreq><priority>0.6</priority></url>'
+        )
     content = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
-        '  <url><loc>https://gcgeartracker.com/</loc>'
-        '<changefreq>daily</changefreq><priority>1.0</priority></url>\n'
-        '  <url><loc>https://gcgeartracker.com/privacy</loc>'
-        '<changefreq>monthly</changefreq><priority>0.3</priority></url>\n'
-        '</urlset>\n'
+        + "\n".join(urls) +
+        '\n</urlset>\n'
     )
     return content, 200, {"Content-Type": "application/xml"}
 
@@ -3069,7 +3172,7 @@ CL_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CL Used Gear Search</title>
 <link rel="stylesheet" href="/static/cl.css">
 <!-- __GA__ -->
@@ -3177,24 +3280,9 @@ def api_stores_refresh():
     return jsonify({"stores": stores,
                     "count": len(stores), "info": info})
 
-@app.route("/api/favorites", methods=["POST"])
-@optional_user_context
-def api_favorites():
-    # Require a logged-in session — this endpoint writes to a server-side file
-    # and is not called by the main frontend (favorites are stored in SQLite via
-    # /api/sync).  Leaving it open would let unauthenticated requests corrupt
-    # the global favorites file.
-    if not session.get("user_id"):
-        return jsonify({"error": "Not logged in."}), 401
-    data = request.json
-    favs = load_favorites()
-    name = data.get("store", "")
-    if data.get("action") == "add" and name not in favs:
-        favs.append(name)
-    elif data.get("action") == "remove" and name in favs:
-        favs.remove(name)
-    save_favorites(favs)
-    return jsonify({"favorites": sorted(favs)})
+# (Dead legacy POST /api/favorites removed in v2.14.5 — favorites live in SQLite via
+#  /api/sync; no frontend called it. Login-gated since v2.12.28, deleted per 2026-07
+#  audit E3. FAVORITES_FILE stays: admin export/import/reset still reference it.)
 
 
 # Synthetic brand-facet label so brandless items (brand == "") are filterable
@@ -3216,11 +3304,13 @@ def api_saved_search_counts():
         return jsonify({"counts": []})
     # Hard cap so even authenticated users can't send thousands of searches.
     searches = searches[:50]
-    try:
-        with open(CAT_CACHE_FILE) as f:
-            cache = json.load(f)
-        all_items = list(cache.values())
-    except Exception:
+    # Use the mtime-memoized in-memory cache (v2.13.0) instead of re-reading and
+    # re-parsing the 51MB file from disk on every call (~400ms, GIL-held — it stalled
+    # every other request thread). Same read-only snapshot idiom as /api/browse.
+    # (2026-07 audit E1)
+    _load_cat_cache()
+    all_items = [v for _, v in list(_cat_cache.items())]
+    if not all_items:
         return jsonify({"counts": [0] * len(searches)})
 
     import re as _re2
@@ -3286,6 +3376,10 @@ def api_saved_search_counts():
 # (≤ ~96 real probes/day no matter how often it's hit). Public, returns no secret.
 _ALGOLIA_HEALTH = {"ts": 0.0, "result": None}
 _ALGOLIA_HEALTH_TTL = 900  # seconds
+# Refresh lock: without it, N concurrent requests arriving after TTL expiry each fire
+# a live probe at GC before any writes the result back — the "≤96 probes/day" cap only
+# holds if misses are serialized. (2026-07 audit L1)
+_ALGOLIA_HEALTH_LOCK = threading.Lock()
 
 @app.route("/api/health/algolia")
 def api_health_algolia():
@@ -3294,6 +3388,26 @@ def api_health_algolia():
     cached = _ALGOLIA_HEALTH["result"]
     if cached is not None and (now - _ALGOLIA_HEALTH["ts"]) < _ALGOLIA_HEALTH_TTL:
         return jsonify(dict(cached, cached=True))
+    # Serialize the refresh — losers of the race return the (stale) cached value
+    # instead of firing their own probe at GC's Algolia.
+    if not _ALGOLIA_HEALTH_LOCK.acquire(blocking=False):
+        if cached is not None:
+            return jsonify(dict(cached, cached=True))
+        _ALGOLIA_HEALTH_LOCK.acquire()  # cold start: wait for the first probe
+        _ALGOLIA_HEALTH_LOCK.release()
+        fresh = _ALGOLIA_HEALTH["result"]
+        return jsonify(dict(fresh, cached=True)) if fresh is not None else (jsonify({"ok": False, "error": "unavailable"}), 503)
+    try:
+        # Re-check under the lock — another thread may have refreshed while we waited.
+        cached = _ALGOLIA_HEALTH["result"]
+        if cached is not None and (_t.time() - _ALGOLIA_HEALTH["ts"]) < _ALGOLIA_HEALTH_TTL:
+            return jsonify(dict(cached, cached=True))
+        return _algolia_health_probe(now)
+    finally:
+        _ALGOLIA_HEALTH_LOCK.release()
+
+
+def _algolia_health_probe(now: float):
     result = {
         "ok": False, "nbHits": 0, "http_status": None,
         "checked_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -3772,133 +3886,12 @@ def api_browse():
     })
 
 
-@app.route("/api/watchlist", methods=["GET"])
-@optional_user_context
-def api_watchlist_get():
-    # Dead legacy endpoint (per-user watchlists live in SQLite). Gate it so the global
-    # file isn't read by anonymous callers.
-    if not session.get("user_id"):
-        return jsonify({"error": "Not logged in."}), 401
-    wl = load_watchlist()
-    return jsonify({"watchlist": wl})
-
-
-@app.route("/api/watchlist", methods=["POST"])
-@optional_user_context
-def api_watchlist_post():
-    # Require login — this writes the global gc_watchlist.json (consumed by the scan
-    # loop and /api/watchlist/items). Dead code (per-user watchlists live in SQLite via
-    # /api/sync), but left unauthenticated anyone could corrupt shared server state.
-    # Same class as the /api/favorites fix in v2.12.28.
-    if not session.get("user_id"):
-        return jsonify({"error": "Not logged in."}), 401
-    data = request.json or {}
-    sku  = data.get("id", "")
-    action = data.get("action", "")
-    if not sku:
-        return jsonify({"error": "No id provided"}), 400
-    wl = load_watchlist()
-    if action == "add":
-        _load_cat_cache()
-        cached = _cat_cache.get(sku, {})
-        wl[sku] = {
-            "name":       cached.get("name", data.get("name", "")),
-            "brand":      cached.get("brand", data.get("brand", "")),
-            "price":      cached.get("price", 0),
-            "store":      cached.get("store", data.get("store", "")),
-            "location":   cached.get("location") or cached.get("store", data.get("store", "")),
-            "url":        cached.get("url", data.get("url", "")),
-            "condition":  cached.get("condition", ""),
-            "category":   cached.get("category", ""),
-            "subcategory":cached.get("subcategory", ""),
-            "date_added": datetime.now().strftime("%Y-%m-%d"),
-            "date_listed":cached.get("date_listed", ""),
-            "image_id":   cached.get("image_id", ""),
-            "sold":       False,
-        }
-    elif action == "remove":
-        wl.pop(sku, None)
-    save_watchlist(wl)
-    return jsonify({"watchlist": wl})
-
-
-@app.route("/api/watchlist/items", methods=["GET"])
-@optional_user_context
-def api_watchlist_items():
-    """Return watchlist items formatted for display."""
-    # Dead legacy endpoint — reads the global watchlist file. Gate to logged-in users.
-    if not session.get("user_id"):
-        return jsonify({"error": "Not logged in."}), 401
-    wl         = load_watchlist()
-    item_dates = load_state().get("item_dates", {})
-    items = []
-    for sku, w in wl.items():
-        price_raw = w.get("price", 0) or 0
-        # Pull latest price drop info from live cache if available
-        live = _cat_cache.get(sku, {})
-        pd_amt   = live.get("price_drop", 0) or w.get("price_drop", 0) or 0
-        lp_raw   = live.get("list_price", 0) or w.get("list_price", 0) or 0
-        pd_since = live.get("price_drop_since", "") or w.get("price_drop_since", "") or ""
-        items.append({
-            "id":               sku,
-            "name":             w.get("name", ""),
-            "brand":            w.get("brand", ""),
-            "price":            f"${price_raw:,.2f}" if price_raw else "",
-            "price_raw":        price_raw,
-            "list_price_raw":   lp_raw,
-            "price_drop":       pd_amt,
-            "price_drop_since": pd_since,
-            "store":            w.get("store", ""),
-            "location":         w.get("location") or w.get("store", ""),
-            "url":              w.get("url", ""),
-            "category":         w.get("category", ""),
-            "subcategory":      w.get("subcategory", ""),
-            "condition":        w.get("condition", ""),
-            "date":             _fmt_date(w.get("date_listed") or item_dates.get(sku, w.get("date_added",""))),
-            "date_raw":         w.get("date_listed") or item_dates.get(sku, w.get("date_added","")),
-            "image_id":         w.get("image_id", ""),
-            "isNew":            False,
-            "watched":          True,
-            "sold":             w.get("sold", False),
-        })
-    # Sold items at bottom
-    items.sort(key=lambda x: x["sold"])
-    return jsonify({"items": items, "count": len(items)})
-
-
-@app.route("/api/keywords", methods=["GET"])
-@optional_user_context
-def api_keywords_get():
-    # Dead legacy endpoint — reads the global keywords file. Gate to logged-in users.
-    if not session.get("user_id"):
-        return jsonify({"error": "Not logged in."}), 401
-    return jsonify({"keywords": load_keywords()})
-
-
-@app.route("/api/keywords", methods=["POST"])
-@optional_user_context
-def api_keywords_post():
-    # Require login — writes the global gc_keywords.json. Dead code (per-user want
-    # lists live in SQLite via /api/sync); left open it allowed unauthenticated writes
-    # to shared server state. Same class as the /api/favorites fix in v2.12.28.
-    if not session.get("user_id"):
-        return jsonify({"error": "Not logged in."}), 401
-    data = request.json or {}
-    action = data.get("action", "")
-    kw_list = load_keywords()
-    if action == "add":
-        word = (data.get("keyword") or "").strip()
-        if word and word.lower() not in [k.lower() for k in kw_list]:
-            kw_list.append(word)
-            save_keywords(kw_list)
-    elif action == "remove":
-        word = (data.get("keyword") or "").strip().lower()
-        kw_list = [k for k in kw_list if k.lower() != word]
-        save_keywords(kw_list)
-    elif action == "clear":
-        kw_list = []
-        save_keywords(kw_list)
-    return jsonify({"keywords": load_keywords()})
+# (Dead legacy global-file endpoints removed in v2.14.5 — /api/watchlist GET+POST,
+# /api/watchlist/items, /api/keywords GET+POST. Per-user watch/want lists live in
+# SQLite via /api/sync; no frontend called any of these (grepped all static/*.js).
+# Login-gated since v2.12.32, deleted per 2026-07 audit E3. load_watchlist/
+# save_watchlist helpers stay — the scan loop still updates the legacy global
+# watchlist file's sold flags.)
 
 
 @app.route("/api/state")
@@ -3939,7 +3932,9 @@ def api_run():
         _scan_last[ip] = now
     _stop_event.clear()
     data     = request.json
-    selected = data.get("stores", [])
+    # Cap the stores array — each entry is an Algolia fan-out; there are only ~240
+    # real stores, so anything beyond that is garbage or abuse. (2026-07 audit L2)
+    selected = (data.get("stores") or [])[:300]
     baseline = data.get("baseline", False)
     # If user is logged in, use their server-stored last_run (synced across devices).
     # Otherwise fall back to the device's own localStorage value.
@@ -5212,7 +5207,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Guitar Center Used Gear Tracker — Browse Inventory by Store Location</title>
 <meta name="description" content="Browse used gear at any Guitar Center location. Search guitars, amps, pedals, drums, and more by store, city, condition, and price — updated in real time. Free watch list and want list.">
 <link rel="canonical" href="https://gcgeartracker.com/">
@@ -5221,12 +5216,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <meta property="og:site_name" content="GC Used Inventory Tracker">
 <meta property="og:title" content="Guitar Center Used Gear Tracker — Browse Inventory by Store Location">
 <meta property="og:description" content="Browse used gear at any Guitar Center location. Filter by store, city, condition, and price across 300+ stores nationwide. Free watch list and want list.">
-<meta property="og:image" content="https://gcgeartracker.com/static/og-image.svg">
+<meta property="og:image" content="https://gcgeartracker.com/static/og-image.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Guitar Center Used Gear Tracker — Browse Inventory by Store Location">
 <meta name="twitter:description" content="Browse used gear at any Guitar Center location. Filter by store, city, condition, and price. Free watch list and want list alerts.">
-<meta name="twitter:image" content="https://gcgeartracker.com/static/og-image.svg">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%237a0000'/><text x='16' y='22' font-family='system-ui,sans-serif' font-size='14' font-weight='700' fill='%23ffcccc' text-anchor='middle'>GC</text></svg>">
+<meta name="twitter:image" content="https://gcgeartracker.com/static/og-image.png">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"WebSite","name":"GC Used Inventory Tracker","url":"https://gcgeartracker.com/","description":"Browse used gear at any Guitar Center location across 300+ stores nationwide.","potentialAction":{"@type":"SearchAction","target":{"@type":"EntryPoint","urlTemplate":"https://gcgeartracker.com/?q={search_term_string}"},"query-input":"required name=search_term_string"}}
 </script>
@@ -5942,7 +5937,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.14.4"
+APP_VERSION = "2.15.0"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
