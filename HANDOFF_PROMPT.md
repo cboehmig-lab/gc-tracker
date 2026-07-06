@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-07-06 · Version: v2.15.1 · Live at: gcgeartracker.com*
+*Generated: 2026-07-06 · Version: v2.15.2 · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,10 +88,11 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.15.1 (store-page meta double-escape fix — pending push; v2.15.0 deployed)
+## Current State: v2.15.2 (store-page → app deep link — pending push; v2.15.1 deployed)
 
 ### Recent changes (this session)
 
+- **v2.15.2** — **Store page → app pre-filtered deep link.** Landing-page CTA now links `/?store=<slug>`; new `_applyStoreDeepLink()` in gc.js (runs after loadData/loadState) matches the slug against `allStores`, sets `_selectedStores` to that one store, `renderList()` auto-refetches. Param stripped via replaceState; unknown slugs ignored. Completes audit S6 for `?store=` (`?q=` still deferred).
 - **v2.15.1** — **Store-page meta description double-escape fix.** All ~298 `/store/<slug>` pages rendered "&amp;" literally in meta/og descriptions (Google snippet shows it verbatim). Cause: v2.15.0 escaped category names when building `desc` AND at interpolation. Now built plain, escaped once. Verified on rendered attributes. Also: live store count is 298 (local repo cache stale at 240); GSC sitemap resubmitted (300 URLs processed); metro pages (/chicago) in design discussion, no code.
 - **v2.15.0** — **July 2026 audit bundle + per-store SEO landing pages.** Audit Phases 1–3 (security, SEO, efficiency) are in `AUDIT_REPORT_2026-07.md`; the apply-now findings shipped as one bump. **NEW `GET /store/<slug>`** (e.g. `/store/boise`): server-rendered zero-JS city pages (live count, category counts, newest-50 table, ItemList+Breadcrumb JSON-LD), memoized per store by cat-cache mtime — the fix for the Search Console CTR problem (page-1 city queries, generic title, ~0 clicks). `sitemap.xml` now lists all ~240 store pages w/ `lastmod`; homepage noscript city list links to them. Security: `MAX_CONTENT_LENGTH=1MB` (unauth body DoS), `/api/run` stores cap `[:300]`, deleted dead `/login`+GET `/logout`+`LOGIN_PAGE`, Algolia-health refresh lock. Efficiency: `/api/saved-search-counts` now uses the memoized cache (was re-parsing 51MB from disk per call, ~400ms GIL-held), atomic new-deals cache write, deleted dead legacy watchlist/keywords/favorites endpoints + orphaned helpers. SEO: `og-image.png` (1200×630 — SVG og-images don't render on Reddit/Discord/FB/X), real `static/favicon.svg` (data-URI favicons get no SERP icon), dropped `user-scalable=no`. Repo: `git rm --cached` the 51MB cache + other ignored-but-tracked files, deleted dead `gc_inventory_tracker.py`. **Post-deploy: resubmit sitemap in Search Console.** Deferred items in the audit report's backlog (E2 browse memoization, E4 local-render consolidation, S6 deep links, S7 cache-busting, gunicorn, module split, DB backup).
 - **v2.14.4** — **Want-list comma-AND fix** (user-reported). Multi-term entries using the comma-AND operator (e.g. `Whirlwind, box`) stopped matching once a want list had **>30 combined exotic terms** (wildcard+quoted+comma), because v2.13.1's anti-DoS cap `_EXOTIC_KW_CAP=30` was *shared* across all three; quoted terms sort first (start with `"`) and fill the slots, so comma terms drop — hence "quotes work, commas don't." **Not** from the v2.14.x work (cap dates to v2.13.1). Fix (`gc_tracker_app.py`, `/api/browse` matcher): comma-AND gets its own cap (`_AND_KW_CAP=200`) + a sound required-tokens pre-filter (`_req <= _toks` before the regexes) so it stays cheap on the unauthenticated endpoint; wildcard/quoted keep the tight 30-cap. Verified behavior-identical vs old across the full 91,686-item cache (0 diffs) and the repro now matches. Detail in HANDOFF.md "v2.14.3 → v2.14.4".

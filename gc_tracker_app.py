@@ -2827,7 +2827,7 @@ td a{{color:#e88;text-decoration:none}} td a:hover{{text-decoration:underline}}
 <h1>Guitar Center {city} — Used Gear Inventory</h1>
 <p class="sub">{count} used items currently tracked at this store. Newest 50 shown below; the full list is in the free tracker.</p>
 <p class="cats">{cats_html}</p>
-<a class="cta" href="/">Browse all {count} {city} items in the tracker →</a>
+<a class="cta" href="/?store={slug}">Browse all {count} {city} items in the tracker →</a>
 <table>
 <thead><tr><th>Item</th><th>Brand</th><th>Price</th><th>Condition</th><th>Listed</th></tr></thead>
 <tbody>{"".join(rows) if rows else '<tr><td colspan="5" style="color:#777">No used items at this store right now — check back after the next scan.</td></tr>'}</tbody>
@@ -5941,7 +5941,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.15.1"
+APP_VERSION = "2.15.2"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

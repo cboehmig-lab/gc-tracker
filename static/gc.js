@@ -847,7 +847,31 @@ document.addEventListener('DOMContentLoaded', async () => {
   } catch(e) { /* not logged in or network error — continue with localStorage */ }
   await loadData();
   await loadState(alreadyLoggedIn);
+  _applyStoreDeepLink();
 });
+
+// ?store=<slug> deep link from the /store/<slug> SEO landing pages (v2.15.2):
+// pre-select just that store so "Browse all N <city> items" lands filtered to it.
+// Runs AFTER loadData/loadState so nothing overwrites the selection; renderList()
+// -> updateCount() auto-triggers browseCache(), so results refetch for free.
+function _applyStoreDeepLink() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const slug = (params.get('store') || '').trim().toLowerCase();
+    if (!slug) return;
+    // Clean the URL either way so a refresh/bookmark doesn't keep re-forcing it
+    const url = new URL(window.location.href);
+    url.searchParams.delete('store');
+    history.replaceState(null, '', url.toString());
+    const slugify = function (n) {
+      return n.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    };
+    const match = (allStores || []).find(function (n) { return slugify(n) === slug; });
+    if (!match) return;
+    _selectedStores = new Set([match]);
+    renderList();
+  } catch (e) { /* never block app init on a bad deep link */ }
+}
 
 async function loadData() {
   const r = await fetch('/api/stores');

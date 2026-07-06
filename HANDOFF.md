@@ -1,5 +1,11 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-07-06 · Current version: v2.15.1 (store-page meta double-escape fix — pending push; v2.15.0 deployed) · Domain: gcgeartracker.com*
+*Last updated: 2026-07-06 · Current version: v2.15.2 (store-page → app deep link — pending push; v2.15.1 deployed) · Domain: gcgeartracker.com*
+
+---
+
+## ⭐ Recent Changes (v2.15.1 → v2.15.2) — 2026-07-06 (store landing page → app pre-filtered deep link — PENDING PUSH)
+
+**Feature (Chuck-requested):** the store landing pages' CTA ("Browse all N {city} items in the tracker →") now links to **`/?store=<slug>`** instead of bare `/`, and the app pre-selects that store on arrival — so a visitor from `/store/las-vegas` lands in the tracker already filtered to Las Vegas. Implementation: `_render_store_page` CTA href (`gc_tracker_app.py`) + new **`_applyStoreDeepLink()`** in `static/gc.js`, called in DOMContentLoaded **after** `loadData()`/`loadState()` so nothing overwrites the selection. It slugifies client-side with the same rules as the server's `_store_slug()`, matches against `allStores`, sets `_selectedStores` to the single store, and calls `renderList()` (→ `updateCount()` auto-triggers `browseCache()` — the standard selection-change flow, no new browse plumbing). The `?store=` param is stripped via `history.replaceState` either way so refresh/bookmark doesn't re-force it; unknown slugs are ignored gracefully. No CSP concerns (static gc.js, no inline JS; regex literals are safe in static files). Verified: `py_compile` + `node --check` clean; test client confirms CTA renders `/?store=las-vegas`. This also completes audit item **S6 (partially — `?store=`; `?q=` still deferred)**.
 
 ---
 
