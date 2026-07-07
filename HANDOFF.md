@@ -1,5 +1,16 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-07-06 · Current version: v2.15.3 (daily DB backup + WAL + SSE error-leak fix — pending push; v2.15.2 deployed) · Domain: gcgeartracker.com*
+*Last updated: 2026-07-06 · Current version: v2.15.4 (gzip compression + static cache-busting — pending push; v2.15.3 deployed) · Domain: gcgeartracker.com*
+
+---
+
+## ⭐ Recent Changes (v2.15.3 → v2.15.4) — 2026-07-06 (response compression + static cache-busting — PENDING PUSH; audit S7 closed)
+
+**Trigger:** Chuck's curl check confirmed Railway does NOT compress responses (no `Content-Encoding` on `/static/gc.js`) — 194KB gc.js + 53KB gc.css over the wire uncompressed on every first visit, and every `/api/browse` JSON page too.
+
+- **flask-compress** (new dep in `requirements.txt`; guarded `try/except ImportError` so the app still boots without it). Two non-obvious configs that were REQUIRED: (1) `COMPRESS_MIMETYPES` must include **`text/javascript`** — Flask 3.x serves .js with that mimetype and flask-compress's default list only has `application/javascript`, so gc.js silently stayed uncompressed; (2) `COMPRESS_ALGORITHM_STREAMING` must include **`gzip`** — static files are *streamed* responses and the streaming default (`["zstd","br","deflate"]`) excludes gzip, so gzip-only clients got static uncompressed. `text/event-stream` is not in the mimetype list → SSE (`/api/progress`) untouched.
+- **Static cache-busting**: `_version_static()` (bottom of file, after the `__GA__`/`__VER__` replacements) rewrites every `/static/*.js|css` ref in `HTML_TEMPLATE`/`CL_TEMPLATE`/`NEWDEALS_TEMPLATE` to `?v=APP_VERSION`, enabling `SEND_FILE_MAX_AGE_DEFAULT = 31536000` (1 year). A version bump changes the URL → no stale-asset risk. (Admin pages' `admin.js` ref not versioned — admin-only, trivial.)
+- **Measured**: gc.js 195,080 → **45,926 B** (gzip) / 47,367 B (zstd); gc.css 52,569 → **10,912 B**; browse JSON page ~5KB compressed. SSE `Content-Encoding: None` confirmed.
+- Verify after deploy: `curl -sI -H 'Accept-Encoding: gzip' https://gcgeartracker.com/static/gc.js | grep -i 'content-encoding\|cache-control'` → expect `gzip` + `max-age=31536000`, and view-source shows `/static/gc.js?v=2.15.4`.
 
 ---
 

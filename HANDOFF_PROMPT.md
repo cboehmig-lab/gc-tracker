@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-07-06 · Version: v2.15.3 · Live at: gcgeartracker.com*
+*Generated: 2026-07-06 · Version: v2.15.4 · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,10 +88,11 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.15.3 (daily DB backup + WAL + SSE error-leak fix — pending push; v2.15.2 deployed)
+## Current State: v2.15.4 (gzip + static cache-busting — pending push; v2.15.3 deployed)
 
 ### Recent changes (this session)
 
+- **v2.15.4** — **Compression + cache-busting (audit S7 closed).** Railway doesn't gzip (verified by curl). Added flask-compress (new dep) with two required non-defaults: `text/javascript` in `COMPRESS_MIMETYPES` (Flask 3.x mimetype for .js) and `gzip` in `COMPRESS_ALGORITHM_STREAMING` (static files are streamed; default excludes gzip). `_version_static()` adds `?v=APP_VERSION` to all static js/css refs in the three templates → `SEND_FILE_MAX_AGE_DEFAULT` = 1 year. gc.js 195KB → 46KB wire; SSE untouched.
 - **v2.15.3** — **Audit "do now" items closed.** Daily `gc_users.db` backup: `_maybe_backup_users_db()` off the after_request hook — `VACUUM INTO DATA_DIR/backups/gc_users_YYYYMMDD.db` once per UTC day, keeps 7, lock-guarded, failure-tolerant. SQLite **WAL** enabled in `_init_user_db` (persistent). SSE **error-leak fix**: the three populate/fill-gaps handlers no longer broadcast `str(e)` over the progress stream (generic message + server log). The only remaining "do now" from the audit is the gzip check (`curl -sI -H 'Accept-Encoding: gzip' https://gcgeartracker.com/static/gc.js` from the Mac).
 - **v2.15.2** — **Store page → app pre-filtered deep link.** Landing-page CTA now links `/?store=<slug>`; new `_applyStoreDeepLink()` in gc.js (runs after loadData/loadState) matches the slug against `allStores`, sets `_selectedStores` to that one store, `renderList()` auto-refetches. Param stripped via replaceState; unknown slugs ignored. Completes audit S6 for `?store=` (`?q=` still deferred).
 - **v2.15.1** — **Store-page meta description double-escape fix.** All ~298 `/store/<slug>` pages rendered "&amp;" literally in meta/og descriptions (Google snippet shows it verbatim). Cause: v2.15.0 escaped category names when building `desc` AND at interpolation. Now built plain, escaped once. Verified on rendered attributes. Also: live store count is 298 (local repo cache stale at 240); GSC sitemap resubmitted (300 URLs processed); metro pages (/chicago) in design discussion, no code.

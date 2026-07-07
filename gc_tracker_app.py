@@ -1523,6 +1523,31 @@ app.config["SESSION_COOKIE_SECURE"]   = os.environ.get("RAILWAY_ENVIRONMENT") is
 # is a memory DoS. Largest legit payload (240-store array + 750-keyword want list +
 # admin import) is well under 1 MB. (2026-07 audit M1)
 app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024  # 1 MB
+# Static assets are safe to cache long-term because their URLs carry ?v=APP_VERSION
+# (see the template replacements at the bottom of the file) — a deploy changes the
+# URL, so stale caches can't survive a version bump. (2026-07 audit S7)
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 31536000  # 1 year
+# Railway does NOT gzip responses (verified 2026-07-06: no Content-Encoding on
+# static/gc.js) — 194KB gc.js + 53KB gc.css went over the wire uncompressed, and so
+# did every /api/browse JSON page. Flask-Compress gzips html/css/js/json (default
+# mimetype list; text/event-stream is untouched, so SSE is safe). (2026-07 audit S7)
+try:
+    from flask_compress import Compress
+    # Newer Flask serves .js as text/javascript, which is NOT in flask-compress's
+    # default mimetype list — without this line gc.js stays uncompressed (the whole
+    # point). svg included for og-image/favicon.
+    app.config["COMPRESS_MIMETYPES"] = [
+        "text/html", "text/css", "text/xml",
+        "text/javascript", "application/javascript",
+        "application/json", "image/svg+xml",
+    ]
+    # Static files are streamed responses, and flask-compress's streaming algorithm
+    # list excludes gzip by default (["zstd","br","deflate"]) — a gzip-only client
+    # (curl -H 'Accept-Encoding: gzip', older agents) would get static uncompressed.
+    app.config["COMPRESS_ALGORITHM_STREAMING"] = ["zstd", "br", "gzip", "deflate"]
+    Compress(app)
+except ImportError:
+    print("[warn] flask-compress not installed — responses will be uncompressed")
 
 # ProxyFix: Railway terminates TLS so Flask sees HTTP; this makes url_for() produce https://
 if os.environ.get("RAILWAY_ENVIRONMENT"):
@@ -5998,11 +6023,21 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.15.3"
+APP_VERSION = "2.15.4"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 NEWDEALS_TEMPLATE = NEWDEALS_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
+
+# Cache-busting: version every local static JS/CSS reference so the 1-year
+# SEND_FILE_MAX_AGE_DEFAULT above can never serve a stale asset across deploys.
+# (2026-07 audit S7)
+def _version_static(tpl: str) -> str:
+    return re.sub(r'(/static/[a-zA-Z0-9._-]+\.(?:js|css))', rf'\1?v={APP_VERSION}', tpl)
+
+HTML_TEMPLATE     = _version_static(HTML_TEMPLATE)
+CL_TEMPLATE       = _version_static(CL_TEMPLATE)
+NEWDEALS_TEMPLATE = _version_static(NEWDEALS_TEMPLATE)
 
 # __STORES_NOSCRIPT__ is replaced at request time in index() so it always reflects
 # the live store cache — see the index() route handler below.
