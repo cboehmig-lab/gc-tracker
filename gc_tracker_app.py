@@ -3367,6 +3367,147 @@ def api_stores_refresh():
 NO_BRAND_LABEL = "(none)"
 
 
+# ── Shared query-matching helpers (v2.16.0) ──────────────────────────────────
+# Hoisted from api_browse's function locals so /api/saved-search-counts uses
+# IDENTICAL semantics (its old inline copy had drifted: it treated filter_strict
+# as whole-word when browse treats it as fuzzy/contains, and it searched 6 fields
+# where browse searches name+brand — so counts didn't match applied results).
+# Also adds the v2.16.0 operators: leading '-' = NOT on a term, ';' = OR between
+# clauses (lowest precedence). Comma/space AND, quotes, wildcards unchanged.
+# These are pure functions of their inputs — no request state.
+
+_SIMPLE_KW_RE = re.compile(r'^\w+$')   # a single word token
+_KW_SPLIT_RE  = re.compile(r'\W+')     # tokenizer matching \b boundaries
+
+def _compile_query(query_str, fuzzy=False):
+    """Parse a query string into AND-joined terms.
+    Syntax:
+      Allen          → whole-word match  (won't match Allentown, McAllen)
+      "Jam Pedals"   → exact phrase match
+      Thorpy, Dane   → comma = AND; each part uses same rules
+      OD*            → wildcard: * is a glob wildcard (OD808, OD-1, etc.)
+      fuzzy=True     → plain terms use contains matching instead of whole-word
+    """
+    terms = []
+    for part in query_str.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        if part.startswith('"') and part.endswith('"') and len(part) > 2:
+            terms.append(('exact', part[1:-1].lower()))
+        elif '*' in part:
+            pieces = [re.escape(p) for p in part.split('*')]
+            terms.append(('regex', re.compile('.*'.join(pieces), re.IGNORECASE)))
+        elif fuzzy:
+            terms.append(('contains', part.lower()))
+        else:
+            terms.append(('word', re.compile(r'\b' + re.escape(part) + r'\b', re.IGNORECASE)))
+    return terms
+
+def _matches_all(text_lower, terms):
+    for mode, val in terms:
+        if mode in ('exact', 'contains'):
+            if val not in text_lower:
+                return False
+        else:
+            if not val.search(text_lower):
+                return False
+    return bool(terms)
+
+def _matches_any(text_lower, terms):
+    """True if ANY term matches — used for the negation lists."""
+    for mode, val in terms:
+        if mode in ('exact', 'contains'):
+            if val in text_lower:
+                return True
+        elif val.search(text_lower):
+            return True
+    return False
+
+def _kw_or_pattern(base):
+    """Regex pattern string for one OR-able want-list keyword, mirroring the
+    single-term branches of _compile_query so the alternation matches identically:
+      "phrase"  -> escaped substring (exact, no boundaries)
+      od*       -> escaped pieces joined by .*  (wildcard)
+      big muff  -> \\bbig\\ muff\\b             (whole-word / phrase)
+    Compiled case-insensitively by the caller."""
+    if base.startswith('"') and base.endswith('"') and len(base) > 2:
+        return re.escape(base[1:-1])
+    if '*' in base:
+        return '.*'.join(re.escape(p) for p in base.split('*'))
+    return r'\b' + re.escape(base) + r'\b'
+
+# search-box (filter_q) clause compiler: ';' OR-clauses of space-separated tokens,
+# '-tok' negated. Shared 12-token budget across all clauses, ≤4 clauses — same
+# unauthenticated-DoS budget as the old single-clause path (v2.13.0 cap).
+_FQ_TOKEN_RE = re.compile(r'-?"[^"]+"|\S+')
+
+def _compile_fq_clauses(fq, fuzzy=False, max_tokens=12, max_clauses=4):
+    clauses = []
+    budget = max_tokens
+    for cl in fq.split(';'):
+        cl = cl.strip()
+        if not cl or budget <= 0:
+            continue
+        toks = _FQ_TOKEN_RE.findall(cl)[:budget]
+        budget -= len(toks)
+        pos, neg = [], []
+        for tok in toks:
+            if len(tok) > 1 and tok[0] == '-':
+                neg.extend(_compile_query(tok[1:], fuzzy=fuzzy))
+            else:
+                pos.extend(_compile_query(tok, fuzzy=fuzzy))
+        if pos or neg:
+            clauses.append((pos, neg))
+        if len(clauses) >= max_clauses:
+            break
+    return clauses
+
+def _fq_text_match(text_lower, clauses):
+    """True if ANY clause matches: all positives present, no negative present."""
+    for pos, neg in clauses:
+        if pos and not _matches_all(text_lower, pos):
+            continue
+        if neg and _matches_any(text_lower, neg):
+            continue
+        return True
+    return False
+
+def _wl_bool_compile(base):
+    """Compile a want-list entry that uses the v2.16.0 ';' (OR) / '-' (NOT)
+    syntax. Returns a list of (pos_terms, neg_terms, required_tokens) clauses,
+    or None if the entry uses no new syntax (caller falls through to the
+    legacy paths — old entries stay byte-identical in behavior). A clause needs
+    at least one positive part; an all-negative entry returns None (a want-list
+    entry matching "everything except X" would highlight the whole catalog)."""
+    parts_all = [p.strip() for cl in base.split(';') for p in cl.split(',')]
+    has_neg = any(len(p) > 1 and p[0] == '-' for p in parts_all)
+    if ';' not in base and not has_neg:
+        return None
+    clauses = []
+    for cl in base.split(';'):
+        cl = cl.strip()
+        if not cl:
+            continue
+        pos, neg, req = [], [], set()
+        for p in cl.split(','):
+            p = p.strip()
+            if not p:
+                continue
+            if len(p) > 1 and p[0] == '-':
+                neg.extend(_compile_query(p[1:]))
+            else:
+                pos.extend(_compile_query(p))
+                pl = p.lower()
+                # Required-tokens pre-filter (sound, same trick as the phrase and
+                # comma-AND paths): only from plain (non-quoted, non-wildcard) parts.
+                if '*' not in pl and not (pl.startswith('"') and pl.endswith('"') and len(pl) > 2):
+                    req |= set(_KW_SPLIT_RE.split(pl)) - {''}
+        if pos:
+            clauses.append((pos, neg, req))
+    return clauses or None
+
+
 @app.route("/api/saved-search-counts", methods=["POST"])
 def api_saved_search_counts():
     """Return match counts for each saved search in a single batch call."""
@@ -3390,7 +3531,6 @@ def api_saved_search_counts():
     if not all_items:
         return jsonify({"counts": [0] * len(searches)})
 
-    import re as _re2
     counts = []
     for search in searches:
         stores   = set(search.get("stores") or [])
@@ -3406,25 +3546,15 @@ def api_saved_search_counts():
         items = [i for i in all_items if i.get("store") in stores] if stores else list(all_items)
 
         if fq:
-            if fq.startswith('"') and fq.endswith('"') and len(fq) > 2:
-                phrase = fq[1:-1]
-                items = [i for i in items if phrase in (i.get("name") or "").lower()
-                         or phrase in (i.get("brand") or "").lower()]
-            elif f_strict:
-                words = fq.split()
-                pats  = [_re2.compile(r'\b' + _re2.escape(w) + r'\b', _re2.IGNORECASE) for w in words]
-                items = [i for i in items if all(
-                    p.search(" ".join([i.get("name") or "", i.get("brand") or "",
-                                       i.get("store") or "", i.get("location") or "",
-                                       i.get("category") or "", i.get("subcategory") or ""]))
-                    for p in pats)]
-            else:
-                words = fq.split()
-                items = [i for i in items if all(
-                    w in " ".join([i.get("name") or "", i.get("brand") or "",
-                                   i.get("store") or "", i.get("location") or "",
-                                   i.get("category") or "", i.get("subcategory") or ""]).lower()
-                    for w in words)]
+            # v2.16.0: use the SAME shared clause compiler + the SAME name+brand text
+            # as /api/browse's _apply_base, so a saved search's count equals what
+            # applying it actually returns. The old inline copy here had drifted two
+            # ways: it treated filter_strict as whole-word (browse treats it as
+            # fuzzy/contains, per the v2.10.5 semantics flip) and it searched 6
+            # fields where browse searches name+brand — both made counts wrong.
+            fq_clauses = _compile_fq_clauses(fq, fuzzy=f_strict)
+            items = [i for i in items if fq_clauses and _fq_text_match(
+                ((i.get("name") or "") + " " + (i.get("brand") or "")).lower(), fq_clauses)]
 
         if f_brands: items = [i for i in items if (i.get("brand") in f_brands) or (not i.get("brand") and NO_BRAND_LABEL in f_brands)]
         if f_conds:  items = [i for i in items if i.get("condition") in f_conds]
@@ -3592,60 +3722,10 @@ def api_browse():
     # ── Unified query matching (shared by keyword list and filter_q) ─────────
     import re as _re
 
-    # Helpers for the fast want-list matcher (see _kw_match). \w and \W share the
-    # same character-class definition, so \W+ tokenization is exactly equivalent to
-    # \bword\b matching for a single-word term — that equivalence is what lets the
-    # plain-word fast path stay semantically identical to the regex path.
-    _SIMPLE_KW_RE = _re.compile(r'^\w+$')   # a single word token
-    _KW_SPLIT_RE  = _re.compile(r'\W+')     # tokenizer matching \b boundaries
-
-    def _compile_query(query_str, fuzzy=False):
-        """Parse a query string into AND-joined terms.
-        Syntax:
-          Allen          → whole-word match  (won't match Allentown, McAllen)
-          "Jam Pedals"   → exact phrase match
-          Thorpy, Dane   → comma = AND; each part uses same rules
-          OD*            → wildcard: * is a glob wildcard (OD808, OD-1, etc.)
-          fuzzy=True     → plain terms use contains matching instead of whole-word
-        """
-        terms = []
-        for part in query_str.split(','):
-            part = part.strip()
-            if not part:
-                continue
-            if part.startswith('"') and part.endswith('"') and len(part) > 2:
-                terms.append(('exact', part[1:-1].lower()))
-            elif '*' in part:
-                pieces = [_re.escape(p) for p in part.split('*')]
-                terms.append(('regex', _re.compile('.*'.join(pieces), _re.IGNORECASE)))
-            elif fuzzy:
-                terms.append(('contains', part.lower()))
-            else:
-                terms.append(('word', _re.compile(r'\b' + _re.escape(part) + r'\b', _re.IGNORECASE)))
-        return terms
-
-    def _matches_all(text_lower, terms):
-        for mode, val in terms:
-            if mode in ('exact', 'contains'):
-                if val not in text_lower:
-                    return False
-            else:
-                if not val.search(text_lower):
-                    return False
-        return bool(terms)
-
-    def _kw_or_pattern(base):
-        """Regex pattern string for one OR-able want-list keyword, mirroring the
-        single-term branches of _compile_query so the alternation matches identically:
-          "phrase"  -> escaped substring (exact, no boundaries)
-          od*       -> escaped pieces joined by .*  (wildcard)
-          big muff  -> \\bbig\\ muff\\b             (whole-word / phrase)
-        Compiled case-insensitively by the caller."""
-        if base.startswith('"') and base.endswith('"') and len(base) > 2:
-            return _re.escape(base[1:-1])
-        if '*' in base:
-            return '.*'.join(_re.escape(p) for p in base.split('*'))
-        return r'\b' + _re.escape(base) + r'\b'
+    # Query helpers (_compile_query, _matches_all, _matches_any, _kw_or_pattern,
+    # _SIMPLE_KW_RE, _KW_SPLIT_RE, _wl_bool_compile, _compile_fq_clauses) are
+    # module-level since v2.16.0 — shared with /api/saved-search-counts so the
+    # two endpoints can't drift. See "Shared query-matching helpers".
 
     # ── Want-list keyword matcher (fast path) ────────────────────────────────
     # Matching each keyword as its own \bword\b regex is O(items × keywords); at ~92K
@@ -3682,18 +3762,38 @@ def api_browse():
     _PHRASE_KW_CAP = 300
     _EXOTIC_KW_CAP = 30    # wildcard (*) + quoted-exact only — the expensive alternation
     _AND_KW_CAP    = 200   # comma-AND — cheap once sound-prefiltered, so its own cap
+    _BOOL_KW_CAP   = 50    # v2.16.0 ';'/'-' entries — benched ~0.8s worst-adversarial
+                           # at 50 over the full cache, in line with the v2.13.1 budget
     _phrase_n = 0
     _exotic_n = 0
     _and_n    = 0
+    _bool_n   = 0
     _kw_word_set = set()
     _kw_phrases  = []   # (compiled \b...\b regex, set-of-required-word-tokens) — pre-filtered
     _kw_or_pats  = []   # wildcard + quoted-exact patterns -> one alternation (capped)
     _kw_and      = []   # comma-AND: (term-list, set-of-required-plain-word-tokens) — pre-filtered
+    _kw_bool     = []   # v2.16.0 OR/NOT entries: list of (pos, neg, req) clause lists
     for _kw in keywords:
         _base = _kw.lstrip('=').strip()
         if not _base:
             continue
-        if _SIMPLE_KW_RE.match(_base):
+        # v2.16.0 OR/NOT syntax — must be checked FIRST: an entry like 'OD*, -combo'
+        # or 'foo*; bar' contains '*' and would otherwise be misrouted to the exotic
+        # branch and lose its operators. _wl_bool_compile returns None for every
+        # legacy entry (no ';' and no leading-dash part), so old lists are untouched.
+        _wl_clauses = _wl_bool_compile(_base) if (';' in _base or '-' in _base) else None
+        if _wl_clauses is not None:
+            if '*' in _base:
+                # Wildcards can't be pre-filtered — charge them to the tight exotic
+                # budget so the bool path can't smuggle 100 wildcard scans past the
+                # 30-cap (the v2.13.1 DoS boundary).
+                if _exotic_n < _EXOTIC_KW_CAP:
+                    _kw_bool.append(_wl_clauses)
+                    _exotic_n += 1
+            elif _bool_n < _BOOL_KW_CAP:
+                _kw_bool.append(_wl_clauses)
+                _bool_n += 1
+        elif _SIMPLE_KW_RE.match(_base):
             _kw_word_set.add(_base.lower())
         elif '*' in _base or (_base.startswith('"') and _base.endswith('"') and len(_base) > 2):
             if _exotic_n < _EXOTIC_KW_CAP:
@@ -3722,11 +3822,11 @@ def api_browse():
                 _kw_phrases.append((_re.compile(r'\b' + _re.escape(_base) + r'\b', _re.IGNORECASE), _words))
                 _phrase_n += 1
     _kw_combo = _re.compile('|'.join(_kw_or_pats), _re.IGNORECASE) if _kw_or_pats else None
-    _has_kw = bool(_kw_word_set or _kw_phrases or _kw_combo or _kw_and)
+    _has_kw = bool(_kw_word_set or _kw_phrases or _kw_combo or _kw_and or _kw_bool)
 
     def _kw_match(name_l, brand_l):
         text = name_l + " " + brand_l
-        _toks = set(_KW_SPLIT_RE.split(text)) if (_kw_word_set or _kw_phrases or _kw_and) else None
+        _toks = set(_KW_SPLIT_RE.split(text)) if (_kw_word_set or _kw_phrases or _kw_and or _kw_bool) else None
         if _kw_word_set and not _kw_word_set.isdisjoint(_toks):
             return True
         if _kw_phrases:
@@ -3744,6 +3844,13 @@ def api_browse():
             for _terms, _req in _kw_and:
                 if _req <= _toks and _matches_all(text, _terms):
                     return True
+        if _kw_bool:
+            # v2.16.0 OR/NOT entries: entry matches if ANY of its clauses does —
+            # all positives present (required-tokens pre-filtered) and no negative.
+            for _clauses in _kw_bool:
+                for _pos, _neg, _req in _clauses:
+                    if _req <= _toks and _matches_all(text, _pos) and not (_neg and _matches_any(text, _neg)):
+                        return True
         return False
 
     # Check if any cache entries have store field
@@ -3820,19 +3927,13 @@ def api_browse():
     def _apply_base(items):
         r = items
         if fq:
-            # Split by spaces (respecting quoted phrases) so each word is an independent
-            # AND term — matches local-mode behaviour where "fender jaguar vintera" means
-            # fender AND jaguar AND vintera in any order, not an exact phrase.
-            # _compile_query handles each token's type (quoted, wildcard, word, fuzzy).
-            # Cap token count: filter_q is clamped to 200 chars but could still pack
-            # ~100 single-char tokens, each a regex over the full cache (O(items×tokens),
-            # an unauthenticated cost). No human search has >12 words. (v2.13.0)
-            fq_tokens = _re.findall(r'"[^"]+"|[^\s]+', fq)[:12]
-            fq_terms = []
-            for tok in fq_tokens:
-                fq_terms.extend(_compile_query(tok, fuzzy=f_strict))
-            r = [i for i in r if fq_terms and _matches_all(
-                ((i["name"] or "") + " " + (i["brand"] or "")).lower(), fq_terms)]
+            # v2.16.0: ';' splits OR clauses; within a clause space-separated tokens
+            # are AND'd (old behavior, byte-identical when no ';' or '-' present) and
+            # a leading '-' negates a token. Token budget stays 12 TOTAL across all
+            # clauses + ≤4 clauses — same unauthenticated-DoS ceiling as v2.13.0.
+            fq_clauses = _compile_fq_clauses(fq, fuzzy=f_strict)
+            r = [i for i in r if fq_clauses and _fq_text_match(
+                ((i["name"] or "") + " " + (i["brand"] or "")).lower(), fq_clauses)]
         if f_want_only:       r = [i for i in r if i["kwMatch"]]
         if f_price_drop_only: r = [i for i in r if i.get("price_drop", 0) > 0]
         if f_vintage_only:    r = [i for i in r if i.get("is_vintage")]
@@ -5398,7 +5499,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <span style="color:#4ade80">Allen</span> &nbsp;— whole word (not Allentown or McAllen)<br>
         <span style="color:#4ade80">"Jam Pedals"</span> &nbsp;— exact phrase<br>
         <span style="color:#4ade80">Thorpy, Dane</span> &nbsp;— comma = AND (both words required)<br>
-        <span style="color:#4ade80">OD*</span> &nbsp;— wildcard (OD808, OD-1…) &nbsp;·&nbsp; <span style="color:#4ade80">*drive*</span> &nbsp;— contains "drive"<br><br>
+        <span style="color:#4ade80">OD*</span> &nbsp;— wildcard (OD808, OD-1…) &nbsp;·&nbsp; <span style="color:#4ade80">*drive*</span> &nbsp;— contains "drive"<br>
+        <span style="color:#4ade80">Mesa, -combo</span> &nbsp;— minus = NOT (Mesa but no combos; also <span style="color:#4ade80">-"combo amp"</span>)<br>
+        <span style="color:#4ade80">Mesa, Mark*; Heartbreaker</span> &nbsp;— semicolon = OR (either side matches)<br><br>
         <span style="color:#888;font-size:.78rem">💡 Same syntax works in the search bar — click <b style="color:#ccc">ⓘ</b> for reference.</span>
       </p>
       <div style="display:flex;gap:6px;margin-bottom:12px">
@@ -5615,7 +5718,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <code>"Jam Pedals"</code> — phrase match<br>
                 <code>Thorpy, Dane</code> — must contain both<br>
                 <code>OD*</code> — wildcard (OD808, OD-1…)<br>
-                <code>*drive*</code> — contains "drive"
+                <code>*drive*</code> — contains "drive"<br>
+                <code>-combo</code> — NOT (exclude; also <code>-"combo amp"</code>)<br>
+                <code>fuzz; octave</code> — OR (either matches)
               </div>
               <span id="res-search-count"></span>
             </div>
@@ -6023,7 +6128,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.15.4"
+APP_VERSION = "2.16.0"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

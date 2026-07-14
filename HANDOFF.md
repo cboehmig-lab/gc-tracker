@@ -1,5 +1,21 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-07-06 · Current version: v2.15.4 (gzip compression + static cache-busting — pending push; v2.15.3 deployed) · Domain: gcgeartracker.com*
+*Last updated: 2026-07-06 · Current version: v2.16.0 (NOT/OR search operators + arrow-key pagination — pending push; v2.15.4 deployed) · Domain: gcgeartracker.com*
+
+---
+
+## ⭐ Recent Changes (v2.15.4 → v2.16.0) — 2026-07-06 (search/want-list NOT + OR operators, arrow-key pagination — PENDING PUSH)
+
+**Feature (user-suggested via Chuck's friend):** two new query operators, in BOTH the search box and want-list entries: leading **`-` = NOT** on a term (`mesa -combo`, `Mesa, -combo`, `-"combo amp"`, `-OD*`) and **`;` = OR** between clauses, lowest precedence (`Mesa, Maverick; Heartbreaker` = (Mesa AND Maverick) OR Heartbreaker). Comma/space AND, quotes, wildcards, entry-OR all unchanged. No parentheses (deliberate — no boolean parser on the public endpoint); NOT-of-a-conjunction is expressible via De Morgan across clauses (`Mesa, -pedal; Mesa, -boss`). A want-list entry must have ≥1 positive part — all-negative entries keep their old literal behavior. Plus **←/→ arrow-key pagination** (ignored while typing or with modifiers held).
+
+**Server (`gc_tracker_app.py`):**
+- Query helpers HOISTED to module level ("Shared query-matching helpers", above `/api/saved-search-counts`): `_compile_query`, `_matches_all`, new `_matches_any`, `_kw_or_pattern`, `_SIMPLE_KW_RE`, `_KW_SPLIT_RE`, plus new `_compile_fq_clauses`/`_fq_text_match` (search box) and `_wl_bool_compile` (want list). Pure functions, no request state; api_browse's function-local copies deleted.
+- **Drift bugfix riding along**: `/api/saved-search-counts` now uses the shared compiler and the same name+brand text as browse — its old inline copy treated `filter_strict` backwards (whole-word where browse means fuzzy) and searched 6 fields where browse searches 2, so counts didn't match applied results. Counts are now exact.
+- Want-list bucketing: new-syntax entries route to `_kw_bool` — checked FIRST (an entry like `OD*, -combo` contains `*` and would otherwise be misrouted to the exotic branch). Legacy entries return None from `_wl_bool_compile` → behavior byte-identical. DoS budget: `_BOOL_KW_CAP=50` (benched ~0.8–1.0s worst-adversarial over the full 92K cache, in line with the v2.13.1 envelope); entries containing `*` charge the tight `_EXOTIC_KW_CAP=30` instead (wildcards can't be pre-filtered — no smuggling past the 30-cap). Same sound required-tokens pre-filter as the phrase/comma paths.
+- filter_q: `_compile_fq_clauses` keeps the **same 12-token TOTAL budget** across ≤4 clauses (v2.13.0 cap); token regex gained an optional leading `-` on quoted tokens (`-"combo amp"`).
+
+**Client (`static/gc.js`):** `_parseEntryClauses` + `_matchesAnyTerm` mirror the server for want-list highlighting (`_itemMatchesKeyword`); the local-mode (≤1000-item scans) search filter got the same `;`/`-` semantics; arrow-key handler calls the existing `goToPage()` (server + local via new `window._localTotalPages`). Help text updated in both the want-list panel and the ⓘ search popover.
+
+**Verified:** `py_compile` + `node --check` clean. **0/32,000** mismatches old-vs-new fq on legacy queries (no `;`/`-`); zero legacy want-list entries misrouted (incl. `OD-1`, `Mark-V`, `mesa/boogie`); on the real 92K corpus: `fender -squier` → 0 whole-word squier leaks, `fuzz; octave` = exact set-union in BOTH search and want list, `mesa -"combo amp"` → 0 phrase leaks, `mesa, -combo` 535→341 with 0 combo leaks; end-to-end browse with mixed new/legacy keywords 200 OK; 300 adversarial bool keywords (cap 50) = 1.0s full-pipeline. **DB back-compat scan**: local dev DB clean (but it has 1 row — Chuck should optionally spot-check prod for keywords containing `;` or leading-`-` parts; realistically none).
 
 ---
 

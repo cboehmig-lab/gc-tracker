@@ -2465,13 +2465,53 @@ function _matchesAllTerms(textLower, terms) {
     return t.val.test(textLower);
   });
 }
+function _parseEntryClauses(entry) {
+  /* v2.16.0 — mirror of Python _wl_bool_compile: ';' = OR between clauses,
+     ',' = AND within a clause, leading '-' = NOT on a part. Returns a list of
+     {pos, neg} clauses, or null when the entry uses no new syntax (caller falls
+     through to the legacy path, so old entries behave byte-identically).
+     All-negative entries return null, same as the server. */
+  var hasNeg = entry.split(';').some(function(cl) {
+    return cl.split(',').some(function(p) {
+      p = p.trim(); return p.length > 1 && p[0] === '-';
+    });
+  });
+  if (entry.indexOf(';') < 0 && !hasNeg) return null;
+  var clauses = [];
+  entry.split(';').forEach(function(cl) {
+    cl = cl.trim(); if (!cl) return;
+    var pos = [], neg = [];
+    cl.split(',').forEach(function(p) {
+      p = p.trim(); if (!p) return;
+      if (p.length > 1 && p[0] === '-') neg = neg.concat(_parseQueryTerms(p.slice(1)));
+      else pos = pos.concat(_parseQueryTerms(p));
+    });
+    if (pos.length) clauses.push({pos: pos, neg: neg});
+  });
+  return clauses.length ? clauses : null;
+}
+
+function _matchesAnyTerm(textLower, terms) {
+  return terms.some(function(t) {
+    if (t.mode === 'exact' || t.mode === 'contains') return textLower.includes(t.val);
+    return t.val.test(textLower);
+  });
+}
+
 function _itemMatchesKeyword(item) {
   if (!window._keywords || !window._keywords.length) return false;
   const text = ((item.name || '') + ' ' + (item.brand || '')).toLowerCase();
   return window._keywords.some(function(kw) {
     // Strip legacy '=' strict prefix — whole-word is the default now
     var k = kw.replace(/^=/, '').trim();
-    return k && _matchesAllTerms(text, _parseQueryTerms(k));
+    if (!k) return false;
+    var clauses = _parseEntryClauses(k);
+    if (clauses) {
+      return clauses.some(function(c) {
+        return _matchesAllTerms(text, c.pos) && !(c.neg.length && _matchesAnyTerm(text, c.neg));
+      });
+    }
+    return _matchesAllTerms(text, _parseQueryTerms(k));
   });
 }
 
@@ -2882,12 +2922,19 @@ function renderTable() {
     // Text filter: all words must match (AND), or exact phrase if quoted
     if (q) {
       const text = ((item.name||'')+' '+(item.brand||'')+' '+(item.store||'')+' '+(item.location||'')+' '+(item.category||'')+' '+(item.subcategory||'')).toLowerCase();
-      if (q.startsWith('"') && q.endsWith('"') && q.length > 2) {
-        if (!text.includes(q.slice(1,-1))) return false;
-      } else {
-        const words = q.split(/\s+/).filter(Boolean);
-        if (!words.every(w => text.includes(w))) return false;
-      }
+      // v2.16.0: ';' = OR clauses, leading '-' = NOT (mirrors server filter_q).
+      const matchClause = function(cl) {
+        cl = cl.trim();
+        if (!cl) return false;
+        if (cl.startsWith('"') && cl.endsWith('"') && cl.length > 2) return text.includes(cl.slice(1,-1));
+        const words = cl.split(/\s+/).filter(Boolean);
+        if (!words.length) return false;
+        const pos = words.filter(function(w){ return !(w.length > 1 && w[0] === '-'); });
+        const neg = words.filter(function(w){ return w.length > 1 && w[0] === '-'; }).map(function(w){ return w.slice(1); });
+        return pos.every(function(w){ return text.includes(w); }) &&
+               !neg.some(function(w){ return text.includes(w); });
+      };
+      if (!q.split(';').some(matchClause)) return false;
     }
     return (!brandArr.length || brandArr.includes(item.brand || '')) &&
            (!condArr.length  || condArr.includes(item.condition || '')) &&
@@ -2896,6 +2943,7 @@ function renderTable() {
   });
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  window._localTotalPages = totalPages;  // for arrow-key pagination (v2.16.0)
   window._localPage = Math.min(window._localPage, totalPages);
   const start = (window._localPage - 1) * PAGE_SIZE;
   const pageItems = filtered.slice(start, start + PAGE_SIZE);
@@ -2940,6 +2988,22 @@ function renderTable() {
     th.addEventListener('click', () => sortTable(colIdx));
   });
 }
+
+// ←/→ arrow-key pagination (v2.16.0). Ignored while typing in any input/textarea/
+// select or contenteditable, and when any modifier is held (browser shortcuts like
+// Cmd+← = history back must keep working).
+document.addEventListener('keydown', function(e) {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  var t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+  var cur, total;
+  if (_browseMode === 'server') { cur = _srvPage; total = _srvTotalPages; }
+  else { cur = window._localPage || 1; total = window._localTotalPages || 1; }
+  var next = (e.key === 'ArrowLeft') ? cur - 1 : cur + 1;
+  if (next < 1 || next > total) return;
+  goToPage(next);
+});
 
 function goToPage(page) {
   if (_browseMode === 'server') {

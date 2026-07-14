@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-07-06 · Version: v2.15.4 · Live at: gcgeartracker.com*
+*Generated: 2026-07-06 · Version: v2.16.0 · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
