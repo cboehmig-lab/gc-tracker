@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-07-15 · Version: v2.16.1 · Live at: gcgeartracker.com*
+*Generated: 2026-07-15 · Version: v2.16.2 · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,10 +88,11 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.1 (Want List modal ⓘ syntax popover — pending push; v2.16.0 pushed 2026-07-14)
+## Current State: v2.16.2 (ⓘ button bigger/brighter for accessibility — pending push; v2.16.1 pushed 2026-07-15)
 
 ### Recent changes (this session)
 
+- **v2.16.2** — **Accessibility: Want List ⓘ button bigger + brighter.** Chuck has retinitis pigmentosa; the v2.16.1 ⓘ button was too small/low-contrast to spot. Green-accented border+text, bolder, larger padding; popover border/text also brightened and enlarged. `search-info-btn` (search bar) has the same subtle style, left as-is pending a decision on whether to match it.
 - **v2.16.1** — **Want List modal syntax popover.** User-reported: v2.16.0's NOT/OR syntax block in the Want List modal's pinned header left only ~2 lines visible in the scrollable keyword list. Moved the syntax reference into a click-to-open ⓘ popover (`#kw-info-btn`/`#kw-info-popover`), mirroring the existing search-box pattern (`#search-info-btn`/`#search-info-popover`). Header now one short line; `#kw-list` gets the space back. `gc_tracker_app.py` + `static/gc.css` + `static/gc.js`. Verified: py_compile + node --check clean.
 - **v2.16.0** — NOT (`-`) / OR (`;`) query operators in search box + want list, arrow-key pagination, saved-search-count parity fix. Pushed 2026-07-14.
 - **v2.15.4** — **Compression + cache-busting (audit S7 closed).** Railway doesn't gzip (verified by curl). Added flask-compress (new dep) with two required non-defaults: `text/javascript` in `COMPRESS_MIMETYPES` (Flask 3.x mimetype for .js) and `gzip` in `COMPRESS_ALGORITHM_STREAMING` (static files are streamed; default excludes gzip). `_version_static()` adds `?v=APP_VERSION` to all static js/css refs in the three templates → `SEND_FILE_MAX_AGE_DEFAULT` = 1 year. gc.js 195KB → 46KB wire; SSE untouched.

@@ -226,11 +226,11 @@ header h1{font-size:1.2rem;font-weight:700;color:#fff}
 #search-info-popover.open{display:block}
 #search-info-popover b{color:#eee}
 #search-info-popover code{color:#4ade80;font-family:monospace;font-size:.8rem}
-#kw-info-btn:hover{color:#ccc;border-color:#666}
-#kw-info-popover{display:none;position:absolute;top:calc(100% + 6px);right:0;z-index:200;background:#1e1e1e;border:1px solid #3a3a3a;border-radius:7px;padding:12px 14px;width:270px;max-width:calc(100vw - 56px);font-size:.76rem;line-height:1.6;color:#bbb;box-shadow:0 6px 24px rgba(0,0,0,.6)}
+#kw-info-btn:hover{color:#eafff0;border-color:#7ef0a8;background:rgba(74,222,128,.12)}
+#kw-info-popover{display:none;position:absolute;top:calc(100% + 6px);right:0;z-index:200;background:#1e1e1e;border:1px solid #4ade80;border-radius:7px;padding:14px 16px;width:290px;max-width:calc(100vw - 56px);font-size:.85rem;line-height:1.7;color:#ddd;box-shadow:0 6px 24px rgba(0,0,0,.7)}
 #kw-info-popover.open{display:block}
-#kw-info-popover b{color:#eee}
-#kw-info-popover code{color:#4ade80;font-family:monospace;font-size:.8rem}
+#kw-info-popover b{color:#fff;font-size:.9rem}
+#kw-info-popover code{color:#4ade80;font-family:monospace;font-size:.88rem;font-weight:600}
 .dd-clear-row{padding:7px 12px;color:#f88;font-size:.78rem;cursor:pointer;border-bottom:1px solid #2a2a2a;display:flex;align-items:center;gap:4px}
 .dd-clear-row:hover{background:#1e1e1e}
 

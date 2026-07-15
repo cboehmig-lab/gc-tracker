@@ -5494,7 +5494,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div style="padding:16px 20px 0;flex-shrink:0">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;position:relative;margin-bottom:4px">
         <h2 style="color:#fff;font-size:1.05rem;margin:0">🎯 Want List</h2>
-        <button id="kw-info-btn" title="Keyword syntax help" style="background:none;border:1px solid #3a3a3a;border-radius:4px;color:#555;font-size:.78rem;cursor:pointer;padding:2px 6px;line-height:1.4;flex-shrink:0">ⓘ</button>
+        <button id="kw-info-btn" title="Keyword syntax help" style="background:none;border:1.5px solid #4ade80;border-radius:5px;color:#4ade80;font-weight:700;font-size:1rem;cursor:pointer;padding:4px 11px;line-height:1.4;flex-shrink:0">ⓘ</button>
         <div id="kw-info-popover">
           <b>Keyword syntax</b><br>
           <code>Allen</code> — whole word (not Allentown or McAllen)<br>
@@ -6132,7 +6132,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.1"
+APP_VERSION = "2.16.2"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

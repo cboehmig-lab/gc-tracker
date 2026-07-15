@@ -3,7 +3,13 @@
 
 ---
 
-## ⭐ Recent Changes (v2.16.0 → v2.16.1) — 2026-07-15 (Want List modal: syntax text moved to ⓘ popover — PENDING PUSH)
+## ⭐ Recent Changes (v2.16.1 → v2.16.2) — 2026-07-15 (Want List ⓘ button: bigger + brighter, accessibility — PENDING PUSH)
+
+**User-reported (Chuck, retinitis pigmentosa):** the new `#kw-info-btn` (ⓘ) from v2.16.1 was hard to spot — small, low-contrast gray-on-gray, matching the deliberately understated `#search-info-btn` style. Bumped size and contrast: `gc_tracker_app.py` inline button style now `1.5px solid #4ade80` border, `#4ade80` text, `font-weight:700`, `font-size:1rem`, more padding (`4px 11px` vs `2px 6px`). `static/gc.css`: `#kw-info-popover` border now green-accented (was plain gray `#3a3a3a`), body text bumped `.76rem`→`.85rem` with `line-height:1.7`, `<code>` text `.8rem`→`.88rem` + bold, hover state adds a faint green background wash. `#search-info-btn`/`#search-info-popover` intentionally left as-is for now (not yet requested) — same low-contrast pattern, candidate for a matching pass if needed.
+
+---
+
+## ⭐ Recent Changes (v2.16.0 → v2.16.1) — 2026-07-15 (Want List modal: syntax text moved to ⓘ popover — PUSHED 2026-07-15)
 
 **User-reported (Chuck's friend, aftermath of v2.16.0):** the NOT/OR syntax block added to the Want List modal's pinned header pushed the scrollable keyword-chip list (`#kw-list`) down to ~2 visible lines inside the 80vh modal. Fix: same pattern as the search box's `#search-info-btn`/`#search-info-popover` — syntax reference moved into a click-to-open ⓘ popover next to the "🎯 Want List" heading, pinned header now just one short description line. `#kw-list` gets the freed vertical space back.
 
