@@ -126,6 +126,19 @@ document.addEventListener('click', function(e) {
     pop.classList.remove('open');
 });
 
+// ── Want List (kw) info popover — same pattern as search info popover ────────
+function _toggleKwInfo(e) {
+  e.stopPropagation();
+  const pop = document.getElementById('kw-info-popover');
+  if (pop) pop.classList.toggle('open');
+}
+document.addEventListener('click', function(e) {
+  const pop = document.getElementById('kw-info-popover');
+  const btn = document.getElementById('kw-info-btn');
+  if (pop && btn && pop.classList.contains('open') && e.target !== btn && !btn.contains(e.target))
+    pop.classList.remove('open');
+});
+
 // Close saved-searches dropdown on outside click
 document.addEventListener('click', function(e) {
   const dd  = document.getElementById('ss-dropdown');
@@ -2333,6 +2346,7 @@ function openKeywords() {
 
 function closeKeywords() {
   document.getElementById('kw-modal').style.display = 'none';
+  document.getElementById('kw-info-popover')?.classList.remove('open');
   // Refresh whichever tab is active
   const clActive = document.querySelector('.cl-tab.active');
   if (clActive && _clData.length) {
@@ -4392,6 +4406,7 @@ document.addEventListener('DOMContentLoaded', function() {
   if (resSearch) resSearch.addEventListener('input', function() { _globalKeywordSearch(); _updateResSearchClear(); });
   document.getElementById('res-search-clear')?.addEventListener('click', clearResSearch);
   document.getElementById('search-info-btn')?.addEventListener('click', function(e) { _toggleSearchInfo(e); });
+  document.getElementById('kw-info-btn')?.addEventListener('click', function(e) { _toggleKwInfo(e); });
 
   // Accordion headers via data-acc attribute
   document.querySelectorAll('.acc-header[data-acc]').forEach(function(btn) {

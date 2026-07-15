@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-07-06 · Version: v2.16.0 · Live at: gcgeartracker.com*
+*Generated: 2026-07-15 · Version: v2.16.1 · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,10 +88,12 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.15.4 (gzip + static cache-busting — pending push; v2.15.3 deployed)
+## Current State: v2.16.1 (Want List modal ⓘ syntax popover — pending push; v2.16.0 pushed 2026-07-14)
 
 ### Recent changes (this session)
 
+- **v2.16.1** — **Want List modal syntax popover.** User-reported: v2.16.0's NOT/OR syntax block in the Want List modal's pinned header left only ~2 lines visible in the scrollable keyword list. Moved the syntax reference into a click-to-open ⓘ popover (`#kw-info-btn`/`#kw-info-popover`), mirroring the existing search-box pattern (`#search-info-btn`/`#search-info-popover`). Header now one short line; `#kw-list` gets the space back. `gc_tracker_app.py` + `static/gc.css` + `static/gc.js`. Verified: py_compile + node --check clean.
+- **v2.16.0** — NOT (`-`) / OR (`;`) query operators in search box + want list, arrow-key pagination, saved-search-count parity fix. Pushed 2026-07-14.
 - **v2.15.4** — **Compression + cache-busting (audit S7 closed).** Railway doesn't gzip (verified by curl). Added flask-compress (new dep) with two required non-defaults: `text/javascript` in `COMPRESS_MIMETYPES` (Flask 3.x mimetype for .js) and `gzip` in `COMPRESS_ALGORITHM_STREAMING` (static files are streamed; default excludes gzip). `_version_static()` adds `?v=APP_VERSION` to all static js/css refs in the three templates → `SEND_FILE_MAX_AGE_DEFAULT` = 1 year. gc.js 195KB → 46KB wire; SSE untouched.
 - **v2.15.3** — **Audit "do now" items closed.** Daily `gc_users.db` backup: `_maybe_backup_users_db()` off the after_request hook — `VACUUM INTO DATA_DIR/backups/gc_users_YYYYMMDD.db` once per UTC day, keeps 7, lock-guarded, failure-tolerant. SQLite **WAL** enabled in `_init_user_db` (persistent). SSE **error-leak fix**: the three populate/fill-gaps handlers no longer broadcast `str(e)` over the progress stream (generic message + server log). The only remaining "do now" from the audit is the gzip check (`curl -sI -H 'Accept-Encoding: gzip' https://gcgeartracker.com/static/gc.js` from the Mac).
 - **v2.15.2** — **Store page → app pre-filtered deep link.** Landing-page CTA now links `/?store=<slug>`; new `_applyStoreDeepLink()` in gc.js (runs after loadData/loadState) matches the slug against `allStores`, sets `_selectedStores` to that one store, `renderList()` auto-refetches. Param stripped via replaceState; unknown slugs ignored. Completes audit S6 for `?store=` (`?q=` still deferred).

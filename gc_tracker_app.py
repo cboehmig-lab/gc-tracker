@@ -5492,17 +5492,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div style="position:relative;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;width:420px;max-width:calc(100vw - 32px);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;z-index:1">
     <!-- pinned header: title, instructions, add input -->
     <div style="padding:16px 20px 0;flex-shrink:0">
-      <h2 style="color:#fff;font-size:1.05rem;margin-bottom:4px">🎯 Want List</h2>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;position:relative;margin-bottom:4px">
+        <h2 style="color:#fff;font-size:1.05rem;margin:0">🎯 Want List</h2>
+        <button id="kw-info-btn" title="Keyword syntax help" style="background:none;border:1px solid #3a3a3a;border-radius:4px;color:#555;font-size:.78rem;cursor:pointer;padding:2px 6px;line-height:1.4;flex-shrink:0">ⓘ</button>
+        <div id="kw-info-popover">
+          <b>Keyword syntax</b><br>
+          <code>Allen</code> — whole word (not Allentown or McAllen)<br>
+          <code>"Jam Pedals"</code> — exact phrase<br>
+          <code>Thorpy, Dane</code> — comma = AND (both required)<br>
+          <code>OD*</code> — wildcard (OD808, OD-1…) &nbsp;·&nbsp; <code>*drive*</code> — contains "drive"<br>
+          <code>Mesa, -combo</code> — minus = NOT (also <code>-"combo amp"</code>)<br>
+          <code>Mesa, Mark*; Heartbreaker</code> — semicolon = OR (either side)
+        </div>
+      </div>
       <p style="color:#aaa;font-size:.82rem;margin-bottom:12px;line-height:1.45">
-        Highlights matches across all results. New matches sort to top after a scan.<br><br>
-        <span style="color:#ccc;font-weight:600">Keyword syntax:</span><br>
-        <span style="color:#4ade80">Allen</span> &nbsp;— whole word (not Allentown or McAllen)<br>
-        <span style="color:#4ade80">"Jam Pedals"</span> &nbsp;— exact phrase<br>
-        <span style="color:#4ade80">Thorpy, Dane</span> &nbsp;— comma = AND (both words required)<br>
-        <span style="color:#4ade80">OD*</span> &nbsp;— wildcard (OD808, OD-1…) &nbsp;·&nbsp; <span style="color:#4ade80">*drive*</span> &nbsp;— contains "drive"<br>
-        <span style="color:#4ade80">Mesa, -combo</span> &nbsp;— minus = NOT (Mesa but no combos; also <span style="color:#4ade80">-"combo amp"</span>)<br>
-        <span style="color:#4ade80">Mesa, Mark*; Heartbreaker</span> &nbsp;— semicolon = OR (either side matches)<br><br>
-        <span style="color:#888;font-size:.78rem">💡 Same syntax works in the search bar — click <b style="color:#ccc">ⓘ</b> for reference.</span>
+        Highlights matches across all results. New matches sort to top after a scan.
       </p>
       <div style="display:flex;gap:6px;margin-bottom:12px">
         <input id="kw-input" type="text" placeholder="Add an item to your want list…"
@@ -6128,7 +6132,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.0"
+APP_VERSION = "2.16.1"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

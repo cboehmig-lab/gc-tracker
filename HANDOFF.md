@@ -1,9 +1,20 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-07-06 · Current version: v2.16.0 (NOT/OR search operators + arrow-key pagination — pending push; v2.15.4 deployed) · Domain: gcgeartracker.com*
+*Last updated: 2026-07-15 · Current version: v2.16.1 (Want List modal ⓘ syntax popover — pending push; v2.16.0 pushed 2026-07-14) · Domain: gcgeartracker.com*
 
 ---
 
-## ⭐ Recent Changes (v2.15.4 → v2.16.0) — 2026-07-06 (search/want-list NOT + OR operators, arrow-key pagination — PENDING PUSH)
+## ⭐ Recent Changes (v2.16.0 → v2.16.1) — 2026-07-15 (Want List modal: syntax text moved to ⓘ popover — PENDING PUSH)
+
+**User-reported (Chuck's friend, aftermath of v2.16.0):** the NOT/OR syntax block added to the Want List modal's pinned header pushed the scrollable keyword-chip list (`#kw-list`) down to ~2 visible lines inside the 80vh modal. Fix: same pattern as the search box's `#search-info-btn`/`#search-info-popover` — syntax reference moved into a click-to-open ⓘ popover next to the "🎯 Want List" heading, pinned header now just one short description line. `#kw-list` gets the freed vertical space back.
+
+- `gc_tracker_app.py` (`kw-modal` HTML): header restructured — `<h2>` + new `#kw-info-btn` (ⓘ) + `#kw-info-popover` (same 6 syntax lines, `<code>` styling) in a flex row; description `<p>` trimmed to one line.
+- `static/gc.css`: `#kw-info-btn`/`#kw-info-popover` rules mirroring `#search-info-btn`/`#search-info-popover` (absolute-positioned, `.open` class toggles `display`).
+- `static/gc.js`: `_toggleKwInfo()` + outside-click-close listener (mirrors `_toggleSearchInfo`); wired `#kw-info-btn` click in the main listener block; `closeKeywords()` now also closes the popover so it doesn't persist open across modal open/close cycles.
+- Verified: `py_compile` + `node --check` clean.
+
+---
+
+## ⭐ Recent Changes (v2.15.4 → v2.16.0) — 2026-07-06 (search/want-list NOT + OR operators, arrow-key pagination — PUSHED 2026-07-14)
 
 **Feature (user-suggested via Chuck's friend):** two new query operators, in BOTH the search box and want-list entries: leading **`-` = NOT** on a term (`mesa -combo`, `Mesa, -combo`, `-"combo amp"`, `-OD*`) and **`;` = OR** between clauses, lowest precedence (`Mesa, Maverick; Heartbreaker` = (Mesa AND Maverick) OR Heartbreaker). Comma/space AND, quotes, wildcards, entry-OR all unchanged. No parentheses (deliberate — no boolean parser on the public endpoint); NOT-of-a-conjunction is expressible via De Morgan across clauses (`Mesa, -pedal; Mesa, -boss`). A want-list entry must have ≥1 positive part — all-negative entries keep their old literal behavior. Plus **←/→ arrow-key pagination** (ignored while typing or with modifiers held).
 
