@@ -2452,6 +2452,30 @@ function _toggleStrictSearch() {
 function _escapeRegex(s) {
   return s.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
 }
+// ── Colon-prefix OR expansion (v2.16.3) — mirror of Python _expand_colon_prefix
+function _findPrefixColon(s) {
+  var inQuotes = false;
+  for (var i = 0; i < s.length; i++) {
+    var ch = s[i];
+    if (ch === '"') inQuotes = !inQuotes;
+    else if (ch === ':' && !inQuotes) return i;
+  }
+  return -1;
+}
+var _COLON_PREFIX_MAX_BRANCHES = 30;
+function _expandColonPrefix(s, join) {
+  join = join || ', ';
+  var idx = _findPrefixColon(s);
+  if (idx < 0) return s;
+  var prefix = s.slice(0, idx).trim();
+  var rest = s.slice(idx + 1);
+  if (!prefix) return s;
+  var branches = rest.split(';').map(function(b) { return b.trim(); })
+                      .filter(function(b) { return b; })
+                      .slice(0, _COLON_PREFIX_MAX_BRANCHES);
+  if (!branches.length) return s;
+  return branches.map(function(b) { return prefix + join + b; }).join('; ');
+}
 function _parseQueryTerms(queryStr, fuzzy) {
   /* Mirror of Python _compile_query — same syntax rules. */
   var wb = '\\b';  // word boundary for new RegExp()
@@ -2519,6 +2543,10 @@ function _itemMatchesKeyword(item) {
     // Strip legacy '=' strict prefix — whole-word is the default now
     var k = kw.replace(/^=/, '').trim();
     if (!k) return false;
+    // v2.16.3: expand 'prefix : b1; b2; ...' before routing, same reasoning as
+    // the server (_kw_match loop in gc_tracker_app.py) — a single-branch colon
+    // entry with no dash must still reach the comma-AND fallback below correctly.
+    k = _expandColonPrefix(k, ', ');
     var clauses = _parseEntryClauses(k);
     if (clauses) {
       return clauses.some(function(c) {
@@ -2937,6 +2965,9 @@ function renderTable() {
     if (q) {
       const text = ((item.name||'')+' '+(item.brand||'')+' '+(item.store||'')+' '+(item.location||'')+' '+(item.category||'')+' '+(item.subcategory||'')).toLowerCase();
       // v2.16.0: ';' = OR clauses, leading '-' = NOT (mirrors server filter_q).
+      // v2.16.3: 'prefix : b1; b2' expands so prefix applies to every branch
+      // (mirrors server _compile_fq_clauses, space-joined to match this
+      // matcher's space-tokenized AND semantics).
       const matchClause = function(cl) {
         cl = cl.trim();
         if (!cl) return false;
@@ -2948,7 +2979,7 @@ function renderTable() {
         return pos.every(function(w){ return text.includes(w); }) &&
                !neg.some(function(w){ return text.includes(w); });
       };
-      if (!q.split(';').some(matchClause)) return false;
+      if (!_expandColonPrefix(q, ' ').split(';').some(matchClause)) return false;
     }
     return (!brandArr.length || brandArr.includes(item.brand || '')) &&
            (!condArr.length  || condArr.includes(item.condition || '')) &&

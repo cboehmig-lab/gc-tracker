@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-07-15 · Version: v2.16.2 · Live at: gcgeartracker.com*
+*Generated: 2026-07-15 · Version: v2.16.3 · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,10 +88,11 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.2 (ⓘ button bigger/brighter for accessibility — pending push; v2.16.1 pushed 2026-07-15)
+## Current State: v2.16.3 (colon-prefix OR syntax — pending push; v2.16.2 pushed 2026-07-15)
 
 ### Recent changes (this session)
 
+- **v2.16.3** — **Colon-prefix OR syntax.** Chuck's friend reported that entries like `"Mesa", -combo, Angel; Blues; Electra; ...` "ignore Mesa and -combo, return everything" — confirmed as documented `;`-clause behavior (no cross-clause propagation), not a bug, but a real gap for the common "brand + OR'd models + exclusion" case. New syntax: `prefix : b1; b2; b3` applies the prefix to every OR branch — `Mesa, -combo: Angel; Blues; Trem`. Pure preprocessing expansion feeding the existing v2.16.0 clause compilers, no new matching logic. Works in both the want list and search box. No colon = zero behavior change (verified). `gc_tracker_app.py` + `static/gc.js`. See HANDOFF.md for full verification detail.
 - **v2.16.2** — **Accessibility: Want List ⓘ button bigger + brighter.** Chuck has retinitis pigmentosa; the v2.16.1 ⓘ button was too small/low-contrast to spot. Green-accented border+text, bolder, larger padding; popover border/text also brightened and enlarged. `search-info-btn` (search bar) has the same subtle style, left as-is pending a decision on whether to match it.
 - **v2.16.1** — **Want List modal syntax popover.** User-reported: v2.16.0's NOT/OR syntax block in the Want List modal's pinned header left only ~2 lines visible in the scrollable keyword list. Moved the syntax reference into a click-to-open ⓘ popover (`#kw-info-btn`/`#kw-info-popover`), mirroring the existing search-box pattern (`#search-info-btn`/`#search-info-popover`). Header now one short line; `#kw-list` gets the space back. `gc_tracker_app.py` + `static/gc.css` + `static/gc.js`. Verified: py_compile + node --check clean.
 - **v2.16.0** — NOT (`-`) / OR (`;`) query operators in search box + want list, arrow-key pagination, saved-search-count parity fix. Pushed 2026-07-14.

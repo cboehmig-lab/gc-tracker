@@ -3374,10 +3374,54 @@ NO_BRAND_LABEL = "(none)"
 # where browse searches name+brand — so counts didn't match applied results).
 # Also adds the v2.16.0 operators: leading '-' = NOT on a term, ';' = OR between
 # clauses (lowest precedence). Comma/space AND, quotes, wildcards unchanged.
+# v2.16.3 adds 'prefix : b1; b2; ...' (_expand_colon_prefix) so a common AND/NOT
+# prefix applies to every OR branch instead of just the one it's typed next to.
 # These are pure functions of their inputs — no request state.
 
 _SIMPLE_KW_RE = re.compile(r'^\w+$')   # a single word token
 _KW_SPLIT_RE  = re.compile(r'\W+')     # tokenizer matching \b boundaries
+
+# ── Colon-prefix OR expansion (v2.16.3) ───────────────────────────────────────
+# User-reported gap: 'Mesa, -combo; Angel; Blues; ...' only applies "Mesa" and
+# "-combo" to the FIRST clause — ';' has no cross-clause memory by design (no
+# parentheses, deliberately, to keep this a flat O(items) matcher on an
+# unauthenticated endpoint). 'prefix : branch1; branch2; ...' lets a common
+# AND/NOT condition apply to every OR branch by expanding BEFORE the existing,
+# already-fuzzed clause compilers ever see it — zero new matching primitives.
+_COLON_PREFIX_MAX_BRANCHES = 30  # independent ceiling; expansion multiplies
+                                  # token count, so it needs its own cap even
+                                  # though the per-entry char/keyword caps exist.
+
+def _find_prefix_colon(s):
+    """Index of the first ':' not inside a double-quoted phrase, else -1."""
+    in_quotes = False
+    for i, ch in enumerate(s):
+        if ch == '"':
+            in_quotes = not in_quotes
+        elif ch == ':' and not in_quotes:
+            return i
+    return -1
+
+def _expand_colon_prefix(s, join=', '):
+    """'prefix : b1; b2; b3' -> 'prefix<join>b1; prefix<join>b2; prefix<join>b3'
+    so the prefix (its own comma/dash AND/NOT terms) applies to every OR
+    branch instead of just the one it's typed next to. Only the first
+    non-quoted ':' is the marker; strings with no such colon are returned
+    completely unchanged, so every existing want list / saved search / query
+    with no colon in it parses byte-identically to before. `join` matches
+    each caller's own AND separator: want-list clauses are comma-AND (', '),
+    filter_q clauses are space-AND (' ')."""
+    idx = _find_prefix_colon(s)
+    if idx == -1:
+        return s
+    prefix = s[:idx].strip()
+    rest = s[idx + 1:]
+    if not prefix:
+        return s
+    branches = [b.strip() for b in rest.split(';') if b.strip()][:_COLON_PREFIX_MAX_BRANCHES]
+    if not branches:
+        return s
+    return '; '.join(prefix + join + b for b in branches)
 
 def _compile_query(query_str, fuzzy=False):
     """Parse a query string into AND-joined terms.
@@ -3443,6 +3487,7 @@ def _kw_or_pattern(base):
 _FQ_TOKEN_RE = re.compile(r'-?"[^"]+"|\S+')
 
 def _compile_fq_clauses(fq, fuzzy=False, max_tokens=12, max_clauses=4):
+    fq = _expand_colon_prefix(fq, join=' ')  # v2.16.3 — see _expand_colon_prefix
     clauses = []
     budget = max_tokens
     for cl in fq.split(';'):
@@ -3723,9 +3768,10 @@ def api_browse():
     import re as _re
 
     # Query helpers (_compile_query, _matches_all, _matches_any, _kw_or_pattern,
-    # _SIMPLE_KW_RE, _KW_SPLIT_RE, _wl_bool_compile, _compile_fq_clauses) are
-    # module-level since v2.16.0 — shared with /api/saved-search-counts so the
-    # two endpoints can't drift. See "Shared query-matching helpers".
+    # _SIMPLE_KW_RE, _KW_SPLIT_RE, _wl_bool_compile, _compile_fq_clauses,
+    # _expand_colon_prefix) are module-level since v2.16.0 — shared with
+    # /api/saved-search-counts so the two endpoints can't drift. See "Shared
+    # query-matching helpers".
 
     # ── Want-list keyword matcher (fast path) ────────────────────────────────
     # Matching each keyword as its own \bword\b regex is O(items × keywords); at ~92K
@@ -3777,6 +3823,11 @@ def api_browse():
         _base = _kw.lstrip('=').strip()
         if not _base:
             continue
+        # v2.16.3: expand 'prefix : b1; b2; ...' BEFORE any routing decision, so a
+        # colon-prefix entry with a single branch and no dash (e.g. 'Mesa: Angel')
+        # correctly falls through to the plain comma-AND path below instead of the
+        # dead literal-string branch it'd hit if expansion ran after routing.
+        _base = _expand_colon_prefix(_base, join=', ')
         # v2.16.0 OR/NOT syntax — must be checked FIRST: an entry like 'OD*, -combo'
         # or 'foo*; bar' contains '*' and would otherwise be misrouted to the exotic
         # branch and lose its operators. _wl_bool_compile returns None for every
@@ -5502,7 +5553,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <code>Thorpy, Dane</code> — comma = AND (both required)<br>
           <code>OD*</code> — wildcard (OD808, OD-1…) &nbsp;·&nbsp; <code>*drive*</code> — contains "drive"<br>
           <code>Mesa, -combo</code> — minus = NOT (also <code>-"combo amp"</code>)<br>
-          <code>Mesa, Mark*; Heartbreaker</code> — semicolon = OR (either side)
+          <code>Mesa, Mark*; Heartbreaker</code> — semicolon = OR (either side)<br>
+          <code>Mesa, -combo: Angel; Blues; Trem</code> — colon = apply the prefix to every OR branch
         </div>
       </div>
       <p style="color:#aaa;font-size:.82rem;margin-bottom:12px;line-height:1.45">
@@ -5724,7 +5776,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <code>OD*</code> — wildcard (OD808, OD-1…)<br>
                 <code>*drive*</code> — contains "drive"<br>
                 <code>-combo</code> — NOT (exclude; also <code>-"combo amp"</code>)<br>
-                <code>fuzz; octave</code> — OR (either matches)
+                <code>fuzz; octave</code> — OR (either matches)<br>
+                <code>Mesa -combo: Angel; Trem</code> — colon = apply prefix to every OR branch
               </div>
               <span id="res-search-count"></span>
             </div>
@@ -6132,7 +6185,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.2"
+APP_VERSION = "2.16.3"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
