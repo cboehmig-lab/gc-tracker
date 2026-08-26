@@ -1670,13 +1670,18 @@ function _buildRowHtml(item) {
       (item.list_price_raw > item.price_raw ? ` <span class="price-orig">$${item.list_price_raw.toFixed(2)}</span>` : '') +
       `</span></td>`
     : `<td>${item.price||''}</td>`;
+  // Condition cell: on desktop, if the scanner picked up a staff "Condition & Details"
+  // note for this item, show it as a hover tooltip with a dotted-underline hint.
+  const condCell = item.condition_note
+    ? `<td title="${esc(item.condition_note)}"><span class="cond-has-note">${esc(item.condition)}</span></td>`
+    : `<td>${esc(item.condition)}</td>`;
   return `<tr class="${rowClass}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}" data-image-id="${esc(item.image_id)}">` +
     `<td>${item.kwMatch ? '<span class="tag-kw">WANT</span>' : ''}</td>` +
     `<td>${watchStar}</td>` +
     `<td>${isNew ? '<span class="tag">NEW</span>' : ''}</td>` +
     `<td>${nameCell}${soldBadge}</td>` +
     (_isMobile() ? priceCell + brandCell : brandCell + priceCell) +
-    `<td>${esc(item.condition)}</td>` +
+    condCell +
     `<td title="${esc(item.category)}">${esc(item.category)}</td>` +
     `<td title="${esc(item.subcategory)}">${esc(item.subcategory)}</td>` +
     `<td>${esc(item.date||'')}</td>` +

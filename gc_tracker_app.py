@@ -438,6 +438,7 @@ def _build_base_item_list():
             "first_seen":       cached.get("first_seen", ""),
             "image_id":         cached.get("image_id", ""),
             "is_vintage":       bool(cached.get("is_vintage")),
+            "condition_note":   cached.get("condition_note", "") or "",
         })
     _base_item_list = items
     _base_item_list_mtime = _cat_cache_mtime
@@ -983,17 +984,36 @@ def _parse_condition(raw: str) -> str:
 
 
 
-_DEBUG_HIT_PROBE_DONE = False  # TEMPORARY (v2.16.5) — remove after checking Railway logs.
-# Investigating a feature request: GC product pages sometimes show a "Condition &
-# Details" freeform note (e.g. "Includes Hardshell Case") that isn't captured today.
-# Unknown whether that text is in the bulk Algolia hit (cheap — scanner already
-# pulls it) or only on individual product pages (expensive — one fetch per item).
-# This dumps the first few real hits' field names on the next scan so we can check
-# Railway's logs and settle it before deciding whether to build anything.
+
+# ── Condition & Details note extraction (v2.16.6) ────────────────────────────
+# GC's `longDescription` field (already pulled on every scan via
+# attributesToRetrieve:["*"] — zero extra Algolia calls) sometimes ends with a
+# staff-written freeform note, HTML-stripped-to-plaintext by Algolia's own
+# indexing: "...marketing paragraph...  Condition &amp; Details   Includes
+# Hardshell Case". Confirmed present on real live items (probe_condition_
+# details.py, gitignored); confirmed NOT always present (many items have no
+# such section) and NOT always about accessories (one sampled item's note was
+# about cosmetic scuffs and country of manufacture instead). So: extract just
+# the short suffix and store it — do NOT store the full longDescription in the
+# cache (it's a full marketing paragraph per item; at ~90-100K items that's
+# real bytes for text nobody would read twice).
+_COND_DETAILS_RE = re.compile(r'condition\s*&(?:amp;)?\s*details\s*', re.IGNORECASE)
+
+def _extract_condition_note(long_description: str) -> str:
+    """Return the freeform staff note after a 'Condition & Details' marker in
+    longDescription, or '' if that section isn't present. Collapses the extra
+    whitespace left behind where Algolia stripped the source HTML tags."""
+    if not long_description:
+        return ""
+    m = _COND_DETAILS_RE.search(long_description)
+    if not m:
+        return ""
+    note = long_description[m.end():].strip()
+    note = re.sub(r'\s+', ' ', note)
+    return note[:300]  # sound cap — these are short staff notes, not essays
 
 def parse_products(data, store_name: str = None) -> list[dict]:
     """Parse products from Algolia API response. store_name can be None for all-stores queries."""
-    global _DEBUG_HIT_PROBE_DONE
     if isinstance(data, dict):
         products = []
         try:
@@ -1001,20 +1021,6 @@ def parse_products(data, store_name: str = None) -> list[dict]:
             if not results:
                 return []
             hits = results[0].get("hits", [])
-            if not _DEBUG_HIT_PROBE_DONE and hits:
-                _DEBUG_HIT_PROBE_DONE = True
-                try:
-                    _terms = ("note", "detail", "condition", "includ", "accessor", "case", "bag", "box")
-                    for _i, _h in enumerate(hits[:5]):
-                        _matches = {k: _h[k] for k in _h if any(t in k.lower() for t in _terms)}
-                        print(f"[v2.16.5 probe] hit[{_i}] ({_h.get('objectID')}) keys: {sorted(_h.keys())}", flush=True)
-                        if _matches:
-                            print(f"[v2.16.5 probe] hit[{_i}] interesting-key matches: {_matches}", flush=True)
-                        _cond = _h.get("condition")
-                        if isinstance(_cond, dict):
-                            print(f"[v2.16.5 probe] hit[{_i}] condition sub-object: {_cond}", flush=True)
-                except Exception as _pe:
-                    print(f"[v2.16.5 probe] error dumping hit: {_pe}", flush=True)
             for hit in hits:
                 sku   = str(hit.get("objectID") or "").strip()
                 name  = _clean_name(hit.get("displayName") or hit.get("name") or "")
@@ -1022,6 +1028,7 @@ def parse_products(data, store_name: str = None) -> list[dict]:
                     continue
                 price_raw = hit.get("price") or 0
                 list_price_raw = hit.get("listPrice") or 0
+                condition_note = _extract_condition_note(hit.get("longDescription") or "")
                 # Fall back to listPrice if price is absent (listPrice is the original/regular price)
                 if not price_raw and list_price_raw:
                     price_raw = list_price_raw
@@ -1095,6 +1102,7 @@ def parse_products(data, store_name: str = None) -> list[dict]:
                     "date_listed":    date_str,
                     "image_id":       image_id,
                     "is_vintage":     is_vintage,
+                    "condition_note": condition_note,
                 })
         except Exception:
             pass
@@ -4042,6 +4050,7 @@ def api_browse():
             "date_raw":         b["date_raw"],
             "image_id":         b["image_id"],
             "is_vintage":       b["is_vintage"],
+            "condition_note":   b["condition_note"],
             "watched":          sku in wl_ids,
             "isNew":            sku in new_ids,
             "kwMatch":          kw_hit,
@@ -5346,6 +5355,9 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                 "image_id":          p.get("image_id") or cached.get("image_id", ""),
                 # GC vintage flag (premiumGear=="Vintage"), captured at scan time
                 "is_vintage":        bool(p.get("is_vintage", cached.get("is_vintage", False))),
+                # Staff-written "Condition & Details" note extracted from longDescription
+                # (v2.16.6) — often empty, that's expected (not every item has one).
+                "condition_note":    p.get("condition_note") or cached.get("condition_note", ""),
                 # first_seen: when our system first encountered this item
                 "first_seen":        cached.get("first_seen", run_time),
             }
@@ -5428,6 +5440,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                 "date":             _fmt_date(date_src),
                 "date_raw":         date_src,
                 "image_id":         p.get("image_id") or _cat_cache.get(p["id"], {}).get("image_id", ""),
+                "condition_note":   p.get("condition_note") or _cat_cache.get(p["id"], {}).get("condition_note", ""),
             }
 
         # ── Per-device new-item detection ─────────────────────────────────────
@@ -6263,7 +6276,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.5"
+APP_VERSION = "2.16.6"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

@@ -19,6 +19,8 @@ probe_vintage.py
 probe_vintage2.py
 vintage_probe_output.json
 vintage_probe2_output.json
+probe_condition_details.py
+condition_details_probe_output.json
 
 # OS files
 .DS_Store

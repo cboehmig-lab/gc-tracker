@@ -1,19 +1,27 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-07-15 · Current version: v2.16.1 (Want List modal ⓘ syntax popover — pending push; v2.16.0 pushed 2026-07-14) · Domain: gcgeartracker.com*
+*Last updated: 2026-08-26 · Current version: v2.16.6 (condition_note: surface GC's "Condition & Details" staff note as a hover tooltip — pending push; v2.16.5 pushed 2026-08-26 then superseded) · Domain: gcgeartracker.com*
 
 ---
 
-## ⚠️ TEMPORARY — v2.16.5 (Algolia hit-shape probe, PENDING PUSH, MUST BE REVERTED)
+## ⭐ Recent Changes (v2.16.5 → v2.16.6) — 2026-08-26 (condition_note: "Condition & Details" hover tooltip)
 
-**Not a feature — a diagnostic.** Chuck's friend wants a "does this item include a case/bag/box" indicator. Confirmed by hand-checking live GC product pages: some (not all) items have a "Condition & Details" freeform staff note below the standard condition blurb — e.g. a Fender Jaguar's page literally says "Condition & Details / Includes Hardshell Case." Present in the page's raw server-rendered HTML (verified via `fetch(location.href)` + DOMParser, not client hydration). Also confirmed it's NOT a reliable structured field: a Casio keyboard's note was about cosmetic scuffs and country of manufacture, unrelated to accessories; a Martin acoustic had no "Condition & Details" section at all. So even if buildable, this will need fuzzy keyword matching over human-written prose, not a clean boolean.
+**User-reported (Chuck's friend, via Chuck):** could Gear Tracker indicate if an item includes a case/bag/box/accessory? GC sometimes shows a freeform staff-written note under a "Condition & Details" heading below the standard description — e.g. a Fender Jaguar's page reads "Condition & Details / Includes Hardshell Case." Told explicitly not to build anything until the data was verified as reliable enough.
 
-**The one open question that decides feasibility:** is this text present in the bulk Algolia data the scanner already pulls (cheap — free with the existing scan), or only on individual product pages (expensive — would need ~100K individual page fetches, a different architecture entirely)? Couldn't determine this by inspecting GC's own site client-side — unlike some Algolia InstantSearch sites, guitarcenter.com proxies Algolia through its own backend, so the browser never sees a raw hit. No Algolia credentials available locally (they're Railway-only env vars).
+**Investigation (v2.16.5, temporary probe, now removed):** confirmed via a live server-rendered fetch of a GC product page (using `fetch(location.href)` + DOMParser to get the full HTML past what's lazily hydrated in the DOM) that the note text exists. The open question was whether it's present in the bulk Algolia data the scanner already pulls, or only rendered per-product-page (which would mean ~100K extra page fetches — a much bigger, different feature). Chuck ran a standalone credentialed probe script (`probe_condition_details.py`, gitignored, not pushed) against Algolia directly with `attributesToRetrieve: ["*"]` on the same Fender Jaguar item and confirmed: the note is part of the `longDescription` field, which the scanner already fetches on every single scan — **zero extra cost**. Also confirmed (from earlier hand-checking) that this section isn't always present (absent on a sampled Martin acoustic) and isn't always about accessories (one Casio keyboard's note was about cosmetic scuffs/country of manufacture instead) — so it's a freeform note, not a clean boolean.
 
-**The probe:** `parse_products()` in `gc_tracker_app.py` (right before the SKU/name extraction loop) now does a **one-time** (module-level `_DEBUG_HIT_PROBE_DONE` flag) dump of the first 5 raw hits from the first Algolia page fetched on the next scan: full sorted key list per hit, any key whose name contains note/detail/condition/includ/accessor/case/bag/box, and the `condition` sub-object's keys. Printed via `print(..., flush=True)` — lands in Railway's server logs, never sent over SSE or to any client, so it's not user-visible.
+**Built:**
+- `_COND_DETAILS_RE` + `_extract_condition_note(long_description)` (`gc_tracker_app.py`, just above `parse_products()`) — finds a "Condition & Details" marker (handles the `&amp;`-escaped form Algolia's stripped-HTML text leaves behind) and returns the freeform text after it, whitespace-collapsed, capped at 300 chars. Returns `""` when the section isn't present — expected for most items.
+- `parse_products()` now computes `condition_note` per hit from `longDescription` and includes it in each product dict.
+- Cache write (`_run()`'s per-item `_cat_cache[sku] = {...}`) stores `condition_note` alongside the other per-item fields, `""` by default.
+- `_build_base_item_list()` (the E2 memoized list) and `/api/browse`'s per-request loop both carry `condition_note` through to the API response.
+- SSE small-scan path (`fmt(p)` inside `_run()`) also includes `condition_note` so local-mode scans get it without a follow-up `/api/browse` call.
+- Frontend (`static/gc.js`, `_buildRowHtml`, desktop table only — matches the request that mobile not get this): when `item.condition_note` is non-empty, the Condition cell gets a `title=` tooltip with the note text and a dotted-underline visual hint (`static/gc.css`, `.cond-has-note`). Mobile card/list views are untouched (different renderers, `_renderMobileCards`/`_renderMobileList`), so mobile never shows the tooltip cue — matches Chuck's request ("mobile web won't have this feature").
+- Reverted the v2.16.5 diagnostic (`_DEBUG_HIT_PROBE_DONE` dump block) entirely — no debug scaffolding left in `parse_products()`.
+- `py_compile` and `node --check` both clean.
 
-**To use it:** push this version, run any scan (even a single-store one — the probe only needs the first page of results), then check Railway's deploy logs for lines starting with `[v2.16.5 probe]`.
+**Rollout caveat:** `condition_note` will read empty for every item already in the cache until that item is re-scanned — same behavior as the `is_vintage` flag's rollout (v2.13.x). No backfill; it fills in naturally as normal scans run.
 
-**⚠️ MUST REVERT after checking logs** — this is debug scaffolding, not meant to stay in the codebase. Whether or not the answer is "yes, it's in Algolia," pull this block back out before the next real feature bump (the flag makes it a no-op after the first hit either way, but it's dead weight and slightly obscures `parse_products()`).
+**Also confirmed while checking git state:** v2.16.5 (with the temporary probe still in `parse_products()`) *was* pushed to `origin/main` — this v2.16.6 push supersedes it, so the probe won't ship to production standalone.
 
 ---
 
