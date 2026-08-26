@@ -3,7 +3,21 @@
 
 ---
 
-## ⭐ Recent Changes (v2.16.3 → v2.16.4) — 2026-08-24 (E2: /api/browse base-list memoization — PENDING PUSH)
+## ⚠️ TEMPORARY — v2.16.5 (Algolia hit-shape probe, PENDING PUSH, MUST BE REVERTED)
+
+**Not a feature — a diagnostic.** Chuck's friend wants a "does this item include a case/bag/box" indicator. Confirmed by hand-checking live GC product pages: some (not all) items have a "Condition & Details" freeform staff note below the standard condition blurb — e.g. a Fender Jaguar's page literally says "Condition & Details / Includes Hardshell Case." Present in the page's raw server-rendered HTML (verified via `fetch(location.href)` + DOMParser, not client hydration). Also confirmed it's NOT a reliable structured field: a Casio keyboard's note was about cosmetic scuffs and country of manufacture, unrelated to accessories; a Martin acoustic had no "Condition & Details" section at all. So even if buildable, this will need fuzzy keyword matching over human-written prose, not a clean boolean.
+
+**The one open question that decides feasibility:** is this text present in the bulk Algolia data the scanner already pulls (cheap — free with the existing scan), or only on individual product pages (expensive — would need ~100K individual page fetches, a different architecture entirely)? Couldn't determine this by inspecting GC's own site client-side — unlike some Algolia InstantSearch sites, guitarcenter.com proxies Algolia through its own backend, so the browser never sees a raw hit. No Algolia credentials available locally (they're Railway-only env vars).
+
+**The probe:** `parse_products()` in `gc_tracker_app.py` (right before the SKU/name extraction loop) now does a **one-time** (module-level `_DEBUG_HIT_PROBE_DONE` flag) dump of the first 5 raw hits from the first Algolia page fetched on the next scan: full sorted key list per hit, any key whose name contains note/detail/condition/includ/accessor/case/bag/box, and the `condition` sub-object's keys. Printed via `print(..., flush=True)` — lands in Railway's server logs, never sent over SSE or to any client, so it's not user-visible.
+
+**To use it:** push this version, run any scan (even a single-store one — the probe only needs the first page of results), then check Railway's deploy logs for lines starting with `[v2.16.5 probe]`.
+
+**⚠️ MUST REVERT after checking logs** — this is debug scaffolding, not meant to stay in the codebase. Whether or not the answer is "yes, it's in Algolia," pull this block back out before the next real feature bump (the flag makes it a no-op after the first hit either way, but it's dead weight and slightly obscures `parse_products()`).
+
+---
+
+## ⭐ Recent Changes (v2.16.3 → v2.16.4) — 2026-08-24 (E2: /api/browse base-list memoization — PUSHED 2026-08-24)
 
 **User-reported (Chuck):** page felt slower recently — scan finishes, finds a few hundred new items, then the table takes 10-15s to refresh. Root-caused rather than guessed: Chuck has all 298 stores selected, so every scan puts him on the server-side browse path (`large_scan = len(all_products) > 1000`), and `/api/browse` was rebuilding its entire ~92K-item lightweight-dict list from scratch on EVERY call — price/date formatting, name/brand lowercasing, for every item, every filter click/keystroke/page-flip. This was flagged as the biggest open perf lever in the July audit (E2) but not yet built. Registered users nearly doubled (152→283) since then; more concurrent traffic means more threads holding the GIL during that per-call rebuild on the single-process Flask dev server, which plausibly explains the gap between the audited ~110-230ms single-call cost and the reported 10-15s wall-clock experience (queuing under contention is nonlinear, not additive).
 

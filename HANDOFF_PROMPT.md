@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-08-24 · Version: v2.16.4 · Live at: gcgeartracker.com*
+*Generated: 2026-08-24 · Version: v2.16.5 (TEMPORARY diagnostic — see below) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,10 +88,13 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.4 (E2: /api/browse memoization — pending push; v2.16.3 pushed 2026-07-15)
+## Current State: v2.16.5 — TEMPORARY diagnostic build, pending push (v2.16.4 pushed 2026-08-24)
+
+**⚠️ v2.16.5 must be reverted after use** — it's a one-time debug probe in `parse_products()`, not a feature. Push it, run one scan, check Railway logs for `[v2.16.5 probe]` lines to see if GC's "Condition & Details" accessory notes (case/bag/box) are present in the bulk Algolia data or only on individual product pages, then pull the probe block back out. Full context in HANDOFF.md's "⚠️ TEMPORARY" section at the top.
 
 ### Recent changes (this session)
 
+- **v2.16.5** — **TEMPORARY: Algolia hit-shape probe** (not a feature, must be reverted). Investigating whether GC's per-item "Condition & Details" note (sometimes mentions included case/bag/box, confirmed on live product pages, NOT a reliable structured field — sometimes it's about cosmetic damage instead, sometimes absent) is available in the bulk Algolia data the scanner already pulls, vs. requiring a fetch per product page. One-time debug dump (`_DEBUG_HIT_PROBE_DONE` flag) of the first 5 raw hits' keys on the next scan, printed server-side only (Railway logs, never SSE/client-visible). See HANDOFF.md for full detail and revert instructions.
 - **v2.16.4** — **E2: /api/browse base-list memoization.** Chuck reported the page feeling slower — scan finds a few hundred items, table takes 10-15s to refresh. Root cause: he browses all 298 stores, so every scan lands on server-side browse, and `/api/browse` rebuilt its entire ~92K-item list from scratch on every call. New `_build_base_item_list()` memoizes the expensive per-item work (price/date formatting, lowercasing) by cache mtime; each request now does a cheap filter/annotate pass instead. Verified byte-identical output against the real 91,686-item production cache (0 mismatches) and benchmarked: ~281ms every call before → ~93ms (all-stores) / ~11ms (typical single-store) after cache warms. Registered users nearly doubled recently, so less GIL-hold-time per request should also ease queuing under concurrent load, likely explaining the gap between the audited per-call cost and the reported 10-15s. `gc_tracker_app.py` only. See HANDOFF.md for full detail.
 - **v2.16.3** — **Colon-prefix OR syntax.** Chuck's friend reported that entries like `"Mesa", -combo, Angel; Blues; Electra; ...` "ignore Mesa and -combo, return everything" — confirmed as documented `;`-clause behavior (no cross-clause propagation), not a bug, but a real gap for the common "brand + OR'd models + exclusion" case. New syntax: `prefix : b1; b2; b3` applies the prefix to every OR branch — `Mesa, -combo: Angel; Blues; Trem`. Pure preprocessing expansion feeding the existing v2.16.0 clause compilers, no new matching logic. Works in both the want list and search box. No colon = zero behavior change (verified). `gc_tracker_app.py` + `static/gc.js`. See HANDOFF.md for full verification detail.
 - **v2.16.2** — **Accessibility: Want List ⓘ button bigger + brighter.** Chuck has retinitis pigmentosa; the v2.16.1 ⓘ button was too small/low-contrast to spot. Green-accented border+text, bolder, larger padding; popover border/text also brightened and enlarged. `search-info-btn` (search bar) has the same subtle style, left as-is pending a decision on whether to match it.
