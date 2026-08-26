@@ -10,6 +10,8 @@ A web app that tracks Guitar Center used gear inventory across all US stores, fl
 
 - Scans Guitar Center's used inventory across 298+ stores and flags items listed since your last visit
 - Filter by brand, condition, category, price drops, and more
+- Advanced keyword syntax for the search box and want list, including AND/OR/NOT and a colon-prefix shorthand (`Mesa, -combo: Angel; Blues; Trem`) that applies one prefix to every OR branch
+- Hover the Condition column (desktop) to see GC's staff-written "Condition & Details" note when one exists — e.g. "Includes Hardshell Case"
 - Watch list and want list sync across devices when signed in
 - ZIP code sort — see gear closest to you first
 - Save custom filter combinations as named searches
@@ -25,6 +27,7 @@ A web app that tracks Guitar Center used gear inventory across all US stores, fl
 | Backend | Python / Flask (single entry point: `gc_tracker_app.py`) |
 | Database | SQLite (`gc_users.db`) — user accounts, watchlists, want lists, favorites |
 | Inventory data | Guitar Center Algolia search API |
+| Inventory cache | Flat JSON file (`gc_category_cache.json`, ~91-92K items / ~51-53MB), loaded into an in-memory dict and mirrored to disk |
 | Hosting | Railway (auto-deploys from `main` branch) |
 | Static assets | `static/gc.css`, `static/gc.js`, `static/cl.css`, `static/cl.js` |
 
@@ -33,7 +36,7 @@ A web app that tracks Guitar Center used gear inventory across all US stores, fl
 ## Project Structure
 
 ```
-gc_tracker_app.py        ← Main Flask app (~8000+ lines)
+gc_tracker_app.py        ← Main Flask app (~6300+ lines)
 requirements.txt         ← Python dependencies
 Procfile                 ← Railway process definition
 static/
