@@ -1671,9 +1671,9 @@ function _buildRowHtml(item) {
       `</span></td>`
     : `<td>${item.price||''}</td>`;
   // Condition cell: on desktop, if the scanner picked up a staff "Condition & Details"
-  // note for this item, show it as a hover tooltip with a dotted-underline hint.
+  // note for this item, show a small ⓘ next to the condition — hover it to read the note.
   const condCell = item.condition_note
-    ? `<td title="${esc(item.condition_note)}"><span class="cond-has-note">${esc(item.condition)}</span></td>`
+    ? `<td>${esc(item.condition)} <span class="cond-info-icon" title="${esc(item.condition_note)}">ⓘ</span></td>`
     : `<td>${esc(item.condition)}</td>`;
   return `<tr class="${rowClass}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}" data-image-id="${esc(item.image_id)}">` +
     `<td>${item.kwMatch ? '<span class="tag-kw">WANT</span>' : ''}</td>` +

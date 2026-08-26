@@ -1,5 +1,15 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-08-26 · Current version: v2.16.6 (condition_note: surface GC's "Condition & Details" staff note as a hover tooltip — pending push; v2.16.5 pushed 2026-08-26 then superseded) · Domain: gcgeartracker.com*
+*Last updated: 2026-08-26 · Current version: v2.16.7 (condition_note: dedicated ⓘ icon instead of whole-cell tooltip — pending push; v2.16.6 pushed 2026-08-26) · Domain: gcgeartracker.com*
+
+---
+
+## ⭐ Recent Changes (v2.16.6 → v2.16.7) — 2026-08-26 (condition_note UI tweak: dedicated ⓘ icon)
+
+**User feedback (Chuck):** the v2.16.6 approach put the tooltip on the condition text itself (dotted underline, `cursor:help` on the whole word) — Chuck asked instead for a small circled-i "ⓘ" info icon to the right of the condition value, so the cue is a distinct clickable-looking target rather than a hover-anywhere-on-the-text affordance.
+
+**Fix:** `_buildRowHtml` (`static/gc.js`) now renders `${esc(item.condition)} <span class="cond-info-icon" title="...">ⓘ</span>` instead of wrapping the condition text itself. Reused the same `ⓘ` glyph and green accent color (`#4ade80`) already established for the Want List modal's info button (v2.16.1/2.16.2), for visual consistency across the app. `static/gc.css`: replaced `.cond-has-note` (dotted underline) with `.cond-info-icon` (green, bold, `.85rem`, `cursor:help`). Still desktop-only — mobile card/list renderers untouched, same as v2.16.6. No backend changes; `condition_note` plumbing from v2.16.6 is unchanged.
+
+- `py_compile` and `node --check` both clean.
 
 ---
 

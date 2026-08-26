@@ -38,4 +38,4 @@ This is a discussion/evaluation session, not a build session — don't touch cod
 - Git pushes must happen from Chuck's Mac terminal, never from the sandbox — `cd ~/Desktop/gc_tracker` FIRST, then `rm -f .git/index.lock`, then `git add`/`commit`/`push origin main`
 - Update `HANDOFF.md` / `HANDOFF_PROMPT.md` with changelog entries for any version bump
 
-Current version: **v2.16.6** (condition_note hover tooltip). Last updated: 2026-08-26.
+Current version: **v2.16.7** (condition_note ⓘ icon). Last updated: 2026-08-26.

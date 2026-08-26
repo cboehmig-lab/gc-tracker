@@ -262,7 +262,7 @@ td a:hover{color:#a8d4ff;text-decoration:underline}
 .tag{background:#c00;color:#fff;font-size:.64rem;font-weight:700;padding:2px 7px;border-radius:10px;letter-spacing:.2px}
 .tag-kw{background:#0a5c2a;color:#4ade80;font-size:.64rem;font-weight:700;padding:2px 7px;border-radius:10px;border:1px solid #2d6a2d;letter-spacing:.2px}
 .price-drop-val{color:#4ade80;cursor:default}
-.cond-has-note{border-bottom:1px dotted #888;cursor:help}
+.cond-info-icon{color:#4ade80;font-weight:700;font-size:.85rem;cursor:help;margin-left:2px}
 .price-orig{color:#888;text-decoration:line-through;font-size:.85em;margin-right:2px}
 .tag-sold{background:#3a1a1a;color:#f87171;font-size:.62rem;font-weight:700;padding:2px 5px;border-radius:3px;border:1px solid #6a2d2d}
 .watch-btn{background:none;border:none;cursor:pointer;color:#444;font-size:1rem;line-height:1;padding:0 2px;transition:color .15s;flex-shrink:0}

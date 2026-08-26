@@ -11,7 +11,7 @@ A web app that tracks Guitar Center used gear inventory across all US stores, fl
 - Scans Guitar Center's used inventory across 298+ stores and flags items listed since your last visit
 - Filter by brand, condition, category, price drops, and more
 - Advanced keyword syntax for the search box and want list, including AND/OR/NOT and a colon-prefix shorthand (`Mesa, -combo: Angel; Blues; Trem`) that applies one prefix to every OR branch
-- Hover the Condition column (desktop) to see GC's staff-written "Condition & Details" note when one exists — e.g. "Includes Hardshell Case"
+- A small ⓘ next to the Condition value (desktop) reveals GC's staff-written "Condition & Details" note on hover, when one exists — e.g. "Includes Hardshell Case"
 - Watch list and want list sync across devices when signed in
 - ZIP code sort — see gear closest to you first
 - Save custom filter combinations as named searches
