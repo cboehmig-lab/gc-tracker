@@ -1,5 +1,15 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-08-26 · Current version: v2.16.7 (condition_note: dedicated ⓘ icon instead of whole-cell tooltip — pending push; v2.16.6 pushed 2026-08-26) · Domain: gcgeartracker.com*
+*Last updated: 2026-08-26 · Current version: v2.16.8 (condition_note ⓘ: normal cursor instead of help/question-mark — pending push; v2.16.7 pushed 2026-08-26) · Domain: gcgeartracker.com*
+
+---
+
+## ⭐ Recent Changes (v2.16.7 → v2.16.8) — 2026-08-26 (condition_note ⓘ: cursor tweak)
+
+**User feedback (Chuck):** hovering the new ⓘ icon changed the mouse cursor to the OS "help" cursor (arrow + question mark) — asked for a standard pointer/default cursor instead.
+
+**Fix:** `.cond-info-icon` in `static/gc.css` — `cursor:help` → `cursor:default`. No other changes.
+
+- `py_compile` and `node --check` both clean.
 
 ---
 
