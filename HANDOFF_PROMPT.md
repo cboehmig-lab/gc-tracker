@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-08-26 · Version: v2.16.8 (condition_note ⓘ: normal cursor) · Live at: gcgeartracker.com*
+*Generated: 2026-08-26 · Version: v2.16.9 (condition_note ⓘ: instant custom tooltip) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,12 +88,13 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.8 — condition_note ⓘ cursor tweak, pending push (v2.16.7 pushed 2026-08-26)
+## Current State: v2.16.9 — condition_note ⓘ instant custom tooltip, pending push (v2.16.8 pushed 2026-08-26)
 
 **v2.16.5's temporary probe is fully reverted** — no debug scaffolding remains in `parse_products()`. Answer confirmed via a separate credentialed local probe script (`probe_condition_details.py`, gitignored, run by Chuck directly against Algolia): the "Condition & Details" note lives in the `longDescription` field the scanner already fetches on every scan, at zero extra cost.
 
 ### Recent changes (this session)
 
+- **v2.16.9** — **condition_note ⓘ: instant custom tooltip.** Replaced the native `title=` attribute (browser-controlled ~600ms-1s show delay, not adjustable) with a JS-driven tooltip: `.cond-info-icon` now carries `data-tooltip="..."`, a single shared `#cond-tooltip` node (added to `HTML_TEMPLATE` next to `#ss-dropdown`, same "escape the table's overflow:hidden via position:fixed" reasoning) is positioned via `getBoundingClientRect()` on delegated `mouseover`/`mouseout` listeners and shown synchronously — no delay. Desktop-only, unchanged elsewhere.
 - **v2.16.8** — **condition_note ⓘ: normal cursor.** Chuck didn't want the OS help/question-mark cursor on hover — `.cond-info-icon` (`static/gc.css`) changed from `cursor:help` to `cursor:default`. One-line change.
 - **v2.16.7** — **condition_note UI tweak: dedicated ⓘ icon.** Chuck asked for a distinct hoverable ⓘ icon next to the condition value instead of a dotted-underline hover-anywhere-on-the-text cue. `_buildRowHtml` (`static/gc.js`) now appends `<span class="cond-info-icon" title="...">ⓘ</span>` after the condition text; `static/gc.css` swapped `.cond-has-note` for `.cond-info-icon` (green `#4ade80`, bold, matches the Want List modal's existing ⓘ button styling). Backend/data plumbing unchanged from v2.16.6. Desktop table only, same as before.
 - **v2.16.6** — **condition_note: "Condition & Details" hover tooltip.** Extracts the freeform staff note (e.g. "Includes Hardshell Case") that sometimes follows a "Condition & Details" marker in Algolia's `longDescription` field, via new `_extract_condition_note()`. Wired through `parse_products()` → `_cat_cache` → `_build_base_item_list()` → `/api/browse` → and the SSE small-scan `fmt(p)` path — same 5-location pattern as the `is_vintage` flag. Frontend: desktop table only (`_buildRowHtml` in `static/gc.js`); mobile card/list views untouched, per Chuck's request. Empty for existing cached items until their next scan (same rollout caveat as `is_vintage`). `gc_tracker_app.py` + `static/gc.js` + `static/gc.css`. See HANDOFF.md for full detail.

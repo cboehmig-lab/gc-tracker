@@ -5997,6 +5997,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div><!-- /results-top-bar -->
       <!-- ss-dropdown lives here (outside overflow-x:auto chip bar) so position:fixed works on iOS -->
       <div id="ss-dropdown" class="ss-dropdown"></div>
+      <!-- Shared condition_note tooltip — one node reused for every row, positioned via JS
+           (position:fixed escapes the table cell's overflow:hidden, same reason ss-dropdown lives here) -->
+      <div id="cond-tooltip" class="cond-tooltip"></div>
       <div id="res-body"></div>
     </div>
   </div>
@@ -6276,7 +6279,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.8"
+APP_VERSION = "2.16.9"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

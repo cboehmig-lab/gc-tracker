@@ -1,5 +1,19 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-08-26 · Current version: v2.16.8 (condition_note ⓘ: normal cursor instead of help/question-mark — pending push; v2.16.7 pushed 2026-08-26) · Domain: gcgeartracker.com*
+*Last updated: 2026-08-26 · Current version: v2.16.9 (condition_note ⓘ: instant custom tooltip, no native browser delay — pending push; v2.16.8 pushed 2026-08-26) · Domain: gcgeartracker.com*
+
+---
+
+## ⭐ Recent Changes (v2.16.8 → v2.16.9) — 2026-08-26 (condition_note ⓘ: instant custom tooltip)
+
+**User feedback (Chuck):** the ⓘ tooltip used the native HTML `title=` attribute, which has a browser-controlled show delay (~600ms-1s, not adjustable via CSS/HTML) — asked for it to pop up almost immediately.
+
+**Fix — replaced native `title=` with a custom JS-driven tooltip:**
+- `_buildRowHtml` (`static/gc.js`) now sets `data-tooltip="..."` on `.cond-info-icon` instead of `title="..."`.
+- New shared `#cond-tooltip` node in `HTML_TEMPLATE` (`gc_tracker_app.py`, right next to `#ss-dropdown`) — one DOM node reused for every row rather than one per row. Lives outside the table so `position:fixed` isn't clipped by the table cell's `overflow:hidden` (same reason `#ss-dropdown` lives outside the overflow-x chip bar — see the existing "Dropdowns that escape overflow clipping" pattern in HANDOFF_PROMPT.md's architecture section).
+- New delegated `mouseover`/`mouseout` listeners on `document` (`static/gc.js`, right after the existing `[data-action]` click delegation) show/hide/position the shared tooltip synchronously on hover — no setTimeout, no native delay. Position computed via `getBoundingClientRect()`, flips below the icon if there's no room above, clamped to stay on-screen horizontally.
+- New `.cond-tooltip` CSS rule (`static/gc.css`) — dark panel styling consistent with the rest of the app's popovers, `pointer-events:none` so it never intercepts hover/click, `z-index:300`.
+- Desktop-only, same as before — mobile card/list renderers never emit `.cond-info-icon`, so this tooltip never appears there.
+- `py_compile` and `node --check` both clean.
 
 ---
 

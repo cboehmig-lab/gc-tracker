@@ -1672,8 +1672,10 @@ function _buildRowHtml(item) {
     : `<td>${item.price||''}</td>`;
   // Condition cell: on desktop, if the scanner picked up a staff "Condition & Details"
   // note for this item, show a small ⓘ next to the condition — hover it to read the note.
+  // Uses data-tooltip (not the title= attribute) + a shared #cond-tooltip node so the
+  // popup appears instantly instead of waiting on the browser's native tooltip delay.
   const condCell = item.condition_note
-    ? `<td>${esc(item.condition)} <span class="cond-info-icon" title="${esc(item.condition_note)}">ⓘ</span></td>`
+    ? `<td>${esc(item.condition)} <span class="cond-info-icon" data-tooltip="${esc(item.condition_note)}">ⓘ</span></td>`
     : `<td>${esc(item.condition)}</td>`;
   return `<tr class="${rowClass}" data-name="${esc(item.name)}" data-brand="${esc(item.brand)}" data-price="${priceNum}" data-store="${esc(item.store)}" data-location="${esc(item.location)}" data-condition="${esc(item.condition)}" data-category="${esc(item.category)}" data-subcategory="${esc(item.subcategory)}" data-image-id="${esc(item.image_id)}">` +
     `<td>${item.kwMatch ? '<span class="tag-kw">WANT</span>' : ''}</td>` +
@@ -4340,6 +4342,37 @@ document.addEventListener('click', function(e) {
   } else if (action === 'clToggleWatch') {
     clToggleWatch(el.dataset.id, el.dataset.title, el.dataset.url, el.dataset.price, el.dataset.location, el);
   }
+});
+
+// ── condition_note tooltip (instant, not the native title= delay) ────────────
+// Shared #cond-tooltip node, positioned via getBoundingClientRect() same as the
+// other position:fixed panels (ss-dropdown, price-dd-panel) — escapes the table
+// cell's overflow:hidden and shows immediately on hover instead of waiting on
+// the browser's built-in tooltip delay (~600ms-1s).
+document.addEventListener('mouseover', function(e) {
+  const el = e.target.closest('.cond-info-icon');
+  if (!el) return;
+  const tip = document.getElementById('cond-tooltip');
+  if (!tip) return;
+  tip.textContent = el.dataset.tooltip || '';
+  tip.style.display = 'block';
+  const rect = el.getBoundingClientRect();
+  tip.style.left = '0px';
+  tip.style.top  = '0px';
+  const tipRect = tip.getBoundingClientRect();
+  let left = rect.left + rect.width / 2 - tipRect.width / 2;
+  left = Math.max(8, Math.min(left, window.innerWidth - tipRect.width - 8));
+  let top = rect.top - tipRect.height - 8;
+  if (top < 8) top = rect.bottom + 8; // flip below if it would go off the top of the viewport
+  tip.style.left = left + 'px';
+  tip.style.top  = top + 'px';
+});
+document.addEventListener('mouseout', function(e) {
+  const el = e.target.closest('.cond-info-icon');
+  if (!el) return;
+  if (e.relatedTarget && el.contains(e.relatedTarget)) return;
+  const tip = document.getElementById('cond-tooltip');
+  if (tip) tip.style.display = 'none';
 });
 
 document.addEventListener('DOMContentLoaded', function() {
