@@ -3,7 +3,22 @@
 
 ---
 
-## ⭐ Recent Changes (v2.16.2 → v2.16.3) — 2026-07-15 (colon-prefix OR syntax: 'prefix : b1; b2; ...' — PENDING PUSH)
+## ⭐ Recent Changes (v2.16.3 → v2.16.4) — 2026-08-24 (E2: /api/browse base-list memoization — PENDING PUSH)
+
+**User-reported (Chuck):** page felt slower recently — scan finishes, finds a few hundred new items, then the table takes 10-15s to refresh. Root-caused rather than guessed: Chuck has all 298 stores selected, so every scan puts him on the server-side browse path (`large_scan = len(all_products) > 1000`), and `/api/browse` was rebuilding its entire ~92K-item lightweight-dict list from scratch on EVERY call — price/date formatting, name/brand lowercasing, for every item, every filter click/keystroke/page-flip. This was flagged as the biggest open perf lever in the July audit (E2) but not yet built. Registered users nearly doubled (152→283) since then; more concurrent traffic means more threads holding the GIL during that per-call rebuild on the single-process Flask dev server, which plausibly explains the gap between the audited ~110-230ms single-call cost and the reported 10-15s wall-clock experience (queuing under contention is nonlinear, not additive).
+
+**Fix:** split the item-list build into a memoized half and a per-request half.
+
+- New `_build_base_item_list()` (`gc_tracker_app.py`, right after `_save_cat_cache()`) does the expensive, request-independent projection — price/date formatting, name/brand lowercasing, the `available` filter — ONCE per cache generation, memoized by `_cat_cache_mtime` (same trigger `_load_cat_cache` already uses, v2.13.0 pattern, no lock — two threads racing a rebuild just do redundant identical work under the GIL, not incorrect work). Returns one unfiltered list — deliberately NOT keyed per store-selection (298 stores selectable in any combination would blow memory chasing a combinatorial key space).
+- `api_browse()`'s item-building loop now iterates that memoized list and does only the genuinely per-request work: store-selection filter, per-user `user_last_scan` gating, and the per-user annotations (`watched`/`isNew`/`kwMatch`/`isFav`) that can't be cached across users.
+- Drive-by cleanup: `item_dates` (from `load_state()`) was dead — nothing in the codebase ever writes `state["item_dates"]`, so `cached.get("date_listed") or item_dates.get(sku, "")` always resolved to just `cached.get("date_listed") or ""`. Removed the now-fully-unused `state = load_state()` call from `api_browse()` too (saves a 24KB parse per call, minor but free).
+- **Verified against the real 91,686-item production cache file** (not synthetic data): extracted both the old and new implementations standalone (avoids needing Flask installed) and diffed output on an all-stores/no-filter call — 91,175 items both ways, **0 dict mismatches**, confirming byte-identical behavior. Benchmarked: first call after a cache change (builds the memo) costs ~312ms — comparable to one old-way call — but every subsequent call on an unchanged cache drops to **~93.5ms for an all-298-stores call** (Chuck's case) and **~11ms for a realistic single/few-store selection** (most other users), versus the old ~281.6ms *every single call, no exceptions*. That's a 3x floor for the heaviest case and ~25x for typical usage, before even counting the concurrency benefit of holding the GIL for a fraction as long per request.
+- Did NOT merge/remove the separate want-list-match-notification `/api/browse` call in `gc.js` (fires after a scan finds new items, checks matches nationwide across all stores) — on inspection it queries a genuinely different scope (nationwide, new-items-only, want-list-only) than the user's actual filtered table view, so it isn't true duplicate work. It now benefits from the same memoization automatically, which is most of the win available there anyway.
+- `py_compile` clean.
+
+---
+
+## ⭐ Recent Changes (v2.16.2 → v2.16.3) — 2026-07-15 (colon-prefix OR syntax: 'prefix : b1; b2; ...' — PUSHED 2026-07-15)
 
 **User-reported (Chuck's friend, via Discord):** entries like `"Mesa", -combo, Angel; Blues; Electra; Electradyne; Heartbreaker; Maverick; Tremoverb; Trem` "ignore Mesa and -combo entirely, return every result with all the OR terms." Confirmed by hand-tracing all three variants they tried: `;` splits into fully independent OR clauses with **zero cross-clause propagation** (deliberate, no parentheses) — only the ONE clause that happened to contain "Mesa"/"-combo" got the constraint; the other 6 single-word clauses had no brand/exclusion constraint at all. Working as documented, but a real, common use case ("brand + several OR'd models + one exclusion") had no way to express itself without repeating the prefix in every clause.
 

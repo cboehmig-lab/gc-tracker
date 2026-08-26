@@ -372,6 +372,77 @@ def _save_cat_cache():
     except Exception:
         pass
 
+# ── Memoized /api/browse base item list (E2, v2.16.4) ────────────────────────
+# /api/browse used to rebuild this ~92K-item lightweight-dict list from scratch
+# on EVERY call — price/date formatting + name/brand lowercasing for every item
+# — even though none of that depends on who's asking or what they're filtering
+# by. That's ~110-230ms held under the GIL per call, on the threaded dev server,
+# on an endpoint hit by every filter click, keystroke, and page flip. Memoize
+# the expensive request-independent projection once per cache generation (keyed
+# off _cat_cache_mtime — the same trigger _load_cat_cache already uses) so each
+# request only pays for a cheap second pass: store-selection filter, per-user
+# scan-date gating, and the per-user annotations (watched/isNew/kwMatch/isFav)
+# that genuinely can't be cached.
+#
+# Deliberately memoizes ONE unfiltered list, not one per store-selection — with
+# up to 298 stores selectable in any combination, caching per-selection would
+# chase a combinatorial key space and blow memory. Store filtering stays a
+# cheap per-request pass over the single cached list instead.
+#
+# No lock: same unsynchronized memoize-by-mtime pattern as _load_cat_cache
+# (v2.13.0) — under Flask's threaded dev server + the GIL, two threads racing
+# to rebuild after a scan just do redundant identical work, not incorrect work
+# (both read the same _cat_cache snapshot via list(...)).
+_base_item_list: list = []
+_base_item_list_mtime = None
+
+def _build_base_item_list():
+    """The memoized half of the old all_items loop: every field that's the
+    same no matter who's asking, for every AVAILABLE item (the availability
+    filter is static per item, so items failing it are dropped here rather
+    than carried through every request). Does NOT include store filtering,
+    scan-date gating, or the per-user watched/isNew/kwMatch/isFav flags —
+    those stay a per-request pass in api_browse(). `first_seen`/`name_lower`/
+    `brand_lower` are internal-only (used for gating/matching), not part of
+    the JSON shape ultimately returned to the client."""
+    global _base_item_list, _base_item_list_mtime
+    if _base_item_list_mtime == _cat_cache_mtime and _base_item_list:
+        return _base_item_list
+    items = []
+    for sku, cached in list(_cat_cache.items()):
+        if not cached.get("available", True):
+            continue
+        price_raw = cached.get("price", 0) or 0
+        name      = cached.get("name", "")
+        brand     = cached.get("brand", "")
+        date_raw  = cached.get("date_listed", "")
+        items.append({
+            "id":               sku,
+            "name":             name,
+            "brand":            brand,
+            "name_lower":       name.lower(),
+            "brand_lower":      brand.lower(),
+            "price":            f"${price_raw:,.2f}" if price_raw else "",
+            "price_raw":        price_raw,
+            "list_price_raw":   cached.get("list_price", 0) or 0,
+            "price_drop":       cached.get("price_drop", 0) or 0,
+            "price_drop_since": cached.get("price_drop_since", "") or "",
+            "store":            cached.get("store", ""),
+            "location":         cached.get("location") or cached.get("store", ""),
+            "url":              cached.get("url", ""),
+            "category":         cached.get("category", ""),
+            "subcategory":      cached.get("subcategory", ""),
+            "condition":        cached.get("condition", ""),
+            "date":             _fmt_date(date_raw),
+            "date_raw":         date_raw,
+            "first_seen":       cached.get("first_seen", ""),
+            "image_id":         cached.get("image_id", ""),
+            "is_vintage":       bool(cached.get("is_vintage")),
+        })
+    _base_item_list = items
+    _base_item_list_mtime = _cat_cache_mtime
+    return _base_item_list
+
 # ── Store list ────────────────────────────────────────────────────────────────
 
 FALLBACK_STORES: list[str] = []  # Populated from GC live data via Validate Stores
@@ -3731,8 +3802,6 @@ def api_browse():
     force_fav_sort = bool(data.get("force_fav_sort"))
 
     _load_cat_cache()
-    state      = load_state()
-    item_dates = state.get("item_dates", {})
     # Watchlist and keywords now come from the client (localStorage)
     wl_ids     = set(data.get("watchlist_ids", []))
     keywords   = data.get("keywords", [])
@@ -3911,59 +3980,45 @@ def api_browse():
                         "message": "Run 'Check for New Items' once to populate store data."})
 
     # ── Build full item list for selected stores (lightweight dicts) ──────
+    # E2 (v2.16.4): the expensive per-item projection (price/date formatting,
+    # name/brand lowercasing) now happens ONCE per cache generation in
+    # _build_base_item_list(), memoized by cache mtime — see that function's
+    # docstring. This pass is just the genuinely per-request part: store
+    # selection, per-user scan-date gating, and the per-user annotations
+    # (watched/isNew/kwMatch/isFav) that can't be cached across users.
     all_items = []
-    # Snapshot via list() so a concurrent scan thread mutating _cat_cache in place can't
-    # raise "dictionary changed size during iteration" — the cache is now one shared
-    # in-memory object across request threads (v2.13.0), not a per-call private parse.
-    for sku, cached in list(_cat_cache.items()):
-        if store_set is not None and cached.get("store") not in store_set:
-            continue
-        if not cached.get("available", True):
+    for b in _build_base_item_list():
+        if store_set is not None and b["store"] not in store_set:
             continue
         # Per-user browse gating: hide items first seen after this user's last scan.
         # Ensures each device only sees inventory that existed when IT scanned —
         # items added to cache by another device's newer scan stay hidden here.
         if user_last_scan:
-            first_seen = cached.get("first_seen", "")
+            first_seen = b["first_seen"]
             if first_seen and first_seen > user_last_scan:
                 continue
-        price_raw  = cached.get("price", 0) or 0
-        name       = cached.get("name", "")
-        brand      = cached.get("brand", "")
-        location   = cached.get("location") or cached.get("store", "")
-        category   = cached.get("category", "")
-        subcategory= cached.get("subcategory", "")
-        condition  = cached.get("condition", "")
-        date_raw   = cached.get("date_listed") or item_dates.get(sku, "")
-        store      = cached.get("store", "")
-
-        # Check keyword match
-        name_lower = name.lower()
-        brand_lower = brand.lower()
-        kw_hit = _kw_match(name_lower, brand_lower) if _has_kw else False
-
-        pd_amt   = cached.get("price_drop", 0) or 0
-        lp_raw   = cached.get("list_price", 0) or 0
-        pd_since = cached.get("price_drop_since", "") or ""
+        sku   = b["id"]
+        store = b["store"]
+        kw_hit = _kw_match(b["name_lower"], b["brand_lower"]) if _has_kw else False
         all_items.append({
             "id":               sku,
-            "name":             name,
-            "brand":            brand,
-            "price":            f"${price_raw:,.2f}" if price_raw else "",
-            "price_raw":        price_raw,
-            "list_price_raw":   lp_raw,
-            "price_drop":       pd_amt,
-            "price_drop_since": pd_since,
+            "name":             b["name"],
+            "brand":            b["brand"],
+            "price":            b["price"],
+            "price_raw":        b["price_raw"],
+            "list_price_raw":   b["list_price_raw"],
+            "price_drop":       b["price_drop"],
+            "price_drop_since": b["price_drop_since"],
             "store":            store,
-            "location":         location,
-            "url":              cached.get("url", ""),
-            "category":         category,
-            "subcategory":      subcategory,
-            "condition":        condition,
-            "date":             _fmt_date(date_raw),
-            "date_raw":         date_raw,
-            "image_id":         cached.get("image_id", ""),
-            "is_vintage":       bool(cached.get("is_vintage")),
+            "location":         b["location"],
+            "url":              b["url"],
+            "category":         b["category"],
+            "subcategory":      b["subcategory"],
+            "condition":        b["condition"],
+            "date":             b["date"],
+            "date_raw":         b["date_raw"],
+            "image_id":         b["image_id"],
+            "is_vintage":       b["is_vintage"],
             "watched":          sku in wl_ids,
             "isNew":            sku in new_ids,
             "kwMatch":          kw_hit,
@@ -6185,7 +6240,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.3"
+APP_VERSION = "2.16.4"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
