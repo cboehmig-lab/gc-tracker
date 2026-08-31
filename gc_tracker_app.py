@@ -9,6 +9,7 @@ Then open: http://localhost:5050
 import html as _html
 import hmac
 import json, os, re, sys, time, threading, queue, webbrowser, random, sqlite3
+import gc as _gc, ctypes as _ctypes
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as _FutureTimeoutError
 from datetime import datetime, timedelta
 from functools import wraps
@@ -6392,7 +6393,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.12"
+APP_VERSION = "2.16.13"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
@@ -6428,6 +6429,37 @@ _load_cookies()
 if not STORES_CACHE.exists():
     print("Building store list…")
     refresh_store_list()
+
+# ── Periodic malloc_trim ──────────────────────────────────────────────────────
+# Root cause (investigated 2026-08-31): Railway production memory climbs from
+# ~2GB to 7-8GB+ between deploys and never comes back down. Confirmed via local
+# load testing that this is NOT a Python-level leak — it's glibc's allocator
+# holding onto pages at their high-water mark. Under concurrent /api/browse
+# traffic (large per-request temporary lists built from the ~92K-item catalog,
+# --threads=8), glibc grabs extra heap to serve simultaneous large allocations
+# and, once freed, keeps those pages reserved rather than returning them to the
+# OS — classic RSS high-water-mark behavior, not a growing live working set.
+# Confirmed locally that calling libc's malloc_trim(0) reliably reclaims it
+# (reproduced twice: ~450MB baseline → ~1.2GB after load → ~410MB after trim,
+# both rounds). This runs a trim on a timer so RSS gets reclaimed periodically
+# in production without needing a deploy to reset it. Linux-only (Railway) —
+# no-ops harmlessly if libc.so.6 isn't available (e.g. local dev on macOS).
+_MALLOC_TRIM_INTERVAL_SECS = 300  # 5 minutes
+
+def _malloc_trim_loop():
+    try:
+        _libc = _ctypes.CDLL("libc.so.6")
+    except OSError:
+        return  # not on glibc/Linux (e.g. local macOS dev) — nothing to do
+    while True:
+        time.sleep(_MALLOC_TRIM_INTERVAL_SECS)
+        try:
+            _gc.collect()
+            _libc.malloc_trim(0)
+        except Exception:
+            pass  # best-effort — never let this background thread take the app down
+
+threading.Thread(target=_malloc_trim_loop, daemon=True).start()
 
 # Nightly scan removed — "Check for New" is manual only
 
