@@ -1,11 +1,63 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-08-31 · Current version: v2.16.14 (Postgres migration Phase A: schema + backfill script, no behavior change) · Domain: gcgeartracker.com*
+*Last updated: 2026-08-31 · Current version: v2.16.15 (Postgres migration Phase B: scan dual-write, no read-path change) · Domain: gcgeartracker.com*
 
 ---
 
 ## ⚠️ Railway gotcha: Custom Start Command overrides `Procfile`
 
 When v2.16.10 first deployed, the logs still showed Werkzeug's dev-server warning ("This is a development server...") even though `Procfile` had already been updated to run gunicorn. Cause: Railway's service **Settings → Deploy → Custom Start Command** field, if set, takes priority over `Procfile` unconditionally — Railway doesn't warn you the two are out of sync, it just silently ignores `Procfile`. That field was hardcoded to `python gc_tracker_app.py` (presumably set once, early in the project, before `Procfile` existed or was trusted). Fixed by updating that field directly in the dashboard to match `Procfile`'s gunicorn command. **If you ever change the start command in `Procfile` again, also check/update this dashboard field — they do not sync automatically, and the dashboard field wins.**
+
+---
+
+## ⭐ Recent Changes (v2.16.14 → v2.16.15) — 2026-08-31 (Postgres migration Phase B: scan dual-write — no read-path change)
+
+**Context**: Phase A's backfill script was run by Chuck against the real production Postgres and
+verified exact (91,686 total items, 91,175 available — matched the JSON cache exactly). Chuck
+then asked to start Phase B: keep Postgres in sync with every real scan for a few days before
+building the diff harness that gates any read-path cutover. See
+[[postgres_migration_plan_2026-08-31]] in project memory and `POSTGRES_MIGRATION_PLAN.md` §7.
+
+**What shipped**: `_run()` now mirrors every scan's results into Postgres, in a fire-and-forget
+background thread started right after `_save_cat_cache()` — this is purely additive and
+best-effort; it reads the exact same post-merge `_cat_cache` state and the same run-scoped values
+(`ids_this_run`, `nationwide`, `scan_incomplete`, `incomplete_stores`, `stores_to_scan`) the JSON
+path already computed, and does not add any new scan logic of its own:
+- **Upsert**: every SKU this run touched gets bulk-upserted into Postgres's `items` table via
+  `execute_values` + `ON CONFLICT (sku) DO UPDATE`, same shape/columns as the Phase A backfill
+  script (`_PG_UPSERT_COLS` — kept in sync with `migrate_cat_cache_to_pg.py`'s `COLS` by comment,
+  not by import, matching this project's existing tolerance for small documented duplication
+  over one script importing the main 6,500-line app as a library).
+- **Sold-marking**: replays the JSON sold-marking block's IDENTICAL condition and store scope —
+  `if not _stop_event.is_set() and (not nationwide or not scan_incomplete)`, then a temp-table
+  anti-join `UPDATE items SET available=false` scoped to `scanned_store_set` (or unscoped for a
+  clean nationwide scan) — so the v2.16.11 coverage-gap safety logic (don't mark a store's items
+  sold if that store's fetch was incomplete; don't advance past a nationwide scan with any gap)
+  is preserved exactly, just translated to SQL rather than re-derived.
+- **Fire-and-forget by design**: the Postgres write happens in its own daemon thread, NOT awaited
+  before the scan's `"done"` SSE message — a slow or failed Postgres write can never delay or
+  affect what the user sees. Any failure inside `_pg_sync_scan()` is caught and logged
+  server-side only, same tolerance as `_init_pg_schema()` and every other best-effort persistence
+  path in this app (`_maybe_backup_users_db()`, the anchor persist in `_run()` itself).
+- Silently a no-op end-to-end (same as Phase A) until `DATABASE_URL` is actually deployed to the
+  `web` service — it still isn't as of this entry, deliberately, pending Chuck's decision on
+  timing (a deploy of that pending variable restarts `web` once).
+
+**Verified**: `python3 -m py_compile gc_tracker_app.py` and `node --check static/gc.js` (no JS
+touched) both clean. The sold-marking anti-join SQL (both the nationwide branch and the
+store-scoped branch, including the edge case of an empty `ids_this_run` — a scan that legitimately
+found 0 products in its scope) was validated against a scratch Postgres 16 instance in an isolated
+sandbox with synthetic data covering all three scenarios before shipping — not against Chuck's
+real data, since dual-write only takes effect once `DATABASE_URL` is deployed.
+
+**Known gap, explicitly not covered**: `_populate_store_data()` (the `/api/populate-store-data`
+admin endpoint) and the `/api/fill-gaps` admin endpoint also mutate `_cat_cache` and call
+`_save_cat_cache()`, but are NOT mirrored to Postgres by this change — Phase B was scoped to the
+normal scan path (`_run()`, triggered by `/api/run`) only, per the migration plan. Both admin
+endpoints are rare, admin-gated maintenance operations; JSON stays authoritative throughout Phase
+B/C regardless, so this is a staleness gap for those two paths only, not a correctness risk —
+worth closing before any read-path cutover if those endpoints see real use, but not before.
+
+**Files changed**: `gc_tracker_app.py` only. `APP_VERSION = "2.16.15"`.
 
 ---
 

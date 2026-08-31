@@ -420,6 +420,93 @@ def _init_pg_schema():
 
 _init_pg_schema()
 
+# ── Postgres dual-write (Phase B, v2.16.15) ───────────────────────────────────
+# Mirrors this scan's results into Postgres, best-effort, AFTER _cat_cache/JSON
+# have already been fully updated by the normal scan logic in _run() below —
+# this function only writes what the JSON path already decided; it is never a
+# second source of scan logic, and a failure here can never affect scan
+# completion, the JSON cache, or anything the user sees. Purpose: let Postgres
+# accumulate real production scan data (Phase B of POSTGRES_MIGRATION_PLAN.md)
+# so it can be diffed against the JSON-based system before anything ever reads
+# from it. Silently no-ops if DATABASE_URL isn't set or psycopg2 isn't
+# installed — same guard as _init_pg_schema().
+#
+# Runs in its own background thread (see the call site in _run()) so a slow
+# Postgres write never delays the scan's "done" SSE message — dual-write is
+# purely for building confidence, not something anything currently depends on.
+_PG_UPSERT_COLS = ["sku", "name", "brand", "category", "subcategory", "condition",
+                   "condition_note", "price", "list_price", "has_price_drop", "price_drop",
+                   "price_drop_since", "store", "location", "url", "image_id", "is_vintage",
+                   "available", "date_listed", "first_seen"]
+# Keep in sync with migrate_cat_cache_to_pg.py's COLS if the schema ever changes.
+_PG_UPSERT_SQL = (
+    f"INSERT INTO items ({', '.join(_PG_UPSERT_COLS)}) VALUES %s "
+    f"ON CONFLICT (sku) DO UPDATE SET "
+    f"{', '.join(f'{c}=EXCLUDED.{c}' for c in _PG_UPSERT_COLS if c != 'sku')}"
+)
+
+def _pg_row_for(sku: str, it: dict) -> tuple:
+    return (
+        sku, it.get("name", "") or "", it.get("brand", "") or "", it.get("category", "") or "",
+        it.get("subcategory", "") or "", it.get("condition", "") or "",
+        it.get("condition_note", "") or "", it.get("price", 0) or 0, it.get("list_price", 0) or 0,
+        bool(it.get("has_price_drop", False)), it.get("price_drop", 0) or 0,
+        it.get("price_drop_since", "") or "", it.get("store", "") or "",
+        it.get("location", "") or it.get("store", "") or "", it.get("url", "") or "",
+        it.get("image_id", "") or "", bool(it.get("is_vintage", False)),
+        it.get("available", True), it.get("date_listed", "") or "", it.get("first_seen", "") or "",
+    )
+
+def _pg_sync_scan(ids_this_run: set, nationwide: bool, scan_incomplete: bool,
+                   incomplete_stores: set, stores_to_scan: list):
+    """Best-effort Postgres mirror of one scan. See module docstring above.
+    Reads _cat_cache (read-only) and the same run-scoped values _run() already
+    computed — never recomputes scan logic, only replays the JSON path's own
+    two effects: (1) upsert every item this run touched, (2) mark unavailable,
+    in Postgres, whatever the JSON sold-marking block just marked unavailable
+    in _cat_cache, under the IDENTICAL coverage-gap-safe condition and store
+    scope (v2.16.11) — see _run()'s own sold-marking block for that reasoning."""
+    if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL):
+        return
+    try:
+        conn = psycopg2.connect(PG_DATABASE_URL, connect_timeout=10)
+        try:
+            with conn.cursor() as cur:
+                if ids_this_run:
+                    rows = [_pg_row_for(sku, _cat_cache[sku]) for sku in ids_this_run if sku in _cat_cache]
+                    if rows:
+                        psycopg2.extras.execute_values(cur, _PG_UPSERT_SQL, rows, page_size=2000)
+                # Mirrors _run()'s "Mark sold items" block's exact condition and scope.
+                if not _stop_event.is_set() and (not nationwide or not scan_incomplete):
+                    cur.execute("CREATE TEMP TABLE _run_skus (sku TEXT PRIMARY KEY) ON COMMIT DROP")
+                    if ids_this_run:
+                        psycopg2.extras.execute_values(
+                            cur, "INSERT INTO _run_skus (sku) VALUES %s",
+                            [(s,) for s in ids_this_run], page_size=5000,
+                        )
+                    if nationwide:
+                        cur.execute("""
+                            UPDATE items SET available=false
+                            WHERE available
+                            AND NOT EXISTS (SELECT 1 FROM _run_skus WHERE _run_skus.sku = items.sku)
+                        """)
+                    else:
+                        scanned_store_set = list(set(stores_to_scan) - incomplete_stores)
+                        if scanned_store_set:
+                            cur.execute("""
+                                UPDATE items SET available=false
+                                WHERE available
+                                AND NOT EXISTS (SELECT 1 FROM _run_skus WHERE _run_skus.sku = items.sku)
+                                AND store = ANY(%s)
+                            """, (scanned_store_set,))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        # Never let a Postgres hiccup surface anywhere a user or the scan logic
+        # would see it — this is purely a background confidence-building mirror.
+        print(f"[pg] scan dual-write skipped: {type(e).__name__}: {e}")
+
 # ── Memoized /api/browse base item list (E2, v2.16.4) ────────────────────────
 # /api/browse used to rebuild this ~92K-item lightweight-dict list from scratch
 # on EVERY call — price/date formatting + name/brand lowercasing for every item
@@ -5555,6 +5642,14 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
 
         send({"type":"progress","msg":f"  {len(all_products):,} products scanned."})
         _save_cat_cache()
+        # Phase B dual-write (v2.16.15): mirror this scan into Postgres in the
+        # background -- never blocks the scan's own completion. See
+        # _pg_sync_scan()'s docstring and POSTGRES_MIGRATION_PLAN.md.
+        threading.Thread(
+            target=_pg_sync_scan,
+            args=(set(ids_this_run), nationwide, scan_incomplete, set(incomplete_stores), list(stores_to_scan)),
+            daemon=True,
+        ).start()
         # Read global last-scan time (fallback when device has no history)
         last_scan_file = DATA_DIR / "gc_last_scan.txt"
         global_prev_scan = last_scan_file.read_text().strip() if last_scan_file.exists() else ""
@@ -6440,7 +6535,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.14"
+APP_VERSION = "2.16.15"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

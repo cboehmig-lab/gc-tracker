@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-08-31 · Version: v2.16.14 (Postgres migration Phase A: schema + backfill script, no behavior change; not yet pushed) · Live at: gcgeartracker.com — v2.16.13 pushed and confirmed running gunicorn*
+*Generated: 2026-08-31 · Version: v2.16.15 (Postgres migration Phase B: scan dual-write, no read-path change; not yet pushed) · Live at: gcgeartracker.com — v2.16.13 pushed and confirmed running gunicorn*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,6 +88,17 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
+## Current State: v2.16.15 — Postgres migration Phase B: scan dual-write (2026-08-31, not yet pushed)
+
+**Postgres migration in progress** — see `POSTGRES_MIGRATION_PLAN.md` for the full 6-phase plan.
+Phase A is done and VERIFIED against real data (Chuck ran the backfill: 91,686 items, exact
+match). Phase B (this version) makes `_run()` mirror every scan into Postgres in a background
+thread — additive only, no read path touches Postgres yet. Still silently a no-op in production
+until `DATABASE_URL` is actually deployed to `web` (it's referenced but pending — deploying it
+restarts `web` once; that hasn't happened yet, waiting on Chuck's timing preference). Do not
+build Phase C (the diff harness) or touch any read path until dual-write has been running against
+real production scans for the period Chuck decides on.
+
 ## Current State: v2.16.14 — Postgres migration Phase A: schema + backfill script (2026-08-31, not yet pushed)
 
 **Postgres migration in progress** — see `POSTGRES_MIGRATION_PLAN.md` (repo root) for the full 6-phase plan. Railway Postgres is provisioned (project `serene-determination`) and `DATABASE_URL` is referenced into the `web` service's variables but left undeployed. `gc_tracker_app.py` now creates the `items` table schema at startup IF `DATABASE_URL` is set (it isn't yet, in production) — no request path reads/writes Postgres. The backfill script (`migrate_cat_cache_to_pg.py`) is written but **not yet run** — must run from Chuck's own Mac terminal (no network path to Railway from the Cowork sandbox). Do not build Phase B (dual-write) or touch `/api/browse`/`_run()` until Chuck has reviewed Phase A and the backfill has actually run successfully.
@@ -100,6 +111,17 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ### Recent changes (this session)
 
+- **v2.16.15** — **Postgres migration Phase B: scan dual-write.** `_run()` now mirrors every
+  scan's results into Postgres in a fire-and-forget background thread (started right after
+  `_save_cat_cache()`, never blocks the scan's "done" message) — bulk upsert of every SKU this
+  run touched, plus a sold-marking anti-join `UPDATE` that replays the JSON path's IDENTICAL
+  v2.16.11 coverage-gap-safe condition/scope. Purely additive, best-effort (any Postgres failure
+  is caught and logged, never surfaced), and still a no-op end-to-end until `DATABASE_URL` is
+  deployed to `web` (not yet — pending Chuck's timing call on the one-time restart that deploying
+  it causes). Sold-marking SQL validated against a scratch Postgres covering nationwide,
+  store-scoped, and empty-scan-result cases. Known gap: `/api/populate-store-data` and
+  `/api/fill-gaps` (rare admin endpoints) aren't mirrored — scope was `_run()` only. `py_compile`/
+  `node --check` clean, no JS touched.
 - **v2.16.14** — **Postgres migration Phase A: schema + backfill script.** No request-path
   behavior change. New `pg_schema.sql` (the `items` table DDL, `sku`-keyed, `date_listed` kept
   as TEXT deliberately) shared by the app's new guarded `_init_pg_schema()` (runs at startup only
