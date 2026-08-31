@@ -3,3 +3,4 @@ flask-compress
 requests
 openpyxl
 authlib
+gunicorn

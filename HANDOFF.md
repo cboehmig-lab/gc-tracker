@@ -1,5 +1,36 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-08-26 · Current version: v2.16.9 (condition_note ⓘ: instant custom tooltip, no native browser delay — pending push; v2.16.8 pushed 2026-08-26) · Domain: gcgeartracker.com*
+*Last updated: 2026-08-31 · Current version: v2.16.10 (gunicorn switch + scan-hang fix — pending push; v2.16.9 pushed 2026-08-26) · Domain: gcgeartracker.com*
+
+---
+
+## ⭐ Recent Changes (v2.16.9 → v2.16.10) — 2026-08-31 (gunicorn production server + scan-hang fix)
+
+**User-reported (Chuck):** the site "didn't get faster, maybe got slower," and a Reddit comment called it "super buggy" with no detail to go on. Investigated rather than guessed — two real, separate issues found and fixed.
+
+### 1. Still running Flask's dev server in production
+
+`Procfile` was still `web: python gc_tracker_app.py`, which runs `app.run(threaded=True)` — Werkzeug's built-in development server, which Flask's own docs say not to use in production. There's no gunicorn in `requirements.txt` and no Railway/nixpacks config overriding the Procfile, so this has been true the whole time, despite Chuck asking about the gunicorn switch earlier in the project — it never actually happened. As registered users grew (283+ and climbing), a single dev-server process fielding all requests behind the GIL is a much more likely explanation for "the site feels slower" than anything in the E2 memoization fix (v2.16.4), which only reduced *per-call* CPU time — it can't fix queuing delay caused by the server itself.
+
+**Fix:**
+- Added `gunicorn` to `requirements.txt`.
+- `Procfile` → `web: gunicorn gc_tracker_app:app --workers=1 --worker-class=gthread --threads=8 --timeout=0 --graceful-timeout=30 --bind=0.0.0.0:$PORT`.
+- **`--workers=1` is deliberate, not a mistake — do not casually bump it.** This app coordinates scans and SSE fan-out entirely through in-process global state: `_cat_cache`, `_run_queues`, `_current_run_id`, `_lock`, `_stop_event`, etc. (see `gc_tracker_app.py` around line 1710+). Multiple gunicorn *worker processes* each get their own memory space — a client's `/api/run` POST could land on worker A (which creates the run_id/queue) while their `/api/progress` SSE GET lands on worker B (which has never heard of that run_id), and the connection would sit on pings forever. `--threads=8` gets real concurrency (matching the old `threaded=True` behavior) without that split-brain risk. Scaling this app to true multi-process/multi-machine would require externalizing that state (Redis pub/sub for run coordination, etc.) — a bigger project, not this fix.
+- **`--timeout=0` is required, not optional**, because this app holds SSE connections open for the duration of a scan (which can run minutes) — gunicorn's default 30s worker timeout exists to kill workers stuck on a single slow request, which would otherwise kill an in-progress scan/SSE stream.
+- **Found and fixed a real startup bug while doing this**: `_load_cat_cache()`, `_load_cookies()`, and the store-list bootstrap were all inside `if __name__ == "__main__":` — which only runs when the script is executed directly, never when a WSGI server *imports* the module. Under gunicorn, `_load_cookies()` (the only call site, no lazy-load fallback elsewhere) would have silently never run, meaning the scraper's persisted session cookies would never load. Moved the bootstrap calls to unconditional module-level code; the `if __name__ == "__main__":` block now only holds the dev-server-only bits (URL print, browser auto-open, `app.run()`).
+- **Verified locally**: installed gunicorn in a scratch environment, ran `gunicorn gc_tracker_app:app` with the exact Procfile flags, imported the module directly (confirmed `_cat_cache`/`_http.cookies` initialize without crashing), and hit `/` and `/api/stores` — both returned HTTP 200. Clean shutdown, no errors besides a sandbox-only control-socket permission issue unrelated to Railway.
+
+### 2. Scan-hang bug (flagged earlier this project, never root-caused — now fixed)
+
+Chuck previously reported a single-store scan sitting on SSE pings for 10+ minutes with no error and no completion, confirmed *not* a "joined an existing scan" situation and with Algolia's own health check reporting fine. Traced the scan code (`_run()` in `gc_tracker_app.py`) and found the real gap: `fetch_page()`'s `requests` call has `timeout=20`, but that only bounds *socket-level* stalls (no bytes received for N seconds) — it does not bound total wall-clock time if a connection keeps trickling data slowly enough to never trip that per-read timeout. Both the store-scan `ThreadPoolExecutor`/`as_completed()` loop and the nationwide per-batch page-fetch loop waited on `as_completed()` with **no timeout at all** — if a single worker thread never returns, `as_completed()` never yields it, and the `for` loop (and therefore the whole scan) blocks forever waiting for it, with the outer `try/except` in `_run()` never reached because nothing ever raised.
+
+**Fix — hard wall-clock ceilings, independent of whatever's stalling underneath:**
+- Store-scan loop: `as_completed(futures, timeout=STORE_SCAN_TIMEOUT)` where `STORE_SCAN_TIMEOUT = max(120, len(stores_to_scan) * 12)` — scales with store count so large multi-store scans aren't falsely cut short, while a single-store scan (the reported case) is now hard-capped at 120s instead of unbounded.
+- Nationwide per-batch page-fetch loop: same pattern, `PAGE_BATCH_TIMEOUT = 90` per batch of `PARALLEL_WORKERS` pages (each batch is already a small, bounded set, so a flat ceiling is appropriate there).
+- On timeout, `_FutureTimeoutError` is caught, a progress message reports which store(s)/page(s) stalled, and the scan continues with whatever it already has — it now always reaches the `send({"type":"done",...})` at the end instead of hanging.
+- Switched both blocks from `with ThreadPoolExecutor(...) as pool:` to manual `pool = ThreadPoolExecutor(...)` + `try/finally: pool.shutdown(wait=False)` — this matters because the `with` form's `__exit__` calls `shutdown(wait=True)`, which would still block on the stuck thread even after we stop waiting on `as_completed()`. `wait=False` abandons the stuck thread (it finishes or dies on its own without holding up the response) instead of blocking on it.
+- `py_compile` clean.
+
+**Still open / worth watching:** this hardens against the *symptom* (indefinite hang) regardless of root cause, but I couldn't 100% confirm what was actually stalling the socket read past 20s — a genuine Algolia/CDN slow-trickle response is the leading theory given the per-request timeout is otherwise sound. If stalls start showing up in the new "stalled past Ns" progress messages, that's a concrete lead to chase (which store/page, how often).
 
 ---
 

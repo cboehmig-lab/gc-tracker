@@ -24,7 +24,7 @@ A web app that tracks Guitar Center used gear inventory across all US stores, fl
 
 | Layer | Detail |
 |---|---|
-| Backend | Python / Flask (single entry point: `gc_tracker_app.py`) |
+| Backend | Python / Flask (single entry point: `gc_tracker_app.py`), served by gunicorn (`--workers=1 --worker-class=gthread --threads=8` — single worker is deliberate, see Development Notes) |
 | Database | SQLite (`gc_users.db`) — user accounts, watchlists, want lists, favorites |
 | Inventory data | Guitar Center Algolia search API |
 | Inventory cache | Flat JSON file (`gc_category_cache.json`, ~91-92K items / ~51-53MB), loaded into an in-memory dict and mirrored to disk |
@@ -97,5 +97,6 @@ Navigate to `/admin/login` and enter `APP_PASSWORD`.
 - **CSP**: `script-src` does not include `'unsafe-inline'`; `style-src` does (required for inline `style="..."` HTML attributes throughout the templates).
 - **Git lock files**: if a commit fails with `cannot lock ref`, run `rm ~/Desktop/gc_tracker/.git/index.lock 2>/dev/null; true` and retry.
 - **Wrong GitHub account on push**: default remote may push as the wrong account. Use the explicit URL above.
+- **gunicorn `--workers` must stay at 1** (v2.16.10): scans and SSE progress streaming are coordinated through in-process global state (`_cat_cache`, `_run_queues`, `_current_run_id`, locks) — multiple worker *processes* don't share memory, so a client's `/api/run` and `/api/progress` could land on different workers that have never heard of each other's run_id. Get concurrency from `--threads` instead. Any startup logic (`_load_cat_cache()`, `_load_cookies()`, etc.) must live at module level, not inside `if __name__ == "__main__":` — gunicorn imports the module rather than running it as a script, so that guard never executes under gunicorn.
 
 See `HANDOFF.md` for full architecture details, version history, and debugging guide.

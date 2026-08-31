@@ -9,7 +9,7 @@ Then open: http://localhost:5050
 import html as _html
 import hmac
 import json, os, re, sys, time, threading, queue, webbrowser, random, sqlite3
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as _FutureTimeoutError
 from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
@@ -5242,24 +5242,39 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                         return pg, d, None
                     except Exception as exc:
                         return pg, None, exc
+                # Hard wall-clock ceiling per batch — a normal Algolia page fetch
+                # completes in well under a second, so this is purely a safety net
+                # against a connection that stalls past requests' own timeout=
+                # (v2.16.10, see STORE_SCAN_TIMEOUT below for the matching store-scan fix).
+                PAGE_BATCH_TIMEOUT = 90
                 batch_idx = 0
                 while batch_idx < len(remaining) and not _stop_event.is_set():
                     batch = remaining[batch_idx:batch_idx + PARALLEL_WORKERS]
                     batch_idx += len(batch)
-                    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
+                    pool = ThreadPoolExecutor(max_workers=PARALLEL_WORKERS)
+                    try:
                         futures = {pool.submit(_fetch_one_page, pg): pg for pg in batch}
-                        for fut in as_completed(futures):
-                            pg, data, err = fut.result()
-                            if err:
-                                send({"type":"progress","msg":f"  API error on page {pg}: {err}"})
-                                continue
-                            if data is None:
-                                continue
-                            products = parse_products(data, None)
-                            for p in products:
-                                if p["id"] not in ids_this_run:
-                                    all_products.append(p)
-                                    ids_this_run.add(p["id"])
+                        try:
+                            for fut in as_completed(futures, timeout=PAGE_BATCH_TIMEOUT):
+                                pg, data, err = fut.result()
+                                if err:
+                                    send({"type":"progress","msg":f"  API error on page {pg}: {err}"})
+                                    continue
+                                if data is None:
+                                    continue
+                                products = parse_products(data, None)
+                                for p in products:
+                                    if p["id"] not in ids_this_run:
+                                        all_products.append(p)
+                                        ids_this_run.add(p["id"])
+                        except _FutureTimeoutError:
+                            stuck = [futures[f] for f in futures if not f.done()]
+                            send({"type":"progress","msg":f"  ⚠ page(s) {stuck} stalled past {PAGE_BATCH_TIMEOUT}s — skipping, continuing scan."})
+                    finally:
+                        # wait=False: never block here on a genuinely stuck worker thread —
+                        # that's the exact hang this fix exists to prevent. The thread is
+                        # abandoned and will finish or die on its own without holding up the scan.
+                        pool.shutdown(wait=False)
                     # Progress update after each batch
                     pages_done = min(batch_idx + 1, nb_pages)
                     send({"type":"progress","msg":f"  page {pages_done}/{nb_pages}… ({len(all_products):,} items so far)"})
@@ -5269,6 +5284,15 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         else:
             # ── Normal scan: query selected stores in parallel ────────────────
             STORE_WORKERS = 10
+            # Hard wall-clock ceiling on the whole batch of stores, scaled by count
+            # (12s/store budget — generous headroom over normal completion time,
+            # since up to STORE_WORKERS run concurrently). This is what fixes the
+            # bug where a single-store scan would sit pinging with no progress and
+            # no completion for 10+ minutes: fetch_page()'s requests timeout= only
+            # bounds socket-level stalls (no bytes for N seconds), not a slow trickle
+            # that keeps the connection technically alive — this bounds the whole
+            # wait regardless of what's stalling underneath (v2.16.10).
+            STORE_SCAN_TIMEOUT = max(120, len(stores_to_scan) * 12)
             send({"type":"progress","msg":f"Scanning {len(stores_to_scan)} stores ({STORE_WORKERS} at a time)…"})
             completed = [0]
             lock = threading.Lock()
@@ -5281,17 +5305,25 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                     completed[0] += 1
                     send({"type":"progress","msg":f"  [{completed[0]}/{len(stores_to_scan)}] {store} — {len(products)} items"})
                 return store, products, ids
-            with ThreadPoolExecutor(max_workers=STORE_WORKERS) as pool:
+            pool = ThreadPoolExecutor(max_workers=STORE_WORKERS)
+            try:
                 futures = {pool.submit(_scan_one_store, s): s for s in stores_to_scan}
-                for fut in as_completed(futures):
-                    if _stop_event.is_set():
-                        send({"type":"progress","msg":"⏹ Stopped by user."})
-                        break
-                    store, products, ids = fut.result()
-                    for p in products:
-                        if p["id"] not in ids_this_run:
-                            all_products.append(p)
-                    ids_this_run |= ids
+                try:
+                    for fut in as_completed(futures, timeout=STORE_SCAN_TIMEOUT):
+                        if _stop_event.is_set():
+                            send({"type":"progress","msg":"⏹ Stopped by user."})
+                            break
+                        store, products, ids = fut.result()
+                        for p in products:
+                            if p["id"] not in ids_this_run:
+                                all_products.append(p)
+                        ids_this_run |= ids
+                except _FutureTimeoutError:
+                    stuck = [futures[f] for f in futures if not f.done()]
+                    send({"type":"progress","msg":f"  ⚠ {stuck} stalled past {STORE_SCAN_TIMEOUT}s — skipping, continuing with what we have."})
+            finally:
+                # wait=False: never block here on a genuinely stuck worker thread — see note above.
+                pool.shutdown(wait=False)
 
         # (cache-ID snapshot removed — NEW detection now uses startDate timestamps)
 
@@ -6279,7 +6311,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.9"
+APP_VERSION = "2.16.10"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
@@ -6301,15 +6333,24 @@ NEWDEALS_TEMPLATE = _version_static(NEWDEALS_TEMPLATE)
 
 
 
+# ── Startup bootstrap ─────────────────────────────────────────────────────────
+# Runs unconditionally at import time (not just under `if __name__ == "__main__"`)
+# so it executes the same way whether the app is launched directly (`python
+# gc_tracker_app.py`, dev server) or imported by a WSGI server like gunicorn
+# (`gunicorn gc_tracker_app:app`, v2.16.10) — gunicorn never runs the module as
+# __main__, so anything load-bearing has to live out here or it silently never
+# runs in production. _load_cat_cache() also self-heals via lazy-load calls
+# sprinkled through the route handlers, but _load_cookies() has no other call
+# site, so it MUST run here.
+_load_cat_cache()
+_load_cookies()
+if not STORES_CACHE.exists():
+    print("Building store list…")
+    refresh_store_list()
+
+# Nightly scan removed — "Check for New" is manual only
+
 if __name__ == "__main__":
-    _load_cat_cache()
-    _load_cookies()
-    if not STORES_CACHE.exists():
-        print("Building store list…")
-        refresh_store_list()
-
-    # Nightly scan removed — "Check for New" is manual only
-
     url = f"http://localhost:{PORT}"
     print(f"\n  Guitar Center Tracker v{APP_VERSION} is running!")
     print(f"  Open: {url}")
