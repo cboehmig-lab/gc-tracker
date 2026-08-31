@@ -1,11 +1,126 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-08-31 · Current version: v2.16.12 (NEW-detection anchor/sold-marking coverage-gap fix + /api/browse facet-count & sort perf) · Domain: gcgeartracker.com*
+*Last updated: 2026-08-31 · Current version: v2.16.14 (Postgres migration Phase A: schema + backfill script, no behavior change) · Domain: gcgeartracker.com*
 
 ---
 
 ## ⚠️ Railway gotcha: Custom Start Command overrides `Procfile`
 
 When v2.16.10 first deployed, the logs still showed Werkzeug's dev-server warning ("This is a development server...") even though `Procfile` had already been updated to run gunicorn. Cause: Railway's service **Settings → Deploy → Custom Start Command** field, if set, takes priority over `Procfile` unconditionally — Railway doesn't warn you the two are out of sync, it just silently ignores `Procfile`. That field was hardcoded to `python gc_tracker_app.py` (presumably set once, early in the project, before `Procfile` existed or was trusted). Fixed by updating that field directly in the dashboard to match `Procfile`'s gunicorn command. **If you ever change the start command in `Procfile` again, also check/update this dashboard field — they do not sync automatically, and the dashboard field wins.**
+
+---
+
+## ⭐ Recent Changes (v2.16.13 → v2.16.14) — 2026-08-31 (Postgres migration Phase A: schema + backfill script — no request-path behavior change)
+
+**Context**: after v2.16.12's /api/browse perf pass and v2.16.13's malloc_trim mitigation, Chuck
+decided to fix the underlying architecture rather than keep mitigating symptoms — moving the
+flat-JSON catalog (`_cat_cache`, ~92K items / ~53MB in-memory) to Postgres. This was the
+BigQuery/data-hosting discussion queued in NEXT_SESSION_PROMPT.md since the 2026-07 audit;
+BigQuery was ruled out (analytical warehouse, latency mismatch for a live filtered-browse UI,
+likely exceeds its free tier at ~228K `/api/browse` requests/month). Full plan — schema design,
+a two-tier read-path strategy (pure SQL for the common no-keyword-search case, a SQL-narrows/
+Python-matches hybrid for want-list/free-text search so the existing keyword engine's boolean/
+wildcard/phrase logic — with its own multi-session bug history, v2.13.1/v2.14.4/v2.16.0/v2.16.3
+— doesn't need to be reimplemented in SQL), write-path mapping for the scan/merge/sold-marking/
+anchor logic, connection pooling under `--workers=1 --threads=8`, and a 6-phase dual-write/
+diff-gated/rollback-safe cutover — is in **`POSTGRES_MIGRATION_PLAN.md`** (repo root). See
+[[postgres_migration_plan_2026-08-31]] in project memory for the condensed version.
+
+**This session (Phase A only — schema + backfill, explicitly no behavior change):**
+- Provisioned a Postgres database on Railway (via the built-in browser, with Chuck's explicit
+  go-ahead — confirmed the correct project, `serene-determination`, by matching its deploy
+  history against this file's own v2.16.13/v2.16.11-12 entries before touching anything).
+  Referenced `DATABASE_URL` into the `web` service's variables as a live reference
+  (`${{Postgres.DATABASE_URL}}`) but left it **undeployed** — adding the variable without
+  clicking Deploy avoids an unnecessary gunicorn restart before any code actually reads it.
+- New `pg_schema.sql` (repo root): the `items` table DDL — one row per SKU (`sku` as the primary
+  key, reusing the existing natural key from `_cat_cache`), columns matching every field
+  `_cat_cache`/`_build_base_item_list()` carry today. `date_listed`/`first_seen`/
+  `price_drop_since` are kept as **TEXT**, not TIMESTAMPTZ, deliberately — converting storage
+  type AND comparison semantics in the same pass as the storage engine risks a NEW-detection
+  regression in code with a real bug history (v2.10.2, v2.12.2, v2.16.11); see the plan doc §2.
+  Indexes on `available`/`store`/`brand`/`condition`/`category`/`subcategory`/`date_listed`/
+  `price`, all partial (`WHERE available`) since that's the dominant query shape.
+- `gc_tracker_app.py`: added an optional `psycopg2` import (same `try/except ImportError` pattern
+  as the existing `authlib` optional-import, not a hard dependency — `_PSYCOPG2_AVAILABLE`),
+  `PG_DATABASE_URL` env read, and `_init_pg_schema()` — applies `pg_schema.sql` at startup,
+  called unconditionally right after being defined (mirrors `_init_user_db()`'s own pattern).
+  Guarded end-to-end: no-ops silently if `DATABASE_URL` isn't set (true today — the reference is
+  undeployed), psycopg2 isn't installed, or the DB is unreachable — same defensive posture as
+  `_load_cat_cache()`/`_maybe_backup_users_db()`. **Nothing on any request path reads from or
+  writes to Postgres yet** — `_cat_cache`/`gc_category_cache.json` remains the sole source of
+  truth, exactly as before this change.
+- New `migrate_cat_cache_to_pg.py` (repo root): the one-off backfill script (Phase A's other
+  half) — reads `gc_category_cache.json`, bulk-upserts every row into `items` via
+  `psycopg2.extras.execute_values` with `ON CONFLICT (sku) DO UPDATE` (safe to re-run), then
+  verifies Postgres's total and available counts match the JSON exactly. Reads the same
+  `pg_schema.sql` the app uses (not duplicated) so the two can't drift. **Not yet run** — per
+  this project's standing rule, it must run from Chuck's own Mac terminal (same reason git
+  pushes do): the Cowork sandbox's device shell has no network route to Railway's Postgres
+  (confirmed — `curl railway.com` from the sandbox returned a proxy 403).
+- `requirements.txt`: added `psycopg2-binary`.
+- `APP_VERSION` bumped to 2.16.14.
+
+**Verified**: `python3 -m py_compile gc_tracker_app.py` and `node --check static/gc.js` (no JS
+touched) both clean. The actual DDL and the backfill script's SQL patterns (bulk
+`INSERT...ON CONFLICT DO UPDATE`, the temp-table anti-join `UPDATE` planned for sold-marking in
+a later phase, `GROUP BY`-based facet counts) were validated end-to-end against a real scratch
+Postgres 16 instance in an isolated sandbox first — not against Chuck's actual data, since the
+sandbox has no network path to Railway. **Not verified**: booting the actual Flask app locally
+(the local `.venv` in this repo is missing Flask itself — a pre-existing gap, unrelated to this
+change) and running the backfill against the real ~92K-item production cache (blocked on Chuck
+running it from his own terminal — see above).
+
+**Not done this session**: no request-path code (`/api/browse`, `_run()`'s scan/merge/sold-
+marking/anchor logic) was touched — that's Phases B onward in the plan doc, gated on Chuck
+reviewing this Phase A first and deciding how long to run Phase B (dual-write) before a diff
+harness gets built.
+
+**Files changed**: `gc_tracker_app.py`, `requirements.txt`, plus new `pg_schema.sql`,
+`migrate_cat_cache_to_pg.py`, `POSTGRES_MIGRATION_PLAN.md`. `APP_VERSION = "2.16.14"`.
+
+---
+
+## ⭐ Recent Changes (v2.16.12 → v2.16.13) — 2026-08-31 (periodic malloc_trim to fix Railway memory growth)
+
+**Investigated per Chuck's "investigate now, don't fix yet" instruction** — see
+[[perf_railway_memory_growth_2026-08-31]] in project memory for the full write-up. Railway's
+dashboard showed memory climbing from ~2GB to 7-8GB+ (once ~12GB) between deploys in a clear
+sawtooth, never dropping until the next redeploy reset the process — a memory-growth question,
+not a resource-sizing one (the Railway plan's CPU/RAM ceiling wasn't close to being hit).
+
+Set up a real local repro: production-scale data (92K items), gunicorn booted with the exact
+Procfile flags (`--workers=1 --worker-class=gthread --threads=8 --timeout=0`), an 8-thread
+concurrent load generator hitting `/api/browse` (the highest-volume endpoint, ~53K requests/week
+in prod) with randomized filters. Confirmed a dramatic, reproducible RSS jump — baseline ~448MB
+→ ~1.2GB after 320 concurrent requests (~80s), reproduced twice, consistent both times — that did
+**not** decay on its own after idle time, matching production's sawtooth exactly.
+
+**Root cause (confirmed, not a leak)**: classic glibc/CPython high-water-mark RSS behavior.
+`/api/browse` builds large temporary structures per request (filtering/sorting/paginating the
+full ~92K-item base list); under concurrent thread load, glibc allocates fresh memory arenas to
+serve simultaneous large allocations from different threads, and when those objects are freed,
+glibc keeps the underlying pages reserved rather than returning them to the OS — RSS reflects
+the peak concurrent working set ever reached, not current live usage. A debug route calling
+`ctypes`-invoked `libc.malloc_trim(0)` (tested only in a throwaway copy of the app, never in the
+real repo file) reliably reclaimed the memory back to *below* the original baseline in both
+reproduction rounds (1214MB → 410MB, 1213MB → 409MB) — confirmed twice. `MALLOC_ARENA_MAX=1`
+helped partially (~20% reduction) but wasn't the dominant fix.
+
+**Fix shipped**: a daemon background thread in `gc_tracker_app.py` that calls `gc.collect()` +
+`malloc_trim(0)` every 5 minutes. Linux-only mechanism (the `ctypes.CDLL("libc.so.6")` call is
+guarded so it no-ops safely on macOS/local dev); best-effort — wrapped so it can never take the
+app down. This is a **mitigation**, not the structural fix — see the Phase A entry above for the
+Postgres migration that addresses the actual mechanism (per-request materialization of the full
+catalog) architecturally instead.
+
+**Also found, not fixed here**: `_cleanup_run_queue()` (~line 1908) is defined but never called
+anywhere — only `_cleanup_subscriber()` is. A real, verified unbounded-growth bug for abandoned/
+interrupted SSE scan connections, but reasoned too small in magnitude alone to explain the
+multi-GB growth seen in prod. Still open.
+
+**Files changed**: `gc_tracker_app.py` only (`APP_VERSION = "2.16.13"`). Pushed and confirmed
+live (this file's own Railway deploy history was used to confirm the correct project during the
+Phase A work above).
 
 ---
 

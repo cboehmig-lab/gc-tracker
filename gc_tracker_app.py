@@ -45,6 +45,13 @@ try:
 except ImportError:
     _AUTHLIB_AVAILABLE = False
 
+try:
+    import psycopg2
+    import psycopg2.extras
+    _PSYCOPG2_AVAILABLE = True
+except ImportError:
+    _PSYCOPG2_AVAILABLE = False
+
 # ── Paths & config ────────────────────────────────────────────────────────────
 SCRIPT_DIR     = Path(__file__).parent
 DATA_DIR       = Path(os.environ.get("DATA_DIR", SCRIPT_DIR))
@@ -65,6 +72,7 @@ PORT              = int(os.environ.get("PORT", 5050))
 APP_PASSWORD      = (os.environ.get("APP_PASSWORD") or "").strip()
 GA_MEASUREMENT_ID = os.environ.get("GA_MEASUREMENT_ID", "").strip()
 ADMIN_EMAIL       = (os.environ.get("ADMIN_EMAIL") or "").strip().lower()
+PG_DATABASE_URL   = (os.environ.get("DATABASE_URL") or "").strip()
 
 # ── User accounts (SQLite) ────────────────────────────────────────────────────
 USER_DB = DATA_DIR / "gc_users.db"
@@ -372,6 +380,45 @@ def _save_cat_cache():
         os.replace(tmp, CAT_CACHE_FILE)
     except Exception:
         pass
+
+# ── Postgres catalog store (Phase A, v2.16.14) ────────────────────────────────
+# Migration target for the flat-JSON _cat_cache above (~92K items, ~53MB) — see
+# POSTGRES_MIGRATION_PLAN.md for the full plan and rationale. This phase ONLY
+# creates the schema at startup; nothing on the request path reads from or
+# writes to Postgres yet, and _cat_cache / gc_category_cache.json remains the
+# sole source of truth. Guarded end-to-end so a missing DATABASE_URL (local
+# dev, or before the Railway variable reference is actually deployed), a
+# missing psycopg2 install, or an unreachable DB can never block app startup —
+# same defensive posture as _load_cat_cache() / _maybe_backup_users_db().
+#
+# Schema lives in pg_schema.sql (repo root) rather than inline here so the
+# one-off backfill script (migrate_cat_cache_to_pg.py) can apply the exact
+# same DDL without duplicating it — see that script's docstring.
+PG_SCHEMA_FILE = SCRIPT_DIR / "pg_schema.sql"
+
+def _init_pg_schema():
+    if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL):
+        return
+    try:
+        schema_sql = PG_SCHEMA_FILE.read_text()
+    except OSError as e:
+        print(f"[pg] schema init skipped — can't read {PG_SCHEMA_FILE.name}: {e}")
+        return
+    try:
+        conn = psycopg2.connect(PG_DATABASE_URL, connect_timeout=10)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(schema_sql)
+            conn.commit()
+        finally:
+            conn.close()
+        print("[pg] items table ready")
+    except Exception as e:
+        # Never let a Postgres hiccup block startup — same tolerance as every
+        # other best-effort persistence path in this app.
+        print(f"[pg] schema init skipped: {type(e).__name__}: {e}")
+
+_init_pg_schema()
 
 # ── Memoized /api/browse base item list (E2, v2.16.4) ────────────────────────
 # /api/browse used to rebuild this ~92K-item lightweight-dict list from scratch
@@ -6393,7 +6440,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.13"
+APP_VERSION = "2.16.14"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

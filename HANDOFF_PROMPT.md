@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-08-31 · Version: v2.16.12 (NEW-detection anchor/sold-marking coverage-gap fix + /api/browse perf) · Live at: gcgeartracker.com — pushed and confirmed running gunicorn*
+*Generated: 2026-08-31 · Version: v2.16.14 (Postgres migration Phase A: schema + backfill script, no behavior change; not yet pushed) · Live at: gcgeartracker.com — v2.16.13 pushed and confirmed running gunicorn*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,6 +88,10 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
+## Current State: v2.16.14 — Postgres migration Phase A: schema + backfill script (2026-08-31, not yet pushed)
+
+**Postgres migration in progress** — see `POSTGRES_MIGRATION_PLAN.md` (repo root) for the full 6-phase plan. Railway Postgres is provisioned (project `serene-determination`) and `DATABASE_URL` is referenced into the `web` service's variables but left undeployed. `gc_tracker_app.py` now creates the `items` table schema at startup IF `DATABASE_URL` is set (it isn't yet, in production) — no request path reads/writes Postgres. The backfill script (`migrate_cat_cache_to_pg.py`) is written but **not yet run** — must run from Chuck's own Mac terminal (no network path to Railway from the Cowork sandbox). Do not build Phase B (dual-write) or touch `/api/browse`/`_run()` until Chuck has reviewed Phase A and the backfill has actually run successfully.
+
 ## Current State: v2.16.12 — NEW-detection anchor/sold-marking coverage-gap fix + /api/browse perf (2026-08-31)
 
 **⚠️ Railway gotcha found during rollout:** Settings → Deploy → Custom Start Command in the Railway dashboard overrides `Procfile` silently — it was hardcoded to `python gc_tracker_app.py` and had to be updated by hand to match. See HANDOFF.md's top section. Check that field too if you ever change the start command again.
@@ -96,6 +100,23 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ### Recent changes (this session)
 
+- **v2.16.14** — **Postgres migration Phase A: schema + backfill script.** No request-path
+  behavior change. New `pg_schema.sql` (the `items` table DDL, `sku`-keyed, `date_listed` kept
+  as TEXT deliberately) shared by the app's new guarded `_init_pg_schema()` (runs at startup only
+  if `DATABASE_URL` is set — it isn't yet in prod) and the new `migrate_cat_cache_to_pg.py`
+  backfill script (writes `gc_category_cache.json` into Postgres via bulk `ON CONFLICT` upsert,
+  not yet run — needs Chuck's terminal, sandbox has no network path to Railway). Postgres
+  provisioned on Railway, `DATABASE_URL` referenced into `web`'s variables but undeployed.
+  `requirements.txt` +psycopg2-binary. `py_compile`/`node --check` clean; DDL and upsert SQL
+  validated against a scratch Postgres in a sandbox first. Full plan: `POSTGRES_MIGRATION_PLAN.md`.
+- **v2.16.13** — **Periodic malloc_trim to fix Railway memory growth.** Root-caused the
+  production memory sawtooth (2GB→7-8GB+ between deploys, never decaying) via local load-test
+  repro: confirmed glibc high-water-mark RSS under concurrent `/api/browse` traffic, not a Python
+  leak — `malloc_trim(0)` reliably reclaimed it in testing (~1.2GB→~410MB). Shipped a daemon
+  thread calling `gc.collect()` + `malloc_trim(0)` every 5 minutes (Linux-only, no-ops on
+  macOS/local). Mitigation, not the structural fix — see v2.16.14 above for the Postgres
+  migration addressing the actual mechanism. Also found, not fixed: `_cleanup_run_queue()` is
+  dead code (a separate, smaller SSE-subscriber leak). `gc_tracker_app.py` only. Pushed and live.
 - **v2.16.12** — **/api/browse: single-pass facet counts + single sort.** Followed up on the speed question with real measurement (scratch venv, real ~92K-item cache, cProfile). flask-compress confirmed still working (~79% reduction on /api/browse JSON) — not the bottleneck. Found the real cost: 4 separate facet-count passes (brand/condition/category/subcategory) plus TWO full-list sorts (date/price/etc, then a second pass just to bubble NEW items to the top) on every call. Merged the 4 facet-count passes into one combined pass; replaced the second sort with an O(N) stable partition into 3 tiers (new+want / new-only / rest) instead of a second O(N log N) sort. Verified byte-identical output across 8 request shapes (filters, sorts, pagination) via Flask test-client A/B diff against the real cache. ~278.6ms → ~244.5ms per warm call (~12% faster), measured over 15 calls each. `gc_tracker_app.py` only, `py_compile` clean, no JS changes. See HANDOFF.md for full detail.
 - **v2.16.11** — **scan coverage gaps no longer corrupt the NEW-detection anchor or falsely mark items sold.** Root-caused Chuck's "genuinely new items sometimes don't get flagged NEW" report: `scrape_store()` silently swallows a page-1 fetch failure for any one store (routine given ~298 stores fanned out at once) — the scan completes "successfully" but is missing that store's data. Two silent consequences: (1) `_run()` still persists `new_anchor = max(date_listed across all_products)` as the user's GLOBAL anchor even though it's missing whatever the failed store's freshest items are — future scans then silently skip flagging genuinely-new items in that store; (2) the failed store's previously-cached items get incorrectly marked sold (treated the same as a store that legitimately returned zero items). Fix: `scrape_store()` now returns a `complete` flag (with one retry on a page-1 error), `_run()` tracks which stores/pages were incomplete, excludes them from sold-marking, and skips advancing the anchor entirely on any run with a coverage gap (safe trade-off — worst case an already-seen item gets re-flagged NEW later, never the reverse). Verified with a from-scratch test: `_run()` called directly with mocked Algolia responses, one store always failing — confirmed anchor doesn't advance, failed store's item isn't marked sold, and a fully clean scan still works exactly as before (no regression). Not confirmed against Chuck's real production account (no live data access this session) — Chuck confirmed he always scans with all stores selected, which rules out the "deliberate subset selection" variant of this bug as his trigger, but per-store fetch failures are independent of selection width. `gc_tracker_app.py` only, `py_compile`/`node --check` clean. See HANDOFF.md for full detail.
 - **v2.16.10** — **gunicorn switch + scan-hang fix.** Two issues investigated after Chuck reported the site "didn't get faster, maybe got slower" plus a Reddit report of it being "buggy" (no detail available). (1) `Procfile` was still running Flask's dev server (`python gc_tracker_app.py`) — never actually switched to gunicorn despite it being discussed earlier in the project. Now `gunicorn gc_tracker_app:app --workers=1 --worker-class=gthread --threads=8 --timeout=0 --graceful-timeout=30 --bind=0.0.0.0:$PORT`; `gunicorn` added to `requirements.txt`. Also found and fixed a real bug in the process: startup bootstrap (`_load_cat_cache()`, `_load_cookies()`, store-list check) was inside `if __name__ == "__main__":`, which gunicorn never runs — moved to unconditional module-level code so it runs under any entry point. Verified locally: gunicorn boots with the exact Procfile flags, `/` and `/api/stores` both return 200, clean shutdown. (2) The previously-unresolved scan-hang bug (single-store scan pinging 10+ min, no error, no completion) — traced to `as_completed()` calls with no timeout in `_run()`'s two `ThreadPoolExecutor` blocks; if one worker thread never returns (a slow-trickle response can evade `requests`' own `timeout=`, which only bounds silent gaps, not total time), the loop blocks forever and the outer `try/except` is never reached. Added hard wall-clock ceilings (`STORE_SCAN_TIMEOUT = max(120, stores*12)`, `PAGE_BATCH_TIMEOUT = 90`/batch) via `as_completed(futures, timeout=...)`, switched pool cleanup to `shutdown(wait=False)` so a stuck thread can't block exit either. `gc_tracker_app.py`, `requirements.txt`, `Procfile`. `py_compile` clean. See HANDOFF.md for full detail.
