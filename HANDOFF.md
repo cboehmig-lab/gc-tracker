@@ -1,11 +1,60 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-08-31 · Current version: v2.16.10 (gunicorn switch + scan-hang fix — pushed 2026-08-31, live and confirmed running gunicorn) · Domain: gcgeartracker.com*
+*Last updated: 2026-08-31 · Current version: v2.16.12 (NEW-detection anchor/sold-marking coverage-gap fix + /api/browse facet-count & sort perf) · Domain: gcgeartracker.com*
 
 ---
 
 ## ⚠️ Railway gotcha: Custom Start Command overrides `Procfile`
 
 When v2.16.10 first deployed, the logs still showed Werkzeug's dev-server warning ("This is a development server...") even though `Procfile` had already been updated to run gunicorn. Cause: Railway's service **Settings → Deploy → Custom Start Command** field, if set, takes priority over `Procfile` unconditionally — Railway doesn't warn you the two are out of sync, it just silently ignores `Procfile`. That field was hardcoded to `python gc_tracker_app.py` (presumably set once, early in the project, before `Procfile` existed or was trusted). Fixed by updating that field directly in the dashboard to match `Procfile`'s gunicorn command. **If you ever change the start command in `Procfile` again, also check/update this dashboard field — they do not sync automatically, and the dashboard field wins.**
+
+---
+
+## ⭐ Recent Changes (v2.16.10 → v2.16.11) — 2026-08-31 (scan coverage gaps no longer corrupt NEW-detection anchor or falsely mark items sold)
+
+**User-reported (Chuck):** items that are genuinely new since his last scan sometimes don't get flagged NEW in the UI. Investigated rather than guessed — read the full anchor-detection history first (v2.10.11 → v2.10.15 → v2.10.18 → v2.12.2 → v2.11.5, all below) and confirmed all four of those fixes are still intact and correct. Also confirmed against the real ~92K-item production-scale cache that every item's `date_listed` is now a full ISO timestamp — the date-only-format bug from v2.10.2/v2.12.2 is extinct in current data, ruling that class of bug out.
+
+**Root cause, confirmed with a from-scratch reproduction (mocked Algolia responses, real `_run()` code, no live traffic):** `scrape_store()` silently swallows a page-1 fetch failure for a store — any transient timeout, connection error, or Algolia hiccup on that ONE store's first request causes it to return zero products for that store with no error signal propagated anywhere. Given every scan fans out to up to ~298 stores at once (`STORE_WORKERS=10` concurrent connections), this is a routine, expected occurrence — NOT an edge case. Two downstream consequences, both silent:
+
+1. **NEW-detection anchor**: `_run()` computes `new_anchor = max(date_listed across all_products)` and persists it as the user's new GLOBAL `last_anchor` — unconditionally, regardless of whether every requested store actually returned data. If one store silently failed while others succeeded, the anchor still advances to the successful stores' max date. Next scan, ANY genuinely-new item in whichever store failed — with a `date_listed` between the old (correct) anchor and this now-inflated one — fails `date_listed > threshold` and never gets flagged NEW, even though the user never actually saw it. Same *class* of bug as v2.10.11/v2.10.15 (anchor contamination), but a new variant: a user's OWN scan self-contaminating its own anchor via incomplete coverage, not cross-user contamination via the shared cache.
+2. **Sold-marking**: the "mark items not found in this scan as sold" block treats a requested-but-failed store exactly like a requested-and-succeeded-but-genuinely-empty store — every previously-cached item from that store gets incorrectly flagged `available: False` (and, if watchlisted, `sold: True`) purely because its fetch errored, not because anything actually sold.
+
+The v2.16.10 fix (STORE_SCAN_TIMEOUT / PAGE_BATCH_TIMEOUT skip-and-continue) made a related but distinct case — stores that stall past the timeout — reachable too: previously a stalled store would hang the ENTIRE scan forever (never reaching either bug above, since `_run()` never got to the anchor/sold-marking code); now it's skipped and the scan completes "successfully," so both of the above become reachable through the timeout path as well as through the always-existing page-1-error path.
+
+**Fix:**
+- `scrape_store()` now returns `(products, ids, complete)` — `complete=False` whenever the fetch was cut short by an error or a user-initiated stop; still `True` for a natural "ran out of pages" or a confirmed 404 (store's genuinely gone — a real answer, not a partial one) or a legitimately-empty store. Added one immediate retry on a page-1 error specifically (not later pages) — a fanout of ~298 near-simultaneous requests trips a handful of transient failures on almost every scan, and a single retry clears most of them without meaningfully slowing the scan down.
+- `_run()` now tracks `incomplete_stores` (store-scoped scans) and `scan_incomplete` (nationwide scans — page 1 failure, a page batch timing out, or a user-initiated stop) across both scan paths.
+- **Sold-marking**: stores in `incomplete_stores` are excluded from `scanned_store_set`, so a store that failed to fetch this run no longer has its cached items marked sold. A nationwide scan that hit any gap skips sold-marking entirely this run (no per-page granularity to know which SKUs were actually missed).
+- **Anchor**: `new_anchor` is only computed from this run's data when `coverage_ok` (no incomplete stores, scan not flagged incomplete) — otherwise the anchor simply doesn't advance this run (stays at the old value) and a new progress message tells the user why ("scan had gaps... anchor not advanced this run"). Trade-off, stated plainly: on a run with any coverage gap, an already-seen item could get re-flagged NEW on a later clean scan (safe, minor annoyance) — that's preferred over the alternative of silently losing a genuinely-new item forever.
+- **Verified with a from-scratch test** (`_run()` called directly with mocked `fetch_page`, three fake stores, one always failing): confirmed (1) the anchor does NOT advance past the pre-scan value when one store fails, with the new gap-warning message shown; (2) that failed store's previously-cached item is NOT marked sold; (3) a fully clean scan (all stores succeed) still advances the anchor and flags NEW items exactly as before — no regression.
+- `py_compile` and `node --check` both clean. No JS changes — this is entirely server-side scan logic.
+
+**Not fully closed**: this session did not have access to Chuck's real production account/scan history (the local `gc_users.db` and `gc_category_cache.json` in the repo folder are stale dev/test snapshots — 1 dev user vs. 283+ real registered users — not synced with the Railway volume), so the theory couldn't be confirmed against a live repro of Chuck's own reports. Chuck confirmed he personally always scans with all stores selected (not a manual subset), which rules out the OTHER variant of this bug (a deliberately partial store selection inflating the anchor) as his specific trigger — but per-store fetch failures during an "all stores selected" scan are exactly as real regardless of selection width, since they're about individual HTTP requests failing, not about which stores were asked for. Worth watching the new "scan had gaps" progress message in practice — if it shows up often, that's a concrete signal of how frequently this was actually firing.
+
+**Files changed:** `gc_tracker_app.py` only (`scrape_store()`, `_run()`'s store-scan loop / nationwide loop / sold-marking block / anchor block, `APP_VERSION = "2.16.11"`)
+
+---
+
+## ⭐ Recent Changes (v2.16.11 → v2.16.12) — 2026-08-31 (/api/browse: single-pass facet counts + single sort)
+
+**Investigated, not guessed** (per Chuck's day-job data-infra context prompting a broader look at speed — see NEXT_SESSION_PROMPT.md): set up a real local repro (scratch venv, the actual Procfile gunicorn command, the real ~92K-item / 53MB `gc_category_cache.json`) and measured rather than assumed. Findings, in order investigated:
+
+- **flask-compress on /api/browse**: confirmed still working after the v2.16.10 gunicorn switch. curl with `Accept-Encoding: gzip` on an all-stores/no-filter page-1 call: 181,378 bytes → 37,442 bytes gzipped (~79% smaller), `Content-Encoding: gzip` present. This was already fixed in the 2026-07 audit (S7); not a live lever. Confirmed compression itself isn't adding latency either — an `Accept-Encoding: identity` call took the same ~280ms as the gzip'd one.
+- **Worker memory**: after loading the full cache, the gunicorn worker sat at ~450MB RSS just holding `_cat_cache` + the memoized base item list. Useful number for a future "is the Railway plan resource-capped" conversation — not investigated further this session (needs the Railway dashboard).
+- **The real per-request cost — found via cProfile, not guessing**: for the common case (all-stores, no filters, page 1 — Chuck's own typical case per the v2.16.4 entry below), warm calls averaged ~280ms, well above the ~93.5ms documented in the v2.16.4 (E2) entry for the equivalent case. Profiling pinned it to two things, NEITHER of which is the E2 memoized base-list build (that part is fast and working exactly as documented):
+  1. The four contextual facet-count passes (brand/condition/category/subcategory dropdown counts) — each did its own full linear pass with its own list comprehension over the base item list.
+  2. Sorting the ENTIRE filtered list TWICE — once by the requested sort field, then again by a `_priority` key just to bubble NEW/want-list-match items to the top — even though only 50 items (one page) are ever returned.
+- **STORE_WORKERS / PARALLEL_WORKERS**: not load-tested this session — would mean hammering live Algolia and watching for rate-limit responses, didn't do that without discussing it first. Still open.
+
+**Fix — two changes, both verified byte-for-byte output-identical against the pre-fix code across 8 representative requests (no filter, single/multi brand filter, condition filter, combined multi-facet filter, price/date/condition sort, user-clicked sort, later pages) via a Flask test-client A/B diff against the real cache:**
+
+1. **Facet counts**: replaced the four separate `_ctx_counts()` calls (each its own filtered list comprehension + loop) with a single combined pass over `base_items` that computes all four facets' counts together, reusing each item's brand/condition/category/subcategory-filter-membership checks across all four instead of recomputing them per facet. Semantics unchanged — each facet's count still reflects all OTHER active facet filters exactly as before.
+2. **Sort**: removed the second full-list `_priority` sort. `filtered` is already correctly ordered by the primary sort at that point, and both `list.sort()` and a straightforward single pass are stable, so partitioning into the three tiers (new+want match / new-only / everything else) via one O(N) pass and concatenating preserves the exact same final order as the old two-sort approach, just without the second O(N log N) pass.
+- Measured: ~278.6ms → ~244.5ms average per warm call on the common no-filter case (~12% faster), verified over 15 calls each on the real cache, before vs. after. dict.get() call volume dropped from ~1.37M to ~910K per request (cProfile call counts). Modest in absolute terms, but real, safe (verified no output change), and free — this endpoint is hit on every filter click, keystroke, and page flip.
+- `py_compile` clean. No JS changes.
+
+**Not done this session**: further optimizing `api_browse()`'s remaining per-item annotation loop (still a full pass building `all_items` from the memoized base list — inherent to the "per-user annotations can't be cached across users" design from E2/v2.16.4, not something to casually collapse), and the untested Algolia concurrency levers (STORE_WORKERS/PARALLEL_WORKERS) and Railway resource sizing — both flagged as open items, not touched.
+
+**Files changed:** `gc_tracker_app.py` only (`api_browse()`'s facet-count block and sort block, `APP_VERSION = "2.16.12"`)
 
 ---
 
