@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-08-31 · Version: v2.16.10 (gunicorn switch + scan-hang fix) · Live at: gcgeartracker.com*
+*Generated: 2026-08-31 · Version: v2.16.10 (gunicorn switch + scan-hang fix) · Live at: gcgeartracker.com — pushed and confirmed running gunicorn*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,7 +88,9 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.10 — gunicorn switch + scan-hang fix, pending push (v2.16.9 pushed 2026-08-26)
+## Current State: v2.16.10 — gunicorn switch + scan-hang fix, pushed and live (confirmed gunicorn/gthread running in Railway deploy logs, 2026-08-31)
+
+**⚠️ Railway gotcha found during rollout:** Settings → Deploy → Custom Start Command in the Railway dashboard overrides `Procfile` silently — it was hardcoded to `python gc_tracker_app.py` and had to be updated by hand to match. See HANDOFF.md's top section. Check that field too if you ever change the start command again.
 
 **⚠️ Read before touching `--workers` in Procfile:** it's `--workers=1` on purpose. This app coordinates scans and SSE fan-out via in-process global state (`_cat_cache`, `_run_queues`, `_current_run_id`, locks). Multiple gunicorn worker *processes* don't share memory — bumping `--workers` would reintroduce a worse version of the scan-hang bug just fixed (a client's `/api/run` and `/api/progress` could land on different processes that have never heard of each other's run_id). Concurrency comes from `--threads=8` instead. See HANDOFF.md's v2.16.10 entry for the full reasoning.
 

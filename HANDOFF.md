@@ -1,5 +1,11 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-08-31 · Current version: v2.16.10 (gunicorn switch + scan-hang fix — pending push; v2.16.9 pushed 2026-08-26) · Domain: gcgeartracker.com*
+*Last updated: 2026-08-31 · Current version: v2.16.10 (gunicorn switch + scan-hang fix — pushed 2026-08-31, live and confirmed running gunicorn) · Domain: gcgeartracker.com*
+
+---
+
+## ⚠️ Railway gotcha: Custom Start Command overrides `Procfile`
+
+When v2.16.10 first deployed, the logs still showed Werkzeug's dev-server warning ("This is a development server...") even though `Procfile` had already been updated to run gunicorn. Cause: Railway's service **Settings → Deploy → Custom Start Command** field, if set, takes priority over `Procfile` unconditionally — Railway doesn't warn you the two are out of sync, it just silently ignores `Procfile`. That field was hardcoded to `python gc_tracker_app.py` (presumably set once, early in the project, before `Procfile` existed or was trusted). Fixed by updating that field directly in the dashboard to match `Procfile`'s gunicorn command. **If you ever change the start command in `Procfile` again, also check/update this dashboard field — they do not sync automatically, and the dashboard field wins.**
 
 ---
 
