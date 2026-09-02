@@ -2737,18 +2737,33 @@ def admin_devices():
 
 
 def _admin_task_page(title: str, api_path: str, description: str,
-                     options_html: str = "", extra_body_js: str = "",
-                     nav_current: str = "") -> str:
-    """Shared HTML template for long-running admin task pages (build-coords, validate-stores).
+                     options_html: str = "", nav_current: str = "") -> str:
+    """Shared HTML template for long-running admin task pages (build-coords,
+    validate-stores, pg-backfill).
 
-    options_html: optional HTML snippet inserted above the Run button (e.g. checkboxes)
-    extra_body_js: optional JS snippet merged into the POST body object (e.g. "force: document.getElementById('force-cb').checked")
+    CSP note (v2.16.19): this template used to have its Run/SSE-progress logic as an
+    inline <script> with onclick="run()" baked directly into the returned HTML. CSP's
+    script-src is 'self' only (no 'unsafe-inline', no nonce) -- the browser silently
+    refused to run that inline script AND the inline onclick handler, so "Run Now" did
+    nothing on every page built from this template, since well before this was
+    noticed. No console error appears for a blocked inline *handler* failing to
+    attach (only for a blocked <script> tag's content), which is how it went
+    undetected. Fixed by moving the logic to static/admin-task.js (same-origin, so
+    'self' allows it) and passing config via data-api-path on #run-btn instead of
+    templating raw JS -- matches the data-*-attribute + external-JS pattern every
+    other onclick="..." in this app was already converted to back in v2.10.18.
+
+    options_html: optional HTML snippet inserted above the Run button (e.g.
+    checkboxes). The one existing use -- Build Coords' "force re-geocode" checkbox --
+    must use id="force-cb": static/admin-task.js looks for that specific id and
+    includes {force: <checked>} in the POST body if present. There's no generic
+    extra-field mechanism; add one in admin-task.js if a second page ever needs a
+    different field.
     Auth is handled by the caller via _require_admin().
     """
-    safe_api  = api_path.replace('"', '')
+    safe_api  = api_path.replace('"', '&quot;')
     safe_title = title.replace('<', '').replace('>', '')
     safe_desc  = description.replace('<', '').replace('>', '')
-    body_inner = extra_body_js if extra_body_js else ""
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <title>{safe_title} — GC Tracker Admin</title>
@@ -2766,39 +2781,10 @@ def _admin_task_page(title: str, api_path: str, description: str,
 <h2>🛠 {safe_title}</h2>
 <p>{safe_desc}</p>
 {options_html}
-<button id="run-btn" onclick="run()">▶ Run Now</button>
+<button id="run-btn" data-api-path="{safe_api}">▶ Run Now</button>
 <div id="log">Waiting…</div>
-<script>
-async function run() {{
-  const btn = document.getElementById('run-btn');
-  const log = document.getElementById('log');
-  btn.disabled = true; btn.textContent = '⏳ Running…';
-  log.textContent = 'Starting…\\n';
-  const resp = await fetch('{safe_api}', {{
-    method: 'POST',
-    headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{{body_inner}}})
-  }});
-  if (!resp.ok) {{
-    const e = await resp.json().catch(()=>({{}}));
-    log.textContent += '❌ Error: ' + (e.error || resp.statusText) + '\\n';
-    btn.disabled = false; btn.textContent = '▶ Run Now';
-    return;
-  }}
-  const es = new EventSource('/api/progress');
-  es.onmessage = e => {{
-    const msg = JSON.parse(e.data);
-    if (msg.type === 'ping') return;
-    if (msg.type === 'progress') {{ log.textContent += (msg.msg || '') + '\\n'; log.scrollTop = log.scrollHeight; return; }}
-    if (msg.type === 'done') {{
-      es.close();
-      log.innerHTML += '<span class="done">\\n✓ Done.</span>';
-      btn.disabled = false; btn.textContent = '▶ Run Again';
-    }}
-  }};
-  es.onerror = () => {{ es.close(); log.innerHTML += '<span class="err">\\nConnection lost.</span>'; btn.disabled = false; btn.textContent = '▶ Run Now'; }};
-}}
-</script></body></html>"""
+<script src="/static/admin-task.js"></script>
+</body></html>"""
 
 
 @app.route("/admin/build-coords")
@@ -2817,7 +2803,6 @@ def admin_build_coords():
         options_html='<label style="display:block;margin-top:14px;color:#bbb;cursor:pointer">'
                      '<input type="checkbox" id="force-cb" style="vertical-align:middle"> '
                      'Force re-geocode all stores (even cached ones)</label>',
-        extra_body_js="force: document.getElementById('force-cb').checked",
         nav_current="/admin/build-coords",
     )
     return Response(html, content_type="text/html")
@@ -6736,7 +6721,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.18"
+APP_VERSION = "2.16.19"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

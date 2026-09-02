@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-02 · Version: v2.16.18 (Postgres full backfill from live _cat_cache — corrective fix for Phase A's stale-file backfill, not yet pushed) · Live at: gcgeartracker.com — v2.16.17 deployed clean, dual-write live since 2026-08-31*
+*Generated: 2026-09-02 · Version: v2.16.19 (fixes admin task pages' "Run Now" button — CSP silently blocked it, unrelated to the backfill logic itself; not yet pushed) · Live at: gcgeartracker.com — v2.16.18 deployed, dual-write live since 2026-08-31*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -87,6 +87,36 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 - **Footer**: `.seo-footer` — visible "Privacy Policy · Not affiliated with Guitar Center, Inc." in `#555` gray. No hidden text.
 
 ---
+
+## Current State: v2.16.19 — admin task page "Run Now" button fix (2026-09-02, not yet pushed)
+
+**Why**: Chuck deployed v2.16.18 and clicked "Run Now" on `/admin/pg-backfill` — nothing
+happened, log stayed on "Waiting…". Root cause: `_admin_task_page()` (shared by Build Coords,
+Validate Stores, PG Backfill) has had its Run-button logic as an inline `<script>` +
+`onclick="run()"` since v2.2.2, but CSP is `script-src 'self'` with no `'unsafe-inline'`/nonce
+(tightened in v2.10.18, which converted every OTHER inline `onclick` in the app but apparently
+missed this template). Browsers silently drop a CSP-blocked inline *event handler* with no
+console error, which is why nobody noticed — **Build Coords and Validate Stores have likely
+been just as broken for a long time**, only surfaced today because the new PG Backfill button
+got clicked. Confirmed via code grep + reading the CSP header definition, not live repro —
+`onclick=` appears exactly once in the whole file, and `@app.after_request` applies the strict
+CSP to every response with no per-route override.
+
+**Fix**: moved the Run/SSE logic into new `static/admin-task.js` (same-origin — CSP's `'self'`
+allows it), `_admin_task_page()` now emits `<button data-api-path="...">` (no onclick) + `<script
+src="/static/admin-task.js">`. Build Coords' force-re-geocode checkbox (`id="force-cb"`) is now
+picked up by a hardcoded check in `admin-task.js`, replacing the old `extra_body_js` param
+(itself unsafe templated-JS, removed from the function signature).
+
+**Verified**: py_compile + node --check (both files), actual module import + route-table check
+in a disposable venv, gunicorn boot + curl confirming `/static/admin-task.js` serves 200 and
+byte-matches the source, and `app.test_request_context()` assertions that both the PG Backfill
+and Build Coords pages render `data-api-path` correctly with zero `onclick` in the output. Full
+writeup in HANDOFF.md's v2.16.19 entry.
+
+**Once this deploys**: `/admin/pg-backfill`'s Run button should actually work — that's still the
+next step queued from v2.16.18 (trigger it, then re-check `/api/pg-parity-check` for `pg_total
+== json_total` before Phase C).
 
 ## Current State: v2.16.18 — Postgres full backfill from live _cat_cache (2026-09-02, not yet pushed)
 

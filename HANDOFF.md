@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-02 · Current version: v2.16.18 (Postgres full backfill from live _cat_cache — corrective fix for Phase A's stale-file backfill) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-02 · Current version: v2.16.19 (fixes admin task pages' "Run Now" button — CSP was silently blocking it) · Domain: gcgeartracker.com*
 
 ---
 
@@ -53,6 +53,71 @@ returns 401 before ever touching Postgres.
 
 **Files changed**: `gc_tracker_app.py` only (moved one function; no logic changes).
 `APP_VERSION = "2.16.17"`.
+
+---
+
+## ⭐ Recent Changes (v2.16.18 → v2.16.19) — 2026-09-02 (admin task page "Run Now" button was silently dead — CSP, not the backfill logic)
+
+**What happened**: Chuck deployed v2.16.18, went to `/admin/pg-backfill`, clicked "Run Now" —
+nothing happened. Log box stayed on the static placeholder text ("Waiting…"), button never
+changed to "⏳ Running…".
+
+**Root cause**: `_admin_task_page()` (the shared template behind Build Coords, Validate Stores,
+and now PG Backfill) has had its Run-button/SSE-progress logic as an inline `<script>` block
+with `onclick="run()"` since it was written in v2.2.2 — but this app's CSP is `script-src 'self'`
+with no `'unsafe-inline'` and no nonce (tightened in the v2.10.18 CSP hardening pass, which
+explicitly removed `'unsafe-inline'` from `script-src` and converted all 124 other
+`onclick="..."` attributes in the app to `data-*` + external JS — this one template was
+apparently missed). Under that policy the browser silently refuses to execute BOTH the inline
+`<script>` content and the inline `onclick` attribute — and critically, a blocked inline event
+*handler* (as opposed to a blocked `<script>` tag) throws no console error, it just never
+attaches, which is exactly why this went unnoticed since script-src was tightened: the page
+looks completely normal, the button is clickable, nothing in DevTools flags it. This means
+**Build Coords and Validate Stores have almost certainly been silently broken the same way for
+a long time** — not something introduced this session, just newly surfaced because Chuck
+actually tried the new PG Backfill button today.
+
+Confirmed via code inspection rather than guesswork before touching anything (per the "read the
+actual code" standing rule): grepped the whole file for `onclick=` — exactly one hit, this
+template. Checked the CSP header definition (line ~2119) — `script-src 'self'` only, and
+`@app.after_request`'s `response.headers.setdefault(...)` applies it to every response
+including admin pages, no route-specific override anywhere. That's a deterministic, sufficient
+explanation — no live repro against production needed (and none was done; nothing was clicked
+against real prod for this fix).
+
+**Fix**: moved the Run-button/SSE logic out of the inline `<script>` into a new
+`static/admin-task.js` (same-origin, so `'self'` allows it — this is exactly how every other
+`onclick="..."` removal in v2.10.18 was fixed). `_admin_task_page()` now renders `<button
+id="run-btn" data-api-path="...">` (no `onclick`) and `<script src="/static/admin-task.js">`
+instead of the inline block; `admin-task.js` reads `data-api-path` off the button, POSTs, opens
+the `/api/progress` EventSource, and updates the log — identical behavior to before, just
+loaded from an external file instead of inlined. The one caller with an extra POST field (Build
+Coords' "force re-geocode" checkbox, `id="force-cb"`) is now handled by a hardcoded check in
+`admin-task.js` for that specific id, replacing the old `extra_body_js` templated-JS-string
+parameter (which is removed from `_admin_task_page()`'s signature — it was itself unsafe
+inline-JS templating, the same category of thing CSP now correctly blocks; there's no generic
+extra-field mechanism, so a future second field means extending `admin-task.js` directly).
+
+**Verification**: `python3 -m py_compile` + `node --check` on both `gc_tracker_app.py` and the
+new `static/admin-task.js`. Actually imported the module in a disposable venv and confirmed the
+route table still builds. Booted gunicorn locally with Railway's real `--workers=1
+--worker-class=gthread` config and curled `/static/admin-task.js` directly — 200, byte-identical
+to the source file — and confirmed the live CSP header on a real response is `script-src 'self'
+...`, which explicitly permits a same-origin `<script src>` (unlike inline content). Rendered
+`_admin_task_page()` for both the PG Backfill and Build Coords call sites via
+`app.test_request_context()` and asserted: `data-api-path` present and correct, no `onclick`
+anywhere in the output, the external `<script src="/static/admin-task.js">` tag present, and
+(for Build Coords) the `force-cb` checkbox still renders correctly.
+
+**Files changed**: `gc_tracker_app.py` (`_admin_task_page()` rewritten; `extra_body_js` param
+removed; its one call site in `admin_build_coords()` updated to match) and new
+`static/admin-task.js`. No changes to `_pg_full_backfill()`, the routes it added in v2.16.18, or
+any other route/logic — this is purely a front-end delivery-mechanism fix for a bug that
+predates this session. `APP_VERSION = "2.16.19"`.
+
+**Still true from v2.16.18, now actually testable**: once this deploys, `/admin/pg-backfill`'s
+Run button should work. Same next steps as before — trigger it, then re-check
+`/api/pg-parity-check` for `pg_total == json_total`.
 
 ---
 
