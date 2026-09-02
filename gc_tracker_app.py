@@ -4379,8 +4379,20 @@ def _pg_tier1_browse(*, store_set, search_all, user_last_scan,
                 sub_ctx.setdefault(s, 0)
 
             # Q3 — total_filtered + store_count over the fully-filtered set
+            # (v2.16.21) NULLIF(store, '') before COUNT(DISTINCT ...): a plain
+            # COUNT(DISTINCT store) counts an empty-string store as one more
+            # distinct value, but api_browse()'s own store_count explicitly
+            # excludes falsy store values (`if i.get("store")`, see the
+            # legacy JSON-path store_count line below) — a real production
+            # item with store == "" made this a 296-vs-297 mismatch caught by
+            # spot-checking ?pg_shadow=1 against live data after deploy (the
+            # 436K-row synthetic test data never had an empty-store item, so
+            # the offline diff harness missed this one). COUNT(DISTINCT ...)
+            # already ignores NULLs, so NULLIF(store, '') reproduces the
+            # Python truthy-check exactly.
             cur.execute(
-                f"SELECT COUNT(*) AS total_filtered, COUNT(DISTINCT store) AS store_count "
+                f"SELECT COUNT(*) AS total_filtered, "
+                f"COUNT(DISTINCT NULLIF(store, '')) AS store_count "
                 f"FROM items WHERE {filtered_where_sql}", filtered_params)
             row = cur.fetchone()
             total_filtered = row["total_filtered"]
@@ -7138,7 +7150,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.20"
+APP_VERSION = "2.16.21"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

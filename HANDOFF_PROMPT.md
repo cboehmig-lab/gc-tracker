@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-02 · Version: v2.16.20 (Postgres migration Phase C — SQL Tier 1 shadow read path, admin/dev-only; not yet pushed) · Live at: gcgeartracker.com — v2.16.18 deployed, dual-write live since 2026-08-31*
+*Generated: 2026-09-02 · Version: v2.16.21 (fixes a real store_count mismatch in the Postgres Tier 1 shadow path, found via live ?pg_shadow=1 spot-check) · Live at: gcgeartracker.com — v2.16.20 deployed, ?pg_shadow=1 admin-only diagnostic live*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -87,6 +87,22 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 - **Footer**: `.seo-footer` — visible "Privacy Policy · Not affiliated with Guitar Center, Inc." in `#555` gray. No hidden text.
 
 ---
+
+## Current State: v2.16.21 — fixed a real `store_count` mismatch in the Postgres Tier 1 shadow path (2026-09-02)
+
+Found by Chuck spot-checking `?pg_shadow=1` against real production right after v2.16.20
+deployed (exactly the step queued for this). `store_count` was off by one — Postgres's
+`COUNT(DISTINCT store)` counted an empty-string `store` value as a real store, while
+`api_browse()`'s own JSON-path `store_count` explicitly excludes falsy store values. At least one
+real production item has `store == ""`, which the 436K-row *synthetic* dataset used for the
+v2.16.20 offline diff harness never happened to include — a real gap in that test data, not in
+the harness logic itself. Fixed with `COUNT(DISTINCT NULLIF(store, ''))`. Reproduced locally
+first (injected an empty-store item into the scratch dataset, confirmed the same mismatch shape),
+then fixed and re-ran the full 37-case harness clean. See HANDOFF.md's v2.16.21 entry.
+
+**Takeaway for future Tier 1 SQL work**: spot-check `?pg_shadow=1` against real production after
+*every* Tier 1 change, not just once — synthetic test data won't cover every edge case
+production has accumulated. Noted in project memory.
 
 ## Current State: v2.16.20 — Postgres migration Phase C: SQL Tier 1 shadow read path (2026-09-02, not yet pushed)
 

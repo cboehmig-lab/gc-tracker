@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-02 · Current version: v2.16.20 (Postgres migration Phase C — SQL Tier 1 shadow read path, admin/dev-only, not yet cut over to real traffic) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-02 · Current version: v2.16.21 (fixes a real store_count mismatch in the Postgres Tier 1 shadow path, found by spot-checking ?pg_shadow=1 against live production) · Domain: gcgeartracker.com*
 
 ---
 
@@ -53,6 +53,52 @@ returns 401 before ever touching Postgres.
 
 **Files changed**: `gc_tracker_app.py` only (moved one function; no logic changes).
 `APP_VERSION = "2.16.17"`.
+
+---
+
+## ⭐ Recent Changes (v2.16.20 → v2.16.21) — 2026-09-02 (Postgres Phase C: fixed a real `store_count` mismatch found by spot-checking `?pg_shadow=1` against live production)
+
+**What happened**: right after v2.16.20 deployed, Chuck spot-checked `?pg_shadow=1` against real
+production (exactly the "next step" queued in NEXT_SESSION_PROMPT.md) — the item-by-item and
+every-other-field comparison came back identical, but `store_count` didn't: JSON said 296,
+Postgres said 297. This is real, live confirmation that the offline diff harness (37 cases,
+436,240 synthetic rows) — while it caught and fixed two real tiebreak bugs in v2.16.20 — still
+had a blind spot: the synthetic data generator never produced an item with an empty `store`
+field, and it turns out at least one exists in real production.
+
+**Root cause, confirmed by reading the code, not guessed**: `api_browse()`'s own `store_count`
+line explicitly excludes falsy store values —
+`len(set(i.get("store", "") for i in filtered if i.get("store")))` — but `_pg_tier1_browse()`'s
+Q3 query did a plain `COUNT(DISTINCT store)`, which counts an empty-string store as one more
+distinct value, exactly like any other store name. One real item with `store == ""` in the
+currently-filtered set means Postgres counts 297 distinct values where the JSON path counts 296
+(after excluding the empty one).
+
+**Reproduced locally before shipping the fix** (same discipline as always — see the standing
+rule): injected one synthetic item with `store: ""` into the 436K-row scratch dataset, re-ran
+the comparison — reproduced the exact same shape of bug (298 vs 299 in that dataset). Fixed Q3's
+query to `COUNT(DISTINCT NULLIF(store, ''))` (NULLIF turns the empty string into `NULL`, and
+`COUNT(DISTINCT ...)` already ignores `NULL`s — this reproduces the Python truthy-check exactly).
+Confirmed the fix resolves the injected case (298 == 298), then re-ran the full 37-case diff
+harness against the same empty-store-containing dataset — all 37 still pass, nothing else
+regressed.
+
+**Lesson for future Tier 1 SQL work, noted in project memory
+([[postgres-phase-c-2026-09-02]])**: the synthetic data generator (`gen_data.py`, cloud-sandbox
+only, not committed) doesn't cover every edge case real production data has accumulated over its
+history — sparse/malformed fields like an empty `store` being one example. Spot-checking
+`?pg_shadow=1` against real production after each Tier 1 change (not just the offline harness)
+is worth doing every time, not just once — this is exactly why that step was queued rather than
+skipped.
+
+**Verified**: `python3 -m py_compile` + `node --check` (no JS changed) both clean. Reproduced and
+fixed against a scratch Postgres with the same 436K-row dataset plus one injected empty-store
+item; re-ran the full 37-case A/B diff harness after the fix (still 37/37). Imported the module
+in a disposable venv and confirmed the route table still builds (60 routes).
+
+**Files changed**: `gc_tracker_app.py` only — one query in `_pg_tier1_browse()`'s Q3 (`store_count`
+now uses `COUNT(DISTINCT NULLIF(store, ''))` instead of `COUNT(DISTINCT store)`). `APP_VERSION =
+"2.16.21"`.
 
 ---
 
