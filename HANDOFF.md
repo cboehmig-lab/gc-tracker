@@ -167,6 +167,27 @@ one item still outstanding is the POST-deploy live spot-check (plan §7 Phase D 
 real, unflagged requests plus watching Railway's logs for `[pg]` error lines for a few minutes)
 — that can only happen after Chuck deploys, see `NEXT_SESSION_PROMPT.md`.
 
+**Confirmed live in production, same day.** Chuck pushed from his Mac terminal; deploy confirmed
+via the version string in the page's banner and footer (both show `v2.16.22`), and `git log`
+shows `main` and `origin/main` at the same commit. Ran the post-deploy checks queued for this in
+`NEXT_SESSION_PROMPT.md`:
+- An unflagged, non-admin `POST /api/browse` (no-filter/all-stores) returned `total_count:
+  110,147` with no `_pg_shadow` diagnostic key present — confirms real users are silently getting
+  the Postgres-backed response. ~820ms on a cold first call, ~200-300ms on subsequent calls
+  (facet-filtered and admin-flagged calls), consistent with the harness's speed findings.
+- The same request WITH an admin session + `?pg_shadow=1` returned the identical `total_count`
+  (110,147) with the diagnostic key present — confirms the admin-only diagnostic gate still works
+  post-cutover.
+- A keyword-search (Tier 2) request came back at ~940ms with no diagnostic key — confirms it's
+  still routing through the unmodified legacy JSON path, not accidentally picked up by the
+  cutover.
+- Could NOT confirm via Railway's own log viewer this session — the two projects visible under
+  the logged-in Railway account (`animalsintrees-website`, `serene-determination`) don't
+  obviously correspond to the gc-tracker service, and didn't chase this further given the live
+  checks above already passed and the automatic per-request fallback provides its own safety
+  net regardless. Chuck can check Railway's logs directly for `[pg]` error lines if he wants
+  extra confidence, but nothing found this session suggests a problem.
+
 **Files changed**: `gc_tracker_app.py` only — the gate condition in `api_browse()` (3 comment
 blocks rewritten, the routing condition itself changed, `_pg_shadow`/`_pg_shadow_ms` now
 admin-gated independently of routing), plus `APP_VERSION`. No query, schema, or `_pg_tier1_browse`/

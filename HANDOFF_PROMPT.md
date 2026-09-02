@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-02 · Version: v2.16.22 (Postgres migration Phase D — THE CUTOVER, not yet pushed) · Live at: gcgeartracker.com — v2.16.21 deployed (store_count fix); v2.16.22 (the real cutover) awaiting Chuck's push*
+*Generated: 2026-09-02 · Version: v2.16.22 (Postgres migration Phase D — THE CUTOVER, deployed and confirmed live) · Live at: gcgeartracker.com — v2.16.22 confirmed live, next up: the NEW-item anchor bug*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -111,10 +111,18 @@ diff harness comparing the cutover path against the legacy path (via `_PG_POOL` 
 `None`) — 39/39 passed. Real gunicorn boot + curl confirmed a real user gets Postgres-backed
 data with no diagnostic keys leaking. See HANDOFF.md's v2.16.22 entry for the full writeup.
 
-**Next up**: deploy (see `NEXT_SESSION_PROMPT.md` for the exact commands), then the post-deploy
-step the plan itself calls for — a few more live spot-checks as an actual (non-flagged) request
-and watching Railway's logs for `[pg]` error lines for a few minutes. Rollback, if ever needed, is
-putting `_is_admin()` back in front of the routing condition — JSON dual-write never stopped.
+**DEPLOYED AND CONFIRMED LIVE, same day (2026-09-02).** Chuck pushed from his Mac terminal;
+confirmed via the version string on the live page (banner + footer both show `v2.16.22`) and
+`git log` showing `main`/`origin/main` at the same commit. Post-deploy checks: an unflagged
+real-user request returns Postgres-backed data (`total_count` matches, no diagnostic keys), the
+same request with an admin session + `?pg_shadow=1` returns identical counts with diagnostic
+keys present, and a keyword (Tier 2) request still routes through the unmodified legacy path —
+all as designed. Did not confirm via Railway's log viewer (the projects visible under the logged-
+in account didn't obviously match the gc-tracker service; not chased further given the live
+checks already passed). Rollback, if ever needed, is putting `_is_admin()` back in front of the
+routing condition — JSON dual-write never stopped. **Postgres work pauses here** — per Chuck's
+own decision, the NEW-item anchor/tagging bug ([[bug_new_item_anchor_scope]] in project memory)
+is next up.
 
 ## Current State: v2.16.21 — fixed a real `store_count` mismatch in the Postgres Tier 1 shadow path (2026-09-02)
 
