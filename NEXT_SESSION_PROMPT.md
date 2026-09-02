@@ -1,41 +1,117 @@
-# Next Session Prompt — Data Hosting: Flat JSON Cache vs. BigQuery (or similar)
+# Next Session Prompt — Postgres Migration Phase C (SQL Tier-1 shadow read path)
 
 Copy and paste this to start the next Cowork session.
 
 ---
 
-We're working on **GC Gear Tracker** (`gcgeartracker.com`), a Flask web app deployed on Railway that lets users track Guitar Center used inventory for new listings. Read the full architecture doc first:
+We're working on **GC Gear Tracker** (`gcgeartracker.com`), a Flask app on Railway tracking
+Guitar Center used inventory. Read `HANDOFF.md` first for full architecture/version history,
+then `POSTGRES_MIGRATION_PLAN.md` (repo root) for the complete 6-phase migration plan — this
+session is Phase C specifically, sections §3 and §7 of that doc.
 
-`/Users/charles.boehmig/Desktop/gc_tracker/HANDOFF.md`
+**All repo work happens via the device bridge in `~/Desktop/gc_tracker`, never the cloud
+sandbox filesystem — check `device_bash` works before starting anything.**
 
-**Goal for this session:** Chuck has been doing some data-infrastructure work at his day job and wants to talk through whether the current inventory storage approach should move to BigQuery (or another proper database/warehouse) instead of what it uses today.
+## Where things stand (as of 2026-09-02, v2.16.19)
 
-## What the app currently does (for reference, verify against HANDOFF.md before assuming anything is still accurate)
-- Inventory scan results are cached in a single flat JSON file, `gc_category_cache.json` — currently ~91-92K items, ~51-53MB
-- That file is loaded into an in-memory Python dict (`_cat_cache`) on the Railway dyno, memoized/reloaded by file mtime (`_load_cat_cache()`, v2.13.0 pattern)
-- `/api/browse` builds and re-filters an in-memory list of lightweight item dicts (`_build_base_item_list()`, memoized by cache mtime, added v2.16.4 for a perf fix — see HANDOFF.md's E2 entry)
-- The JSON file lives on a Railway persistent volume (`DATA_DIR` env var), not in the git repo
-- User accounts/watchlists/want-lists/favorites are separate, in SQLite (`gc_users.db`) — that part is NOT in scope for this discussion, only the inventory cache is
-- Single dev-mode Flask process (`threaded=True`, not gunicorn) — noted in HANDOFF.md as a known limitation, relevant context for any "how much traffic/concurrency" discussion
+Phase A (schema + backfill) and Phase B (dual-write) are both **done and verified against live
+production**, not just locally. The original Phase A backfill was run from a stale local file
+and left Postgres badly incomplete; that was fixed two versions ago (v2.16.18 added an
+admin-triggered full backfill from the live in-process `_cat_cache`, v2.16.19 fixed a
+pre-existing CSP bug that was silently blocking that backfill's "Run Now" button — see
+HANDOFF.md's v2.16.18/19 entries for the full incident writeups). Final parity check, run for
+real against production:
 
-## What to actually do this session
-This is a discussion/evaluation session, not a build session — don't touch code until Chuck decides something is worth doing.
+```
+json_total: 436,343   pg_total: 436,343   missing_in_pg: 0   extra_in_pg: 0   field_mismatches: 0
+```
 
-1. Ask Chuck what specifically prompted this (what he saw at work, what problem he's hoping to solve — slow queries? wanting SQL-style analytics over historical data? cost? something else?)
-2. Get a clear picture of current pain points, if any, with the flat-JSON approach at current scale (~92K items, ~283 registered users as of 2026-08-26)
-3. Walk through realistic options and genuine trade-offs, not just "BigQuery is more scalable" boilerplate:
-   - Stay as-is (flat JSON + in-memory dict)
-   - A real embedded/lightweight DB (SQLite for inventory too, DuckDB, etc.) — cheap, still fits Railway's model, no new vendor
-   - Postgres (Railway has native Postgres) — relational, transactional, still "boring" ops-wise
-   - BigQuery specifically — this is a data warehouse built for large-scale analytical queries, not a low-latency transactional backend for a live web app; worth being honest that it may be a mismatch for "user loads a page and needs a filtered list in <100ms" unless paired with a serving layer
-4. Consider what actually matters for gcgeartracker.com's real usage pattern: it's a live, filtered, user-facing browse UI (latency-sensitive), not an analytics dashboard — any recommendation should be grounded in that, not in what's trendy at Chuck's job
-5. If a change looks genuinely worth it, scope out a migration plan (data model, what changes in `gc_tracker_app.py`, cost, Railway compatibility, rollback plan) — but only as far as Chuck wants to take it this session
+Postgres now mirrors `_cat_cache` exactly, and Phase B's dual-write (live since 2026-08-31)
+keeps it that way as new scans run. `_cat_cache`/`gc_category_cache.json` is still the sole
+source of truth for every read — nothing on the request path reads from Postgres yet.
 
-## Standing project constraints (apply if any code work happens)
-- Bump `APP_VERSION` in `gc_tracker_app.py` for every logical change
-- Verify with `python3 -m py_compile gc_tracker_app.py` and `node --check static/gc.js`
-- All JS lives in `static/gc.js` (CSP blocks inline scripts)
-- Git pushes must happen from Chuck's Mac terminal, never from the sandbox — `cd ~/Desktop/gc_tracker` FIRST, then `rm -f .git/index.lock`, then `git add`/`commit`/`push origin main`
-- Update `HANDOFF.md` / `HANDOFF_PROMPT.md` with changelog entries for any version bump
+## The task: Phase C — SQL Tier-1 read path, shadow-mode, diffed offline
 
-Current version: **v2.16.12** (NEW-detection anchor/sold-marking coverage-gap fix + /api/browse facet-count & sort perf). Last updated: 2026-08-31. Note: the item-not-tagged-NEW bug WAS picked up this session (v2.16.11) — fixed a real, verified root cause (scan coverage gaps silently corrupting the per-user NEW-detection anchor and falsely marking items sold). Not confirmed against Chuck's real production scan history (no live data access), and Chuck said he always scans all stores selected, so keep an eye on whether NEW-tagging complaints actually stop — if they don't, the anchor-contamination theory wasn't the whole story and needs more digging. Also did a real, measured /api/browse perf pass this session (v2.16.12, ~12% faster on the common case) — see HANDOFF.md for what was and wasn't covered (Railway resource sizing and STORE_WORKERS/PARALLEL_WORKERS concurrency are still untested). This BigQuery/data-hosting discussion is still queued and untouched.
+**This is NOT the cutover.** Phase D (a separate, later session) is where `/api/browse` actually
+starts reading from Postgres for real users. This session builds and verifies the SQL path
+without touching real traffic.
+
+Per POSTGRES_MIGRATION_PLAN.md §3, "Tier 1" is the dominant case: no want-list keywords or
+`filter_q` free-text search active — just the simple facet filters (store/brand/condition/
+category/subcategory/price range/vintage/watched/price-drop) or no filters at all. This is most
+of `/api/browse`'s traffic (Chuck's own primary use — browsing all 298 stores unfiltered — is
+this case). Tier 2 (keyword/free-text search active) is explicitly **out of scope** for Phase C
+— see §3's reasoning for why the existing `_kw_match` engine isn't being reimplemented in SQL
+this pass; that's Phase E, later, if it's even still needed after Tier 1 ships.
+
+### What to actually build, in order
+
+1. **Connection pooling** (plan §5) — not built yet. Current Postgres code (`_pg_sync_scan`,
+   `_pg_parity_check`, `_pg_full_backfill`) opens one ad-hoc `psycopg2.connect()` per call,
+   which is fine for admin-only/scan-triggered paths but not for something hit on every
+   `/api/browse` call. Add a `psycopg2.pool.ThreadedConnectionPool(minconn=2, maxconn=12)`
+   created once at module load, with a context-manager helper mirroring `_user_db()`'s
+   `with`-based pattern for SQLite. Sized for `--workers=1 --threads=8` (8 request threads + the
+   scan thread + headroom) — see §5 for the exact reasoning.
+
+2. **The Tier 1 SQL query** — translate `_apply_base()`'s simple-filter path (store/brand/
+   condition/category/subcategory/price/vintage/watched/price-drop, date-gating, sort, facet
+   counts, pagination) into `WHERE`/`ORDER BY`/`LIMIT`/`OFFSET` against the `items` table, plus
+   the facet-count aggregate queries (mirror the v2.16.12 "single pass" approach, in SQL this
+   time — one query with `FILTER (WHERE ...)` clauses, or the 4 separate `GROUP BY`s, whichever
+   profiles better). Gate this behind an admin/dev-only flag (e.g. `?pg_shadow=1`) — it must not
+   be reachable by normal users this session.
+
+3. **A/B diff harness** — a Flask `test_client()`-based script (same rigor as v2.16.12's own
+   perf-verification harness — read that HANDOFF.md entry for the pattern) that fires a
+   representative set of request shapes at both the legacy JSON path and the new Postgres path
+   against production-scale data, and diffs the JSON output field-by-field. Cover: no filters/
+   all stores; single store; multiple stores; each facet filter alone and combined; each sort
+   field/direction; multiple pages (not just page 1); the default NEW-on-top sort; watched-only;
+   price-drop-only; vintage-only; price range. **Fix any mismatch found — do not tune tolerances
+   or drop cases to make the diff pass.**
+
+4. **Verify at production scale** — the real `_cat_cache`/Postgres now both have ~436K rows
+   (not ~92K like the plan doc's original estimate — it was written before the 436K-vs-111K
+   history was fully understood). Time both paths under that actual scale, not a small sample.
+
+5. Only after the offline diff is clean: **optionally** wire up shadow-mode logging in
+   production (both paths run, only JSON's result is served, mismatches logged) for a burn-in
+   period, if you want extra confidence beyond the offline harness. This is optional and your
+   call whether to do it this session or leave it for next time — either way, the *served*
+   response must keep coming from the JSON path this session, unconditionally, for every real
+   user.
+
+### Standing rules (same as always)
+
+- Bump `APP_VERSION` in `gc_tracker_app.py` for every logical change.
+- Verify with `python3 -m py_compile gc_tracker_app.py` AND `node --check static/gc.js` — but
+  per the v2.16.16 incident (routes crashed production because `py_compile` doesn't catch
+  import-time/module-order bugs), **also actually import the module** in a disposable venv
+  (`python3 -m venv` + install the same deps as `requirements.txt` — the repo's own `.venv` is
+  tied to this Mac's Homebrew Python and isn't importable from the device-bridge sandbox) and
+  confirm the route table builds, for any change touching Flask routes. Consider going one step
+  further and booting gunicorn locally with the real `--workers=1 --worker-class=gthread`
+  config and curling the routes, like the v2.16.18/19 sessions did.
+- All JS lives in `static/gc.js` (or a new file under `static/`, following the `static/
+  admin-task.js` precedent from v2.16.19) — CSP blocks inline scripts AND inline `onclick=`/
+  event-handler attributes (`script-src 'self'`, no `'unsafe-inline'`, no nonce). Use `data-*`
+  attributes + `addEventListener`, never `onclick="..."` in generated HTML.
+- Update `HANDOFF.md` and `HANDOFF_PROMPT.md` with a changelog entry for every version bump,
+  written in enough detail that a fresh session could pick up the reasoning.
+- Git pushes happen from Chuck's Mac terminal only, never from the sandbox. Give him the exact
+  commands; do not attempt `git push` from the device bridge.
+- Test locally before proposing anything's done — the A/B diff harness above IS the test for
+  this phase; don't skip it or ship the Tier 1 path without it passing clean.
+
+## What's explicitly out of scope this session
+
+- Actually cutting `/api/browse` over to Postgres for real traffic (Phase D).
+- Tier 2 / keyword search in SQL (Phase E, and only if still needed).
+- Retiring `gc_category_cache.json` (Phase F).
+- `/newdeals`'s separate new-inventory cache — staying flat-JSON, not part of this migration
+  (see plan §0).
+- The NEW-item anchor scope bug (`bug_new_item_anchor_scope.md`) — separate, deferred thread,
+  do not touch it.
+
+Current version: **v2.16.19**. Last updated: 2026-09-02.
