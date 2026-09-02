@@ -507,6 +507,96 @@ def _pg_sync_scan(ids_this_run: set, nationwide: bool, scan_incomplete: bool,
         # would see it — this is purely a background confidence-building mirror.
         print(f"[pg] scan dual-write skipped: {type(e).__name__}: {e}")
 
+# ── Postgres full backfill (Phase A fix, v2.16.18) ────────────────────────────
+# One-time, admin-triggered corrective re-sync of the Postgres `items` table
+# from the LIVE in-process _cat_cache. Fixes Phase A's original backfill
+# (migrate_cat_cache_to_pg.py, run against a stale local gc_category_cache.json
+# snapshot from 2026-04-29) — /api/pg-parity-check confirmed on 2026-09-02 that
+# Postgres was missing 255,886 of 436,325 live SKUs, plus stale field values on
+# the ~180K rows it did have. See POSTGRES_MIGRATION_PLAN.md for the full plan.
+#
+# Deliberately full-catalog, not active-only: Chuck decided 2026-09-02 to keep
+# _cat_cache's full sold/delisted history on purpose (future price-over-time /
+# average-used-price analytics), so this backfills every sku currently in
+# _cat_cache regardless of `available`, matching what the JSON has always had.
+#
+# Upsert-only — never deletes or marks-unavailable anything already in
+# Postgres that isn't in _cat_cache. The 2026-09-02 parity check found
+# extra_in_pg was already 0, so there's nothing to clean up; if that ever
+# changes, treat it as a separate investigation, not something this backfill
+# should silently paper over.
+#
+# Reuses the exact _PG_UPSERT_SQL / _pg_row_for already used by _pg_sync_scan —
+# same upsert shape, just applied to the full cache instead of one scan's
+# ids_this_run. Runs in a background thread via the same _lock/_q pattern as
+# _validate_stores / _fill_gaps, so the ~440K-row write — measured at ~15K
+# rows/sec against a local scratch Postgres (436,240 synthetic rows in ~25-29s,
+# including 180K seeded-stale rows needing correction); real timing against
+# Railway's network/DB will vary — never blocks the request or risks a proxy
+# timeout. Commits per chunk, so an interrupted run (stop button, deploy,
+# crash) leaves whatever it finished already correct in Postgres; re-running
+# it is idempotent (verified in the scratch-Postgres test: an
+# interrupted-then-resumed run produces the same end state as one
+# uninterrupted run — see /tmp/pgtest/test_backfill.py from the session that
+# built this).
+def _pg_full_backfill():
+    """Full upsert of every _cat_cache item into Postgres. See module comment above."""
+    def send(msg): _q.put(msg)
+    total = 0
+    done = 0
+    try:
+        if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL):
+            send({"type": "progress", "msg": "Postgres not configured — aborting."})
+            return
+        _load_cat_cache()
+        skus = list(_cat_cache.keys())
+        total = len(skus)
+        send({"type": "progress", "msg": f"Starting full Postgres backfill from live _cat_cache: "
+                                          f"{total:,} items (all statuses — available and "
+                                          f"sold/delisted history both included)."})
+        CHUNK = 5000
+        conn = psycopg2.connect(PG_DATABASE_URL, connect_timeout=10)
+        conn.autocommit = False
+        t0 = time.time()
+        last_report = 0
+        try:
+            with conn.cursor() as cur:
+                for i in range(0, total, CHUNK):
+                    if _stop_event.is_set():
+                        send({"type": "progress",
+                              "msg": f"⏹ Stopped by user after {done:,}/{total:,} "
+                                     "(already-upserted rows remain correct; safe to re-run)."})
+                        break
+                    batch = skus[i:i + CHUNK]
+                    rows = [_pg_row_for(sku, _cat_cache[sku]) for sku in batch if sku in _cat_cache]
+                    if rows:
+                        psycopg2.extras.execute_values(cur, _PG_UPSERT_SQL, rows, page_size=2000)
+                        conn.commit()
+                    done += len(batch)
+                    if done - last_report >= 50000 or done == total:
+                        elapsed = time.time() - t0
+                        rate = done / elapsed if elapsed > 0 else 0
+                        send({"type": "progress",
+                              "msg": f"  upserted {done:,}/{total:,} "
+                                     f"({elapsed:.0f}s elapsed, ~{rate:,.0f} rows/sec)"})
+                        last_report = done
+        finally:
+            conn.close()
+        elapsed = time.time() - t0
+        send({"type": "progress",
+              "msg": f"\n✓ Full backfill done: {done:,} rows upserted in {elapsed:.0f}s. "
+                     f"Run /api/pg-parity-check next to confirm pg_total == json_total."})
+        send({"type": "done", "baseline": False, "stopped": _stop_event.is_set(),
+              "new_ids": [], "items": []})
+    except Exception as e:
+        # Don't leak exception text over the (public) SSE stream — log it server-side.
+        # (same posture as _validate_stores / 2026-07 audit L3)
+        print(f"[pg] full backfill failed after {done:,}/{total:,}: {type(e).__name__}: {e}")
+        send({"type": "done", "error": "Backfill failed — see server logs.",
+              "new_ids": [], "items": []})
+    finally:
+        _lock.release()
+
 # ── Postgres parity check (Phase B verification, v2.16.16) ───────────────────
 # Admin-only, on-demand, read-only diagnostic: compares the live in-memory
 # _cat_cache (the JSON path's source of truth) against the live Postgres
@@ -2547,6 +2637,7 @@ _ADMIN_NAV_LINKS = [
     ("/admin/listing-patterns", "📊 Listing Patterns"),
     ("/admin/build-coords",     "🗺 Build Coords"),
     ("/admin/validate-stores",  "✓ Validate Stores"),
+    ("/admin/pg-backfill",      "🗄 PG Backfill"),
 ]
 
 def _admin_nav(current: str) -> str:
@@ -2745,6 +2836,27 @@ def admin_validate_stores():
                     "renames any whose slugs changed, then rebuilds the store list from GC live data. "
                     "Takes ~0.5s per store.",
         nav_current="/admin/validate-stores",
+    )
+    return Response(html, content_type="text/html")
+
+
+@app.route("/admin/pg-backfill")
+def admin_pg_backfill():
+    """Admin page to run the one-time full Postgres catalog backfill from the
+    live _cat_cache. Corrective fix for Phase A's stale-file backfill — see
+    POSTGRES_MIGRATION_PLAN.md. Upsert-only and idempotent, safe to re-run."""
+    denied = _require_admin()
+    if denied:
+        return denied
+    html = _admin_task_page(
+        title="Postgres Full Backfill",
+        api_path="/api/pg-full-backfill",
+        description="Upserts EVERY item currently in the live _cat_cache (available items "
+                    "plus sold/delisted history — both intentionally kept) into the Postgres "
+                    "items table, correcting the incomplete Phase A backfill. Upsert-only, "
+                    "never deletes. Takes a few minutes at full catalog scale (~440K items). "
+                    "Run /api/pg-parity-check afterward to confirm pg_total == json_total.",
+        nav_current="/admin/pg-backfill",
     )
     return Response(html, content_type="text/html")
 
@@ -5157,6 +5269,24 @@ def api_pg_parity_check():
     except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 502
 
+@app.route("/api/pg-full-backfill", methods=["POST"])
+@optional_user_context
+def api_pg_full_backfill():
+    denied = _require_admin_api()
+    if denied:
+        return denied
+    if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL):
+        return jsonify({"error": "Postgres not configured"}), 503
+    if not _lock.acquire(blocking=False):
+        return jsonify({"error": "A run is already in progress."}), 409
+    _stop_event.clear()
+    while not _q.empty():
+        try: _q.get_nowait()
+        except queue.Empty: break
+    t = threading.Thread(target=_pg_full_backfill, daemon=True)
+    t.start()
+    return jsonify({"status": "started"})
+
 @app.route("/api/validate-stores", methods=["POST"])
 @optional_user_context
 def api_validate_stores():
@@ -6606,7 +6736,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.17"
+APP_VERSION = "2.16.18"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

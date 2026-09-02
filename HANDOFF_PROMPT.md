@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-02 · Version: v2.16.17 (fixes v2.16.16, which crashed production for ~8 min) · Live at: gcgeartracker.com — rolled back to v2.16.15 during the incident, dual-write still live in production since 2026-08-31*
+*Generated: 2026-09-02 · Version: v2.16.18 (Postgres full backfill from live _cat_cache — corrective fix for Phase A's stale-file backfill, not yet pushed) · Live at: gcgeartracker.com — v2.16.17 deployed clean, dual-write live since 2026-08-31*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -87,6 +87,51 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 - **Footer**: `.seo-footer` — visible "Privacy Policy · Not affiliated with Guitar Center, Inc." in `#555` gray. No hidden text.
 
 ---
+
+## Current State: v2.16.18 — Postgres full backfill from live _cat_cache (2026-09-02, not yet pushed)
+
+**Why**: `/api/pg-parity-check` was finally run against real production on 2026-09-02 (first
+real run since it shipped in v2.16.16/17) and found Phase A's original backfill badly
+incomplete: `pg_total: 180,439` vs `json_total: 436,325` — missing 255,886 SKUs (59%!), plus
+10,769 stale field mismatches. Root cause: Phase A's backfill script
+(`migrate_cat_cache_to_pg.py`) was run once by Chuck against
+`~/Desktop/gc_tracker/gc_category_cache.json` on his own Mac, which turned out to be a stale
+single-baseline snapshot from **2026-04-29** — not a live export of Railway's production
+`_cat_cache`. `extra_in_pg` was 0 (nothing bogus, just incomplete), so a corrective upsert-only
+re-sync needed no cleanup pass.
+
+Also confirmed in this investigation, in case it comes up again: the `436,325` (JSON total) vs.
+the site's `~111,339` active-item count is **not** a new-inventory leak — `fetch_page()` is
+hardcoded to Used-only facets. `_cat_cache` just never deletes sold/delisted items, only flips
+`available: False`, so `json_total` is the full historical catalog. Chuck decided 2026-09-02 to
+keep that full history on purpose (future price-over-time / average-used-price feature idea),
+so the Postgres backfill target is the full ~436K+ catalog, not the ~111K active-only count.
+
+**What shipped**: `_pg_full_backfill()` — admin-triggered, one-time, upserts every sku in the
+LIVE in-process `_cat_cache` (all statuses) into Postgres, reusing the exact `_PG_UPSERT_SQL` /
+`_pg_row_for` already used by `_pg_sync_scan()` — no new upsert logic, no local file involved
+(eliminates the staleness risk that caused this incident). Upsert-only, chunked (5,000/batch,
+committed per chunk — safely resumable if interrupted). Wired the same way as
+`_validate_stores`/`_fill_gaps`: `POST /api/pg-full-backfill` (admin-gated, background thread,
+`_lock`/`_q` pattern) + a matching `/admin/pg-backfill` page (reuses the existing
+`_admin_task_page()` template) + nav link.
+
+**Verification**: scale-tested first in a scratch Postgres (already-installed Postgres 16 in
+the Cowork cloud sandbox, not the device bridge — 436,240 synthetic items, seeded with 180K
+deliberately-stale rows + 500 rows not in the JSON at all). Result: 436,240 rows upserted in
+29.1s (~15K rows/sec), zero field mismatches after, extras left untouched (confirms
+upsert-only), and a separate interrupted-then-resumed run produced an identical end state
+(confirms idempotency/resumability). Then, per the v2.16.16 lesson below, actually imported the
+module in a disposable venv, confirmed the route table builds with both new routes present, AND
+booted gunicorn locally with Railway's actual `--workers=1 --worker-class=gthread` config and
+curled the real routes (200/302/401 as expected) — one step further than v2.16.17's import-only
+check. `python3 -m py_compile` + `node --check` also both pass.
+
+**Not run against real production yet** — that's the immediate next step once this deploys: log
+in as admin, visit `/admin/pg-backfill`, click Run, then re-hit `/api/pg-parity-check` and
+confirm `pg_total == json_total` (~436K+) with `missing_in_pg: 0` and `extra_in_pg: 0`. Do NOT
+start Phase C (SQL Tier-1 read path) until that comes back clean. Full writeup in HANDOFF.md's
+v2.16.18 entry.
 
 ## Current State: v2.16.17 — fixes v2.16.16, which crashed production (2026-09-02, not yet pushed)
 

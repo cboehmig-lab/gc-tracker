@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-02 · Current version: v2.16.17 (fixes v2.16.16, which crashed production — see incident note below) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-02 · Current version: v2.16.18 (Postgres full backfill from live _cat_cache — corrective fix for Phase A's stale-file backfill) · Domain: gcgeartracker.com*
 
 ---
 
@@ -53,6 +53,100 @@ returns 401 before ever touching Postgres.
 
 **Files changed**: `gc_tracker_app.py` only (moved one function; no logic changes).
 `APP_VERSION = "2.16.17"`.
+
+---
+
+## ⭐ Recent Changes (v2.16.17 → v2.16.18) — 2026-09-02 (Postgres full backfill: corrective fix for Phase A)
+
+**Context**: `/api/pg-parity-check` (v2.16.16/17, above) was finally run for real against
+production on 2026-09-02 and found Phase A's original backfill (`migrate_cat_cache_to_pg.py`,
+run once by Chuck from his own Mac terminal) badly incomplete: `json_total: 436,325`,
+`pg_total: 180,439`, `missing_in_pg: 255,886` (59%!), plus 10,769 field mismatches, every one
+showing Postgres holding a *higher/older* price than the live JSON. Root cause: that backfill
+read `~/Desktop/gc_tracker/gc_category_cache.json` on Chuck's Mac, which turned out to be a
+stale single-baseline-scan snapshot from **2026-04-29** (91,686 items, all identical
+`first_seen`) — not a live export of Railway's production `_cat_cache`. The backfill's own
+"exact match" verification (91,686 in, 91,686 out) was real but meaningless for production
+accuracy: it only proved the script faithfully copied that stale file, never that the file
+reflected live state. `extra_in_pg` was 0 — nothing bogus in Postgres, just badly incomplete —
+so a corrective upsert-only re-sync needed no cleanup pass first.
+
+Also resolved in this investigation: the `436,325` (JSON total) vs. the site's displayed
+`~111,339` active-item count is **not** a new-inventory leak. `fetch_page()` (the only function
+that populates `_cat_cache`) hardcodes `facet_filters = ["categoryPageIds:Used",
+"condition.lvl0:Used"]` — the separate `_fetch_new_page()` / `_new_deals_cache` used by
+`/newdeals` is architecturally isolated and never touches `_cat_cache`. The real explanation:
+`_cat_cache` never deletes anything — sold/delisted items are flipped to `available: False` and
+kept forever, so `json_total` is *every SKU ever seen since launch*, and the active count is
+`sum(1 for v in _cat_cache.values() if v.get("available", True))` (same calc the site's own
+`total_items` stat already uses). Chuck confirmed 2026-09-02 he wants this full history kept on
+purpose — a future price-over-time / average-used-price feature — so the Postgres backfill
+target is deliberately the full ~436K+ catalog, not the ~111K active-only count.
+
+**What shipped**: `_pg_full_backfill()` — a one-time, admin-triggered corrective re-sync of the
+Postgres `items` table from the **live in-process `_cat_cache`** (no local file, no staleness
+risk — same "runs inside the deployed app" architecture as `_pg_parity_check()`). Upserts every
+sku currently in `_cat_cache` regardless of `available` (full history, per Chuck's decision
+above), in chunks of 5,000, using the exact same `_PG_UPSERT_SQL` / `_pg_row_for` already used by
+`_pg_sync_scan()` — this is not new upsert logic, just the existing shape applied to the full
+cache instead of one scan's `ids_this_run`. Upsert-only: never deletes or marks-unavailable
+anything already in Postgres that isn't in `_cat_cache` (parity check found `extra_in_pg: 0`, so
+there's nothing to clean up). Commits per chunk, so an interrupted run (stop button, deploy,
+crash) leaves whatever finished already correct — safe to just re-run, no cleanup needed.
+
+Wired up the same way as `_validate_stores` / `_fill_gaps` / `_build_store_coords`: `POST
+/api/pg-full-backfill` (guarded by `_require_admin_api()`, same `_lock`/`_stop_event`/`_q`
+pattern — returns `{"status": "started"}` immediately and runs in a background thread) plus a
+matching admin page at `/admin/pg-backfill` (reuses the existing `_admin_task_page()` shared
+template — Run button, live SSE log via `/api/progress`, same look as Build Coords / Validate
+Stores) and a nav-bar link. Error messages sent over the SSE stream never include exception
+text — `/api/progress` has no auth, same posture `_validate_stores` already uses (2026-07 audit
+L3) — exceptions are logged server-side only (`print(...)`).
+
+**Verification — scale-tested in a scratch Postgres before touching `gc_tracker_app.py`**:
+Postgres 16 was already installed in the Cowork cloud sandbox (`apt`-installed, not Docker),
+started via `service postgresql start`. Generated 436,240 synthetic items (~436K, matching
+production scale) shaped like `_cat_cache`. Two tests:
+1. **Seeded-discrepancy + timing test** (mirrors the rigor used for `/api/pg-parity-check`):
+   pre-seeded Postgres with 180,000 deliberately-stale rows (wrong price, flipped `available`,
+   stale `date_listed` — simulating today's broken Phase A state) plus 500 "extra" rows not in
+   the JSON at all (simulating `extra_in_pg`). Ran the full chunked backfill: **436,240 rows
+   upserted in 29.1s (~15,000 rows/sec)**. Verified after: `pg_total` == `json_total` + the 500
+   untouched extras exactly; **zero** field mismatches across all 436,240 synced rows (all
+   180,000 seeded-stale rows corrected); the 500 extras were left byte-for-byte untouched
+   (upsert-only, confirmed no delete logic ran).
+2. **Interrupted-then-resumed test**: ran the backfill loop but stopped after 40% (175,000
+   rows, simulating a killed process / deploy mid-run), then ran a fresh full backfill again —
+   final state was identical (436,240/436,240, correct) to an uninterrupted run, confirming the
+   per-chunk-commit approach is safely resumable/idempotent.
+
+(Test scripts, not part of the shipped diff: `/tmp/pgtest/gen_data.py`, `test_backfill.py` —
+scratch-Postgres-only, from the cloud sandbox side of this session, not the device bridge; not
+committed to the repo.)
+
+**Also re-verified per the v2.16.16 incident lesson** (see incident note above — `py_compile`
+alone missed that crash): actually imported the module in a disposable venv (`python3 -m venv`
++ pip install the same deps as `requirements.txt`, since the repo's own `.venv` is tied to this
+Mac's Homebrew Python paths and isn't importable from the Cowork device-bridge sandbox),
+confirmed the route table builds cleanly with both new routes present
+(`/api/pg-full-backfill`, `/admin/pg-backfill`), then went one step further and actually booted
+gunicorn locally with the same `--workers=1 --worker-class=gthread` config Railway uses and
+curled the real routes: `GET /` → 200, `GET /admin/pg-backfill` → 302 (correct — not logged in,
+redirects to `/`), `POST /api/pg-full-backfill` → 401 (correct — not admin).
+
+**Not done yet, deliberately left to Chuck**: triggering the backfill against real production
+Postgres. Next steps once this deploys: log in to `/admin/pg-backfill` as admin, click Run,
+watch it complete (should take roughly 30s-a few minutes depending on Railway's network/DB
+latency vs. the ~29s measured locally), then hit `/api/pg-parity-check` again and confirm
+`pg_total == json_total` (~436K+) with `missing_in_pg: 0` and `extra_in_pg: 0` before ever
+considering Phase C (SQL Tier-1 read path).
+
+**Files changed**: `gc_tracker_app.py` only — added `_pg_full_backfill()` (module-level
+function, placed right after `_pg_sync_scan()`), `/api/pg-full-backfill` route (next to
+`/api/pg-parity-check`), `/admin/pg-backfill` route (next to `/admin/validate-stores`, using
+the existing `_admin_task_page()` template), and one `_ADMIN_NAV_LINKS` entry. No changes to
+`_pg_sync_scan()`, `_PG_UPSERT_SQL`, `_pg_row_for()`, `_pg_parity_check()`, or `pg_schema.sql`
+— all reused as-is. `APP_VERSION = "2.16.18"`.
 
 ---
 
