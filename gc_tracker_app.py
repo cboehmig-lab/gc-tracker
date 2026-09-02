@@ -507,6 +507,77 @@ def _pg_sync_scan(ids_this_run: set, nationwide: bool, scan_incomplete: bool,
         # would see it — this is purely a background confidence-building mirror.
         print(f"[pg] scan dual-write skipped: {type(e).__name__}: {e}")
 
+# ── Postgres parity check (Phase B verification, v2.16.16) ───────────────────
+# Admin-only, on-demand, read-only diagnostic: compares the live in-memory
+# _cat_cache (the JSON path's source of truth) against the live Postgres
+# `items` table, to check whether Phase B's dual-write has actually kept them
+# in sync across real production scans. Not on any user-facing path and
+# doesn't touch either data source — pure comparison. See
+# POSTGRES_MIGRATION_PLAN.md Phase C and NEXT_SESSION_PROMPT.md.
+#
+# Verified against a scratch Postgres before shipping: seeded deliberate
+# price/available/date_listed drift plus missing/extra rows on each side and
+# confirmed the diff catches exactly those and nothing else (a $0.01 price
+# rounding difference is intentionally NOT flagged); also timed at
+# production scale (~92K rows, synthetic) at well under 1s.
+def _pg_parity_check() -> dict:
+    _load_cat_cache()
+    conn = psycopg2.connect(PG_DATABASE_URL, connect_timeout=10)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT sku, available, price, date_listed, store FROM items")
+            pg_rows = {
+                r[0]: {"available": r[1], "price": float(r[2]) if r[2] is not None else None,
+                       "date_listed": r[3], "store": r[4]}
+                for r in cur.fetchall()
+            }
+    finally:
+        conn.close()
+
+    json_skus = set(_cat_cache.keys())
+    pg_skus   = set(pg_rows.keys())
+    missing_in_pg = json_skus - pg_skus   # in JSON, never made it to Postgres
+    extra_in_pg   = pg_skus - json_skus   # in Postgres, not in JSON (shouldn't happen)
+
+    mismatches = []
+    for sku in json_skus & pg_skus:
+        j, p = _cat_cache[sku], pg_rows[sku]
+        diffs = {}
+        if bool(j.get("available", True)) != bool(p["available"]):
+            diffs["available"] = [j.get("available"), p["available"]]
+        jp = j.get("price")
+        if jp is not None and p["price"] is not None and abs(float(jp) - p["price"]) > 0.01:
+            diffs["price"] = [jp, p["price"]]
+        if (j.get("date_listed") or "") != (p["date_listed"] or ""):
+            diffs["date_listed"] = [j.get("date_listed"), p["date_listed"]]
+        if diffs:
+            mismatches.append({"sku": sku, "diffs": diffs})
+
+    return {
+        "json_total":             len(json_skus),
+        "pg_total":                len(pg_skus),
+        "missing_in_pg":           len(missing_in_pg),
+        "missing_in_pg_sample":    sorted(missing_in_pg)[:20],
+        "extra_in_pg":             len(extra_in_pg),
+        "extra_in_pg_sample":      sorted(extra_in_pg)[:20],
+        "field_mismatches":        len(mismatches),
+        "field_mismatches_sample": mismatches[:20],
+        "checked_at":              datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+@app.route("/api/pg-parity-check")
+@optional_user_context
+def api_pg_parity_check():
+    denied = _require_admin_api()
+    if denied:
+        return denied
+    if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL):
+        return jsonify({"error": "Postgres not configured"}), 503
+    try:
+        return jsonify(_pg_parity_check())
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 502
+
 # ── Memoized /api/browse base item list (E2, v2.16.4) ────────────────────────
 # /api/browse used to rebuild this ~92K-item lightweight-dict list from scratch
 # on EVERY call — price/date formatting + name/brand lowercasing for every item
@@ -6535,7 +6606,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.15"
+APP_VERSION = "2.16.16"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

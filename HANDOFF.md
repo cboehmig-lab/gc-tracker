@@ -1,11 +1,57 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-08-31 · Current version: v2.16.15 (Postgres migration Phase B: scan dual-write, no read-path change) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-02 · Current version: v2.16.16 (Postgres Phase B verification: admin parity-check endpoint) · Domain: gcgeartracker.com*
 
 ---
 
 ## ⚠️ Railway gotcha: Custom Start Command overrides `Procfile`
 
 When v2.16.10 first deployed, the logs still showed Werkzeug's dev-server warning ("This is a development server...") even though `Procfile` had already been updated to run gunicorn. Cause: Railway's service **Settings → Deploy → Custom Start Command** field, if set, takes priority over `Procfile` unconditionally — Railway doesn't warn you the two are out of sync, it just silently ignores `Procfile`. That field was hardcoded to `python gc_tracker_app.py` (presumably set once, early in the project, before `Procfile` existed or was trusted). Fixed by updating that field directly in the dashboard to match `Procfile`'s gunicorn command. **If you ever change the start command in `Procfile` again, also check/update this dashboard field — they do not sync automatically, and the dashboard field wins.**
+
+---
+
+## ⭐ Recent Changes (v2.16.15 → v2.16.16) — 2026-09-02 (Postgres Phase B verification: admin parity-check endpoint)
+
+**Context**: Phase B (scan dual-write) has been live in production for ~2 days (deployed
+2026-08-31, `DATABASE_URL` actually flipped on that same day — see the v2.16.15 entry's
+"flip it on" follow-up). Chuck asked to check parity between the JSON cache and Postgres
+before going further with the migration. `_pg_sync_scan()` wraps everything in a bare
+`except Exception` that only logs — a silent failure there (bad row, transient connection
+drop, etc.) would leave Postgres quietly drifted from the JSON source of truth with no
+visible symptom, so this needed an actual check, not an assumption.
+
+**What shipped**: a new admin-only, read-only, on-demand diagnostic — `GET
+/api/pg-parity-check` (guarded by the existing `_require_admin_api()`, same pattern as
+`/api/validate-stores`). It runs entirely inside the live app process: reads the live
+in-memory `_cat_cache` (after `_load_cat_cache()`, so it reflects the current file), does
+one `SELECT` against the live Postgres `items` table over the already-working internal
+`DATABASE_URL`, and diffs them — SKUs present in one but not the other, plus
+`available`/`price`/`date_listed` mismatches for SKUs present in both (price compared with
+a 1-cent tolerance so NUMERIC(10,2) rounding never false-positives). Returns counts plus a
+sample of up to 20 of each discrepancy type, and a `checked_at` timestamp.
+
+Deliberately did NOT require pulling the 53MB JSON file off Railway's volume or exposing
+Postgres via Public Access again — the endpoint runs where both data sources already are
+(the live app), same principle as keeping the backfill script's DDL in one shared file
+(`pg_schema.sql`) rather than duplicating logic across environments.
+
+**Verified before shipping** (scratch Postgres, cloud sandbox, torn down after use):
+- Seeded a fake `_cat_cache` and a Postgres `items` table with deliberately planted
+  discrepancies — a price drift, an `available` drift, a `date_listed` drift, one SKU
+  missing from Postgres, one extra SKU only in Postgres, and one SKU with only a
+  sub-penny rounding difference. Confirmed the diff logic caught exactly the five real
+  discrepancies and correctly ignored the rounding-only case.
+- Timed the full comparison at production scale (91,686 synthetic rows, one deliberate
+  mismatch planted): ~1 second end-to-end, safely inside a normal request timeout as a
+  synchronous endpoint — no background job needed.
+- `py_compile` and `node --check` both clean (no JS changes — server-side only).
+
+**Not yet run against real production data this session** — this ships the tool; running
+it against Chuck's actual live Railway Postgres/JSON (via `GET
+/api/pg-parity-check` while logged in as the admin account, or `curl` with the admin
+session cookie) is the next step once this deploys, to answer the actual question ("did
+2 days of dual-write stay in sync?") with real numbers.
+
+**Files changed**: `gc_tracker_app.py` only. `APP_VERSION = "2.16.16"`.
 
 ---
 

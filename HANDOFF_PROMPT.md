@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-08-31 · Version: v2.16.15 (Postgres migration Phase B: scan dual-write, no read-path change; not yet pushed) · Live at: gcgeartracker.com — v2.16.13 pushed and confirmed running gunicorn*
+*Generated: 2026-09-02 · Version: v2.16.16 (Postgres Phase B verification: admin parity-check endpoint) · Live at: gcgeartracker.com — v2.16.15 pushed, deployed, dual-write live in production since 2026-08-31*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,16 +88,31 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.15 — Postgres migration Phase B: scan dual-write (2026-08-31, not yet pushed)
+## Current State: v2.16.16 — Postgres Phase B verification: admin parity-check endpoint (2026-09-02, not yet pushed)
+
+New admin-only `GET /api/pg-parity-check` (guarded by `_require_admin_api()`) compares the
+live in-memory `_cat_cache` against the live Postgres `items` table over the already-working
+internal `DATABASE_URL` — SKUs missing on either side, plus `available`/`price`/`date_listed`
+mismatches for SKUs on both. Runs inside the app process, no file transfer or Public Access
+needed. Verified against a scratch Postgres with deliberately planted discrepancies before
+shipping, and timed at production scale (~1s for ~92K rows). Purpose: answer whether ~2 days
+of live Phase B dual-write actually kept Postgres in sync — **not yet run against real
+production data this session**; that's the immediate next step once this deploys (hit the
+endpoint while logged in as the admin account). Do not start Phase C (SQL Tier-1 read path)
+until that comes back clean.
+
+## Current State: v2.16.15 — Postgres migration Phase B: scan dual-write (2026-08-31, PUSHED + DEPLOYED + LIVE)
 
 **Postgres migration in progress** — see `POSTGRES_MIGRATION_PLAN.md` for the full 6-phase plan.
 Phase A is done and VERIFIED against real data (Chuck ran the backfill: 91,686 items, exact
-match). Phase B (this version) makes `_run()` mirror every scan into Postgres in a background
-thread — additive only, no read path touches Postgres yet. Still silently a no-op in production
-until `DATABASE_URL` is actually deployed to `web` (it's referenced but pending — deploying it
-restarts `web` once; that hasn't happened yet, waiting on Chuck's timing preference). Do not
-build Phase C (the diff harness) or touch any read path until dual-write has been running against
-real production scans for the period Chuck decides on.
+match). Phase B makes `_run()` mirror every scan into Postgres in a background thread —
+additive only, no read path touches Postgres yet. `DATABASE_URL` was deployed to `web` on
+2026-08-31 (see HANDOFF.md's v2.16.15 entry for the gotcha hit along the way: a pending
+Railway dashboard variable change was silently discarded by an intervening GitHub-triggered
+deploy — had to be re-added and actually clicked "Deploy" the second time). Dual-write has
+been running against real production scans since. v2.16.16 (above/below) is the first parity
+check of that — do not build Phase C (the SQL Tier-1 read path) until the parity-check results
+come back clean.
 
 ## Current State: v2.16.14 — Postgres migration Phase A: schema + backfill script (2026-08-31, not yet pushed)
 
@@ -111,6 +126,14 @@ real production scans for the period Chuck decides on.
 
 ### Recent changes (this session)
 
+- **v2.16.16** — **Postgres Phase B verification: admin parity-check endpoint.** New
+  `GET /api/pg-parity-check` (admin-only) diffs the live `_cat_cache` against the live
+  Postgres `items` table on demand — missing-on-either-side SKUs plus
+  available/price/date_listed mismatches (price compared with a 1-cent tolerance).
+  Verified against a scratch Postgres with planted discrepancies (caught exactly the
+  planted ones, ignored a sub-penny rounding case) and timed at production scale
+  (~92K rows, ~1s). Not yet run against real production data — that's next.
+  `py_compile`/`node --check` clean, no JS touched.
 - **v2.16.15** — **Postgres migration Phase B: scan dual-write.** `_run()` now mirrors every
   scan's results into Postgres in a fire-and-forget background thread (started right after
   `_save_cat_cache()`, never blocks the scan's "done" message) — bulk upsert of every SKU this
