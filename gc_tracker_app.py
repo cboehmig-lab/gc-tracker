@@ -4153,14 +4153,16 @@ def _algolia_health_probe(now: float):
     return jsonify(result)
 
 
-# ── Postgres Tier 1 read path (Phase C, v2.16.20) ─────────────────────────────
+# ── Postgres Tier 1 read path (Phase C shadow / Phase D cutover) ──────────────
 # Pure-SQL equivalent of api_browse()'s _apply_base()/facet-count/sort/paginate
 # logic, for the dominant "no want-list keywords, no filter_q free text" case
-# (POSTGRES_MIGRATION_PLAN.md §3, Tier 1). Shadow-mode only this session — see
-# the ?pg_shadow=1/_is_admin() gate at the top of api_browse(); nothing here
-# is reachable by a normal user yet. Tier 2 (keyword/free-text search active)
-# is explicitly out of scope — _pg_tier1_eligible() returns False for it and
-# api_browse() falls through to the existing unmodified Python path.
+# (POSTGRES_MIGRATION_PLAN.md §3, Tier 1). Shipped shadow-mode-only (admin +
+# ?pg_shadow=1) in Phase C (v2.16.20/21); cut over to serve every real user in
+# Phase D (v2.16.22) — see the gate in api_browse(), which no longer checks
+# _is_admin()/the flag before calling this. Tier 2 (keyword/free-text search
+# active) is still explicitly out of scope — _pg_tier1_eligible() returns
+# False for it and api_browse() falls through to the existing unmodified
+# Python path.
 #
 # sort_field is user-controlled (the request body), so every column reference
 # below comes from a fixed whitelist (_PG_SORT_MAP / the "condition" special
@@ -4518,12 +4520,15 @@ def api_browse():
     # for the legacy JSON path, it's just an earlier data.get() call)
     user_sorted = bool(data.get("user_sorted"))
 
-    # ── Postgres Tier 1 shadow read path (Phase C, v2.16.20) ───────────────
-    # Admin/dev-only, gated behind ?pg_shadow=1 — never reachable by normal
-    # users this session. See POSTGRES_MIGRATION_PLAN.md §3/§7 Phase C and
-    # NEXT_SESSION_PROMPT.md. Eligibility (no want-list keywords, no filter_q
-    # free text, a whitelisted sort_field) is re-checked below once fq/_has_kw
-    # are known — this early flag only decides whether it's even worth trying.
+    # ── Postgres Tier 1 read path (Phase D cutover, v2.16.22) ───────────────
+    # As of Phase D this is no longer admin/flag-gated — every eligible
+    # request (no want-list keywords, no filter_q free text, a whitelisted
+    # sort_field — see _pg_tier1_eligible below) is served from Postgres,
+    # for every caller. ?pg_shadow=1 survives only as a debugging aid: it no
+    # longer decides whether Postgres runs, it just asks for the
+    # `_pg_shadow`/`_pg_shadow_ms` diagnostic fields to be added to an
+    # admin's own response (see the gate further down). See
+    # POSTGRES_MIGRATION_PLAN.md §3/§7 Phase D.
     _pg_shadow_requested = request.args.get("pg_shadow") == "1"
 
     _load_cat_cache()
@@ -4704,16 +4709,21 @@ def api_browse():
         return jsonify({"items": [], "no_store_data": True,
                         "message": "Run 'Check for New Items' once to populate store data."})
 
-    # ── Postgres Tier 1 shadow read path, continued (Phase C, v2.16.20) ────
-    # Only reachable with ?pg_shadow=1 AND an admin session AND the request
-    # actually qualifies as Tier 1 (no want-list keywords, no filter_q free
-    # text, a whitelisted sort_field — see _pg_tier1_eligible). Every real
-    # user, and every admin request without the flag, falls straight through
-    # to the unchanged legacy JSON path below — this branch never affects
-    # what gets served to normal traffic this session (Phase D is the real
-    # cutover, not this one).
-    if (_pg_shadow_requested and _is_admin() and _PG_POOL is not None
-            and _pg_tier1_eligible(fq, _has_kw, sort_field)):
+    # ── Postgres Tier 1 read path — THE CUTOVER (Phase D, v2.16.22) ────────
+    # Every request that qualifies as Tier 1 (no want-list keywords, no
+    # filter_q free text, a whitelisted sort_field — see _pg_tier1_eligible)
+    # is now served from Postgres, for every caller — admin or not, flag or
+    # not. Tier 2 (keyword/filter_q requests) is unaffected: it still falls
+    # straight through to the unmodified legacy JSON path below, exactly as
+    # in Phase C.
+    #
+    # The try/except fallback below is the rollback lever (plan §7 Phase D):
+    # JSON dual-write never stopped, so any Postgres/SQL error — a bad query,
+    # a connection blip, the pool exhausted — degrades that one request to
+    # the legacy path automatically rather than failing it. Reverting the
+    # whole cutover, if ever needed, is putting `_is_admin()` back in front
+    # of this condition, not a data-recovery operation.
+    if _PG_POOL is not None and _pg_tier1_eligible(fq, _has_kw, sort_field):
         try:
             _pg_t0 = time.time()
             _pg_result = _pg_tier1_browse(
@@ -4726,14 +4736,20 @@ def api_browse():
                 sort_field=sort_field, sort_dir=sort_dir, user_sorted=user_sorted,
                 new_ids=new_ids, fav_stores=fav_stores, page=page, per_page=per_page,
             )
-            _pg_result["_pg_shadow"] = True
-            _pg_result["_pg_shadow_ms"] = round((time.time() - _pg_t0) * 1000, 1)
+            # ?pg_shadow=1 no longer gates whether this branch runs at all
+            # (see the comment at _pg_shadow_requested's assignment above) —
+            # it only controls whether the diagnostic timing fields get
+            # attached, and only for an admin's own request, so a real user
+            # passing the flag can't pull internal timing into their response.
+            if _pg_shadow_requested and _is_admin():
+                _pg_result["_pg_shadow"] = True
+                _pg_result["_pg_shadow_ms"] = round((time.time() - _pg_t0) * 1000, 1)
             return jsonify(_pg_result)
         except Exception as e:
-            # Never let a Postgres/SQL bug affect a real response — this whole
-            # branch is diagnostic. Log and fall through to the legacy path
-            # below exactly as if pg_shadow had never been passed.
-            print(f"[pg] tier1 shadow browse failed, falling back to JSON path: "
+            # Never let a Postgres/SQL bug affect a real response — every
+            # caller falls back to the legacy path below exactly as if
+            # Postgres had never been attempted.
+            print(f"[pg] tier1 browse failed, falling back to JSON path: "
                   f"{type(e).__name__}: {e}")
 
     # ── Build full item list for selected stores (lightweight dicts) ──────
@@ -7150,7 +7166,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.21"
+APP_VERSION = "2.16.22"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

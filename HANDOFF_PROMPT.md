@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-02 · Version: v2.16.21 (fixes a real store_count mismatch in the Postgres Tier 1 shadow path, found via live ?pg_shadow=1 spot-check) · Live at: gcgeartracker.com — v2.16.20 deployed, ?pg_shadow=1 admin-only diagnostic live*
+*Generated: 2026-09-02 · Version: v2.16.22 (Postgres migration Phase D — THE CUTOVER, not yet pushed) · Live at: gcgeartracker.com — v2.16.21 deployed (store_count fix); v2.16.22 (the real cutover) awaiting Chuck's push*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -87,6 +87,34 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 - **Footer**: `.seo-footer` — visible "Privacy Policy · Not affiliated with Guitar Center, Inc." in `#555` gray. No hidden text.
 
 ---
+
+## Current State: v2.16.22 — Postgres migration Phase D: THE CUTOVER — `/api/browse` now serves every real user from Postgres (2026-09-02)
+
+**Real users now get the Postgres Tier 1 read path**, not just admins with `?pg_shadow=1`. Only
+the gate in `api_browse()` changed — dropped `_pg_shadow_requested and _is_admin()` from the
+routing condition, leaving `_PG_POOL is not None and _pg_tier1_eligible(...)`. `?pg_shadow=1`
+still works, but only to attach `_pg_shadow`/`_pg_shadow_ms` diagnostic fields to an *admin's*
+response — it no longer controls whether Postgres runs. Tier 2 (keyword/`filter_q`) is completely
+untouched — still legacy JSON, unconditionally. The `try/except` fallback around
+`_pg_tier1_browse()` is unchanged and is now the rollback lever for real traffic: any SQL error
+degrades that one request to the JSON path automatically (confirmed with a forced-exception test,
+not just by reading the code).
+
+**Verified thoroughly, both live and offline**: 16/16 live spot-check shapes against real
+production came back byte-identical (facets alone/combined, watched-only, price-drop-only,
+vintage-only, price range, every sort field, page 2/3, fully-combined) — a live-tooling outage
+partway through meant the offline harness got built out first as insurance, then the live pass
+finished once tooling recovered. Offline: a FRESH 53K-row synthetic dataset with 2,000
+deliberately sparse/malformed rows (empty store/brand/category/subcategory/condition, zero price,
+empty date — the direct lesson from v2.16.21's real production bug) ran through a 39-case A/B
+diff harness comparing the cutover path against the legacy path (via `_PG_POOL` monkeypatched to
+`None`) — 39/39 passed. Real gunicorn boot + curl confirmed a real user gets Postgres-backed
+data with no diagnostic keys leaking. See HANDOFF.md's v2.16.22 entry for the full writeup.
+
+**Next up**: deploy (see `NEXT_SESSION_PROMPT.md` for the exact commands), then the post-deploy
+step the plan itself calls for — a few more live spot-checks as an actual (non-flagged) request
+and watching Railway's logs for `[pg]` error lines for a few minutes. Rollback, if ever needed, is
+putting `_is_admin()` back in front of the routing condition — JSON dual-write never stopped.
 
 ## Current State: v2.16.21 — fixed a real `store_count` mismatch in the Postgres Tier 1 shadow path (2026-09-02)
 

@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-02 · Current version: v2.16.21 (fixes a real store_count mismatch in the Postgres Tier 1 shadow path, found by spot-checking ?pg_shadow=1 against live production) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-02 · Current version: v2.16.22 (Postgres Phase D — THE CUTOVER: /api/browse now serves every real user from Postgres, not just admins with ?pg_shadow=1; 16/16 live spot-checks + 39/39 offline diff cases pass) · Domain: gcgeartracker.com*
 
 ---
 
@@ -53,6 +53,125 @@ returns 401 before ever touching Postgres.
 
 **Files changed**: `gc_tracker_app.py` only (moved one function; no logic changes).
 `APP_VERSION = "2.16.17"`.
+
+---
+
+## ⭐ Recent Changes (v2.16.21 → v2.16.22) — 2026-09-02 (Postgres migration Phase D: THE CUTOVER — `/api/browse` now serves every real user from Postgres, not just admins with `?pg_shadow=1`)
+
+**This is the real cutover**, per POSTGRES_MIGRATION_PLAN.md §7 Phase D. Every Tier 1 request
+(no want-list keywords, no `filter_q` free text, a whitelisted `sort_field`) is now served from
+the SQL path in `_pg_tier1_browse()` for EVERY caller — admin or not, `?pg_shadow=1` or not.
+Tier 2 (keyword/`filter_q` requests) is completely unaffected — `_pg_tier1_eligible()` still
+returns `False` for it, unchanged, so it keeps falling through to the legacy JSON path exactly as
+before. `/api/state`'s `total_items` and `api_browse()`'s `has_store_data` check were left as-is
+(see "trivial spots" below) — both are cheap in-memory operations already, not worth a Postgres
+round-trip.
+
+**The code change itself is small and precise** — only the *gate* in `api_browse()` changed, not
+any query or business logic (that's all been stable since v2.16.21's `store_count` fix):
+- The condition guarding the Postgres call site went from
+  `_pg_shadow_requested and _is_admin() and _PG_POOL is not None and _pg_tier1_eligible(...)`
+  to just `_PG_POOL is not None and _pg_tier1_eligible(...)` — dropping the flag and admin checks
+  entirely from the routing decision.
+- `?pg_shadow=1` didn't disappear — it's repurposed as a pure debugging aid. When an admin passes
+  it, the response gets `_pg_shadow`/`_pg_shadow_ms` diagnostic fields attached (same fields as
+  Phase C); a non-admin passing the flag gets nothing extra (checked live via curl against a real
+  gunicorn boot — see Verified below). Everyone else — which after this deploy is everyone,
+  flag or not — just gets served from Postgres silently, with no diagnostic fields in the
+  response.
+- The `try/except` fallback around `_pg_tier1_browse()` is untouched: any Postgres/SQL error
+  (bad query, connection blip, pool exhaustion) still degrades that one request to the unmodified
+  legacy JSON path and logs `[pg] tier1 browse failed, falling back to JSON path: ...` — this is
+  now the rollback lever for every real user, not just for admin diagnostics. JSON dual-write
+  (Phase B) never stopped, so nothing about this is a one-way door; reverting is putting
+  `_is_admin()` back in front of the condition, not a data-recovery operation.
+
+**Verification, in order (per the standing rule that a synthetic-data offline diff is necessary
+but not sufficient — see v2.16.21's own lesson):**
+
+1. **Live spot-checking against real production, expanded well beyond the 3 shapes v2.16.21
+   already confirmed** (no-filter/all-stores, single-store, price sort). Using the same
+   browser-console fetch-and-diff pattern as v2.16.20/21 (admin session, `?pg_shadow=1` vs. no
+   flag, deep-compare after stripping `_pg_shadow`/`_pg_shadow_ms`) — this session's browser
+   automation hit a ~10-minute outage partway through (the safety classifier backing Chrome/
+   browser-pane tool calls was temporarily unavailable; every call failed identically until it
+   recovered on its own), so the offline verification below (items 2-4) was built out FIRST,
+   during the outage, then the live pass was finished once the tooling came back. Final tally:
+   **16/16 live-checked request shapes came back byte-identical against real production** — brand/
+   condition/category/subcategory filters (alone and combined), watched-only, price-drop-only,
+   vintage-only, a price range, date sort, condition sort (both directions), page 2 and page 3,
+   and a fully-combined filter+sort+page case. No mismatches found.
+2. **Given that gap, the offline verification for this session was deliberately built to be
+   stronger, not just repeated**: a fresh 53,000-row synthetic dataset (`gen_data.py`, cloud-
+   sandbox-only, not committed — new for this session, not reused from v2.16.20's 436K-row one)
+   with **2,000 deliberately sparse/malformed rows** rotating through seven shapes — empty
+   `store` (the exact v2.16.21 bug), empty `brand`, empty `category`, empty `subcategory`, empty
+   `condition`, zero `price`/`list_price`, and empty `date_listed`/`first_seen` — plus 3,000
+   `available=False` rows for realism. This is the direct lesson from v2.16.21: the 436K-row
+   v2.16.20 dataset never had an empty-`store` row, and that's exactly the shape that broke in
+   production. A fresh 39-case `diff_harness.py` (cloud-sandbox-only, Flask `test_client()`, real
+   scratch Postgres 16) compared the CUTOVER code path (`_PG_POOL` live, no query flag — exactly
+   what a real anonymous user now hits) against the LEGACY path (same request, `_PG_POOL`
+   monkeypatched to `None` for the call, forcing the JSON fallback) — this is the correct offline
+   analog now that the flag no longer controls routing. Covered every facet alone/combined,
+   watched-only, want-list-only-no-keywords (degenerate case), price-drop-only, vintage-only,
+   price range (including a range that only catches the sparse zero-price rows), every sort field
+   in both directions (explicitly including `store`/`brand`/`condition`/`date` sorts, which are
+   the columns with sparse-row blanks), the default NEW-tiering sort, `per_page=200`, a
+   zero-result combo, `user_last_scan` gating, and a fully-combined filter+sort+page case.
+   **39/39 passed byte-identical**, including every case that touches a sparse/malformed row —
+   the `NULLIF(store, '')` fix from v2.16.21 covers the empty-store case correctly in this fresh
+   dataset too. A separate Tier 2 (keyword) sanity check confirmed keyword requests are
+   byte-identical between the two code paths and never touch Postgres either way.
+3. **Explicitly forced-failure test**: monkeypatched `_pg_tier1_browse()` to raise
+   `RuntimeError` unconditionally, hit `/api/browse` through the real Flask test client with no
+   flag (i.e. simulating a real user hitting a live SQL bug post-cutover) — got a clean `200`
+   with output byte-identical to the legacy path, confirming the fallback truly protects real
+   traffic, not just admin diagnostic calls.
+4. **Real gunicorn boot**, exact Procfile flags (`--workers=1 --worker-class=gthread --threads=8
+   --timeout=0 --graceful-timeout=30`), against the scratch Postgres (the cloud sandbox has a
+   network path to it, unlike the device-bridge shell) — confirmed via curl: `/` and `/api/state`
+   200; an anonymous `POST /api/browse` with no flag returns Postgres-backed data (`total_count`
+   matches the full synthetic set) with **no** `_pg_shadow` key present; the same request with
+   `?pg_shadow=1` and no admin session ALSO has no diagnostic key (confirming the admin gate on
+   the diagnostic fields specifically still works correctly); a keyword request still returns via
+   the untouched Tier 2 legacy path.
+5. `python3 -m py_compile gc_tracker_app.py` and `node --check static/gc.js` (no JS changed) both
+   clean. Imported the module in a disposable venv and confirmed the route table still builds (60
+   routes — unchanged from v2.16.20/21, nothing lost or duplicated).
+6. Patched `gc_tracker_app.py` on the device with a Python find-and-replace script performing the
+   exact same 4 edits already verified in the cloud-sandbox copy (3 comment/gate rewrites + the
+   version bump), then confirmed via SHA-256 hash that the device file and the sandbox-tested,
+   harness-verified file are byte-identical before treating the change as ready — not just
+   re-running `py_compile` and hoping the two copies matched.
+
+**"Trivial spots" from the plan (`/api/state`'s `total_items`, `has_store_data`) — left alone,
+deliberately**: read both. `api_state()`'s `total_items` is `sum(1 for v in _cat_cache.values()
+if v.get("available", True))` and `api_browse()`'s `has_store_data` is `any(v.get("store") for v
+in _cat_cache.values())` — both are cheap single-pass iterations over an in-memory dict, not the
+expensive per-item projection `_build_base_item_list()` does. Moving either to a Postgres
+`COUNT(*)`/`EXISTS` query would trade a sub-millisecond in-process operation for a network round
+trip, plus a new failure mode needing its own fallback, for no measured benefit — these were never
+implicated in the memory-growth or latency findings that motivated this whole migration. The
+plan itself flags this as "trivial, not mandatory" (§7 Phase D); judgment call this session was to
+leave them as JSON-path reads.
+
+**Not done this session**: a production shadow-mode burn-in period (log-only diffs from real
+traffic, mentioned as optional in plan §7 Phase C) was never done and is now moot — Phase D
+supersedes it. Migrating the admin-only Postgres call sites (`_pg_sync_scan`/`_pg_full_backfill`/
+`_pg_parity_check`) onto the connection pool is still deliberately deferred (same reasoning as
+v2.16.20 — rare, background-thread-triggered, not on any hot path). Everything the plan's Phase D
+paragraph actually calls for — expanded live spot-checking before cutover, the cutover itself,
+offline re-verification with fresh sparse data, and real-gunicorn verification — is done; the
+one item still outstanding is the POST-deploy live spot-check (plan §7 Phase D step 5: a few
+real, unflagged requests plus watching Railway's logs for `[pg]` error lines for a few minutes)
+— that can only happen after Chuck deploys, see `NEXT_SESSION_PROMPT.md`.
+
+**Files changed**: `gc_tracker_app.py` only — the gate condition in `api_browse()` (3 comment
+blocks rewritten, the routing condition itself changed, `_pg_shadow`/`_pg_shadow_ms` now
+admin-gated independently of routing), plus `APP_VERSION`. No query, schema, or `_pg_tier1_browse`/
+`_pg_tier1_eligible` logic changed — those are untouched since v2.16.21. `APP_VERSION = "2.16.22"`.
+
 
 ---
 
