@@ -420,6 +420,52 @@ def _init_pg_schema():
 
 _init_pg_schema()
 
+# ── Postgres connection pool (Phase C, v2.16.20) ──────────────────────────────
+# The scan-triggered/admin-only Postgres paths above (_init_pg_schema,
+# _pg_sync_scan, _pg_full_backfill, _pg_parity_check) each open one ad-hoc
+# psycopg2.connect() per call — fine for rare, background-thread-triggered
+# work, but not for something hit on every /api/browse request once Phase D
+# cuts over. See POSTGRES_MIGRATION_PLAN.md §5. Sized for this app's
+# `--workers=1 --worker-class=gthread --threads=8` Procfile: up to 8 concurrent
+# request threads + the scan thread + headroom for the admin-only paths above
+# (which still open their own ad-hoc connections — not migrated to the pool,
+# since they're rare and not on any hot path; migrating them is a follow-up,
+# not required for Phase C). Created once at module load, torn down never
+# (lives for the process lifetime, same as _cat_cache).
+_PG_POOL = None
+if _PSYCOPG2_AVAILABLE and PG_DATABASE_URL:
+    try:
+        import psycopg2.pool
+        _PG_POOL = psycopg2.pool.ThreadedConnectionPool(
+            2, 12, PG_DATABASE_URL, connect_timeout=10)
+        print("[pg] connection pool ready (minconn=2, maxconn=12)")
+    except Exception as e:
+        # Same tolerance as _init_pg_schema() — a pool that fails to init just
+        # means Tier 1 shadow reads no-op (see _pg_tier1_eligible's caller in
+        # api_browse); it can never block startup or any other Postgres path.
+        print(f"[pg] connection pool init skipped: {type(e).__name__}: {e}")
+        _PG_POOL = None
+
+import contextlib as _contextlib
+
+@_contextlib.contextmanager
+def _pg_conn():
+    """Yield a pooled Postgres connection, committing on a clean exit and
+    rolling back + discarding the connection back to the pool on error —
+    mirrors _user_db()'s `with`-based pattern for SQLite, just pooled since
+    Postgres connections are more expensive to establish than SQLite's."""
+    if _PG_POOL is None:
+        raise RuntimeError("Postgres connection pool not available")
+    conn = _PG_POOL.getconn()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        _PG_POOL.putconn(conn)
+
 # ── Postgres dual-write (Phase B, v2.16.15) ───────────────────────────────────
 # Mirrors this scan's results into Postgres, best-effort, AFTER _cat_cache/JSON
 # have already been fully updated by the normal scan logic in _run() below —
@@ -4107,6 +4153,310 @@ def _algolia_health_probe(now: float):
     return jsonify(result)
 
 
+# ── Postgres Tier 1 read path (Phase C, v2.16.20) ─────────────────────────────
+# Pure-SQL equivalent of api_browse()'s _apply_base()/facet-count/sort/paginate
+# logic, for the dominant "no want-list keywords, no filter_q free text" case
+# (POSTGRES_MIGRATION_PLAN.md §3, Tier 1). Shadow-mode only this session — see
+# the ?pg_shadow=1/_is_admin() gate at the top of api_browse(); nothing here
+# is reachable by a normal user yet. Tier 2 (keyword/free-text search active)
+# is explicitly out of scope — _pg_tier1_eligible() returns False for it and
+# api_browse() falls through to the existing unmodified Python path.
+#
+# sort_field is user-controlled (the request body), so every column reference
+# below comes from a fixed whitelist (_PG_SORT_MAP / the "condition" special
+# case) rather than ever being interpolated from the request directly — every
+# other value in every WHERE/ORDER BY fragment is passed as a psycopg2 %(name)s
+# parameter, never string-formatted into the SQL text.
+
+# sort_field -> (sql column, lowercase-compare?). Mirrors api_browse()'s sort
+# `elif` chain: "price"/"date"/"price_drop_since" get their own raw (unlowered)
+# numeric/text comparison exactly like the Python elifs; everything else falls
+# in the Python `else` branch, which lowercases — same here. "condition" isn't
+# in this map; it gets the quality-rank CASE below, matching the Python
+# elif for "condition" (v2.10.18 quality ranking, not alphabetical).
+_PG_SORT_MAP = {
+    "price":             ("price", False),
+    "date":              ("date_listed", False),
+    "price_drop_since":  ("price_drop_since", False),
+    "name":              ("name", True),
+    "brand":             ("brand", True),
+    "category":          ("category", True),
+    "subcategory":       ("subcategory", True),
+    "location":          ("location", True),
+    "store":             ("store", True),
+    "condition_note":    ("condition_note", True),
+    "url":               ("url", True),
+    "image_id":          ("image_id", True),
+}
+_PG_TIER1_SORTABLE = set(_PG_SORT_MAP) | {"condition"}
+_PG_COND_RANK_SQL = (
+    "CASE condition "
+    "WHEN 'Excellent' THEN 0 WHEN 'Great' THEN 1 WHEN 'Good' THEN 2 "
+    "WHEN 'Fair' THEN 3 WHEN 'Poor' THEN 4 ELSE 99 END"
+)
+_PG_COND_KNOWN_SQL = "condition IN ('Excellent','Great','Good','Fair','Poor')"
+
+
+def _pg_tier1_eligible(fq: str, has_kw: bool, sort_field: str) -> bool:
+    """True iff this /api/browse request is the Tier 1 case: no filter_q free
+    text, no want-list keywords active, and a sort_field the SQL path actually
+    knows how to translate (the UI only ever sends the columns in
+    _PG_TIER1_SORTABLE — see static/gc.js's _SORT_COLS — so an unrecognized
+    value here means a client we don't recognize, not a real gap; falling
+    through to the legacy path is the safe choice either way).
+    f_want_only does NOT disqualify Tier 1 — see _pg_tier1_browse, it degrades
+    to a correctly-empty result exactly like the JSON path would with no
+    keywords active."""
+    return (not fq) and (not has_kw) and (sort_field in _PG_TIER1_SORTABLE)
+
+
+def _pg_tier1_browse(*, store_set, search_all, user_last_scan,
+                      f_brands, f_conds, f_cats, f_subs, f_watched, wl_ids,
+                      f_want_only, f_price_drop_only, f_vintage_only,
+                      f_price_min, f_price_max, sort_field, sort_dir, user_sorted,
+                      new_ids, fav_stores, page, per_page) -> dict:
+    """Returns the exact same JSON shape api_browse() returns for a Tier 1
+    request, computed entirely in Postgres (four small aggregate/paginated
+    queries against the `items` table) instead of materializing and
+    filtering/sorting the full catalog in Python. Raises on any DB error —
+    the caller (api_browse()) catches and falls back to the legacy path."""
+    import psycopg2.extras as _pg_extras
+
+    # ── Shared WHERE fragments (parameterized; see module note above) ──────
+    where = ["available"]
+    params = {}
+
+    if search_all:
+        pass
+    else:
+        where.append("store = ANY(%(stores)s)")
+        params["stores"] = list(store_set) if store_set else []
+
+    if user_last_scan:
+        where.append("(first_seen = '' OR first_seen <= %(user_last_scan)s)")
+        params["user_last_scan"] = user_last_scan
+
+    # ── Non-facet filters (api_browse()'s _apply_base(), minus fq/want_only-
+    # via-keywords which can't fire in Tier 1) ──────────────────────────────
+    if f_want_only:
+        # No keywords active (a Tier 1 precondition) => kwMatch is False for
+        # every item in the JSON path => "want-list matches only" can never
+        # match anything. Reproduce that exactly rather than special-casing
+        # eligibility around it.
+        where.append("FALSE")
+    if f_price_drop_only:
+        where.append("price_drop > 0")
+    if f_vintage_only:
+        where.append("is_vintage")
+    if f_watched:
+        where.append("sku = ANY(%(wl_ids)s)")
+        params["wl_ids"] = list(wl_ids)
+    if f_price_min is not None:
+        where.append("price >= %(price_min)s")
+        params["price_min"] = f_price_min
+    if f_price_max is not None:
+        where.append("price <= %(price_max)s")
+        params["price_max"] = f_price_max
+
+    base_where_sql = " AND ".join(where)
+
+    # ── Facet WHERE fragments — one per facet, each independently omittable
+    # so the 4 facet-count queries below can each apply "all OTHER facets"
+    # (api_browse()'s contextual-count semantics) ───────────────────────────
+    def _facet_clause(col: str, values, param_key: str):
+        if not values:
+            return "TRUE", {}
+        if col == "brand":
+            real = [v for v in values if v != NO_BRAND_LABEL]
+            want_no_brand = NO_BRAND_LABEL in values
+            if real and want_no_brand:
+                return f"(brand = ANY(%({param_key})s) OR brand = '')", {param_key: real}
+            if want_no_brand and not real:
+                return "brand = ''", {}
+            return f"brand = ANY(%({param_key})s)", {param_key: real}
+        return f"{col} = ANY(%({param_key})s)", {param_key: list(values)}
+
+    brand_clause, brand_p = _facet_clause("brand", f_brands, "_f_brand")
+    cond_clause,  cond_p  = _facet_clause("condition", f_conds, "_f_cond")
+    cat_clause,   cat_p   = _facet_clause("category", f_cats, "_f_cat")
+    sub_clause,   sub_p   = _facet_clause("subcategory", f_subs, "_f_sub")
+
+    filtered_where_sql = f"{base_where_sql} AND {brand_clause} AND {cond_clause} AND {cat_clause} AND {sub_clause}"
+    filtered_params = dict(params); filtered_params.update(brand_p); filtered_params.update(cond_p)
+    filtered_params.update(cat_p); filtered_params.update(sub_p)
+
+    # ── Sort clause (whitelisted columns only — see module note above) ─────
+    reverse = (sort_dir == "desc")
+    order_parts = []
+    if sort_field == "condition":
+        order_parts.append(f"{_PG_COND_KNOWN_SQL} DESC")  # unknowns always last
+        order_parts.append(f"{_PG_COND_RANK_SQL} {'DESC' if reverse else 'ASC'}")
+    else:
+        col, lower = _PG_SORT_MAP[sort_field]
+        expr = f"LOWER({col})" if lower else col
+        order_parts.append(f"{expr} {'DESC' if reverse else 'ASC'}")
+    if not user_sorted:
+        # NEW-on-top tiering (api_browse()'s post-sort partition). No keywords
+        # active in Tier 1 => kwMatch is always False => the "new+want-match"
+        # tier is always empty => this reduces to exactly two tiers: NEW
+        # first, then everything else, each internally in primary-sort order —
+        # a single leading ORDER BY term does that.
+        order_parts.insert(0, "(sku = ANY(%(new_ids)s)) DESC")
+    # Final tiebreak, always: Python's list.sort() is stable (ties keep their
+    # PRE-sort relative order, even with reverse=True — see the Python docs),
+    # and the pre-sort order of `filtered` in the JSON path traces back to
+    # _build_base_item_list()'s iteration of _cat_cache, i.e. plain ascending
+    # SKU order. On a low-cardinality sort column (condition/category/store/
+    # brand/etc, or even price/date with enough rows) that tie group can be
+    # huge, and Postgres gives no ordering guarantee at all among ties without
+    # an explicit tiebreak — found via the Phase C A/B diff harness (multiple
+    # "sort X" cases returned entirely different, though equally-valid-per-key,
+    # item orders). sku ASC reproduces the JSON path's tiebreak exactly.
+    order_parts.append("sku ASC")
+    order_sql = ", ".join(order_parts)
+
+    offset_params = dict(filtered_params)
+    offset_params["new_ids"] = list(new_ids)
+
+    with _pg_conn() as conn:
+        with conn.cursor(cursor_factory=_pg_extras.RealDictCursor) as cur:
+
+            # Q1 — total_unfiltered + new_count: BEFORE any _apply_base filter,
+            # matching api_browse()'s `all_items`/`total_unfiltered` scope
+            # (store selection + per-user scan-date gating only).
+            q1_where = ["available"]
+            q1_params = {"new_ids": list(new_ids)}
+            if not search_all:
+                q1_where.append("store = ANY(%(stores)s)")
+                q1_params["stores"] = list(store_set) if store_set else []
+            if user_last_scan:
+                q1_where.append("(first_seen = '' OR first_seen <= %(user_last_scan)s)")
+                q1_params["user_last_scan"] = user_last_scan
+            cur.execute(
+                f"SELECT COUNT(*) AS total_unfiltered, "
+                f"COUNT(*) FILTER (WHERE sku = ANY(%(new_ids)s)) AS new_count "
+                f"FROM items WHERE {' AND '.join(q1_where)}", q1_params)
+            row = cur.fetchone()
+            total_unfiltered = row["total_unfiltered"]
+            new_count = row["new_count"]
+
+            # Q2 — facet counts: one query, one pass per facet (mirrors the
+            # v2.16.12 "single pass" optimization, in SQL: 4 branches unioned
+            # instead of 4 separate round trips). Each branch's WHERE includes
+            # base_where + the OTHER three facets, exactly matching
+            # api_browse()'s contextual-count semantics.
+            facet_params = dict(params)
+            facet_params.update(brand_p); facet_params.update(cond_p)
+            facet_params.update(cat_p); facet_params.update(sub_p)
+            facet_params["no_brand_label"] = NO_BRAND_LABEL
+            facet_sql = " UNION ALL ".join([
+                f"SELECT 'brand' AS facet, COALESCE(NULLIF(brand,''), %(no_brand_label)s) AS value, "
+                f"COUNT(*) AS n FROM items WHERE {base_where_sql} AND {cond_clause} AND {cat_clause} "
+                f"AND {sub_clause} GROUP BY value",
+                f"SELECT 'condition' AS facet, condition AS value, COUNT(*) AS n FROM items "
+                f"WHERE {base_where_sql} AND {brand_clause} AND {cat_clause} AND {sub_clause} "
+                f"AND condition <> '' GROUP BY value",
+                f"SELECT 'category' AS facet, category AS value, COUNT(*) AS n FROM items "
+                f"WHERE {base_where_sql} AND {brand_clause} AND {cond_clause} AND {sub_clause} "
+                f"AND category <> '' GROUP BY value",
+                f"SELECT 'subcategory' AS facet, subcategory AS value, COUNT(*) AS n FROM items "
+                f"WHERE {base_where_sql} AND {brand_clause} AND {cond_clause} AND {cat_clause} "
+                f"AND subcategory <> '' GROUP BY value",
+            ])
+            cur.execute(facet_sql, facet_params)
+            brand_ctx, cond_ctx, cat_ctx, sub_ctx = {}, {}, {}, {}
+            _ctx_map = {"brand": brand_ctx, "condition": cond_ctx, "category": cat_ctx, "subcategory": sub_ctx}
+            for r in cur.fetchall():
+                _ctx_map[r["facet"]][r["value"]] = r["n"]
+            # Always include currently-selected values so users can deselect them
+            for b in f_brands:
+                brand_ctx.setdefault(b, 0)
+            for c in f_conds:
+                cond_ctx.setdefault(c, 0)
+            for c in f_cats:
+                cat_ctx.setdefault(c, 0)
+            for s in f_subs:
+                sub_ctx.setdefault(s, 0)
+
+            # Q3 — total_filtered + store_count over the fully-filtered set
+            cur.execute(
+                f"SELECT COUNT(*) AS total_filtered, COUNT(DISTINCT store) AS store_count "
+                f"FROM items WHERE {filtered_where_sql}", filtered_params)
+            row = cur.fetchone()
+            total_filtered = row["total_filtered"]
+            store_count = row["store_count"]
+
+            total_pages = max(1, -(-total_filtered // per_page))
+            page = min(page, total_pages)
+            start = (page - 1) * per_page
+
+            # Q4 — the actual page of items
+            cur.execute(
+                f"SELECT sku, name, brand, category, subcategory, condition, condition_note, "
+                f"price, list_price, price_drop, price_drop_since, store, location, url, "
+                f"image_id, is_vintage, date_listed "
+                f"FROM items WHERE {filtered_where_sql} ORDER BY {order_sql} "
+                f"LIMIT %(_limit)s OFFSET %(_offset)s",
+                {**offset_params, "_limit": per_page, "_offset": start})
+            page_rows = cur.fetchall()
+
+    page_items = []
+    for r in page_rows:
+        sku = r["sku"]
+        store = r["store"] or ""
+        price_raw = float(r["price"] or 0)
+        page_items.append({
+            "id":               sku,
+            "name":             r["name"] or "",
+            "brand":            r["brand"] or "",
+            "price":            f"${price_raw:,.2f}" if price_raw else "",
+            "price_raw":        price_raw,
+            "list_price_raw":   float(r["list_price"] or 0),
+            "price_drop":       float(r["price_drop"] or 0),
+            "price_drop_since": r["price_drop_since"] or "",
+            "store":            store,
+            "location":         r["location"] or "",
+            "url":              r["url"] or "",
+            "category":         r["category"] or "",
+            "subcategory":      r["subcategory"] or "",
+            "condition":        r["condition"] or "",
+            "date":             _fmt_date(r["date_listed"] or ""),
+            "date_raw":         r["date_listed"] or "",
+            "image_id":         r["image_id"] or "",
+            "is_vintage":       bool(r["is_vintage"]),
+            "condition_note":   r["condition_note"] or "",
+            "watched":          sku in wl_ids,
+            "isNew":            sku in new_ids,
+            "kwMatch":          False,  # Tier 1 precondition: no keywords active
+            "isFav":            store in fav_stores if fav_stores else False,
+        })
+
+    _cond_order = {"Excellent": 0, "Great": 1, "Good": 2, "Fair": 3, "Poor": 4}
+    return {
+        "items":            page_items,
+        "page":             page,
+        "per_page":         per_page,
+        "total_count":      total_filtered,
+        "total_unfiltered": total_unfiltered,
+        "total_pages":      total_pages,
+        "store_count":      store_count,
+        "new_count":        new_count,
+        "new_want_count":   0,  # no keywords active in Tier 1 => always 0
+        "no_store_data":    False,
+        # (v2.16.20) Secondary alphabetical tiebreak on brand name: two brands
+        # with the same count used to fall back to dict-insertion order, which
+        # is really "SKU order" — an accidental, unspecified tiebreak nobody
+        # relied on, and one the Postgres Tier 1 path can't cheaply reproduce
+        # (SQL aggregation doesn't preserve row order). Made deterministic and
+        # identical in both paths instead of trying to replicate the old
+        # incidental order in SQL — found via the Phase C A/B diff harness.
+        "brands":        [{"name": b, "count": c} for b, c in sorted(brand_ctx.items(), key=lambda x: (-x[1], x[0]))],
+        "conditions":    [{"name": c, "count": n} for c, n in sorted(cond_ctx.items(), key=lambda x: _cond_order.get(x[0], 5))],
+        "categories":    [{"name": c, "count": n} for c, n in sorted(cat_ctx.items())],
+        "subcategories": [{"name": s, "count": n} for s, n in sorted(sub_ctx.items())],
+    }
+
+
 @app.route("/api/browse", methods=["POST"])
 @optional_user_context
 def api_browse():
@@ -4151,6 +4501,18 @@ def api_browse():
     f_price_min = _to_float(data.get("filter_price_min"))
     f_price_max = _to_float(data.get("filter_price_max"))
     force_fav_sort = bool(data.get("force_fav_sort"))
+    # (moved up from the sort block below, v2.16.20 — Tier 1 shadow read path
+    # needs this before the sort block runs; reading it here changes nothing
+    # for the legacy JSON path, it's just an earlier data.get() call)
+    user_sorted = bool(data.get("user_sorted"))
+
+    # ── Postgres Tier 1 shadow read path (Phase C, v2.16.20) ───────────────
+    # Admin/dev-only, gated behind ?pg_shadow=1 — never reachable by normal
+    # users this session. See POSTGRES_MIGRATION_PLAN.md §3/§7 Phase C and
+    # NEXT_SESSION_PROMPT.md. Eligibility (no want-list keywords, no filter_q
+    # free text, a whitelisted sort_field) is re-checked below once fq/_has_kw
+    # are known — this early flag only decides whether it's even worth trying.
+    _pg_shadow_requested = request.args.get("pg_shadow") == "1"
 
     _load_cat_cache()
     # Watchlist and keywords now come from the client (localStorage)
@@ -4330,6 +4692,38 @@ def api_browse():
         return jsonify({"items": [], "no_store_data": True,
                         "message": "Run 'Check for New Items' once to populate store data."})
 
+    # ── Postgres Tier 1 shadow read path, continued (Phase C, v2.16.20) ────
+    # Only reachable with ?pg_shadow=1 AND an admin session AND the request
+    # actually qualifies as Tier 1 (no want-list keywords, no filter_q free
+    # text, a whitelisted sort_field — see _pg_tier1_eligible). Every real
+    # user, and every admin request without the flag, falls straight through
+    # to the unchanged legacy JSON path below — this branch never affects
+    # what gets served to normal traffic this session (Phase D is the real
+    # cutover, not this one).
+    if (_pg_shadow_requested and _is_admin() and _PG_POOL is not None
+            and _pg_tier1_eligible(fq, _has_kw, sort_field)):
+        try:
+            _pg_t0 = time.time()
+            _pg_result = _pg_tier1_browse(
+                store_set=store_set, search_all=search_all,
+                user_last_scan=user_last_scan,
+                f_brands=f_brands, f_conds=f_conds, f_cats=f_cats, f_subs=f_subs,
+                f_watched=f_watched, wl_ids=wl_ids, f_want_only=f_want_only,
+                f_price_drop_only=f_price_drop_only, f_vintage_only=f_vintage_only,
+                f_price_min=f_price_min, f_price_max=f_price_max,
+                sort_field=sort_field, sort_dir=sort_dir, user_sorted=user_sorted,
+                new_ids=new_ids, fav_stores=fav_stores, page=page, per_page=per_page,
+            )
+            _pg_result["_pg_shadow"] = True
+            _pg_result["_pg_shadow_ms"] = round((time.time() - _pg_t0) * 1000, 1)
+            return jsonify(_pg_result)
+        except Exception as e:
+            # Never let a Postgres/SQL bug affect a real response — this whole
+            # branch is diagnostic. Log and fall through to the legacy path
+            # below exactly as if pg_shadow had never been passed.
+            print(f"[pg] tier1 shadow browse failed, falling back to JSON path: "
+                  f"{type(e).__name__}: {e}")
+
     # ── Build full item list for selected stores (lightweight dicts) ──────
     # E2 (v2.16.4): the expensive per-item projection (price/date formatting,
     # name/brand lowercasing) now happens ONCE per cache generation in
@@ -4464,7 +4858,23 @@ def api_browse():
     # NEW items float to top ONLY on default sort (no explicit column click)
     # When user explicitly clicks a sort column, sort purely by that column
     reverse = (sort_dir == "desc")
-    user_sorted = bool(data.get("user_sorted"))
+    # user_sorted is read earlier now (v2.16.20, see the Tier 1 shadow block above)
+
+    # (v2.16.20) Deterministic tiebreak: pre-sort by sku ascending before the
+    # primary sort below. list.sort() is stable, so this becomes the tiebreak
+    # for equal-key items in every branch below, regardless of the requested
+    # direction — Python's reverse=True preserves stable tie order rather than
+    # reversing it, so a plain (primary, sku) tuple key would have reversed
+    # the tiebreak too on a "desc" request; this two-pass approach keeps the
+    # tiebreak always-ascending-by-sku no matter which way the primary sort
+    # runs. Previously ties fell back to whatever order `filtered` already
+    # had — i.e. _cat_cache's arbitrary historical insertion order, which
+    # Postgres has no equivalent of and can't reproduce. Made explicit here
+    # and matched exactly by the new Tier 1 SQL path's own trailing
+    # "ORDER BY ..., sku ASC" (see _pg_tier1_browse) — found via the Phase C
+    # A/B diff harness (several "sort X" cases returned entirely different,
+    # though equally-valid-per-key, item orders on tied values).
+    filtered.sort(key=lambda x: x["id"])
 
     if sort_field == "price":
         filtered.sort(key=lambda x: x.get("price_raw") or 0, reverse=reverse)
@@ -4528,7 +4938,14 @@ def api_browse():
         "new_want_count":   new_want_count,
         "no_store_data":    False,
         # Contextual facet counts — each facet reflects all OTHER active filters
-        "brands":        [{"name": b, "count": c} for b, c in sorted(brand_ctx.items(), key=lambda x: -x[1])],
+        # (v2.16.20) Secondary alphabetical tiebreak on brand name: two brands
+        # with the same count used to fall back to dict-insertion order, which
+        # is really "SKU order" — an accidental, unspecified tiebreak nobody
+        # relied on, and one the Postgres Tier 1 path can't cheaply reproduce
+        # (SQL aggregation doesn't preserve row order). Made deterministic and
+        # identical in both paths instead of trying to replicate the old
+        # incidental order in SQL — found via the Phase C A/B diff harness.
+        "brands":        [{"name": b, "count": c} for b, c in sorted(brand_ctx.items(), key=lambda x: (-x[1], x[0]))],
         "conditions":    [{"name": c, "count": n} for c, n in sorted(cond_ctx.items(), key=lambda x: _cond_order.get(x[0], 5))],
         "categories":    [{"name": c, "count": n} for c, n in sorted(cat_ctx.items())],
         "subcategories": [{"name": s, "count": n} for s, n in sorted(sub_ctx.items())],
@@ -6721,7 +7138,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.19"
+APP_VERSION = "2.16.20"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

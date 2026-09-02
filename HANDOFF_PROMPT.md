@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-02 · Version: v2.16.19 (fixes admin task pages' "Run Now" button — CSP silently blocked it, unrelated to the backfill logic itself; not yet pushed) · Live at: gcgeartracker.com — v2.16.18 deployed, dual-write live since 2026-08-31*
+*Generated: 2026-09-02 · Version: v2.16.20 (Postgres migration Phase C — SQL Tier 1 shadow read path, admin/dev-only; not yet pushed) · Live at: gcgeartracker.com — v2.16.18 deployed, dual-write live since 2026-08-31*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -87,6 +87,38 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 - **Footer**: `.seo-footer` — visible "Privacy Policy · Not affiliated with Guitar Center, Inc." in `#555` gray. No hidden text.
 
 ---
+
+## Current State: v2.16.20 — Postgres migration Phase C: SQL Tier 1 shadow read path (2026-09-02, not yet pushed)
+
+**Not the cutover.** Every real user still gets served from the JSON path, unconditionally, this
+session. This ships a shadow-mode diagnostic only, gated behind `?pg_shadow=1` + an active admin
+session — Phase D (the actual `/api/browse` cutover) is a separate, later session.
+
+**What shipped**: (1) `_PG_POOL`/`_pg_conn()` — a `psycopg2.pool.ThreadedConnectionPool(2, 12)`
+sized for `--workers=1 --threads=8`, mirroring `_user_db()`'s `with`-pattern. (2)
+`_pg_tier1_eligible()`/`_pg_tier1_browse()` — the pure-SQL translation of `api_browse()`'s filter/
+facet-count/sort/paginate logic for the dominant "no want-list keywords, no `filter_q`" case
+(POSTGRES_MIGRATION_PLAN.md §3 Tier 1). Four parameterized queries per call; `sort_field`'s SQL
+column always comes from a fixed whitelist, never interpolated from the request.
+
+**Verified, not just written**: a 37-case Flask `test_client()` A/B diff harness against a
+436,240-row synthetic dataset (real production scale) in a scratch Postgres — found and actually
+fixed two real bugs (both were missing a deterministic tiebreak for equal-count/equal-value ties;
+Postgres aggregation has no equivalent to the JSON path's old "arbitrary cache-insertion-order"
+tiebreak, so both paths were changed to use an explicit, matching tiebreak — see HANDOFF.md's
+v2.16.20 entry for the full detail). All 37 cases now pass byte-for-byte identical. The dominant
+no-filter/all-stores case: **~9.5x faster** (JSON ~3.2-4.0s/call vs. Postgres Tier 1 ~0.4s/call).
+8-thread concurrent load against the pool: 0 errors, no exhaustion, no leaks.
+
+**Gating verified safe**: non-admin + `?pg_shadow=1` → byte-identical to no flag; admin + active
+keywords/`filter_q` (Tier 2) → falls through to the legacy path untouched; unrecognized
+`sort_field` → falls through; `DATABASE_URL` unset (no pool) → falls through with zero errors.
+
+**Next up**: exercise `?pg_shadow=1` against real production as admin (Phase B's dual-write has
+been live since 2026-08-31, so production Postgres already has real data — no extra setup
+needed), then decide: a production shadow-mode burn-in period (log-only diffs, zero user impact —
+optional, per the plan §7 Phase C) vs. going straight to planning Phase D. See
+`NEXT_SESSION_PROMPT.md`.
 
 ## Current State: v2.16.19 — admin task page "Run Now" button fix (2026-09-02, not yet pushed)
 

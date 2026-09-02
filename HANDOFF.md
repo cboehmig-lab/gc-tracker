@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-02 · Current version: v2.16.19 (fixes admin task pages' "Run Now" button — CSP was silently blocking it) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-02 · Current version: v2.16.20 (Postgres migration Phase C — SQL Tier 1 shadow read path, admin/dev-only, not yet cut over to real traffic) · Domain: gcgeartracker.com*
 
 ---
 
@@ -53,6 +53,155 @@ returns 401 before ever touching Postgres.
 
 **Files changed**: `gc_tracker_app.py` only (moved one function; no logic changes).
 `APP_VERSION = "2.16.17"`.
+
+---
+
+## ⭐ Recent Changes (v2.16.19 → v2.16.20) — 2026-09-02 (Postgres migration Phase C: SQL Tier 1 shadow read path — NOT the cutover)
+
+**Context**: Phase A (schema + backfill) and Phase B (dual-write) were both confirmed done and
+verified against live production as of this session's start — the 2026-09-02 parity check came
+back clean (`json_total: 436,343`, `pg_total: 436,343`, 0 missing/extra/mismatched). See
+POSTGRES_MIGRATION_PLAN.md §3/§7 Phase C and the (now superseded) NEXT_SESSION_PROMPT.md this
+session started from. Goal: build and offline-verify a pure-SQL Postgres read path for the
+dominant `/api/browse` traffic shape (no want-list keywords, no `filter_q` free text — "Tier 1"
+per the plan's two-tier strategy), without touching what real users are served. **The served
+response for every real user is unchanged this session — this ships a shadow-mode diagnostic
+path only, gated behind `?pg_shadow=1` + an active admin session. Phase D (the actual cutover)
+is a separate, later session.**
+
+**What shipped**:
+
+1. **Connection pooling** (`_PG_POOL`, plan §5) — a `psycopg2.pool.ThreadedConnectionPool(2, 12)`
+   created once at module load (right after `_init_pg_schema()`), plus `_pg_conn()`, a
+   context-manager helper mirroring `_user_db()`'s `with`-based pattern for SQLite (commits on a
+   clean exit, rolls back and always returns the connection to the pool on error). Sized for the
+   Procfile's `--workers=1 --worker-class=gthread --threads=8`. The existing scan-triggered/
+   admin-only Postgres call sites (`_pg_sync_scan`, `_pg_full_backfill`, `_pg_parity_check`) were
+   **not** migrated to the pool — they're rare, background-thread-triggered, and not on any hot
+   path, so their ad-hoc `psycopg2.connect()`-per-call pattern stays as-is; only the new Tier 1
+   read path (below) uses the pool.
+
+2. **`_pg_tier1_eligible()` / `_pg_tier1_browse()`** — the SQL translation of `api_browse()`'s
+   `_apply_base()` / contextual-facet-count / sort / NEW-tiering / paginate logic, for the case
+   with no want-list keywords and no `filter_q` (§3 Tier 1). Eligibility also requires
+   `sort_field` to be one of the columns the UI actually sends (`_PG_TIER1_SORTABLE`, built from
+   `static/gc.js`'s `_SORT_COLS` plus `price_drop_since`) — anything else falls through to the
+   legacy path rather than guessing. `f_want_only` does NOT disqualify Tier 1: with no keywords
+   active, `kwMatch` is always `False` in the JSON path too, so "want-list matches only" degrades
+   to a correctly-empty result either way (reproduced in SQL via `WHERE FALSE`, not by special-
+   casing eligibility around it).
+
+   Four queries per Tier 1 call (all parameterized — `sort_field`'s column comes only from a
+   fixed whitelist, `_PG_SORT_MAP`, never interpolated from the request):
+   - `total_unfiltered` + `new_count` (scope: availability + store selection + per-user
+     `user_last_scan` gating only, matching `all_items`'s scope before any `_apply_base` filter).
+   - Facet counts — one query, 4 `UNION ALL` branches (mirrors the v2.16.12 "single pass"
+     optimization, in SQL: each branch's `WHERE` is the base filters + the OTHER three facets,
+     reproducing `api_browse()`'s contextual-count semantics exactly).
+   - `total_filtered` + `store_count` over the fully-filtered set (drives pagination).
+   - The actual page of items (`ORDER BY ... LIMIT ... OFFSET ...`).
+
+   Sort translation: `price`/`date`/`price_drop_since` get raw (unlowered) comparisons like the
+   Python `elif` chain; `condition` gets the same quality-rank `CASE` as `_cond_order` (v2.10.18)
+   with unknowns always last regardless of direction; everything else lowercases, matching the
+   Python `else` branch. NEW-on-top tiering (non-`user_sorted` requests) is one leading
+   `ORDER BY (sku = ANY(:new_ids)) DESC` term — with no keywords active, the "new + want-match"
+   tier is always empty, so the 3-tier Python partition reduces to exactly 2 tiers, which a single
+   boolean ORDER BY term reproduces.
+
+3. **A/B diff harness** (`diff_harness.py`, cloud-sandbox-only scratch script, not committed —
+   same non-committed status as `/tmp/pgtest/*.py` from the v2.16.18 session) — Flask
+   `test_client()`, 37 request shapes (no filters/all stores across 3 pages, single/multi store,
+   every facet alone and combined, every sort field/direction including `user_sorted` vs. the
+   default NEW-tiering, watched-only, price-drop-only, vintage-only, price range, `user_last_scan`
+   gating, the `(none)` synthetic brand facet, the degenerate `filter_want_list_only` + zero-
+   keywords case, a fully-combined filter+sort+page case, `per_page=200`, and a zero-result case)
+   against a **436,240-row synthetic dataset at real production scale** (a local scratch Postgres
+   16 + a matching `gc_category_cache.json`, both in the cloud sandbox — the device-bridge shell
+   has no network path to Railway's Postgres, same limitation noted in the v2.16.14 entry).
+
+   **Found and fixed two real mismatches** (not tuned away, not dropped — both are now identical
+   fixes applied to the *existing* JSON path too, not just the new SQL path):
+   - The `brands` facet-count list (`sorted(brand_ctx.items(), key=lambda x: -x[1])`) had no
+     tiebreak for equal counts — ties fell back to Python dict-insertion order, which traces back
+     to `_cat_cache`'s arbitrary historical scan-insertion order. Postgres has no equivalent to
+     reproduce (aggregation doesn't preserve row order). Fixed by adding an explicit alphabetical
+     secondary key, `key=lambda x: (-x[1], x[0])`, identically in both `api_browse()` and
+     `_pg_tier1_browse()` — deterministic and byte-identical now, not an attempt to replicate the
+     old incidental order.
+   - Every "sort by X" case had the same class of bug at the *item* level: on a low-cardinality
+     column (condition/category/brand/store, or even price/date once ties actually collide at
+     436K rows), `filtered.sort()`'s tie order — also `_cat_cache`'s arbitrary insertion order —
+     had no SQL equivalent either. Fixed the same way: `filtered.sort(key=lambda x: x["id"])`
+     immediately before the existing primary sort in `api_browse()` (a stable pre-sort makes `sku`
+     ascending the tiebreak for every branch below, regardless of `asc`/`desc` — note a plain
+     `(primary, sku)` tuple key would have been wrong here, since `reverse=True` would have
+     reversed the tiebreak too; the two-pass stable-sort approach keeps the tiebreak
+     always-ascending independent of direction), matched by `_pg_tier1_browse()`'s SQL always
+     appending `, sku ASC` as the final `ORDER BY` term.
+
+   After both fixes: **37/37 cases pass, byte-for-byte identical JSON**, including the facet
+   count arrays, `total_*`/`store_count`/`new_count`/`new_want_count`, and full item payloads.
+
+4. **Verified at production scale**: 436,240 synthetic rows (not ~92K — see the v2.16.18 entry
+   for why the real scale is ~436K including sold/delisted history). Real gunicorn, real Procfile
+   flags (`--workers=1 --worker-class=gthread --threads=8`), scratch Postgres 16, warmed:
+   - No-filter/all-stores (the dominant case — Chuck's own primary use, per the v2.16.4/v2.16.12
+     entries): **JSON path ~3.2-4.0s/call vs. Postgres Tier 1 ~0.4s/call, ~9.5x faster** — this is
+     exactly the case the memory-growth investigation (`perf_railway_memory_growth_2026-08-31.md`)
+     identified as materializing the full catalog under concurrent load; killing that
+     materialization for this traffic is the actual mechanism fix, not just the `malloc_trim`
+     mitigation from v2.16.13.
+   - Across all 37 diff-harness cases: JSON path totaled 67.6s, Postgres Tier 1 totaled 11.5s
+     (~5.9x faster in aggregate, including cheaper filtered cases where the gap is smaller).
+   - 8-thread concurrent load (120 requests, mixed request shapes, real gunicorn) against the
+     pool: **zero errors**, pool never exhausted (`minconn=2, maxconn=12` against 8 request
+     threads), median latency ~1.1s under contention (vs. sub-second per-call when uncontended) —
+     no deadlocks, no connection leaks observed.
+
+5. **Gating verified safe** — confirmed via the harness, not just by reading the code: (a) a
+   non-admin session with `?pg_shadow=1` gets byte-identical output to no flag at all, and no
+   `_pg_shadow` debug key in the response; (b) an admin session with active keywords, or with
+   `filter_q` set (Tier 2), falls through to the unmodified legacy path — SQL is never attempted;
+   (c) an unrecognized `sort_field` falls through the same way; (d) with `DATABASE_URL` unset (no
+   pool at all — the common local-dev case), `/api/browse?pg_shadow=1` behaves exactly like
+   `/api/browse` with zero errors.
+
+**Not done this session, deliberately** (per NEXT_SESSION_PROMPT.md, both explicitly optional):
+production shadow-mode logging (both paths run for real, only JSON's result served, mismatches
+logged) was left for a future session rather than done this session — the offline diff harness
+above is the actual verification gate, and Chuck can now exercise `?pg_shadow=1` by hand against
+real production data himself once this deploys (Phase B's dual-write has been live since
+2026-08-31, so production Postgres already has real data to query — no separate backfill/rollout
+step needed to start poking at it). Migrating the admin-only Postgres call sites
+(`_pg_sync_scan`/`_pg_full_backfill`/`_pg_parity_check`) onto the new pool was considered and
+deliberately skipped — they're rare and not on any hot path, so it's pure churn for this phase.
+
+**Verified**: `python3 -m py_compile gc_tracker_app.py` and `node --check static/gc.js` (no JS
+changed — `?pg_shadow=1` is a server-side-only dev flag, nothing in the UI sets it) both clean.
+Actually imported the module in a disposable venv (repo's own `.venv` is tied to this Mac's
+Homebrew Python, per the standing v2.16.16 lesson) and confirmed the route table still builds (60
+routes) with `DATABASE_URL` unset. Booted gunicorn locally with the real `--workers=1
+--worker-class=gthread --threads=8` Procfile config (no `DATABASE_URL` available from the device
+shell — no network path to a real or scratch Postgres from there) and curled `/`, `POST
+/api/browse`, and `POST /api/browse?pg_shadow=1` (unauthenticated) — all 200, all falling through
+cleanly with the pool unavailable. All of the SQL-path-specific testing above (the 37-case diff,
+the scale timing, the concurrency test) ran against the cloud-sandbox scratch Postgres, the same
+setup pattern as the v2.16.18 session's backfill scale test.
+
+**Files changed**: `gc_tracker_app.py` only — `_PG_POOL`/`_pg_conn()` (new, after
+`_init_pg_schema()`), `_pg_tier1_eligible()`/`_pg_tier1_browse()`/`_PG_SORT_MAP`/
+`_PG_TIER1_SORTABLE`/`_PG_COND_RANK_SQL`/`_PG_COND_KNOWN_SQL` (new, just before `api_browse()`),
+the `?pg_shadow=1` gate + call site inside `api_browse()` (new), `user_sorted`'s read moved
+earlier in `api_browse()` (behavior-neutral — same value, read sooner), and the two tiebreak
+fixes described above (`brands` facet sort, the `filtered.sort(key=lambda x: x["id"])` pre-sort).
+No other route, no `_pg_sync_scan()`/`_pg_full_backfill()`/`_pg_parity_check()`/`pg_schema.sql`
+changes. `APP_VERSION = "2.16.20"`.
+
+**Next steps, queued**: see the rewritten `NEXT_SESSION_PROMPT.md` — once this deploys, exercise
+`?pg_shadow=1` against real production as admin (Phase B's dual-write means real data is already
+there), then decide on a production shadow-mode burn-in period vs. going straight to planning
+Phase D (the actual `/api/browse` cutover for the Tier 1 case).
 
 ---
 
