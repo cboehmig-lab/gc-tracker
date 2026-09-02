@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-02 · Version: v2.16.16 (Postgres Phase B verification: admin parity-check endpoint) · Live at: gcgeartracker.com — v2.16.15 pushed, deployed, dual-write live in production since 2026-08-31*
+*Generated: 2026-09-02 · Version: v2.16.17 (fixes v2.16.16, which crashed production for ~8 min) · Live at: gcgeartracker.com — rolled back to v2.16.15 during the incident, dual-write still live in production since 2026-08-31*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,16 +88,28 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.16 — Postgres Phase B verification: admin parity-check endpoint (2026-09-02, not yet pushed)
+## Current State: v2.16.17 — fixes v2.16.16, which crashed production (2026-09-02, not yet pushed)
 
-New admin-only `GET /api/pg-parity-check` (guarded by `_require_admin_api()`) compares the
-live in-memory `_cat_cache` against the live Postgres `items` table over the already-working
-internal `DATABASE_URL` — SKUs missing on either side, plus `available`/`price`/`date_listed`
-mismatches for SKUs on both. Runs inside the app process, no file transfer or Public Access
-needed. Verified against a scratch Postgres with deliberately planted discrepancies before
-shipping, and timed at production scale (~1s for ~92K rows). Purpose: answer whether ~2 days
-of live Phase B dual-write actually kept Postgres in sync — **not yet run against real
-production data this session**; that's the immediate next step once this deploys (hit the
+**v2.16.16 crashed production for ~8 minutes.** It added `@app.route("/api/pg-parity-check")`
+at a point in the file BEFORE `app = Flask(__name__)` is defined (~line 1847) — a decorator
+runs at import time and needs `app` to exist, so every gunicorn worker crashed on boot with
+`NameError: name 'app' is not defined`. Caught only because Chuck noticed the site was down and
+asked; mitigated by rolling back to v2.16.15 via Railway's dashboard Rollback action (~15s to
+restore). `py_compile`/`node --check` do NOT catch this class of bug (they check syntax, not
+import-time execution order) — that's a real gap, now closed: verifying any new Flask route
+means actually importing the module and confirming the route table builds, not just compiling it.
+
+v2.16.17 moves the route (unchanged otherwise) to after `app`/`optional_user_context`/
+`_require_admin_api()` are all defined, next to `/api/validate-stores` where it belongs. Verified
+by actually importing `gc_tracker_app` in a disposable venv (SECRET_KEY=test) and confirming the
+route registers and returns 401 when hit unauthenticated, in addition to `py_compile`/`node --check`.
+
+**What v2.16.16 was trying to do (still true of v2.16.17, just relocated)**: new admin-only
+`GET /api/pg-parity-check` compares the live in-memory `_cat_cache` against the live Postgres
+`items` table over the already-working internal `DATABASE_URL` — SKUs missing on either side,
+plus `available`/`price`/`date_listed` mismatches for SKUs on both. Purpose: answer whether ~2
+days of live Phase B dual-write actually kept Postgres in sync — **not yet run against real
+production data this session**; that's the immediate next step once v2.16.17 deploys (hit the
 endpoint while logged in as the admin account). Do not start Phase C (SQL Tier-1 read path)
 until that comes back clean.
 
@@ -126,6 +138,13 @@ come back clean.
 
 ### Recent changes (this session)
 
+- **v2.16.17** — **Fixes v2.16.16, which crashed production for ~8 minutes.** v2.16.16 put a
+  new `@app.route` decorator before `app = Flask(...)` existed in the file -- NameError at
+  import time, every gunicorn worker crash-looped. Mitigated via Railway dashboard Rollback
+  to v2.16.15 (~15s). Fix: moved the route to after app/optional_user_context/
+  _require_admin_api are defined, next to /api/validate-stores. py_compile/node --check don't
+  catch import-time NameErrors -- verification now also imports the module directly and checks
+  the route table, which it should have from the start for any new route.
 - **v2.16.16** — **Postgres Phase B verification: admin parity-check endpoint.** New
   `GET /api/pg-parity-check` (admin-only) diffs the live `_cat_cache` against the live
   Postgres `items` table on demand — missing-on-either-side SKUs plus

@@ -565,19 +565,6 @@ def _pg_parity_check() -> dict:
         "checked_at":              datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
-@app.route("/api/pg-parity-check")
-@optional_user_context
-def api_pg_parity_check():
-    denied = _require_admin_api()
-    if denied:
-        return denied
-    if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL):
-        return jsonify({"error": "Postgres not configured"}), 503
-    try:
-        return jsonify(_pg_parity_check())
-    except Exception as e:
-        return jsonify({"error": f"{type(e).__name__}: {e}"}), 502
-
 # ── Memoized /api/browse base item list (E2, v2.16.4) ────────────────────────
 # /api/browse used to rebuild this ~92K-item lightweight-dict list from scratch
 # on EVERY call — price/date formatting + name/brand lowercasing for every item
@@ -5157,6 +5144,19 @@ def _populate_store_data(selected_stores: list = None):
 
 
 
+@app.route("/api/pg-parity-check")
+@optional_user_context
+def api_pg_parity_check():
+    denied = _require_admin_api()
+    if denied:
+        return denied
+    if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL):
+        return jsonify({"error": "Postgres not configured"}), 503
+    try:
+        return jsonify(_pg_parity_check())
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 502
+
 @app.route("/api/validate-stores", methods=["POST"])
 @optional_user_context
 def api_validate_stores():
@@ -6606,7 +6606,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.16"
+APP_VERSION = "2.16.17"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

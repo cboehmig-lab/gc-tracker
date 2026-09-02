@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-02 · Current version: v2.16.16 (Postgres Phase B verification: admin parity-check endpoint) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-02 · Current version: v2.16.17 (fixes v2.16.16, which crashed production — see incident note below) · Domain: gcgeartracker.com*
 
 ---
 
@@ -9,7 +9,58 @@ When v2.16.10 first deployed, the logs still showed Werkzeug's dev-server warnin
 
 ---
 
+## 🔥 INCIDENT — v2.16.16 crashed production for ~8 minutes (2026-09-02)
+
+**What happened**: v2.16.16 added a new route (`@app.route("/api/pg-parity-check")`) but placed
+it at the wrong point in the file — right after `_pg_sync_scan()`, which is defined much earlier
+in the file than `app = Flask(__name__)` (line ~1847). A route decorator evaluates immediately at
+module-import time and needs `app` to already exist; it didn't yet at that point in the file, so
+every gunicorn worker crashed on boot with `NameError: name 'app' is not defined`, and the whole
+`web` service crash-looped (Railway showed CRASHED) for about 8 minutes until Chuck noticed and
+asked to check.
+
+**Why this wasn't caught before shipping**: verification before pushing was `python3 -m
+py_compile` + `node --check` only. `py_compile` checks syntax, not module-level execution order —
+it happily compiles a decorator that references a name that won't exist yet at import time,
+because that's only a runtime (import-time) error, not a syntax error. This is a real gap in the
+verification method used for this change; it would NOT have caught this class of bug.
+
+**Fix, immediate mitigation**: rolled back `web` to the last-known-good deployment (v2.16.15) via
+Railway's dashboard "Rollback" action on the previous deployment — restored ACTIVE/healthy in
+about 15 seconds. No data loss; Phase A/B (schema + dual-write) were completely unaffected since
+the crash happened at import time, before any request-handling code ever ran.
+
+**Fix, actual code (v2.16.17)**: moved the `@app.route("/api/pg-parity-check")` /
+`api_pg_parity_check()` function to after `app = Flask(...)`, `optional_user_context`, and
+`_require_admin_api()` are all defined — placed next to `/api/validate-stores`, the other
+admin-only diagnostic-style endpoint, which is where it belonged all along. The `_pg_parity_check()`
+helper function itself didn't need to move (it never referenced `app`).
+
+**Verification tightened as a direct result** — `py_compile`/`node --check` alone is not enough
+for a change that adds a new route; from now on, verifying a new Flask route also means actually
+importing the module (not just compiling it) and confirming Flask can build its route table,
+e.g.:
+```
+SECRET_KEY=test python3 -c "
+import gc_tracker_app as m
+print(len(list(m.app.url_map.iter_rules())), 'routes loaded OK')
+"
+```
+Done for v2.16.17 in a disposable venv (the repo's own `.venv` is tied to this Mac's Homebrew
+Python and isn't importable from the Cowork device-bridge sandbox) — confirmed the module imports
+cleanly, the route registers at `/api/pg-parity-check`, and hitting it unauthenticated correctly
+returns 401 before ever touching Postgres.
+
+**Files changed**: `gc_tracker_app.py` only (moved one function; no logic changes).
+`APP_VERSION = "2.16.17"`.
+
+---
+
 ## ⭐ Recent Changes (v2.16.15 → v2.16.16) — 2026-09-02 (Postgres Phase B verification: admin parity-check endpoint)
+
+**⚠️ This version crashed production — see the incident note above. The code below describes the
+intent; the endpoint didn't actually work until v2.16.17 moved it to a valid location.**
+
 
 **Context**: Phase B (scan dual-write) has been live in production for ~2 days (deployed
 2026-08-31, `DATABASE_URL` actually flipped on that same day — see the v2.16.15 entry's
