@@ -4900,8 +4900,21 @@ def api_browse():
     _pg_tier2_shadow_source = None
     _pg_tier2_shadow_ms = None
     _pg_tier2_shadow_count = None
+    # (v2.16.24) Only bother narrowing when a narrowing predicate actually
+    # applies. _pg_tier2_narrow_items's WHERE clause is availability +
+    # (optionally) store subset + (optionally) user_last_scan gating — if
+    # search_all is True AND there's no user_last_scan, neither optional
+    # clause fires, so the query is just "SELECT ... WHERE available",
+    # i.e. a full-catalog fetch over the network (110K+ rows). That's
+    # strictly worse than the already in-memory, already-memoized
+    # _build_base_item_list() it would replace: live timing found it ~2.5x
+    # SLOWER for exactly this shape (all-stores + keyword, no other filter)
+    # despite byte-identical output. So skip the Postgres round-trip
+    # whenever it can't narrow anything, and fall straight through to the
+    # unchanged in-memory path below, exactly as if shadow mode weren't on.
+    _pg_tier2_would_narrow = (not search_all) or bool(user_last_scan)
     if (_pg_shadow_requested and _is_admin() and _PG_POOL is not None
-            and _pg_tier2_eligible(fq, _has_kw)):
+            and _pg_tier2_eligible(fq, _has_kw) and _pg_tier2_would_narrow):
         try:
             _pg_t2_t0 = time.time()
             _pg_tier2_shadow_source = _pg_tier2_narrow_items(
@@ -7349,7 +7362,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.23"
+APP_VERSION = "2.16.24"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

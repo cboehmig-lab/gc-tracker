@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-04 · Current version: v2.16.23 (Postgres Phase E — Tier 2 candidate narrowing, SHADOW MODE ONLY, not yet cut over; Phase D confirmed healthy) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-04 · Current version: v2.16.24 (Postgres Phase E — Tier 2 candidate narrowing, SHADOW MODE ONLY, perf regression fixed; Phase D confirmed healthy) · Domain: gcgeartracker.com*
 
 ---
 
@@ -53,6 +53,81 @@ returns 401 before ever touching Postgres.
 
 **Files changed**: `gc_tracker_app.py` only (moved one function; no logic changes).
 `APP_VERSION = "2.16.17"`.
+
+---
+
+## ⭐ Recent Changes (v2.16.23 → v2.16.24) — 2026-09-04 (Postgres migration Phase E follow-up: fixed a real perf regression found via live spot-check — still SHADOW MODE ONLY)
+
+**What prompted this**: right after v2.16.23 deployed, live-spot-checking `?pg_shadow=1` against
+real production data (Chuck's own admin session, via Claude in Chrome) confirmed byte-identical
+output on every shape tried, but also surfaced a genuine timing regression for Chuck's own most
+common usage pattern — all-stores + keyword/want-list search, no store/date/facet filter — the
+shadow (Postgres-narrowed) path ran ~2.5x SLOWER than today's legacy path (~2356-2478ms wall vs.
+~847-885ms; `_pg_tier2_shadow_ms` alone was ~1363-1382ms). Root cause: `_pg_tier2_narrow_items()`'s
+WHERE clause is availability + (optional) store subset + (optional) `user_last_scan` gating — when
+`search_all` is True and there's no `user_last_scan`, NEITHER optional clause fires, so the query
+degenerates to `SELECT ... WHERE available`, i.e. a full-catalog fetch (110K+ rows) over the
+network. That's strictly worse than the already in-memory, already-memoized
+`_build_base_item_list()` it was replacing — no narrowing was ever going to happen in that case, so
+the Postgres round-trip was pure overhead.
+
+**The fix**: a new `_pg_tier2_would_narrow` guard — `(not search_all) or bool(user_last_scan)` —
+gates the shadow-narrowing attempt in `api_browse()`, right alongside the existing
+`_pg_tier2_eligible(fq, _has_kw)` check. When neither a store subset nor a scan-date filter would
+actually narrow anything, Phase E's shadow path is skipped entirely and falls straight through to
+the unchanged in-memory `_build_base_item_list()` path — exactly as if shadow mode weren't on for
+that request. No change to what gets narrowed when narrowing DOES apply (store subset and/or
+`user_last_scan` still route through Postgres exactly as in v2.16.23).
+
+**Verification**:
+1. Re-ran the existing 60-case offline diff harness (`diff_harness_e.py`, same 44,300-row synthetic
+   dataset from v2.16.23) — updated its assertions to expect the `_pg_tier2_shadow` diagnostic
+   marker to be ABSENT for the ~38 cases shaped `all_stores: true` with no `user_last_scan` (the new
+   guard correctly skips those) and present for the rest — **60/60 still passed byte-identical**
+   after stripping diagnostic keys, confirming the skip doesn't change output, only which code path
+   produces it.
+2. Caught and fixed a real gap in `forced_fail_test_e.py`: its body (`all_stores: true`, no
+   `user_last_scan`) now falls under the new guard, so the forced-Postgres-exception it injects
+   never actually ran anymore — the test was passing trivially without exercising the fallback at
+   all. Fixed by switching its body to a store-subset shape (still eligible for narrowing) and
+   adding an explicit assertion that the injected exception was actually raised — re-ran and
+   confirmed the fallback-to-legacy-response behavior still works correctly when Postgres genuinely
+   fails mid-narrowing.
+3. Timing re-check (test-client wall time, scratch Postgres, 5 reps each): the regression case
+   (all-stores + keyword, no other filter) now times identically between shadow and legacy
+   (~185-410ms both — first-call variance, not a systematic gap) — confirms the fix. **Open
+   question for next session**: on the small 44,300-row synthetic set, a still-eligible narrowing
+   case (3-store subset + keyword) timed SLOWER under Postgres narrowing than legacy in this test
+   (~21-24ms shadow vs. ~8-11ms legacy) despite narrowing 41,800 candidate rows down to ~1,066 —
+   likely dominated by psycopg2 connection/query round-trip overhead against a small dataset rather
+   than reflecting production scale (110K+ active / 436K historical rows), where the story may be
+   different. This was NOT re-checked against live production data this session — the next
+   session's live-spot-check pass should specifically time a narrowing-eligible case (not just the
+   no-predicate case fixed here) against real production data before treating Phase E's SQL
+   narrowing as a proven latency win rather than just a (still real, still worth having) memory-
+   pressure reduction.
+4. `python3 -m py_compile gc_tracker_app.py` clean, both in the sandbox and on the device. No JS
+   changed. Imported the module in a disposable venv — route table still builds at 60 routes,
+   unchanged.
+5. Patched `gc_tracker_app.py` directly on the device this session (not built in the sandbox first,
+   unlike v2.16.23 — a small, contained guard-condition addition), then staged the device copy INTO
+   the sandbox to run the harness/timing checks against the existing scratch Postgres setup, and
+   confirmed via SHA-256 (`b7e13298...cb9513a`) that the sandbox-tested file and the device file are
+   byte-identical before treating the change as ready.
+
+**Files changed**: `gc_tracker_app.py` only — one new line (`_pg_tier2_would_narrow`) and one
+added condition in the existing shadow-narrowing `if` in `api_browse()`. No changes to
+`_pg_tier2_narrow_items()` itself, Tier 1, the keyword matcher, `_apply_base`, sort/tiering/
+pagination, or the JS/CSS. `APP_VERSION = "2.16.24"`. Still SHADOW MODE ONLY — this version doesn't
+change what real (non-admin/unflagged) traffic sees at all, same as v2.16.23.
+
+**Next up**: finish the live-spot-check pass queued since v2.16.23 — category/subcategory facet
+combos weren't checked live yet (only brand/condition were), the `fq-multitoken` case needs a clean
+retry (got redacted by a tooling artifact last time, not a real failure), and — per the open
+question above — a narrowing-eligible case (store subset or `user_last_scan` active) needs a live
+timing comparison, not just a correctness check, before Phase E's SQL narrowing can be called a
+proven win rather than just "not measurably worse." Only after that passes clean is dropping the
+admin/`pg_shadow` gate (the actual cutover) appropriate.
 
 ---
 

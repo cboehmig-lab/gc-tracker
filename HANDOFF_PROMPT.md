@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-04 · Version: v2.16.23 (Postgres migration Phase E — Tier 2 candidate narrowing, SHADOW MODE ONLY) · Live at: gcgeartracker.com — v2.16.22 still deployed/live (Phase D); v2.16.23 not yet pushed*
+*Generated: 2026-09-04 · Version: v2.16.24 (Postgres migration Phase E — Tier 2 candidate narrowing, SHADOW MODE ONLY, perf regression fixed) · Live at: gcgeartracker.com — v2.16.24 not yet pushed (v2.16.23 is live)*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -85,6 +85,49 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 - **JSON-LD**: `WebSite` schema with `SearchAction` (`potentialAction`) — injected as `<script type="application/ld+json">` (not blocked by CSP `script-src 'self'`)
 - **Noscript store list**: `_build_stores_noscript()` called in `index()` — reads `STORES_CACHE` fresh, generates `<noscript>` block listing all ~240+ store names. Invisible to JS users, crawlable by Google. Updates automatically when store list is refreshed.
 - **Footer**: `.seo-footer` — visible "Privacy Policy · Not affiliated with Guitar Center, Inc." in `#555` gray. No hidden text.
+
+---
+
+## Current State: v2.16.24 — Postgres migration Phase E follow-up: fixed a real perf regression in shadow mode, still not cut over (2026-09-04)
+
+**Still SHADOW MODE ONLY** — real (non-admin/unflagged) Tier 2 traffic is 100% unaffected by
+either v2.16.23 or v2.16.24; this is a fix to code only an admin's `?pg_shadow=1` session
+exercises.
+
+**Same-session follow-up to v2.16.23**: right after v2.16.23 shipped, Chuck asked Claude to
+live-spot-check `?pg_shadow=1` against real production using his own logged-in admin browser
+session (Claude in Chrome). Output matched byte-for-byte on every shape tried, but timing didn't:
+the shadow (Postgres-narrowed) path was ~2.5x SLOWER than legacy for Chuck's own most common
+usage pattern — all stores selected + a keyword/want-list search, no other filter. Cause: when
+`search_all` is True and there's no `user_last_scan`, `_pg_tier2_narrow_items()`'s WHERE clause
+has nothing to narrow by (`SELECT ... WHERE available` — the whole 110K+ row catalog), which is
+slower to fetch over the network than reading the already in-memory, already-memoized item list
+it was replacing.
+
+**Fix**: added `_pg_tier2_would_narrow = (not search_all) or bool(user_last_scan)` and gated the
+shadow-narrowing attempt on it — when neither a store subset nor `user_last_scan` would actually
+narrow anything, Phase E is skipped for that request and it falls straight through to the
+unchanged in-memory path, same as if shadow mode weren't on. Narrowing behavior is unchanged for
+every case that DOES have a narrowing predicate.
+
+**Verified**: re-ran the 60-case offline diff harness (updated its assertions for which cases
+should now skip narrowing) — 60/60 still byte-identical. Also caught and fixed a real gap this
+introduced in the forced-exception fallback test — its old body no longer reached the code being
+tested, so it was passing without testing anything; fixed by using a still-narrowing-eligible
+body and asserting the injected exception actually fired. Timing re-check confirmed the
+regression is gone for the no-predicate case. **Open item for next session**: a still-eligible
+narrowing case (store subset + keyword) timed slower under Postgres than legacy on the small
+44K-row *synthetic* sandbox dataset (~21-24ms vs ~8-11ms) — likely connection/round-trip overhead
+that may not hold at production's 110K+/436K-row scale, but this needs a live timing check
+against real production data, not just correctness, before Phase E's SQL narrowing is treated as
+a proven latency win (it's still a real memory-pressure reduction regardless). See HANDOFF.md's
+v2.16.24 entry for the full writeup.
+
+**Not yet live-spot-checked**: category/subcategory facet combos with keyword active (only
+brand/condition were checked live so far), the `fq-multitoken` case (got redacted by a tooling
+artifact last time, not a real failure — needs a clean retry), and — per the open item above — a
+narrowing-eligible case's live timing. Only after all of that passes clean is dropping the
+admin/`pg_shadow` gate (the actual Phase E cutover) appropriate.
 
 ---
 
