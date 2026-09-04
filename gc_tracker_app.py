@@ -4471,6 +4471,147 @@ def _pg_tier1_browse(*, store_set, search_all, user_last_scan,
     }
 
 
+# ── Postgres Tier 2 candidate narrowing — Phase E, SHADOW MODE (v2.16.23) ────
+# Tier 1 (above) serves the ENTIRE response from SQL. Tier 2 is different by
+# design (POSTGRES_MIGRATION_PLAN.md §3): the want-list/free-text keyword
+# matcher stays exactly as it is today — Python, unmodified — because it's
+# genuinely sophisticated (its own multi-session bug history: v2.13.1 DoS
+# caps, v2.14.4 cap-starvation fix, v2.16.0 operators, v2.16.3 colon-prefix)
+# and reimplementing it in SQL (tsquery/pg_trgm) is a real project on its own,
+# not worth doing without a proven need. So Phase E only narrows the
+# CANDIDATE row set the existing Python matcher runs over: push every filter
+# SQL can express that does NOT depend on keyword/free-text matching into a
+# WHERE clause, fetch that from Postgres, and hand it to api_browse()'s
+# existing per-request loop / _kw_match / _apply_base / facet-context-count /
+# sort / tiering / paginate code completely unchanged — see
+# _pg_tier2_narrow_items's docstring for exactly what is and isn't pushed
+# down and why.
+#
+# SHADOW MODE ONLY this phase, deliberately — same staged rollout Tier 1 used
+# (Phase C shadow-mode, v2.16.20/21, before its own separate cutover in Phase
+# D, v2.16.22): gated behind admin + `?pg_shadow=1` in api_browse() below, not
+# real traffic. Verify via the offline diff harness + live spot-checks (same
+# bar Phase D was held to) before a future session drops that gate.
+
+def _pg_tier2_eligible(fq: str, has_kw: bool) -> bool:
+    """True iff this /api/browse request is the Tier 2 case Phase E targets:
+    want-list keywords or filter_q free text active — exactly the case Tier 1
+    excludes (see _pg_tier1_eligible, which is `(not fq) and (not has_kw) and
+    ...`). Unlike Tier 1, sort_field doesn't matter here: Phase E only
+    narrows the candidate set fetched from Postgres, it never moves sorting
+    or pagination into SQL, so every sort_field the JSON path already
+    supports keeps working completely unchanged."""
+    return bool(fq) or has_kw
+
+
+def _pg_tier2_narrow_items(*, store_set, search_all, user_last_scan) -> list:
+    """Phase E (v2.16.23): fetch a candidate row set from Postgres, narrowed
+    by every filter SQL can express WITHOUT touching keyword/free-text
+    matching, the four facet dropdowns, OR any of _apply_base()'s own
+    filters (filter_q/want_only/price_drop_only/vintage_only/watched/price
+    range).
+
+    Deliberately EXCLUDED from the WHERE clause here (must stay Python-only,
+    downstream, exactly as today):
+      - filter_q / want-list keywords: compile to Python regexes (_kw_match /
+        _compile_fq_clauses), not reimplemented in SQL — see the module note
+        above.
+      - filter_want_list_only, filter_price_drop_only, vintage_only,
+        filter_watched, filter_price_min/max: these are _apply_base()'s own
+        filters, applied to `all_items` to produce `base_items` — and
+        api_browse()'s `total_unfiltered`/`new_count_unfiltered` are counted
+        on `all_items` BEFORE _apply_base runs (mirrors Tier 1's own Q1
+        query, which is deliberately store+scan-gate ONLY — see its
+        docstring). An earlier version of this function pushed these into
+        the WHERE clause here too, which silently shrank `all_items` itself
+        and corrupted total_unfiltered for every request using one of these
+        filters (caught by the offline diff harness — total_unfiltered
+        mismatched while total_count still matched, i.e. exactly a
+        pre-vs-post-_apply_base scope bug). So these stay exactly where they
+        already are: Python-side, inside _apply_base(), applied AFTER this
+        candidate set.
+      - brand/condition/category/subcategory facet filters: api_browse()'s
+        facet DROPDOWN COUNTS are "contextual" — each facet's count reflects
+        every OTHER active facet but never itself (see the single-pass facet
+        loop in api_browse(), just below where this function's result is
+        consumed), computed by iterating the FULL non-facet-filtered
+        candidate set in Python. Pre-filtering candidates by a facet in SQL
+        here would silently corrupt that math for every OTHER facet's count
+        (e.g. pre-filtering by brand would make every category/subcategory/
+        condition count wrong, since those are supposed to still reflect
+        "all brands"). So facet filtering stays exactly where it already is:
+        applied AFTER this candidate set, by the unchanged Python code.
+
+    What IS pushed down (availability + store selection + per-user scan-date
+    gating) exactly matches the scope `all_items`/`total_unfiltered` already
+    have in the legacy path — this function narrows the SAME population
+    Tier 1's Q1 query narrows to, just returns the rows instead of a count.
+
+    Returns a list of dicts in the EXACT shape _build_base_item_list()
+    produces (including the internal-only name_lower/brand_lower/first_seen
+    fields that function's own docstring calls out) so the caller can use
+    this as a drop-in replacement for that function's return value — every
+    line of api_browse() downstream (kw_match computation, _apply_base,
+    facet-context counting, facet filtering, sort, NEW-tiering, pagination,
+    response building) runs completely unchanged, exactly as
+    POSTGRES_MIGRATION_PLAN.md §3 calls for.
+
+    Raises on any DB error — the caller catches and falls back to
+    _build_base_item_list(), exactly like Tier 1's fallback (_pg_tier1_browse).
+    """
+    import psycopg2.extras as _pg_extras
+
+    where = ["available"]
+    params = {}
+    if not search_all:
+        where.append("store = ANY(%(stores)s)")
+        params["stores"] = list(store_set) if store_set else []
+    if user_last_scan:
+        where.append("(first_seen = '' OR first_seen <= %(user_last_scan)s)")
+        params["user_last_scan"] = user_last_scan
+
+    where_sql = " AND ".join(where)
+
+    items = []
+    with _pg_conn() as conn:
+        with conn.cursor(cursor_factory=_pg_extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT sku, name, brand, category, subcategory, condition, "
+                "condition_note, price, list_price, price_drop, price_drop_since, "
+                "store, location, url, image_id, is_vintage, date_listed, first_seen "
+                f"FROM items WHERE {where_sql}", params)
+            for r in cur:
+                price_raw = float(r["price"] or 0)
+                name = r["name"] or ""
+                brand = r["brand"] or ""
+                date_raw = r["date_listed"] or ""
+                items.append({
+                    "id":               r["sku"],
+                    "name":             name,
+                    "brand":            brand,
+                    "name_lower":       name.lower(),
+                    "brand_lower":      brand.lower(),
+                    "price":            f"${price_raw:,.2f}" if price_raw else "",
+                    "price_raw":        price_raw,
+                    "list_price_raw":   float(r["list_price"] or 0),
+                    "price_drop":       float(r["price_drop"] or 0),
+                    "price_drop_since": r["price_drop_since"] or "",
+                    "store":            r["store"] or "",
+                    "location":         r["location"] or "",
+                    "url":              r["url"] or "",
+                    "category":         r["category"] or "",
+                    "subcategory":      r["subcategory"] or "",
+                    "condition":        r["condition"] or "",
+                    "date":             _fmt_date(date_raw),
+                    "date_raw":         date_raw,
+                    "first_seen":       r["first_seen"] or "",
+                    "image_id":         r["image_id"] or "",
+                    "is_vintage":       bool(r["is_vintage"]),
+                    "condition_note":   r["condition_note"] or "",
+                })
+    return items
+
+
 @app.route("/api/browse", methods=["POST"])
 @optional_user_context
 def api_browse():
@@ -4752,6 +4893,30 @@ def api_browse():
             print(f"[pg] tier1 browse failed, falling back to JSON path: "
                   f"{type(e).__name__}: {e}")
 
+    # ── Postgres Tier 2 candidate narrowing — SHADOW MODE (Phase E, v2.16.23) ──
+    # Admin + `?pg_shadow=1` gated only this phase — see the module note above
+    # _pg_tier2_eligible for why this isn't a real-traffic cutover yet. A real
+    # (non-flagged, non-admin) request always takes the unchanged path below.
+    _pg_tier2_shadow_source = None
+    _pg_tier2_shadow_ms = None
+    _pg_tier2_shadow_count = None
+    if (_pg_shadow_requested and _is_admin() and _PG_POOL is not None
+            and _pg_tier2_eligible(fq, _has_kw)):
+        try:
+            _pg_t2_t0 = time.time()
+            _pg_tier2_shadow_source = _pg_tier2_narrow_items(
+                store_set=store_set, search_all=search_all,
+                user_last_scan=user_last_scan,
+            )
+            _pg_tier2_shadow_ms = round((time.time() - _pg_t2_t0) * 1000, 1)
+            _pg_tier2_shadow_count = len(_pg_tier2_shadow_source)
+        except Exception as e:
+            # Same tolerance as Tier 1's fallback: never let a Postgres/SQL
+            # bug affect a real response — fall through to the full cache.
+            print(f"[pg] tier2 narrow failed, falling back to full cache: "
+                  f"{type(e).__name__}: {e}")
+            _pg_tier2_shadow_source = None
+
     # ── Build full item list for selected stores (lightweight dicts) ──────
     # E2 (v2.16.4): the expensive per-item projection (price/date formatting,
     # name/brand lowercasing) now happens ONCE per cache generation in
@@ -4759,8 +4924,16 @@ def api_browse():
     # docstring. This pass is just the genuinely per-request part: store
     # selection, per-user scan-date gating, and the per-user annotations
     # (watched/isNew/kwMatch/isFav) that can't be cached across users.
+    #
+    # (Phase E, v2.16.23) When Tier 2 shadow-narrowing above succeeded, this
+    # iterates that smaller Postgres-sourced list instead of the full
+    # memoized cache. Every check inside this loop (store_set/user_last_scan)
+    # is left completely unchanged and just gets redundantly re-applied on
+    # what's already a subset (harmless, and cheap — see
+    # _pg_tier2_narrow_items's docstring for why the subset already satisfies
+    # both), so this is a pure data-source swap, not a logic change.
     all_items = []
-    for b in _build_base_item_list():
+    for b in (_pg_tier2_shadow_source if _pg_tier2_shadow_source is not None else _build_base_item_list()):
         if store_set is not None and b["store"] not in store_set:
             continue
         # Per-user browse gating: hide items first seen after this user's last scan.
@@ -4954,7 +5127,7 @@ def api_browse():
     # Unique stores in filtered result set
     store_count = len(set(i.get("store", "") for i in filtered if i.get("store")))
 
-    return jsonify({
+    _resp = {
         "items":            page_items,
         "page":             page,
         "per_page":         per_page,
@@ -4977,7 +5150,17 @@ def api_browse():
         "conditions":    [{"name": c, "count": n} for c, n in sorted(cond_ctx.items(), key=lambda x: _cond_order.get(x[0], 5))],
         "categories":    [{"name": c, "count": n} for c, n in sorted(cat_ctx.items())],
         "subcategories": [{"name": s, "count": n} for s, n in sorted(sub_ctx.items())],
-    })
+    }
+    # (Phase E, v2.16.23) Tier 2 shadow-mode diagnostics — admin-gated
+    # independently of routing, same posture as Tier 1's _pg_shadow/
+    # _pg_shadow_ms (see the comment at _pg_shadow_requested's assignment):
+    # a non-admin passing ?pg_shadow=1 gets nothing extra, so shadow-mode
+    # internals never leak to a real caller even before the eventual cutover.
+    if _pg_shadow_requested and _is_admin() and _pg_tier2_shadow_count is not None:
+        _resp["_pg_tier2_shadow"] = True
+        _resp["_pg_tier2_shadow_ms"] = _pg_tier2_shadow_ms
+        _resp["_pg_tier2_shadow_candidate_count"] = _pg_tier2_shadow_count
+    return jsonify(_resp)
 
 
 # (Dead legacy global-file endpoints removed in v2.14.5 — /api/watchlist GET+POST,
@@ -7166,7 +7349,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.22"
+APP_VERSION = "2.16.23"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

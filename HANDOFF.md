@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-04 · Current version: v2.16.22 (Postgres Phase D — THE CUTOVER: /api/browse now serves every real user from Postgres, live and holding clean; Phase E queued next) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-04 · Current version: v2.16.23 (Postgres Phase E — Tier 2 candidate narrowing, SHADOW MODE ONLY, not yet cut over; Phase D confirmed healthy) · Domain: gcgeartracker.com*
 
 ---
 
@@ -53,6 +53,127 @@ returns 401 before ever touching Postgres.
 
 **Files changed**: `gc_tracker_app.py` only (moved one function; no logic changes).
 `APP_VERSION = "2.16.17"`.
+
+---
+
+## ⭐ Recent Changes (v2.16.22 → v2.16.23) — 2026-09-04 (Postgres migration Phase E: Tier 2 candidate narrowing — SHADOW MODE ONLY, not a cutover)
+
+**Phase D health check first (the actual gate from the last session's queued prompt)**: live
+spot-checks against `https://gcgeartracker.com/api/browse` (unflagged, non-admin — no-filter/
+all-stores, one brand facet, one sort) all came back clean — 200s, sane `total_count` (110,963,
+up from 110,147 two days prior, normal catalog growth), no diagnostic key leaking, warm-cache
+timing 200-400ms matching Phase D's own numbers. Chuck confirmed nothing looked off since the
+2026-09-02 deploy. Found the actual Railway project this session (`serene-determination`, service
+`web` — see `postgres_phase_d_healthcheck_2026-09-04.md` / `reference_railway.md` in project
+memory; a prior session's two guessed project names were both wrong). Deploy logs: zero
+`falling back to JSON` lines, no `@level:error` entries. **Memory graph, last 24h (comfortably
+post-cutover): still shows an active, fairly tight sawtooth (~3.5-4.7GB, frequent cycling) — not
+flat.** This is the direct production confirmation of `perf_railway_memory_growth_2026-08-31.md`'s
+addendum: Tier 2 (keyword/want-list) traffic still builds the full temporary Python structures
+Phase D bypassed for Tier 1, so the underlying memory mechanism is still firing, just less often
+and with a much lower ceiling (no more 6-13GB spikes) than pre-Phase-D. That's the evidence the
+plan asked for ("only worth doing if Tier 2's residual cost turns out to matter") — it does, so
+Phase E went ahead this session.
+
+**What Phase E actually is, and why it's NOT shaped like Tier 1**: Tier 1 (Phase D) serves the
+*entire* response from SQL. Tier 2 can't, by design (`POSTGRES_MIGRATION_PLAN.md` §3) — the
+want-list/free-text keyword matcher (`_kw_match`/`_compile_fq_clauses`) stays exactly as it is
+today, unmodified Python, because reimplementing it in SQL (tsquery/pg_trgm) is a real project on
+its own with no proven need yet. So Phase E only narrows the *candidate row set* that existing
+Python logic runs over: two new functions, `_pg_tier2_eligible()` (`fq` or want-list keywords
+active — the exact complement of `_pg_tier1_eligible`) and `_pg_tier2_narrow_items()`, which
+queries Postgres for `available` rows in-scope by store selection + per-user `user_last_scan`
+gating (the *same* scope Tier 1's own Q1 query and `total_unfiltered` use) and returns them in the
+exact dict shape `_build_base_item_list()` already produces. `api_browse()` swaps this in as the
+iteration source for the existing per-request loop — `_kw_match` computation, `_apply_base`,
+facet-context counting, facet filtering, sort, NEW-tiering, pagination, response building are all
+**completely unchanged**, just running over a (usually) smaller candidate list.
+
+**A real bug caught by the harness, not eyeballing**: the first version of
+`_pg_tier2_narrow_items` also pushed `filter_price_drop_only`/`vintage_only`/`filter_watched`/
+`filter_price_min`/`filter_price_max` into the narrowing WHERE clause, on the theory that "SQL can
+express these too." That's true but *wrong here*: `total_unfiltered` (and `new_count`) are counted
+on `all_items` **before** `_apply_base()`'s filters run — pushing those specific filters into the
+row-fetch itself shrinks `all_items` and silently corrupts `total_unfiltered` for any request using
+one of them (found immediately by the 60-case offline diff harness: `total_count` matched but
+`total_unfiltered` didn't, in every case that set one of those filters — a clean pre-vs-post-
+`_apply_base` scope bug). Fixed by dropping those five filters from the narrowing WHERE entirely —
+they stay exactly where they already were, applied by the unchanged `_apply_base()` call. Also
+deliberately excluded from the narrowing WHERE, for a different reason: the four facet dropdowns
+(brand/condition/category/subcategory) — their dropdown counts are *contextual* ("this facet's
+count with every OTHER active facet applied, but never itself"), computed by a Python loop over
+the *full* non-facet-filtered candidate set; pre-filtering by any one facet in SQL would corrupt
+every *other* facet's count. So Phase E's real narrowing power is store selection + scan-date
+gating only — still a real, meaningful win (an 8-store want-list browse against the 44K-row
+synthetic set narrowed from 41,800 to 717 candidate rows in the harness), but doesn't attempt to
+also narrow by price-drop/vintage/watched/price-range/facets — those still get evaluated by
+Python over whatever the store selection already narrowed to, exactly as before.
+
+**SHADOW MODE ONLY this phase — deliberately not a cutover**, same staged rollout Tier 1 used
+(Phase C shadow, v2.16.20/21, before its own separate Phase D cutover, v2.16.22): gated behind
+admin + `?pg_shadow=1` in `api_browse()`, attaching `_pg_tier2_shadow`/`_pg_tier2_shadow_ms`/
+`_pg_tier2_shadow_candidate_count` diagnostic fields to an admin's own flagged response only. Every
+real (non-admin/unflagged) Tier 2 request still gets the byte-for-byte unmodified legacy behavior.
+Not cutting over this session on purpose — dropping the admin/flag gate needs the same "offline +
+live checks both pass clean" bar Phase D was held to, and this session's live-checking budget went
+into the Phase D health check + building/verifying Phase E itself; a future session should
+live-spot-check `?pg_shadow=1` behavior against real production data (like v2.16.20/21/22's own
+precedent) before flipping the cutover.
+
+**Verification, in order:**
+1. Fresh 44,300-row synthetic dataset (`gen_data.py`, cloud-sandbox-only, not committed — new for
+   this session) with 1,800 deliberately sparse/malformed rows rotating through the same seven
+   shapes v2.16.22's harness used (empty store/brand/category/subcategory/condition, zero price,
+   empty date), plus 2,500 `available=False` rows, realistic want-list-matchable brand/model text
+   (Fender/Gibson/Stratocaster/Les Paul/Big Muff/etc., some sharing tokens on purpose so keyword
+   matching has both real hits and real misses). Loaded into BOTH `gc_category_cache.json` (legacy
+   path's source) and a scratch Postgres 16 `items` table via the app's own `_pg_row_for`/
+   `_PG_UPSERT_SQL` (not a separately-maintained column mapping — guarantees the scratch DB matches
+   exactly what production dual-write would produce for this data).
+2. Fresh `diff_harness_e.py` (Flask `test_client()`, admin session) — 60 request shapes: every
+   keyword syntax bucket (plain/phrase/wildcard/quoted-exact/comma-AND/OR-NOT-bool), `filter_q`
+   (plain/multi-token-AND/OR-clause/negation), keyword combined with each SQL-narrowable filter
+   (store subset, price-drop-only, vintage-only, price range, watched), keyword combined with each
+   facet filter alone and combined (to prove facet-context math survived), want-list-only, every
+   sort field in both directions, the default NEW-tiering sort, `user_last_scan` gating,
+   pagination/large-per_page, a zero-result combo, sparse-row-touching cases (empty-store scope,
+   zero-price range, empty-brand facet select), and a fully-combined kitchen-sink case. Compared
+   the shadow path (`?pg_shadow=1`, admin, `_PG_POOL` live) against the legacy path (same request,
+   `_PG_POOL` monkeypatched to `None` so `_pg_tier2_narrow_items` never runs) — **60/60 passed
+   byte-identical** after the `total_unfiltered` bug above was fixed. (One earlier false-positive
+   diff traced to the synthetic generator itself — `list_price = price + round(uniform(0,200),2)`
+   without rounding the sum produced float noise like `689.5500000000001` that Postgres's
+   `NUMERIC(10,2)` naturally rounded away; fixed the generator, not app code, since production
+   prices are never computed this way.)
+3. Forced-exception test (`forced_fail_test_e.py`): monkeypatched `_pg_tier2_narrow_items` to raise
+   unconditionally, hit `/api/browse?pg_shadow=1` with an admin session — got a clean `200`,
+   byte-identical to the legacy response, with no `_pg_tier2_shadow` key present, confirming the
+   fallback degrades silently exactly like Tier 1's.
+4. Real gunicorn boot, exact Procfile flags, against the scratch Postgres: anonymous keyword
+   request with no flag → 200, correct `total_count`, no diagnostic key; anonymous keyword request
+   WITH `?pg_shadow=1` but no admin session → also no diagnostic key (confirms the admin gate on
+   Tier 2's diagnostics holds, same as Tier 1's). Admin-session curl testing wasn't attempted (CSRF
+   on the password-login form makes that awkward over raw curl and Phase D didn't do it either —
+   its own real-gunicorn curl pass only exercised the anonymous/no-leak side, leaving admin-flagged
+   behavior to the test_client harness, same split used here).
+5. `python3 -m py_compile gc_tracker_app.py` clean, both in the sandbox and after committing to the
+   device. `node --check static/gc.js` clean (no JS changed this phase). Imported the module in a
+   disposable venv — route table still builds at 60 routes, unchanged.
+6. Patched `gc_tracker_app.py` on the device via `device_commit_files`, then confirmed via
+   SHA-256 hash (`a7bf90ec...4d02e`) that the device file and the sandbox-tested, harness-verified
+   file are byte-identical, before treating the change as ready — same discipline as v2.16.22.
+
+**Files changed**: `gc_tracker_app.py` only — two new functions (`_pg_tier2_eligible`,
+`_pg_tier2_narrow_items`) inserted just before the `/api/browse` route, a new shadow-mode call site
++ data-source swap right before the existing "Build full item list" loop, and shadow diagnostic
+fields attached to the final response. No changes to `_pg_tier1_browse`/`_pg_tier1_eligible`, the
+keyword matcher, `_apply_base`, sort/tiering/pagination, or the JS/CSS. `APP_VERSION = "2.16.23"`.
+
+**Next up**: live-spot-check `?pg_shadow=1` Tier 2 behavior against real production data (a
+handful of real want-list/keyword shapes, admin session, comparing shadow vs. legacy on live data
+the way v2.16.20/21/22 did for Tier 1) — only after that passes clean is dropping the admin/flag
+gate (the actual Phase E cutover) appropriate. Until then Tier 2 traffic is 100% unaffected in
+production; this version only adds new, currently-dormant-for-real-users code paths.
 
 ---
 
