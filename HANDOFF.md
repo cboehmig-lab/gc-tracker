@@ -1,5 +1,5 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-02 · Current version: v2.16.22 (Postgres Phase D — THE CUTOVER: /api/browse now serves every real user from Postgres, not just admins with ?pg_shadow=1; 16/16 live spot-checks + 39/39 offline diff cases pass) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-04 · Current version: v2.16.22 (Postgres Phase D — THE CUTOVER: /api/browse now serves every real user from Postgres, live and holding clean; Phase E queued next) · Domain: gcgeartracker.com*
 
 ---
 
@@ -187,6 +187,14 @@ shows `main` and `origin/main` at the same commit. Ran the post-deploy checks qu
   checks above already passed and the automatic per-request fallback provides its own safety
   net regardless. Chuck can check Railway's logs directly for `[pg]` error lines if he wants
   extra confidence, but nothing found this session suggests a problem.
+
+**Holding here on purpose (2026-09-04 update):** per Chuck's own call, Phase D is running in
+production for a few days before Phase E (Tier 2/keyword SQL cutover) starts — see
+`postgres_migration_plan_2026-08-31.md` in project memory / `NEXT_SESSION_PROMPT.md` for the
+plan. Separately, the NEW-item anchor/tagging bug that had been queued as the next dedicated
+session after Phase D (`bug_new_item_anchor_scope.md`) turned out not to be a bug — Chuck
+confirmed on 2026-09-04 it's working correctly and he was mistaken earlier, so that item is
+closed, not queued.
 
 **Files changed**: `gc_tracker_app.py` only — the gate condition in `api_browse()` (3 comment
 blocks rewritten, the routing condition itself changed, `_pg_shadow`/`_pg_shadow_ms` now

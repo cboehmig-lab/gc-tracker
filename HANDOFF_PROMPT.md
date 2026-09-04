@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-02 · Version: v2.16.22 (Postgres migration Phase D — THE CUTOVER, deployed and confirmed live) · Live at: gcgeartracker.com — v2.16.22 confirmed live, next up: the NEW-item anchor bug*
+*Generated: 2026-09-02 · Version: v2.16.22 (Postgres migration Phase D — THE CUTOVER, deployed and confirmed live) · Live at: gcgeartracker.com — v2.16.22 confirmed live; letting Phase D run in production before considering Phase E*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -120,9 +120,13 @@ keys present, and a keyword (Tier 2) request still routes through the unmodified
 all as designed. Did not confirm via Railway's log viewer (the projects visible under the logged-
 in account didn't obviously match the gc-tracker service; not chased further given the live
 checks already passed). Rollback, if ever needed, is putting `_is_admin()` back in front of the
-routing condition — JSON dual-write never stopped. **Postgres work pauses here** — per Chuck's
-own decision, the NEW-item anchor/tagging bug ([[bug_new_item_anchor_scope]] in project memory)
-is next up.
+routing condition — JSON dual-write never stopped.
+
+**Postgres work pauses here on purpose** — per Chuck's own call, Phase D should run clean in
+production for a few days before starting Phase E (the Tier 2/keyword SQL cutover). (The
+NEW-item anchor/tagging bug that was previously queued as "next up" turned out not to be a bug —
+Chuck confirmed 2026-09-04 it's working correctly and he was mistaken; no anchor-bug work is
+planned. See [[bug_new_item_anchor_scope]] in project memory for the closing note.)
 
 ## Current State: v2.16.21 — fixed a real `store_count` mismatch in the Postgres Tier 1 shadow path (2026-09-02)
 

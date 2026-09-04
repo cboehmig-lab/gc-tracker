@@ -1,67 +1,64 @@
-# Next Session Prompt — NEW-item anchor/tagging bug (narrowly scoped)
+# Next Session Prompt — Phase D health check, then Phase E (Tier 2 SQL cutover) if clean
 
 Copy and paste this to start the next Cowork session.
 
 ---
 
 We're working on **GC Gear Tracker** (`gcgeartracker.com`), a Flask app on Railway tracking
-Guitar Center used inventory. Read `HANDOFF.md` first for architecture/version history, then
-read project memory file `bug_new_item_anchor_scope.md` in full before doing anything else — it
-has the complete investigation history and the narrow scope for this session.
+Guitar Center used inventory. Read `HANDOFF.md` first (especially the v2.16.22 entry), then
+`POSTGRES_MIGRATION_PLAN.md` §7 for Phase E's design, then project memory file
+`postgres_migration_plan_2026-08-31.md` for full status.
 
 **All repo work happens via the device bridge in `~/Desktop/gc_tracker`, never the cloud sandbox
 filesystem — check `device_bash` works before starting anything.**
 
-## Context in brief
+## Where things stand
 
-Chuck has reported, across multiple sessions, that genuinely-new items aren't getting tagged NEW
-— most recently (2026-09-02) with a much better repro than before: items with TODAY's date
-(`date_listed` = 9/2) weren't tagged NEW after a scan. He has 4 concrete repro URLs already
-captured in the memory file — do not ask him for SKUs again, they're there.
+Postgres Phase D (the `/api/browse` Tier 1 cutover) shipped as v2.16.22 on 2026-09-02 and was
+confirmed live in production the same day — see HANDOFF.md and
+`postgres_migration_plan_2026-08-31.md` for the full verification writeup (16/16 live spot-checks,
+39/39 offline diff cases, forced-exception fallback test, real gunicorn+curl smoke test, plus
+post-deploy production checks).
 
-Postgres Phase D (the `/api/browse` read-path cutover) was the reason this got deferred — it's
-now shipped, deployed, and confirmed live (v2.16.22, 2026-09-02). This bug's connection to
-Postgres was already mechanically ruled out before the deferral (Phase A-D don't touch
-`_cat_cache`, the anchor, `_run()`'s scan/merge logic, or `isNew` computation — the SQL Tier 1
-path even reads the same precomputed `new_ids` set the JSON path does, it doesn't recompute
-anchor logic). So there's no new Postgres-related angle to check here — proceed straight to the
-leads below.
+Chuck's own call was to let Phase D run clean in production for a few days before starting
+Phase E — so **step 1 below is a real gate, not a formality.**
 
-**Chuck has explicitly asked for a narrowly-scoped session, not a fresh open-ended dig** — he
-does not want to redo "the whole nightmare" of re-deriving context. Use what's already in the
-memory file.
+The NEW-item anchor/tagging bug that was previously queued as "next up" after Phase D
+(`bug_new_item_anchor_scope.md` in project memory) is **no longer active work** — Chuck confirmed
+on 2026-09-04 that it's working correctly and he was mistaken earlier. Don't investigate it unless
+Chuck explicitly raises it again.
 
-## The task, in order (per the memory file's own next-steps list)
+## The task, in order
 
-1. **Use the 4 repro URLs directly** — look them up in real production (`/api/pg-parity-check`-
-   style admin access, the live `_cat_cache`, or the Postgres `items` table now that Phase D
-   means Postgres is a trustworthy live mirror) and record each item's actual `date_listed`,
-   `first_seen`, and what the affected user's `last_anchor` was at scan time:
-   - https://www.guitarcenter.com/Used/Bose/Used-Bose-L1-M1S-with-B1-Bass-Module-Powered-Speaker.gc
-   - https://www.guitarcenter.com/Used/American-DJ/Used-American-DJ-DMX-OPERATOR-384-Lighting-Controller-122795885.gc
-   - https://www.guitarcenter.com/Used/Epiphone/Used-Epiphone-MB100-Natural-Banjo-122788905.gc
-   - https://www.guitarcenter.com/Used/American-DJ/Used-American-DJ-INNO-POCKET-PRO-Intelligent-Lighting-122795883.gc
+1. **Check Phase D's health first.** This is the actual "let it run a few days" checkpoint, so
+   don't skip it even if it feels like a formality:
+   - Ask Chuck (or check Railway's logs directly if dashboard access works this session) whether
+     anything looked off since 2026-09-02 — page errors, slow loads, any `[pg] tier1 browse
+     failed, falling back to JSON path: ...` lines in the logs (safe by design, but worth knowing
+     the frequency).
+   - Do a couple of live sanity requests against `https://gcgeartracker.com/api/browse` yourself
+     (unflagged, no admin session — a real Tier 1 shape: no-filter/all-stores, one facet, one
+     sort) and confirm sane `total_count` / fast response.
+   - If anything looks wrong: stop here, investigate, and if needed use the rollback lever
+     documented in HANDOFF.md's v2.16.22 entry (`_is_admin()` back in front of the Postgres
+     routing condition in `api_browse()` — a one-condition revert, not a data-recovery operation).
+   - If it's clean: proceed to Phase E.
 
-2. **Read `parse_products()`'s `startDate`/`creationDate` → `date_listed` mapping code** and
-   reconcile it against the documented "6-12h" Algolia indexing-delay figure referenced in
-   HANDOFF.md's Algolia notes — the memory file flags this as the most promising unexplored lead,
-   never actually read end-to-end.
-
-3. **Check the specific repro items' `date_listed` values against the string-comparison
-   tie-break theory**: a date-only `date_listed` like `"2026-09-02"` lexicographically sorts
-   BEFORE a full-timestamp anchor from earlier the same day (e.g. `"2026-09-02T10:15:00"`), even
-   though the item may genuinely be newer within the day. This exact bug class (v2.10.2/v2.12.2
-   history) was checked "extinct" against a cache snapshot before, but never against live,
-   freshly-scanned production data — check it for real this time using the 4 repro items.
-
-4. **Do NOT revert v2.16.11** — that reopens a different, already-confirmed bug (false
-   sold-marking on transient per-store fetch failures). If the investigation points at v2.16.11
-   after all, that needs a different, more surgical fix, not a revert.
-
-5. **Investigate before proposing a fix, per standing project rule**: read the actual code, and
-   test locally where possible (a scratch scan simulation, or reproducing the anchor-advance
-   logic against the 4 real items' data) rather than guessing at root cause from description
-   alone.
+2. **Phase E — Tier 2 (keyword/free-text) SQL cutover.** Read `POSTGRES_MIGRATION_PLAN.md` §7 for
+   the design Chuck already approved: push every filter SQL can express into the WHERE clause to
+   narrow the candidate row set, then run the EXISTING unmodified Python keyword matcher over just
+   that narrowed set — do NOT reimplement keyword matching in SQL (it's complex, has its own bug
+   history, not worth rebuilding without a proven need). Same discipline as Phases C/D:
+   - Build behind a debug-only flag first (shadow mode), diff against the legacy path.
+   - Build a fresh offline diff harness with deliberately sparse/malformed synthetic data — same
+     lesson as Phase D's `store_count` bug: synthetic data alone isn't enough, live spot-checking
+     against real production is required too.
+   - Only cut it over to serve real traffic once both offline and live checks pass clean, the same
+     bar Phase D was held to.
+   - If, after reading the plan and current Tier 2 traffic patterns, Phase E doesn't look worth it
+     yet (i.e. Tier 2's residual cost isn't actually significant in practice), it's fine to say so
+     and hold off rather than build it for its own sake — check with Chuck before investing the
+     session in it if that's what you find.
 
 ## Standing rules (same as always)
 
@@ -77,9 +74,10 @@ memory file.
 
 ## What's explicitly out of scope this session
 
-- Postgres Phase E (Tier 2/keyword SQL) and Phase F (retire JSON) — not scheduled, not related
-  to this bug.
-- Any other open item — this session is scoped to the NEW-item anchor bug only, per Chuck's
-  explicit ask.
+- The NEW-item anchor/tagging bug — dismissed by Chuck (see above), not a live task.
+- Phase F (retire JSON entirely) — not until Phase D (and, once built, Phase E) have run clean in
+  production for a while; not this session.
+- `/newdeals`'s separate new-inventory cache — staying flat-JSON, not part of this migration.
 
-Current version: **v2.16.22** (deployed, live). Last updated: 2026-09-02.
+Current version: **v2.16.22** (deployed, live, pushed and confirmed by Chuck). Last updated:
+2026-09-04.
