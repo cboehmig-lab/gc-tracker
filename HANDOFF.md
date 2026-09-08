@@ -1,5 +1,67 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-04 · Current version: v2.16.24 (Postgres Phase E — Tier 2 candidate narrowing, SHADOW MODE ONLY, perf regression fixed; Phase D confirmed healthy) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-08 · Current version: v2.16.24 (Postgres Phase E — Tier 2 candidate narrowing, SHADOW MODE ONLY; live-spot-check pass complete, cutover NOT recommended pending Chuck's call) · Domain: gcgeartracker.com*
+
+---
+
+## 🔍 Phase E live-spot-check pass completed — 2026-09-08 (finding: do NOT cut over yet)
+
+**What this session did**: finished the live-spot-check pass against real production
+(`gcgeartracker.com`) that v2.16.24 queued up — admin session (`smurfco`), `?pg_shadow=1` vs. no
+flag on the same request body, deep-compared after stripping `_pg_tier2_shadow*` diagnostic keys.
+No code changes this session — verification only, still v2.16.24.
+
+**Correctness — clean.** Category-facet+keyword, subcategory-facet+keyword, and the
+`filter_q: 'fender strat'` multitoken case (the one that got redacted by a tooling artifact last
+session) all came back byte-identical between shadow and legacy. One thing worth noting for future
+sessions: none of these actually exercised the Postgres narrowing path on their own — with
+`all_stores: true` and no `user_last_scan`, `_pg_tier2_would_narrow` correctly skips Postgres
+entirely (by design, v2.16.24), so a facet-only or filter_q-only request against all stores falls
+straight through to the legacy in-memory path even with `?pg_shadow=1` set. Re-ran all three
+against a 5-store subset (`Austin, Boston, Denver, Central Chicago, Dallas`) to actually engage
+`_pg_tier2_narrow_items()` (narrowed ~111K rows → 2,015 candidates each time) — still
+byte-identical on every case.
+
+**Railway deploy logs — clean.** Checked the full Deploy Logs for the active deployment
+(`21a7e735`, v2.16.24, live since 2026-09-04 16:54 CDT) via the Railway dashboard — its entire log
+history (through 2026-09-08) has zero `[pg] tier2 narrow failed, falling back to full cache` and
+zero `[pg] tier1 browse failed, falling back to JSON path` lines. Only app-level `[pg]` lines are
+the two boot-time ones (`items table ready`, `connection pool ready`) — this app doesn't log
+per-request access lines, so log volume itself isn't a proxy for traffic, but the specific
+fallback-error lines we're watching for are the kind that would show up regardless, and there are
+none.
+
+**Timing — NOT clean; this is the real finding.** The open question v2.16.24 left unresolved was
+whether Postgres narrowing is actually a *latency* win at production scale, since the small
+44,300-row synthetic dataset showed narrowing running slower than legacy despite real narrowing
+(41,800 → 1,066 candidates). Answer, timed live against production: **still slower, at
+production scale, on a real narrowing-eligible request.** 8 alternating shadow/legacy calls
+(test-client-style, via `fetch()` in Chuck's own authenticated browser session) against the same
+5-store-subset + category-filter + keyword body (narrowing 111K rows → 2,015 candidates,
+`_pg_tier2_shadow_ms` averaging ~40ms for the Postgres round-trip alone):
+
+| | shadow (Postgres) | legacy (in-memory) |
+|---|---|---|
+| mean | 128.4ms | 114.1ms |
+| median | 126.4ms | 109.0ms |
+| min | 122.2ms | 103.5ms |
+| max | 139.2ms | 147.1ms |
+
+Shadow was slower on 7 of 8 reps, ~12-14ms / ~12% slower on average. Much smaller relative
+regression than the synthetic dataset's ~2.5x, but the direction is the same: the ~40ms Postgres
+round-trip isn't being recovered by the downstream Python savings at this candidate-set size
+(2,015 rows is already fast for the existing in-memory keyword matcher / `_apply_base()` to chew
+through, so narrowing it further doesn't pay for the network round-trip that got it there).
+
+**Per the standing bar** ("if shadow timing is at or below legacy, Phase E is a confirmed win; if
+it's still slower even when it does narrow, that's a real finding to bring back to Chuck before
+considering cutover, not something to paper over") — **this session is NOT recommending the Phase
+E cutover.** Correctness is solid and the memory-pressure reduction (the original motivation, see
+[[perf_railway_memory_growth_2026-08-31]]) is presumably still real, but the latency case for
+narrowing over keyword/facet search specifically hasn't panned out at either dataset scale tried
+so far. Flagging this to Chuck as a decision point rather than proceeding — see
+`NEXT_SESSION_PROMPT.md` for the options.
+
+**Files changed**: none. No `APP_VERSION` bump — verification-only session.
 
 ---
 
