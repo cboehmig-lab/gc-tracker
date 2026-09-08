@@ -4559,8 +4559,6 @@ def _pg_tier2_narrow_items(*, store_set, search_all, user_last_scan) -> list:
     Raises on any DB error — the caller catches and falls back to
     _build_base_item_list(), exactly like Tier 1's fallback (_pg_tier1_browse).
     """
-    import psycopg2.extras as _pg_extras
-
     where = ["available"]
     params = {}
     if not search_all:
@@ -4572,42 +4570,53 @@ def _pg_tier2_narrow_items(*, store_set, search_all, user_last_scan) -> list:
 
     where_sql = " AND ".join(where)
 
+    # (v2.16.25) Plain cursor + cur.description column-index lookup instead
+    # of RealDictCursor. RealDictCursor's per-row dict construction has real
+    # overhead that scales with row count -- measured ~2.5x slower than a
+    # plain cursor at this function's typical candidate-set size (~2,000
+    # rows), closely matching the ~40ms _pg_tier2_shadow_ms seen live on
+    # 2026-09-08 (see postgres_phase_e_cursor_investigation_2026-09-08 in
+    # project memory for the local benchmark). Using cur.description instead
+    # of a hardcoded column-index list means this can't silently desync if
+    # the SELECT's column list is ever edited. Output shape/values are
+    # unchanged -- only the DB-access mechanics differ.
     items = []
     with _pg_conn() as conn:
-        with conn.cursor(cursor_factory=_pg_extras.RealDictCursor) as cur:
+        with conn.cursor() as cur:
             cur.execute(
                 "SELECT sku, name, brand, category, subcategory, condition, "
                 "condition_note, price, list_price, price_drop, price_drop_since, "
                 "store, location, url, image_id, is_vintage, date_listed, first_seen "
                 f"FROM items WHERE {where_sql}", params)
+            col = {d.name: i for i, d in enumerate(cur.description)}
             for r in cur:
-                price_raw = float(r["price"] or 0)
-                name = r["name"] or ""
-                brand = r["brand"] or ""
-                date_raw = r["date_listed"] or ""
+                price_raw = float(r[col["price"]] or 0)
+                name = r[col["name"]] or ""
+                brand = r[col["brand"]] or ""
+                date_raw = r[col["date_listed"]] or ""
                 items.append({
-                    "id":               r["sku"],
+                    "id":               r[col["sku"]],
                     "name":             name,
                     "brand":            brand,
                     "name_lower":       name.lower(),
                     "brand_lower":      brand.lower(),
                     "price":            f"${price_raw:,.2f}" if price_raw else "",
                     "price_raw":        price_raw,
-                    "list_price_raw":   float(r["list_price"] or 0),
-                    "price_drop":       float(r["price_drop"] or 0),
-                    "price_drop_since": r["price_drop_since"] or "",
-                    "store":            r["store"] or "",
-                    "location":         r["location"] or "",
-                    "url":              r["url"] or "",
-                    "category":         r["category"] or "",
-                    "subcategory":      r["subcategory"] or "",
-                    "condition":        r["condition"] or "",
+                    "list_price_raw":   float(r[col["list_price"]] or 0),
+                    "price_drop":       float(r[col["price_drop"]] or 0),
+                    "price_drop_since": r[col["price_drop_since"]] or "",
+                    "store":            r[col["store"]] or "",
+                    "location":         r[col["location"]] or "",
+                    "url":              r[col["url"]] or "",
+                    "category":         r[col["category"]] or "",
+                    "subcategory":      r[col["subcategory"]] or "",
+                    "condition":        r[col["condition"]] or "",
                     "date":             _fmt_date(date_raw),
                     "date_raw":         date_raw,
-                    "first_seen":       r["first_seen"] or "",
-                    "image_id":         r["image_id"] or "",
-                    "is_vintage":       bool(r["is_vintage"]),
-                    "condition_note":   r["condition_note"] or "",
+                    "first_seen":       r[col["first_seen"]] or "",
+                    "image_id":         r[col["image_id"]] or "",
+                    "is_vintage":       bool(r[col["is_vintage"]]),
+                    "condition_note":   r[col["condition_note"]] or "",
                 })
     return items
 
@@ -7362,7 +7371,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.24"
+APP_VERSION = "2.16.25"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

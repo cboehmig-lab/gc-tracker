@@ -1,5 +1,61 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-08 · Current version: v2.16.24 (Postgres Phase E — Tier 2 candidate narrowing, SHADOW MODE ONLY; live-spot-check pass complete, cutover NOT recommended pending Chuck's call) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-08 · Current version: v2.16.25 (Postgres Phase E — Tier 2 candidate narrowing, SHADOW MODE ONLY; cursor-overhead fix built + offline-verified, NOT yet live-timed or cut over) · Domain: gcgeartracker.com*
+
+---
+
+## ⚡ Phase E cursor-overhead fix — v2.16.25, 2026-09-08 (built + offline-verified, NOT live-timed)
+
+**What prompted this**: the live-spot-check pass earlier today (see the entry immediately below) found Phase E's
+Postgres shadow-narrowing path ~12% slower than legacy on a real narrowing-eligible request
+(128.4ms vs 114.1ms mean). Chuck asked to investigate the round-trip cost before deciding on
+cutover, rather than accept or shelve the trade-off blind.
+
+**Root cause found**: `_pg_tier2_narrow_items()` used `cursor_factory=psycopg2.extras.RealDictCursor`.
+Ruled out first: connection pool checkout (~0.00ms overhead, confirmed via local benchmark),
+`_pg_conn()`'s explicit `conn.commit()` after a read-only SELECT (~0.05ms difference vs. no
+commit — not a meaningful extra round trip), and the per-row Python projection itself (price
+formatting/`.lower()`/dict-building — ~2.4ms for 2,015 rows in pure Python). The DB is also
+provisioned in the same Railway project via `${{Postgres.DATABASE_URL}}` (private networking, not
+the public proxy), so a slow network hop is an unlikely explanation.
+
+What actually explains it: a local benchmark (this sandbox's own Postgres 16 — NOT Railway's —
+same schema/indexes as `pg_schema.sql`, ~111K synthetic rows) at a row count matching production
+almost exactly (2,110 rows locally vs. production's 2,015) showed the full RealDictCursor pattern
+taking a local mean of **36-44ms** — strikingly close to the ~40ms `_pg_tier2_shadow_ms` seen live
+— versus **14-20ms** for the identical query/projection logic using a plain tuple cursor + column-
+index lookup instead. That ~2.2-2.5x difference matches psycopg2's known per-row overhead for
+`RealDictCursor`/`DictCursor` vs. a plain cursor, and it scales with row count — exactly Phase E's
+shape. Full detail: `postgres_phase_e_cursor_investigation_2026-09-08.md` in project memory.
+
+**Fix (v2.16.25)**: `_pg_tier2_narrow_items()` now uses a plain `conn.cursor()` instead of
+`RealDictCursor`, with a `col = {d.name: i for i, d in enumerate(cur.description)}` map built once
+per query so row access stays name-based (`r[col["price"]]` instead of `r["price"]`) rather than a
+fragile hardcoded positional index — if the `SELECT`'s column list is ever edited, this can't
+silently desync. Output shape and values are unchanged; only the DB-access mechanics differ.
+Tier 1's `_pg_tier1_browse()` (already live since Phase D) also uses `RealDictCursor`, but its
+result sets are tiny per request (one summary row, a few dozen facet rows, one page of ≤200 items)
+— not touched, since the overhead this fix addresses only matters at Phase E's multi-thousand-row
+candidate-set scale.
+
+**Verification done this session**: `python3 -m py_compile` + `node --check static/gc.js` both
+clean. Module import + Flask route-table build succeeded in a disposable venv (60 routes,
+`/api/browse` present, `APP_VERSION` confirmed `2.16.25`). Built a standalone offline diff harness
+(local Postgres, same schema, 8 cases spanning single-store/multi-store/all-stores,
+with/without `user_last_scan`, and a zero-row-result edge case) comparing the OLD (RealDictCursor)
+and NEW (plain cursor) implementations side by side against identical data — **all 8 cases
+byte-identical**, including the 108,785-row all-stores case. Local timing on the same harness
+(2,110-row case): OLD 43.76ms mean vs. NEW 19.80ms mean, ~2.2x faster, consistent with the
+diagnostic benchmark above.
+
+**NOT done — this is a local-only verification, not a production one**: this has NOT been live-
+spot-checked against Railway's real Postgres instance/hardware, the way every previous Tier 1/
+Tier 2 phase was before being trusted (see [[postgres_phase_c_2026-09-02]]'s verification method).
+Still shadow-mode only (admin + `?pg_shadow=1` gated) — zero real-user impact either way, on the
+device at `~/Desktop/gc_tracker/gc_tracker_app.py`, NOT yet pushed to git or deployed. Next
+session's (or Chuck's) job: push v2.16.25, then re-run the same live timing methodology
+[[postgres_phase_e_verification_2026-09-08]] used (`?pg_shadow=1` vs. no flag, 5-store-subset +
+category + keyword body, several alternating reps) to confirm the local speedup holds on Railway's
+actual hardware before revisiting the cutover decision in `NEXT_SESSION_PROMPT.md`.
 
 ---
 
