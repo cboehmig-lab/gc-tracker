@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-08 · Version: v2.16.25 (Postgres migration Phase E — Tier 2 candidate narrowing, SHADOW MODE ONLY; cursor-overhead fix built + offline-verified this session, NOT yet live-timed, NOT yet pushed — see HANDOFF.md's 2026-09-08 'cursor-overhead fix' entry) · Live at: gcgeartracker.com — v2.16.24 still confirmed live (v2.16.25 not deployed yet)*
+*Generated: 2026-09-08 · Version: v2.16.25 (Postgres migration Phase E — Tier 2 candidate narrowing, SHADOW MODE ONLY; cursor-overhead fix pushed, deployed, and live-timed — gap narrowed from ~12% to ~8% but not closed, cutover still undecided — see HANDOFF.md's 2026-09-08 entries) · Live at: gcgeartracker.com — v2.16.25 confirmed live*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 

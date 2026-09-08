@@ -1,8 +1,39 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-08 · Current version: v2.16.25 (Postgres Phase E — Tier 2 candidate narrowing, SHADOW MODE ONLY; cursor-overhead fix built + offline-verified, NOT yet live-timed or cut over) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-08 · Current version: v2.16.25 (Postgres Phase E — Tier 2 candidate narrowing, SHADOW MODE ONLY; cursor-overhead fix pushed, deployed, and live-timed — gap narrowed but not closed, cutover still undecided) · Domain: gcgeartracker.com*
 
 ---
 
+## 📊 Phase E v2.16.25 live-timed on Railway — 2026-09-08 (gap narrowed, NOT closed)
+
+**What happened**: Chuck pushed the already-committed v2.16.25 (plain-cursor fix, see entry
+immediately below) from his Mac terminal. Confirmed live via the version string on
+gcgeartracker.com. Then re-ran the same live timing methodology used earlier today
+([[postgres_phase_e_verification_2026-09-08]] in project memory) via Claude in Chrome against
+Chuck's authenticated admin session — same narrowing-eligible request shape (5-store subset +
+category filter + keyword, ~2,019 candidates, near-identical scale to the original 2,015-row
+test), 16 alternating `fetch()` calls (8 shadow via `?pg_shadow=1`, 8 legacy).
+
+**Result**: shadow mean 113.3ms vs legacy mean 104.7ms — shadow lost 6 of 8 reps, ~8.6ms / ~8.2%
+slower. That's down from ~14.3ms / ~12.5% on the pre-fix (v2.16.24) test earlier today — a real,
+meaningful improvement — but the gap did not close or reverse. The internal
+`_pg_tier2_shadow_ms` (Postgres round-trip alone) averaged ~31ms across the 8 shadow reps
+(27.3-34.6ms), down from ~40ms pre-fix (~20-25% faster), but well short of the ~15-20ms the local
+sandbox benchmark predicted — Railway's real Postgres instance apparently carries more per-call
+overhead than the cursor-type difference alone accounts for in the local benchmark (network hop,
+connection-pool behavior, or hardware/psycopg2-build differences not present locally).
+
+**Bottom line, per the same standing bar used throughout Phase E**: this is a real win on the
+round-trip cost, but not a confirmed win on total request latency — Postgres shadow narrowing is
+still consistently slower than the legacy in-memory path on a real production narrowing-eligible
+request. Cutover is still NOT recommended as an engineering conclusion. This goes back to Chuck as
+the same three-way decision as before (cut over anyway for the memory-pressure benefit / hold in
+shadow mode indefinitely / dig further into the remaining ~8% gap) — just with a meaningfully
+smaller cost now if he chooses to cut over anyway. Full detail:
+`postgres_phase_e_v2.16.25_live_timing_2026-09-08.md` in project memory.
+
+**Files changed**: none — verification only, still v2.16.25.
+
+---
 ## ⚡ Phase E cursor-overhead fix — v2.16.25, 2026-09-08 (built + offline-verified, NOT live-timed)
 
 **What prompted this**: the live-spot-check pass earlier today (see the entry immediately below) found Phase E's
