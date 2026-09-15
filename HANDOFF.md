@@ -54,9 +54,15 @@ unchanged from v2.16.25 and was already verified against real production in the 
 2026-09-08 sessions (see `postgres_phase_e_2026-09-04.md` / `postgres_phase_e_verification_2026-09-08.md`
 in project memory).
 
-**Not yet done**: push (Chuck runs from his Mac terminal), post-deploy health check (version
-string live, Railway deploy logs checked for `[pg] tier2 narrow failed, falling back to full
-cache` lines, memory graph watched over the following days/weeks).
+**Pushed and deployed same day.** Chuck's first commit attempt hit a stale `.git/HEAD.lock`
+left over from an earlier session — cleared it (`rm -f .git/HEAD.lock .git/refs/heads/main.lock`),
+re-committed (`6541611`), pushed clean. **Post-deploy health check (~10 min after deploy)**:
+`v2.16.26` confirmed live via the version string; Railway deploy logs (deployment `4bc09c87`)
+searched for `falling back to full cache` — zero matches; `@level:error` filter — 5 matches, all
+the standard benign gunicorn-boot false positives seen clean on every prior deploy, not real
+errors. This is necessarily an early signal (deployment was only ~10 minutes old) — the memory
+graph still needs a multi-day look before Phase E's memory-pressure benefit can be confirmed the
+way Phase D's was; see NEXT_SESSION_PROMPT.md.
 
 ---
 

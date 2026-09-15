@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-15 · Version: v2.16.26 (Postgres migration Phase E — Tier 2 candidate narrowing, CUT OVER to real traffic; Phase D + Phase E both live — see HANDOFF.md's 2026-09-15 entry) · Live at: gcgeartracker.com — pending push, not yet confirmed live*
+*Generated: 2026-09-15 · Version: v2.16.26 (Postgres migration Phase E — Tier 2 candidate narrowing, CUT OVER to real traffic; Phase D + Phase E both live — see HANDOFF.md's 2026-09-15 entry) · Live at: gcgeartracker.com — v2.16.26 confirmed live, deploy-day health check clean*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -125,10 +125,12 @@ holds, that a forced exception still falls back cleanly for real traffic, and th
 fields stay invisible to a non-admin even though their request now runs through Postgres. Full
 detail in HANDOFF.md's 2026-09-15 entry.
 
-**Not yet done**: push (Chuck's Mac terminal), confirm live via the version string, check Railway
-deploy logs for `[pg] tier2 narrow failed, falling back to full cache` lines, watch the memory
-graph over the following days/weeks (Tier 2 traffic is a smaller share than Tier 1's, so don't
-expect as dramatic a change as Phase D showed).
+**Pushed, deployed, and confirmed live same day** (after clearing a stale `.git/HEAD.lock` that
+blocked the first commit). Deploy-day health check clean: version string live, Railway deploy
+logs show zero `falling back to full cache` lines (the only `@level:error` hits are the usual
+benign gunicorn-boot false positives). Still open: watch the memory graph over the following
+days/weeks (Tier 2 traffic is a smaller share than Tier 1's, so don't expect as dramatic a change
+as Phase D showed) — see NEXT_SESSION_PROMPT.md.
 
 ---
 
