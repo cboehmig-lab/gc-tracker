@@ -1,5 +1,62 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-08 · Current version: v2.16.25 (Postgres Phase E — Tier 2 candidate narrowing, SHADOW MODE ONLY; cursor-overhead fix pushed, deployed, and live-timed — gap narrowed but not closed, cutover still undecided) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-15 · Current version: v2.16.26 (Postgres Phase E — Tier 2 candidate narrowing, CUT OVER to real traffic; Phase D + Phase E both live) · Domain: gcgeartracker.com*
+
+---
+
+## 🚀 Phase E CUTOVER — v2.16.26, 2026-09-15 (Chuck's decision: accept the latency cost)
+
+**What happened**: after two prior sessions investigating and narrowing the Postgres Tier 2
+round-trip cost (v2.16.24 → v2.16.25, ~12% slower down to ~8% slower than legacy on a real
+narrowing-eligible request — see the entries immediately below), Chuck made the cutover decision
+explicitly rather than the investigation resolving it: cut Tier 2 over to serve every real user,
+accepting the remaining ~8% latency cost on narrowing-eligible requests for the Railway
+memory-pressure benefit Tier 1 already captured for the dominant traffic pattern (Phase D,
+v2.16.22). Full latency numbers this decision was based on:
+`postgres_phase_e_v2.16.25_live_timing_2026-09-08.md` in project memory.
+
+**Code change**: dropped the `_pg_shadow_requested and _is_admin()` condition from the Tier 2
+gate in `api_browse()` — the exact same pattern as Phase D's own cutover. `_pg_tier2_eligible(fq,
+_has_kw)` and the `_pg_tier2_would_narrow` guard (the v2.16.24 fix that skips Postgres when
+neither a store subset nor `user_last_scan` would narrow anything) are unchanged and orthogonal —
+they decide *whether* narrowing helps this request, not *who* is allowed to trigger it. The
+existing try/except fallback around the narrowing call is now the real rollback lever (same
+posture as Phase D): any Postgres/SQL error degrades that one request to the legacy in-memory
+path automatically, so reverting the whole cutover, if ever needed, is putting `_is_admin()` back
+in front of the condition, not a data-recovery operation. `_pg_tier2_shadow`/`_pg_tier2_shadow_ms`/
+`_pg_tier2_shadow_candidate_count` stay admin-gated exactly as before (independent of routing) —
+a real user still can't pull internal timing into their response by passing `?pg_shadow=1`.
+
+**Verification done this session**: `python3 -m py_compile` + `node --check static/gc.js` both
+clean. Module import + Flask route-table build succeeded in a disposable venv (60 routes,
+`/api/browse` present, `APP_VERSION` confirmed `2.16.26`).
+
+No local/live Postgres instance was reachable this session (device shell has no root, no
+Docker/Homebrew, and the apt/Maven mirrors needed to fetch a portable Postgres binary aren't on
+the egress allowlist) — the standing offline diff-harness pattern from Phase E's earlier sessions
+couldn't be rebuilt as-is. Instead, since this change is purely a routing-gate change (the
+narrowing SQL/logic itself is untouched and was already verified byte-identical across 60+ cases
+in prior sessions), verification targeted exactly what changed: loaded the pre-edit (v2.16.25) and
+post-edit (v2.16.26) app side by side against a small synthetic cat-cache fixture, with
+`_pg_tier2_narrow_items` mocked (spy wrapping the real in-memory item builder, filtered the same
+way the real SQL WHERE clause is documented to filter — availability + store subset + optional
+`user_last_scan`) so no live database was needed. Confirmed: (1) a non-admin, non-flagged,
+narrowing-eligible request never reached Postgres under the old gate and always reaches it under
+the new one; (2) the JSON response is byte-identical between the old code's legacy-path response
+and the new code's Postgres-sourced response for the same request; (3) the `_pg_tier2_would_narrow`
+guard still skips Postgres for an all-stores/no-scan request post-cutover; (4) a forced exception
+inside the narrowing call still falls back to the legacy path with byte-identical output for a
+real (non-admin, non-flag) request — proving the fallback protects real traffic now, not just an
+admin's diagnostic calls; (5) diagnostic fields are present for an admin passing `?pg_shadow=1`
+and absent for a non-admin passing the same flag, even though the non-admin's request now runs
+through Postgres. This confirms the routing/fallback/diagnostic-gating behavior directly; it does
+not re-verify `_pg_tier2_narrow_items`'s actual SQL against a real Postgres instance, which is
+unchanged from v2.16.25 and was already verified against real production in the 2026-09-04 and
+2026-09-08 sessions (see `postgres_phase_e_2026-09-04.md` / `postgres_phase_e_verification_2026-09-08.md`
+in project memory).
+
+**Not yet done**: push (Chuck runs from his Mac terminal), post-deploy health check (version
+string live, Railway deploy logs checked for `[pg] tier2 narrow failed, falling back to full
+cache` lines, memory graph watched over the following days/weeks).
 
 ---
 

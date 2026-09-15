@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-08 · Version: v2.16.25 (Postgres migration Phase E — Tier 2 candidate narrowing, SHADOW MODE ONLY; cursor-overhead fix pushed, deployed, and live-timed — gap narrowed from ~12% to ~8% but not closed, cutover still undecided — see HANDOFF.md's 2026-09-08 entries) · Live at: gcgeartracker.com — v2.16.25 confirmed live*
+*Generated: 2026-09-15 · Version: v2.16.26 (Postgres migration Phase E — Tier 2 candidate narrowing, CUT OVER to real traffic; Phase D + Phase E both live — see HANDOFF.md's 2026-09-15 entry) · Live at: gcgeartracker.com — pending push, not yet confirmed live*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -85,6 +85,50 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 - **JSON-LD**: `WebSite` schema with `SearchAction` (`potentialAction`) — injected as `<script type="application/ld+json">` (not blocked by CSP `script-src 'self'`)
 - **Noscript store list**: `_build_stores_noscript()` called in `index()` — reads `STORES_CACHE` fresh, generates `<noscript>` block listing all ~240+ store names. Invisible to JS users, crawlable by Google. Updates automatically when store list is refreshed.
 - **Footer**: `.seo-footer` — visible "Privacy Policy · Not affiliated with Guitar Center, Inc." in `#555` gray. No hidden text.
+
+---
+
+## Current State: v2.16.26 — Postgres migration Phase E: THE CUTOVER — Tier 2 candidate narrowing now serves every real user (2026-09-15)
+
+**Real users now get the Postgres Tier 2 candidate-narrowing path** (want-list keywords or
+`filter_q` free text active, with a store subset or `user_last_scan` actually narrowing
+something), not just admins with `?pg_shadow=1` — same pattern as Phase D's own cutover of Tier 1.
+
+**Why now, given the round-trip cost was never a clean win**: two prior sessions (2026-09-08)
+investigated and narrowed the cost from ~12% to ~8% slower than legacy on a real narrowing-eligible
+production request (root-caused to `RealDictCursor` overhead, fixed in v2.16.25), but never
+reversed it — Postgres narrowing is still measurably slower per-request. Chuck made the call
+explicitly: cut over anyway, accepting that latency cost for the Railway memory-pressure benefit
+Tier 1 already captured for the dominant traffic pattern. This is a business/tradeoff decision,
+not an engineering conclusion that Postgres won on speed — see
+`postgres_phase_e_v2.16.25_live_timing_2026-09-08.md` in project memory for the numbers it was
+based on.
+
+**Code change**: dropped the `_pg_shadow_requested and _is_admin()` condition from the Tier 2 gate
+in `api_browse()`. `_pg_tier2_eligible()` and `_pg_tier2_would_narrow` (the v2.16.24 fix that skips
+Postgres when nothing would actually narrow) are unchanged — they're orthogonal to who can trigger
+narrowing, not part of the admin gate. The existing try/except fallback is now the real rollback
+lever (same posture as Phase D): a Postgres/SQL error degrades that one request to the legacy path
+automatically. `_pg_tier2_shadow`/`_pg_tier2_shadow_ms`/`_pg_tier2_shadow_candidate_count` stay
+admin-gated exactly as before, independent of routing.
+
+**Verified without a live Postgres** (none was reachable in this session's device shell — no root,
+no Docker/Homebrew, apt/Maven mirrors not on the egress allowlist): `py_compile` + `node --check`
+clean; disposable-venv module import + route-table build clean (60 routes, `/api/browse` present,
+`APP_VERSION` confirmed `2.16.26`). Since the narrowing SQL/logic itself is untouched (already
+verified byte-identical across 60+ cases in the 2026-09-04/09-08 sessions), verification targeted
+the actual change — the gate — using the pre-edit and post-edit app loaded side by side against a
+synthetic cat-cache fixture with `_pg_tier2_narrow_items` mocked: confirmed a real (non-admin,
+non-flag) request now reaches Postgres where it previously didn't, that the response is
+byte-identical to the old legacy-path response, that the `_pg_tier2_would_narrow` guard still
+holds, that a forced exception still falls back cleanly for real traffic, and that diagnostic
+fields stay invisible to a non-admin even though their request now runs through Postgres. Full
+detail in HANDOFF.md's 2026-09-15 entry.
+
+**Not yet done**: push (Chuck's Mac terminal), confirm live via the version string, check Railway
+deploy logs for `[pg] tier2 narrow failed, falling back to full cache` lines, watch the memory
+graph over the following days/weeks (Tier 2 traffic is a smaller share than Tier 1's, so don't
+expect as dramatic a change as Phase D showed).
 
 ---
 

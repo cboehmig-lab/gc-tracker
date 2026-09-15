@@ -4471,7 +4471,7 @@ def _pg_tier1_browse(*, store_set, search_all, user_last_scan,
     }
 
 
-# ── Postgres Tier 2 candidate narrowing — Phase E, SHADOW MODE (v2.16.23) ────
+# ── Postgres Tier 2 candidate narrowing — Phase E CUTOVER (v2.16.26) ─────────
 # Tier 1 (above) serves the ENTIRE response from SQL. Tier 2 is different by
 # design (POSTGRES_MIGRATION_PLAN.md §3): the want-list/free-text keyword
 # matcher stays exactly as it is today — Python, unmodified — because it's
@@ -4487,11 +4487,16 @@ def _pg_tier1_browse(*, store_set, search_all, user_last_scan,
 # _pg_tier2_narrow_items's docstring for exactly what is and isn't pushed
 # down and why.
 #
-# SHADOW MODE ONLY this phase, deliberately — same staged rollout Tier 1 used
-# (Phase C shadow-mode, v2.16.20/21, before its own separate cutover in Phase
-# D, v2.16.22): gated behind admin + `?pg_shadow=1` in api_browse() below, not
-# real traffic. Verify via the offline diff harness + live spot-checks (same
-# bar Phase D was held to) before a future session drops that gate.
+# Shipped shadow-mode-only (admin + `?pg_shadow=1`) in v2.16.23-v2.16.25 while
+# the round-trip cost was investigated and narrowed (~12% slower on a
+# narrowing-eligible production request under v2.16.24, down to ~8% after the
+# v2.16.25 cursor-overhead fix — see
+# postgres_phase_e_v2.16.25_live_timing_2026-09-08.md in project memory). Cut
+# over to serve every real user in v2.16.26 — see the gate in api_browse(),
+# which no longer checks _is_admin()/the flag before calling
+# _pg_tier2_narrow_items(). Chuck's call: the remaining latency cost is
+# accepted for the Railway memory-pressure benefit (same rationale as Phase
+# D), not because the benchmark reversed.
 
 def _pg_tier2_eligible(fq: str, has_kw: bool) -> bool:
     """True iff this /api/browse request is the Tier 2 case Phase E targets:
@@ -4902,10 +4907,16 @@ def api_browse():
             print(f"[pg] tier1 browse failed, falling back to JSON path: "
                   f"{type(e).__name__}: {e}")
 
-    # ── Postgres Tier 2 candidate narrowing — SHADOW MODE (Phase E, v2.16.23) ──
-    # Admin + `?pg_shadow=1` gated only this phase — see the module note above
-    # _pg_tier2_eligible for why this isn't a real-traffic cutover yet. A real
-    # (non-flagged, non-admin) request always takes the unchanged path below.
+    # ── Postgres Tier 2 candidate narrowing — THE CUTOVER (Phase E, v2.16.26) ──
+    # As of this cutover, every Tier-2-eligible request (want-list keywords or
+    # filter_q free text active, and a store subset or user_last_scan actually
+    # narrowing something — see _pg_tier2_eligible/_pg_tier2_would_narrow) is
+    # served from Postgres, for every caller — admin or not, flag or not.
+    # ?pg_shadow=1 no longer gates whether this branch runs at all; it only
+    # controls whether the diagnostic timing fields get attached below, and
+    # only for an admin's own request (same posture as Tier 1's _pg_shadow/
+    # _pg_shadow_ms). See postgres_phase_e_v2.16.25_live_timing_2026-09-08.md
+    # in project memory for the latency numbers behind this decision.
     _pg_tier2_shadow_source = None
     _pg_tier2_shadow_ms = None
     _pg_tier2_shadow_count = None
@@ -4922,7 +4933,12 @@ def api_browse():
     # whenever it can't narrow anything, and fall straight through to the
     # unchanged in-memory path below, exactly as if shadow mode weren't on.
     _pg_tier2_would_narrow = (not search_all) or bool(user_last_scan)
-    if (_pg_shadow_requested and _is_admin() and _PG_POOL is not None
+    # The try/except fallback below is now the real rollback lever (same
+    # pattern as Phase D): any Postgres/SQL error degrades that one request
+    # to the legacy full-cache path automatically. Reverting the whole
+    # cutover, if ever needed, is putting `_is_admin()` back in front of
+    # this condition, not a data-recovery operation.
+    if (_PG_POOL is not None
             and _pg_tier2_eligible(fq, _has_kw) and _pg_tier2_would_narrow):
         try:
             _pg_t2_t0 = time.time()
@@ -7371,7 +7387,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.25"
+APP_VERSION = "2.16.26"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
