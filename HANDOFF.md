@@ -33,11 +33,12 @@ refetch, since store selection is irrelevant to it by design.
 
 **Verification**: live-clicked through both orderings on gcgeartracker.com in Chrome
 (`smurfco` account) before writing the fix, confirming the bug reproduces exactly in the
-"Want List first, then Favorites" order and not in either Watch List ordering. After the fix,
-[pending — verify post-deploy: repeat "Want List → Favorites" and confirm results narrow to the
-2 favorited stores instead of staying at the prior nationwide/298-store result]. `python3 -m
-py_compile gc_tracker_app.py` (version bump only, no logic change there) and `node --check
-static/gc.js` both clean.
+"Want List first, then Favorites" order and not in either Watch List ordering. After deploy,
+re-ran the exact repro live: clicked Want List (298 stores, "89 Want List matches nationwide"),
+then Favorites — result title correctly updated to "1 Want List matches in 2 selected stores"
+(Austin, South Austin), `_srvStores` and `_srvTotalCount` both refreshed. Confirmed fixed.
+`python3 -m py_compile gc_tracker_app.py` (version bump only, no logic change there) and
+`node --check static/gc.js` both clean.
 
 ## v2.16.27 — 2026-09-21: Store filter now applies to Watch/Want List; scan-lock race fixed
 
