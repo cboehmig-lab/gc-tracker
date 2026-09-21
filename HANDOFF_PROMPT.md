@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-15 · Version: v2.16.26 (Postgres migration Phase E — Tier 2 candidate narrowing, CUT OVER to real traffic; Phase D + Phase E both live — see HANDOFF.md's 2026-09-15 entry) · Live at: gcgeartracker.com — v2.16.26 confirmed live, deploy-day health check clean*
+*Generated: 2026-09-21 · Version: v2.16.27 (Store filter now applies to Watch/Want List views; fixed a low-severity scan-lock race — see HANDOFF.md's 2026-09-21 entry) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 

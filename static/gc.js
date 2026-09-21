@@ -1464,16 +1464,22 @@ async function _fetchBrowsePage(page) {
     user_last_scan: window._lastRunISO || '',
     ...filters,
   };
-  if (_globalSearchActive || _watchFilterActive) {
+  // Favorite/selected stores now apply to Watch List and Want List too (previously
+  // both forced all_stores=true, ignoring the store filter entirely — see Discord
+  // feedback from The Eristic/smurfco, 2026-09). True nationwide keyword search
+  // (typing in the search box, not Watch/Want) is unaffected by design.
+  if (_globalSearchActive && !_wantListSearchActive) {
     body.all_stores = true;
-    if (_globalSearchActive) {
-      body.filter_q = _globalSearchQuery;
+    body.filter_q = _globalSearchQuery;
+  } else {
+    body.stores = _srvStores;
+    if (!_srvStores.length) {
+      // No stores selected — fall back to nationwide rather than showing nothing.
+      body.all_stores = true;
     }
     if (_wantListSearchActive) {
       body.filter_want_list_only = true;
     }
-  } else {
-    body.stores = _srvStores;
   }
   try {
     const r = await fetch('/api/browse', {
@@ -1521,9 +1527,16 @@ async function _fetchBrowsePage(page) {
     const countEl2 = document.getElementById('filter-item-count');
     if (countEl2) countEl2.textContent = hasFilters ? _srvTotalCount.toLocaleString() + ' items' : '';
     const newCount = d.new_count || 0;
+    // Watch/Want now respect the store filter (see the all_stores fix above) — label
+    // accordingly instead of always claiming "nationwide", which would be wrong once
+    // a subset of stores is selected.
+    const _wlScopeNationwide = !_srvStores.length || _srvStores.length >= allStores.length;
+    const _wlScopeLabel = _wlScopeNationwide
+      ? 'nationwide'
+      : `in ${_srvStores.length} selected store${_srvStores.length !== 1 ? 's' : ''}`;
     if (_wantListSearchActive) {
       document.getElementById('res-title').textContent = _srvTotalCount > 0
-        ? `${_srvTotalCount.toLocaleString()} Want List matches nationwide`
+        ? `${_srvTotalCount.toLocaleString()} Want List matches ${_wlScopeLabel}`
         : 'No Want List matches found';
     } else if (_priceDropFilterActive) {
       document.getElementById('res-title').textContent = _srvTotalCount > 0
@@ -1535,7 +1548,7 @@ async function _fetchBrowsePage(page) {
         : 'No vintage gear found in selected stores';
     } else if (_watchFilterActive) {
       document.getElementById('res-title').textContent = _srvTotalCount > 0
-        ? `Watch List — ${_srvTotalCount.toLocaleString()} item${_srvTotalCount !== 1 ? 's' : ''} nationwide`
+        ? `Watch List — ${_srvTotalCount.toLocaleString()} item${_srvTotalCount !== 1 ? 's' : ''} ${_wlScopeLabel}`
         : 'Watch List — none of your watched items are currently available';
       document.getElementById('res-badge').textContent = '';
     } else if (_globalSearchActive) {

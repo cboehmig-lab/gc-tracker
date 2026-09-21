@@ -641,7 +641,14 @@ def _pg_full_backfill():
         send({"type": "done", "error": "Backfill failed — see server logs.",
               "new_ids": [], "items": []})
     finally:
-        _lock.release()
+        # Guard against the /api/stop 5s force-unlock watchdog already having
+        # released this lock if this thread's winddown ran long (RuntimeError:
+        # release unlocked lock) — same pattern as admin_clear_lock/_force_unlock.
+        # Harmless either way: the lock ends up unlocked regardless. (v2.16.27)
+        try:
+            _lock.release()
+        except RuntimeError:
+            pass
 
 # ── Postgres parity check (Phase B verification, v2.16.16) ───────────────────
 # Admin-only, on-demand, read-only diagnostic: compares the live in-memory
@@ -5903,7 +5910,14 @@ def _populate_store_data(selected_stores: list = None):
         print(f"[scan] operation failed: {type(e).__name__}: {e}")
         send({"type": "done", "error": "Operation failed — see server logs.", "scanned": 0, "new_count": 0, "new_items": []})
     finally:
-        _lock.release()
+        # Guard against the /api/stop 5s force-unlock watchdog already having
+        # released this lock if this thread's winddown ran long (RuntimeError:
+        # release unlocked lock) — same pattern as admin_clear_lock/_force_unlock.
+        # Harmless either way: the lock ends up unlocked regardless. (v2.16.27)
+        try:
+            _lock.release()
+        except RuntimeError:
+            pass
 
 
 
@@ -6148,7 +6162,14 @@ def _validate_stores():
         print(f"[scan] operation failed: {type(e).__name__}: {e}")
         send({"type": "done", "error": "Operation failed — see server logs.", "scanned": 0, "new_count": 0, "new_items": []})
     finally:
-        _lock.release()
+        # Guard against the /api/stop 5s force-unlock watchdog already having
+        # released this lock if this thread's winddown ran long (RuntimeError:
+        # release unlocked lock) — same pattern as admin_clear_lock/_force_unlock.
+        # Harmless either way: the lock ends up unlocked regardless. (v2.16.27)
+        try:
+            _lock.release()
+        except RuntimeError:
+            pass
 
 
 def _fill_gaps(selected_stores: list[str]):
@@ -6218,7 +6239,14 @@ def _fill_gaps(selected_stores: list[str]):
         print(f"[scan] operation failed: {type(e).__name__}: {e}")
         send({"type": "done", "error": "Operation failed — see server logs.", "scanned": 0, "new_count": 0, "new_items": []})
     finally:
-        _lock.release()
+        # Guard against the /api/stop 5s force-unlock watchdog already having
+        # released this lock if this thread's winddown ran long (RuntimeError:
+        # release unlocked lock) — same pattern as admin_clear_lock/_force_unlock.
+        # Harmless either way: the lock ends up unlocked regardless. (v2.16.27)
+        try:
+            _lock.release()
+        except RuntimeError:
+            pass
 
 
 
@@ -6635,7 +6663,14 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
     except Exception as e:
         send({"type":"done","error":str(e),"scanned":0,"new_count":0,"new_items":[]})
     finally:
-        _lock.release()
+        # Guard against the /api/stop 5s force-unlock watchdog already having
+        # released this lock if this thread's winddown ran long (RuntimeError:
+        # release unlocked lock) — same pattern as admin_clear_lock/_force_unlock.
+        # Harmless either way: the lock ends up unlocked regardless. (v2.16.27)
+        try:
+            _lock.release()
+        except RuntimeError:
+            pass
 
 
 # ── HTML ──────────────────────────────────────────────────────────────────────
@@ -7387,7 +7422,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.26"
+APP_VERSION = "2.16.27"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

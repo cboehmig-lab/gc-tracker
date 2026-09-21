@@ -1,5 +1,68 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-15 · Current version: v2.16.26 (Postgres Phase E — Tier 2 candidate narrowing, CUT OVER to real traffic; Phase D + Phase E both live) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-21 · Current version: v2.16.27 (Store filter now applies to Watch/Want List views; fixed a low-severity scan-lock race) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.27 — 2026-09-21: Store filter now applies to Watch/Want List; scan-lock race fixed
+
+**Two independent, unrelated changes, shipped together.**
+
+### 1. Favorite/selected stores now filter the Watch List and Want List views
+
+**Reported via Discord** (user "The Eristic", relayed by "smurfco"/Chuck): "Filtering by
+Favorite Stores not working?" — turned out Watch List and Want List always searched
+nationwide regardless of the store filter (Favorites or a manual selection), which surprised a
+user tracking ~8 stores in their area. Discussed in the thread and concluded (Chuck's own
+words: "you could also make the argument that the store filters should apply universally" /
+"Yeah, that's how I was thinking of them") that store filtering should apply everywhere,
+including Watch/Want — a change from the original intent (Chuck's own mental model going in
+was "if I click my want list I wanna see the whole thing"), but the decision made was to make
+it universal.
+
+**Root cause** (`static/gc.js`, `_fetchBrowsePage`): the request body builder had
+`if (_globalSearchActive || _watchFilterActive) { body.all_stores = true; ... }` — Watch List
+sets `_watchFilterActive`, and Want List search sets both `_wantListSearchActive` AND
+`_globalSearchActive` (it piggybacks on the global-search code path), so both always forced
+`all_stores: true`, completely bypassing whatever stores were selected. The backend
+(`api_browse()` in `gc_tracker_app.py`) already fully supported combining a `stores` list with
+`filter_watched`/`filter_want_list_only` — this was purely a frontend bug.
+
+**Fix**: the override now only fires for a genuine nationwide keyword search (typing in the
+search box, `_globalSearchActive` true and `_wantListSearchActive` false) — Watch List and Want
+List both now send `body.stores = _srvStores` (the current store selection) like every other
+filter. Added a fallback to `all_stores: true` when `_srvStores` is empty, so a user with zero
+stores selected doesn't just see "no data" instead of results. Also updated the result-header
+wording ("Watch List — N items nationwide" / "N Want List matches nationwide") to say "in N
+selected stores" instead of "nationwide" whenever a subset is active, so the label doesn't lie
+about scope.
+
+**Not changed**: plain nationwide keyword search (typing in the search box outside Watch/Want
+mode) — that's a distinct, deliberate feature and wasn't part of the report.
+
+### 2. Fixed the scan-lock race (`RuntimeError: release unlocked lock`)
+
+Found during Phase E's post-cutover health check (2026-09-21) — see project memory
+`bug_scan_lock_race_2026-09-21.md` for the full investigation. One occurrence in Railway logs,
+2026-09-16, unrelated to the Postgres migration: a race between a scan thread's own
+`finally: _lock.release()` and `/api/stop`'s 5-second force-unlock watchdog — if a scan's
+winddown (anchor computation, SSE `done` event, etc.) ran longer than the watchdog's fixed 5s
+timer, the watchdog released `_lock` first and the scan thread's own release then raised.
+Low severity (fires after the user-visible scan already completed; the lock ends up unlocked
+either way) but noisy in the logs.
+
+**Fix**: wrapped the 5 previously-unguarded `_lock.release()` calls in
+`gc_tracker_app.py` (lines ~644, 5906, 6151, 6221, 6638 pre-edit) in
+`try: _lock.release() except RuntimeError: pass`, matching the pattern already used at the
+other two force-release sites (`admin_clear_lock`, `_force_unlock` itself). Purely defensive —
+doesn't change behavior, just stops the exception from being raised/logged when the watchdog
+wins the race.
+
+**Verification**: `python3 -m py_compile gc_tracker_app.py` and `node --check static/gc.js`
+both clean. Module import + Flask route-table build succeeded in a disposable venv (60 routes,
+`/api/browse` present, `APP_VERSION` confirmed `2.16.27`). No live-traffic test of the
+Watch/Want store-filter change was possible from this session (no local Postgres/store-cache
+data reachable) — worth a quick manual spot-check on gcgeartracker.com after deploy (toggle
+Favorites, then open Watch List / Want List, confirm results only show favorited stores).
 
 ---
 
