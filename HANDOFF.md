@@ -1,7 +1,43 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-21 · Current version: v2.16.27 (Store filter now applies to Watch/Want List views; fixed a low-severity scan-lock race) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-21 · Current version: v2.16.28 (Fixed Want List not refreshing when store selection changes while it's open) · Domain: gcgeartracker.com*
 
 ---
+
+## v2.16.28 — 2026-09-21: Want List didn't refresh when store selection changed while it was open
+
+**Found via live-browser testing** (Chuck asked for a click-through spot-check of the v2.16.27
+store-filter change, specifically: "test both order, like select want list first THEN filter to
+favorites"). Testing both orderings surfaced a real bug in one of them.
+
+**Symptom**: with Want List open, toggling Favorites (or any store-selection change) updated the
+sidebar (`_selectedStores`) and the internal `_srvStores` var correctly, but the displayed result
+list and header never refreshed — stayed frozen on the previous store selection's results. Watch
+List was NOT affected (matches Chuck's own observation: "it seems like it's working on watch list
+but not want list").
+
+**Root cause** (`static/gc.js`, `updateCount()`): the auto-refresh guard that calls
+`browseCache()` whenever the store selection changes was `if (n > 0 && !running &&
+!_globalSearchActive) browseCache();`. Want List search sets `_globalSearchActive = true` (it
+piggybacks on the global-search code path — a vestige of Want List's pre-v2.16.27 design, when it
+always searched nationwide and genuinely didn't care about store selection). That made the guard
+treat Want List the same as a true nationwide keyword search and skip the refresh entirely. Watch
+List never sets `_globalSearchActive`, so it was never affected — it already refreshes correctly.
+
+**Fix**: `updateCount()` now computes `_storesAffectResults = !_globalSearchActive ||
+_wantListSearchActive` and uses that in place of the old `!_globalSearchActive` check, in both the
+`n > 0` auto-refresh branch and a new `n === 0` branch (so clearing all stores while Want List is
+open now correctly falls back to nationwide, per `_fetchBrowsePage`'s existing empty-`_srvStores`
+handling, instead of leaving stale results on screen). Plain nationwide keyword search — the
+actual `_globalSearchActive && !_wantListSearchActive` case — is unchanged: it still skips the
+refetch, since store selection is irrelevant to it by design.
+
+**Verification**: live-clicked through both orderings on gcgeartracker.com in Chrome
+(`smurfco` account) before writing the fix, confirming the bug reproduces exactly in the
+"Want List first, then Favorites" order and not in either Watch List ordering. After the fix,
+[pending — verify post-deploy: repeat "Want List → Favorites" and confirm results narrow to the
+2 favorited stores instead of staying at the prior nationwide/298-store result]. `python3 -m
+py_compile gc_tracker_app.py` (version bump only, no logic change there) and `node --check
+static/gc.js` both clean.
 
 ## v2.16.27 — 2026-09-21: Store filter now applies to Watch/Want List; scan-lock race fixed
 

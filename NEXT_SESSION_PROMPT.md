@@ -1,4 +1,4 @@
-# Next Session Prompt — Phase E closed out; Phase F not started
+# Next Session Prompt — Phase E closed out; store-filter bug fully resolved; Phase F not started
 
 Copy and paste this to start the next Cowork session.
 
@@ -14,32 +14,39 @@ filesystem — check `device_bash` works before starting anything.**
 ## Where things stand (as of 2026-09-21)
 
 Postgres Phase E (Tier 2 keyword/free-text candidate narrowing) cut over 2026-09-15 (v2.16.26) and
-its post-cutover health check (done 2026-09-21, 6 days out) came back clean: zero
-`falling back to full cache` lines in deploy logs, memory graph settled around the same ~4-5GB
-baseline as before cutover (no dramatic change — expected, since Tier 2 is a smaller share of
-traffic than Tier 1's dominant pattern). **Phase E is closed out — no further watching needed.**
+its post-cutover health check (2026-09-21, 6 days out) came back clean. **Phase E is closed out —
+no further watching needed.**
 
-One unrelated, low-severity bug was found during that check: a `RuntimeError: release unlocked
-lock` race between the scan thread's own lock release and `/api/stop`'s 5-second force-unlock
-watchdog. Confirmed unrelated to Phase E, no user-facing impact (fires after the scan's SSE "done"
-event is already sent). Not fixed, not queued — see project memory
-`bug_scan_lock_race_2026-09-21.md` for full root-cause detail and a suggested fix if it's ever
-worth doing.
+Two bugs were found and fixed this session, both deployed as v2.16.27 and v2.16.28:
+
+- **v2.16.27**: (1) a `RuntimeError: release unlocked lock` scan-lock race, found during the
+  Phase E health check — fixed by wrapping the unguarded `_lock.release()` calls in
+  try/except. (2) The Favorite/selected-stores filter wasn't applying to Watch List or Want List
+  (reported via Discord) — fixed so both now send the current store selection like every other
+  filter.
+- **v2.16.28**: live-browser testing of the v2.16.27 store-filter fix (clicking through both
+  "Favorites → Want List" and "Want List → Favorites" orderings on the production site) surfaced
+  a follow-on bug: toggling store selection while Want List was already open didn't refresh the
+  displayed results (stale display), because Want List's `_globalSearchActive` flag made
+  `updateCount()`'s auto-refresh guard treat it like a nationwide keyword search. Watch List was
+  unaffected. Fixed in `updateCount()`. **Needs a quick post-deploy live spot-check** (open Want
+  List, then toggle Favorites, confirm results narrow instead of staying stale) — see HANDOFF.md's
+  v2.16.28 entry for the exact repro steps used pre-fix.
+
+See project memory `feature_store_filter_watch_want_2026-09-21.md` and
+`bug_scan_lock_race_2026-09-21.md` for full investigation detail on both.
 
 ## The task
 
-Nothing urgent is queued. Options for next session, in rough priority order if Chuck wants to keep
-moving on this:
+Nothing urgent is queued beyond the v2.16.28 post-deploy spot-check above. Options for next
+session, in rough priority order if Chuck wants to keep moving:
 
 1. **Phase F (retire JSON entirely)** — the big remaining lever on the original memory-pressure
    problem, since `_cat_cache` still stays resident in memory at all times regardless of Phases D/E.
    Not started, not designed yet — the open design question is keyword search's dependency on the
    full in-memory list. This is a much bigger project than D/E, worth a dedicated design session
    before any code.
-2. **Scan-lock race fix** (optional, cosmetic) — wrap the unguarded `_lock.release()` calls at
-   gc_tracker_app.py lines 6638/5906/6151/6221 in `try/except RuntimeError: pass`, matching the
-   pattern already used at lines 3092/5824. Low priority, only worth doing opportunistically.
-3. Otherwise, check in with Chuck on what he wants to prioritize — Android app groundwork, other
+2. Otherwise, check in with Chuck on what he wants to prioritize — Android app groundwork, other
    feature ideas in `HANDOFF.md`'s "Future Ideas" section, etc.
 
 ## Standing rules (same as always)

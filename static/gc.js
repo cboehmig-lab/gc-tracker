@@ -1275,8 +1275,17 @@ function updateCount() {
   const selBtn = document.getElementById('sel-all-btn');
   if (selBtn) selBtn.textContent = allChecked ? 'Clear All' : 'Select All';
   _updateMobileToggleCounts();
-  // Auto-browse cached inventory when stores are selected
-  if (n > 0 && !running && !_globalSearchActive) browseCache();
+  // Auto-browse cached inventory when stores are selected. A true nationwide
+  // keyword search (_globalSearchActive && !_wantListSearchActive) ignores
+  // store selection entirely, so skip the refetch there. But Want List DOES
+  // care about store selection (as of v2.16.27's store-filter fix), even
+  // though it also sets _globalSearchActive — so it needs the same
+  // auto-refresh as Watch List, or toggling Favorites/stores while Want
+  // List is open leaves stale results on screen (reported via Discord,
+  // 2026-09-21: "toggle want list first then filter to favorites").
+  const _storesAffectResults = !_globalSearchActive || _wantListSearchActive;
+  if (n > 0 && !running && _storesAffectResults) browseCache();
+  else if (n === 0 && !running && _wantListSearchActive) browseCache();  // falls back to nationwide, per _fetchBrowsePage
   else if (n === 0 && !_globalSearchActive) {
     document.getElementById('res-panel').style.display = 'none';
   }
