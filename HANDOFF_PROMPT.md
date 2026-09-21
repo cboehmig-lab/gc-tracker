@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-21 · Version: v2.16.28 (Fixed Want List not refreshing when store selection changes while it's open — see HANDOFF.md's 2026-09-21 entry) · Live at: gcgeartracker.com*
+*Generated: 2026-09-21 · Version: v2.16.29 (Admin-only diagnostic: search-syntax usage stats, for Phase F design — see HANDOFF.md's 2026-09-21 entry) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 

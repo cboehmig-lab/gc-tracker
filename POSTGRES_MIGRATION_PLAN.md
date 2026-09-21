@@ -104,7 +104,7 @@ Sources: [Railway Pricing Calculator](https://makerkit.dev/pricing-calculator/ra
 
 **Phase E — Tier 2 hybrid cutover.** Same diff-then-flip discipline for the keyword/free-text case (§3 Tier 2): SQL narrows by facets, existing Python keyword code runs unchanged on the result.
 
-**Phase F — retire JSON, once you're comfortable (measured in weeks of clean production traffic, your call).** Stop dual-writing `gc_category_cache.json`; Postgres becomes sole source of truth. Only after this phase does the original memory-growth mechanism (materializing the full 92K-item list under concurrent load) become structurally impossible rather than just avoided on the hot path — worth stating plainly since it's the whole point of doing this instead of just keeping the `malloc_trim` mitigation (v2.16.13) forever.
+**Phase F — retire JSON, once you're comfortable (measured in weeks of clean production traffic, your call).** Stop dual-writing `gc_category_cache.json`; Postgres becomes sole source of truth. Only after this phase does the original memory-growth mechanism (materializing the full 92K-item list under concurrent load) become structurally impossible rather than just avoided on the hot path — worth stating plainly since it's the whole point of doing this instead of just keeping the `malloc_trim` mitigation (v2.16.13) forever. **Design work started 2026-09-21 — see `POSTGRES_PHASE_F_DESIGN.md` for the full write-path/read-path design, the user-data-survival analysis, and open questions for Chuck before any code ships.**
 
 Each phase gets its own `APP_VERSION` bump and its own `HANDOFF.md`/`HANDOFF_PROMPT.md` changelog entry with the same level of detail as the v2.16.10–13 entries, per project convention — not one giant "did Postgres" bump.
 

@@ -5934,6 +5934,88 @@ def api_pg_parity_check():
     except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 502
 
+@app.route("/api/search-syntax-stats")
+@optional_user_context
+def api_search_syntax_stats():
+    """Admin-only, read-only: aggregate (NOT per-user) counts of which want-list-
+    keyword/saved-search syntax features are actually in use across every real
+    account. Built 2026-09-21 to size the Postgres-full-text-search design for
+    Phase F (see POSTGRES_PHASE_F_DESIGN.md) -- specifically how much of the
+    syntax maps cleanly onto tsquery (plain word / AND / OR / NOT / phrase) vs.
+    needs a trigram/ILIKE fallback (non-suffix wildcards, filter_strict's
+    "contains anywhere" fuzzy mode). Returns COUNTS ONLY plus a small capped
+    sample of just the two edge-case patterns, for manual review -- never a
+    user's full keyword or saved-search list. Temporary diagnostic tooling,
+    not meant to stay in the codebase long-term; safe to delete once Phase F's
+    search design is locked in."""
+    denied = _require_admin_api()
+    if denied:
+        return denied
+
+    _SAMPLE_CAP = 20
+    stats = {
+        "users_with_data":          0,
+        "total_keyword_entries":    0,
+        "kw_with_star":             0,
+        "kw_star_not_suffix_only":  0,  # needs trigram, not a plain tsquery prefix (:*)
+        "kw_with_quote":            0,
+        "kw_with_semicolon":        0,
+        "kw_with_dash_negation":    0,
+        "kw_with_comma_and":        0,
+        "total_saved_searches":       0,
+        "ss_with_filter_strict":      0,  # "fuzzy" contains-anywhere mode -- needs trigram
+        "ss_with_nonempty_filter_q":  0,
+    }
+    sample_nonsuffix_wildcards = []
+    sample_strict_fq = []
+
+    with _user_db() as conn:
+        rows = conn.execute("SELECT keywords, saved_searches FROM user_data").fetchall()
+
+    for row in rows:
+        try:
+            kws = json.loads(row["keywords"] or "[]")
+        except Exception:
+            kws = []
+        try:
+            ss = json.loads(row["saved_searches"] or "[]")
+        except Exception:
+            ss = []
+        if kws or ss:
+            stats["users_with_data"] += 1
+
+        for k in kws:
+            stats["total_keyword_entries"] += 1
+            if "*" in k:
+                stats["kw_with_star"] += 1
+                if not re.fullmatch(r"[^*]*\*+", k):
+                    stats["kw_star_not_suffix_only"] += 1
+                    if len(sample_nonsuffix_wildcards) < _SAMPLE_CAP:
+                        sample_nonsuffix_wildcards.append(k)
+            if '"' in k:
+                stats["kw_with_quote"] += 1
+            if ";" in k:
+                stats["kw_with_semicolon"] += 1
+            if re.search(r"(^|,)\s*-", k):
+                stats["kw_with_dash_negation"] += 1
+            if "," in k:
+                stats["kw_with_comma_and"] += 1
+
+        for s in ss:
+            stats["total_saved_searches"] += 1
+            f = (s or {}).get("filters") or {}
+            if f.get("filter_strict"):
+                stats["ss_with_filter_strict"] += 1
+            fq = (f.get("filter_q") or "").strip()
+            if fq:
+                stats["ss_with_nonempty_filter_q"] += 1
+                if f.get("filter_strict") and len(sample_strict_fq) < _SAMPLE_CAP:
+                    sample_strict_fq.append(fq)
+
+    stats["sample_nonsuffix_wildcards"] = sample_nonsuffix_wildcards
+    stats["sample_strict_filter_q"] = sample_strict_fq
+    return jsonify(stats)
+
 @app.route("/api/pg-full-backfill", methods=["POST"])
 @optional_user_context
 def api_pg_full_backfill():
@@ -7422,7 +7504,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.28"
+APP_VERSION = "2.16.29"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

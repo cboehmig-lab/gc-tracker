@@ -1,7 +1,36 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-21 · Current version: v2.16.28 (Fixed Want List not refreshing when store selection changes while it's open) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-21 · Current version: v2.16.29 (Admin-only diagnostic: search-syntax usage stats, for Phase F design) · Domain: gcgeartracker.com*
 
 ---
+
+## v2.16.29 — 2026-09-21: Admin-only diagnostic endpoint — real search-syntax usage stats
+
+**Why**: Chuck pushed back on the Phase F search design (see `POSTGRES_PHASE_F_DESIGN.md`) —
+correctly, on review: Postgres full-text search (`tsvector`/`tsquery` + a GIN index) maps
+cleanly onto most of the want-list/filter_q syntax (plain word, comma=AND, `;`=OR, `-`=NOT,
+quoted phrases), and the catalog (~110-450K rows) is nowhere near a scale where that's a
+stretch. The two syntax features that DON'T map onto tsquery cleanly are non-suffix wildcards
+(`*caster`, mid-word `*`) and `filter_strict`'s "contains anywhere" fuzzy mode — both need
+`pg_trgm` instead. Needed real production numbers on how often those two patterns actually show
+up in real want lists/saved searches to size that part of the design, rather than guessing —
+the local dev `gc_users.db` only has one test account, not representative.
+
+**What shipped**: `GET /api/search-syntax-stats`, admin-gated via the same `_require_admin_api()`
+pattern as `/api/pg-parity-check` and friends. Reads every real account's `keywords` and
+`saved_searches` from `user_data` (same query shape `/admin/users` already uses for its
+wl_count/kw_count/fav_count stats) and returns AGGREGATE COUNTS ONLY — total keyword entries,
+how many contain `*`, how many of those are non-suffix-only (the trigram-needing case), how many
+use quotes/`;`/`-`/`,`, total saved searches, how many set `filter_strict`, how many have a
+non-empty `filter_q` — plus a capped (20-entry) sample of just the two edge-case patterns for a
+quick manual look. Never returns a user's full keyword or saved-search list, and it's read-only
+(no writes, no schema change).
+
+**Verification**: `python3 -m py_compile` and `node --check` both clean (no JS touched).
+Disposable-venv import + route-table build: 61 routes (60 before + this one), `/api/browse`
+still present, `APP_VERSION` confirmed `2.16.29`.
+
+**Status**: temporary diagnostic tooling — not meant to stay in the codebase long-term. Safe to
+delete once Phase F's search design (tsquery vs. trigram split) is locked in.
 
 ## v2.16.28 — 2026-09-21: Want List didn't refresh when store selection changed while it was open
 
