@@ -4060,7 +4060,6 @@ def api_saved_search_counts():
         f_conds  = set(f.get("filter_conditions") or [])
         f_cats   = set(f.get("filter_categories") or [])
         f_subs   = set(f.get("filter_subcategories") or [])
-        f_strict = bool(f.get("filter_strict"))
         f_pdrop  = bool(f.get("filter_price_drop_only"))
 
         items = [i for i in all_items if i.get("store") in stores] if stores else list(all_items)
@@ -4068,11 +4067,14 @@ def api_saved_search_counts():
         if fq:
             # v2.16.0: use the SAME shared clause compiler + the SAME name+brand text
             # as /api/browse's _apply_base, so a saved search's count equals what
-            # applying it actually returns. The old inline copy here had drifted two
-            # ways: it treated filter_strict as whole-word (browse treats it as
-            # fuzzy/contains, per the v2.10.5 semantics flip) and it searched 6
-            # fields where browse searches name+brand — both made counts wrong.
-            fq_clauses = _compile_fq_clauses(fq, fuzzy=f_strict)
+            # applying it actually returns. (The old inline copy here had drifted:
+            # it searched 6 fields where browse searches name+brand, making counts
+            # wrong.) v2.16.29: filter_strict/"fuzzy" mode removed — real usage was
+            # zero across every saved search in production (see
+            # POSTGRES_PHASE_F_DESIGN.md §3) and the UI toggle for it had already
+            # been orphaned from the HTML since the v2.10.x era. Whole-word is now
+            # unconditionally the only mode.
+            fq_clauses = _compile_fq_clauses(fq)
             items = [i for i in items if fq_clauses and _fq_text_match(
                 ((i.get("name") or "") + " " + (i.get("brand") or "")).lower(), fq_clauses)]
 
@@ -4670,7 +4672,6 @@ def api_browse():
     f_want_only = bool(data.get("filter_want_list_only"))
     f_price_drop_only = bool(data.get("filter_price_drop_only"))
     f_vintage_only = bool(data.get("vintage_only"))
-    f_strict = bool(data.get("filter_strict"))
     def _to_float(v):
         try: return float(v) if v is not None and v != '' else None
         except (TypeError, ValueError): return None
@@ -5029,7 +5030,7 @@ def api_browse():
             # are AND'd (old behavior, byte-identical when no ';' or '-' present) and
             # a leading '-' negates a token. Token budget stays 12 TOTAL across all
             # clauses + ≤4 clauses — same unauthenticated-DoS ceiling as v2.13.0.
-            fq_clauses = _compile_fq_clauses(fq, fuzzy=f_strict)
+            fq_clauses = _compile_fq_clauses(fq)
             r = [i for i in r if fq_clauses and _fq_text_match(
                 ((i["name"] or "") + " " + (i["brand"] or "")).lower(), fq_clauses)]
         if f_want_only:       r = [i for i in r if i["kwMatch"]]
@@ -6867,7 +6868,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <code>Allen</code> — whole word (not Allentown or McAllen)<br>
           <code>"Jam Pedals"</code> — exact phrase<br>
           <code>Thorpy, Dane</code> — comma = AND (both required)<br>
-          <code>OD*</code> — wildcard (OD808, OD-1…) &nbsp;·&nbsp; <code>*drive*</code> — contains "drive"<br>
+          <code>OD*</code> — wildcard, end of word only (OD808, OD-1…)<br>
           <code>Mesa, -combo</code> — minus = NOT (also <code>-"combo amp"</code>)<br>
           <code>Mesa, Mark*; Heartbreaker</code> — semicolon = OR (either side)<br>
           <code>Mesa, -combo: Angel; Blues; Trem</code> — colon = apply the prefix to every OR branch
@@ -7089,8 +7090,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <code>Allen</code> — exact word match<br>
                 <code>"Jam Pedals"</code> — phrase match<br>
                 <code>Thorpy, Dane</code> — must contain both<br>
-                <code>OD*</code> — wildcard (OD808, OD-1…)<br>
-                <code>*drive*</code> — contains "drive"<br>
+                <code>OD*</code> — wildcard, end of word only (OD808, OD-1…)<br>
                 <code>-combo</code> — NOT (exclude; also <code>-"combo amp"</code>)<br>
                 <code>fuzz; octave</code> — OR (either matches)<br>
                 <code>Mesa -combo: Angel; Trem</code> — colon = apply prefix to every OR branch
@@ -7504,7 +7504,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.29"
+APP_VERSION = "2.16.30"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

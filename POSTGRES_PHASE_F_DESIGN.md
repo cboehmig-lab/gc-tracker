@@ -166,32 +166,72 @@ always-resident 50MB+ dict that sits in memory 24/7 regardless of traffic goes a
 memory investigation (`perf_railway_memory_growth_2026-08-31`) was about that permanent baseline,
 not this one occasional shape.
 
-**Three options**:
+**Resolved with real production data, 2026-09-21.** Rather than guess how often the syntax
+features that don't map cleanly onto Postgres full-text search (`tsquery`) actually get used,
+shipped a temporary admin-only diagnostic (`GET /api/search-syntax-stats`, v2.16.29 — see that
+version's `HANDOFF.md` entry) and pulled real numbers from all 123 real accounts with saved
+data:
 
-1. **(Recommended for this phase) Accept the residual cost as a per-request cost, not a resident
-   one.** Source the residual case's materialization from a fresh, uncached
-   `SELECT * FROM items WHERE available` per request. Ships with essentially zero new logic — the
-   existing `_kw_match`/`_apply_base`/sort/tiering code already accepts "a list of dicts in the
-   exact shape `_build_base_item_list()` produces" from either source, per
-   `_pg_tier2_narrow_items`'s own docstring. Kills the resident-memory baseline (the actual
-   stated goal) even though this one narrow shape (nationwide + keyword + no scan anchor) still
-   does a real per-request fetch. Matches the plan's own established discipline of not building
-   machinery speculatively — ship the safe version, measure on Railway's memory graph, revisit
-   only if this residual shape's cost turns out to matter in practice (the same evidence-gated
-   process that decided Phase E itself).
-2. **Push simple keyword terms into SQL (ILIKE/pg_trgm), keep the Python matcher for complex
-   syntax.** Real payoff (kills the residual case's cost too, not just the resident baseline) but
-   real risk — reimplementing any slice of `_kw_match` in SQL is exactly what
-   `POSTGRES_MIGRATION_PLAN.md` §3 explicitly declined to rush, citing that matcher's own
-   multi-session bug history (v2.13.1 DoS caps, v2.14.4 cap-starvation, v2.16.0 operators,
-   v2.16.3 colon-prefix). Worth scoping later, as its own phase, only if Option 1's residual cost
-   turns out to matter — not now.
-3. **Server-side cursor / batched streaming instead of one big fetch.** Closest to "structurally
-   impossible" without touching matching logic at all, but breaks cleanly against today's
-   offset-based pagination and multi-pass contextual facet counting, both of which assume the
-   full candidate list is available for reordering. Would need cursor-based pagination (a real
-   API/UX change) to actually pay off — buffering every batch just to sort defeats the point.
-   Parking this, not designing it further here.
+| | |
+|---|---|
+| Total want-list keyword entries | 833 |
+| — contain `*` at all | 8 (~1%) |
+| — flagged "non-suffix" by the diagnostic's string-level check | 2 (~0.2%) |
+| — quoted phrases | 27 |
+| — `;` (OR) | 16 |
+| — `-` (NOT) | 12 |
+| — `,` (AND) | 149 |
+| Total saved searches | 343 |
+| — with `filter_strict` (fuzzy/contains-anywhere mode) set | **0** |
+| — with non-empty `filter_q` | 302 |
+
+Two things fall out of this immediately. First, `filter_strict` — the one syntax feature that
+has no clean SQL translation at all, because it's arbitrary substring matching rather than
+token matching — has **zero** measured real usage across every saved search in the app. (Caveat:
+this only counts *saved* preferences, not an ephemeral toggle typed into a live, never-saved
+search, so it's a proxy, not a certainty — but it's an unambiguous proxy at this magnitude, and
+it's the best signal actually available.) Second, the two entries the diagnostic flagged as
+"non-suffix" wildcards turned out, on inspection, to be false positives of a blunt check: the
+sample entries are `"Ampeg, -pedal: AMG*; AMB*"` and `"Warwick, -rock*: Streamer; Fortress"` —
+both use ordinary suffix wildcards (`AMG*`, `AMB*`, `rock*`), which map fine onto `tsquery`'s
+`:*` prefix operator. They only got flagged because the diagnostic tested whether the *entire*
+keyword string was literal-text-then-trailing-stars, and these are complex multi-clause entries
+(colon-prefix expansion, comma-AND, dash-NOT, semicolon-OR) with an ordinary wildcard embedded
+inside one branch — not an actual mid-word wildcard like `*caster`. Real prefix-breaking
+wildcards appear to be effectively absent from the current corpus.
+
+**Decision: build the full `tsquery` translation as the sole search mechanism**, not a hybrid.
+Plain word, comma-AND, `;`-OR, `-`-NOT, quoted phrase, and suffix-wildcard together account for
+essentially all real, measured usage (comma-AND alone is 18% of all entries; every other feature
+maps directly onto a native `tsquery` operator — see `POSTGRES_MIGRATION_PLAN.md` §3's original
+concern about reimplementing `_kw_match` in SQL, which this data addresses directly). The
+`pg_trgm`/fuzzy-substring fallback that Option 2 (below, superseded) would have required is not
+a build requirement for this phase — real usage of the one feature it exists for is zero. It
+stays documented as a future escape hatch, not something Phase F needs to ship.
+
+This resolves the Tier 2 residual case completely, not just narrows it: once keyword matching
+itself runs in SQL, there's no request shape left where the full catalog needs to land in Python
+— a nationwide, no-anchor, keyword-active request now gets exactly the matching rows back from
+Postgres, the same as every other shape. That also means Tier 1 and Tier 2 can collapse into one
+Postgres query path (`WHERE available [AND store = ANY(...)] [AND search_vector @@ tsquery(...)]
+ORDER BY ... LIMIT ... OFFSET ...`) instead of today's two-tier split with a Python matcher stuck
+on the end of one of them — genuinely simpler code, not just faster.
+
+The existing Python `_kw_match`/`_compile_query`/`_wl_bool_compile` machinery (real engineering,
+several versions of DoS-cap tuning) is not deleted — it stays in the codebase, unused on the hot
+path, as a manual escape hatch if a genuine need for arbitrary substring matching ever shows up.
+And "zero in today's 833 entries" isn't "impossible forever" — someone can type `*caster`
+tomorrow. The honest residual risk is a compound rare case (a truly mid-word wildcard, in a
+nationwide search, with no scan-history anchor, all at once) that the `tsquery` translator can't
+express exactly; the plan is to degrade that one term gracefully (translate it to the nearest
+expressible form, e.g. its longest literal prefix) rather than build fallback machinery for a
+shape that's shown zero occurrences across every real want list in the app — the same
+evidence-gated discipline every phase of this migration has used, applied one more time.
+
+**What replaces the old three-option list above**: Option 1 (accept per-request cost) and Option
+3 (streaming cursor) are moot — there's no residual full-materialization case left to accept a
+cost for. Option 2 (hybrid ILIKE/ pg_trgm) is superseded by the cleaner, now-validated full
+`tsquery` translation described above.
 
 ## 4. Rollback story — the safety net changes shape
 
@@ -218,6 +258,13 @@ production incident so far.
 
 - Standing checks every phase has used: `python3 -m py_compile gc_tracker_app.py`,
   `node --check static/gc.js`, disposable-venv route-table import.
+- **New given the tsquery decision (§3)**: diff-test the `tsquery` translator against ALL 833
+  real want-list keyword entries and all 343 real saved-search `filter_q` values (via
+  `/api/search-syntax-stats`'s underlying query, or a proper export) pulled from production —
+  not a sample, the actual corpus, since ~1,176 real strings is small enough to test in full.
+  Compare old-Python-matcher output vs. new-tsquery output for every one, byte-for-byte, plus
+  synthetic edge cases the real data happens not to contain (genuine mid-word wildcards like
+  `*caster`, since "zero seen so far" isn't "will never occur").
 - **New this phase** — a write-path offline diff harness: synthetic scan data (reusing the
   sparse/malformed-row injection pattern from the Phase C/D harness, since that exact class of
   bug has already hit this migration twice), comparing the OLD (`_cat_cache`-sourced merge + JSON
@@ -233,9 +280,13 @@ production incident so far.
 
 ## 6. Open questions for Chuck
 
-1. Tier 2 residual case (§3): ship Option 1 (accept per-request cost, no resident cache) for this
-   phase, and only revisit SQL-keyword-narrowing if the memory graph shows it still matters?
-   Recommended, but your call.
+1. ~~Tier 2 residual case~~ **RESOLVED 2026-09-21** (§3): real production data (123 accounts,
+   833 keyword entries, 343 saved searches) shows the syntax that doesn't map cleanly onto
+   Postgres full-text search (`filter_strict` fuzzy mode) has zero measured real usage, and the
+   handful of flagged "non-suffix" wildcards turned out to be ordinary suffix wildcards inside
+   complex expressions. Decision: build the full `tsquery` translation as the sole search
+   mechanism — no hybrid, no accepted residual cost, Tier 1/Tier 2 collapse into one Postgres
+   query path. See §3 for the full writeup.
 2. Rollback safety net (§4): keep a periodic Postgres→JSON archival snapshot (write-only, never
    read by the app) during and after cutover, or go fully Postgres-only with zero local fallback?
 3. `gc_watchlist.json`/`load_watchlist()` (§1): looks dead based on this session's grep — want me
@@ -245,3 +296,49 @@ production incident so far.
    actually deleting the snapshot generation too?
 5. `_pg_parity_check` / `_pg_full_backfill` / `migrate_cat_cache_to_pg.py` exist only to
    reconcile Postgres against JSON — retire them with this phase, or keep them around dormant?
+
+## 7. Recommended next step — the search-engine build, sequenced
+
+With the dead syntax gone (v2.16.30) and the real-data verdict locked in (§3), this is the
+concrete build order for the `tsquery` engine — the piece that actually eliminates the Tier 2
+residual case and collapses Tier 1/Tier 2 into one query path.
+
+1. **Schema**: add a generated `search_vector tsvector` column to `items`
+   (`to_tsvector('simple', coalesce(name,'') || ' ' || coalesce(brand,''))`) plus a GIN index,
+   built `CONCURRENTLY` so it doesn't lock production reads/writes while it builds. `'simple'`
+   config on purpose — no stemming, no stopword removal — so matching stays close to today's
+   literal whole-word semantics rather than introducing new fuzziness nobody asked for. Folded
+   into `pg_schema.sql` (idempotent `IF NOT EXISTS`, same pattern every other column there
+   already uses) so `_init_pg_schema()` applies it on its own.
+
+2. **Translator**: a new function turning the existing PARSED structure — `_compile_query`'s
+   AND/phrase/suffix-wildcard token classification and `_wl_bool_compile`'s OR-of-AND-with-NOT
+   clause shape, both already built and already used for `_expand_colon_prefix` preprocessing —
+   into a Postgres query, not into Python regexes. Safety detail worth locking in now: build
+   this via multiple parameterized `to_tsquery('simple', %s)` calls combined with SQL's own
+   `&&`/`||`/`!!` tsquery operators in the query itself, rather than string-concatenating one raw
+   tsquery expression in Python — avoids ever having to hand-escape tsquery's own operator
+   syntax (`&`, `|`, `!`, `<->`, `:`) against a user-typed term.
+
+3. **Verification**: extend `/api/search-syntax-stats`'s underlying query into a real diff
+   harness — run every one of the 833 real keyword entries and 343 real saved-search `filter_q`
+   values through the OLD Python matcher and the NEW translator over the same catalog snapshot,
+   diff the resulting SKU sets byte-for-byte. Add synthetic edge cases the real data doesn't
+   happen to contain (a genuine mid-word wildcard, empty/punctuation-only strings, apostrophes in
+   brand names, very long input) — same "don't trust a clean sample, inject the ugly cases"
+   discipline as the Phase C/D harnesses.
+
+4. **Unify Tier 1 + Tier 2**: one `_pg_browse()` replacing `_pg_tier1_browse`,
+   `_pg_tier2_narrow_items`, and the Python `_kw_match`/`_apply_base` text-filtering step —
+   availability + store + scan-gate + facet filters + `search_vector @@ (...)` all in one WHERE
+   clause, sort/paginate in SQL. The genuinely hard sub-piece: today's "contextual" facet counts
+   (each facet's count reflects every OTHER active facet, never itself) are computed by a Python
+   single-pass loop — replicating that in SQL (separate `FILTER (WHERE ...)` aggregates, mirroring
+   what Tier 1's own Q1 query already does for its counts) is real work and deserves its own
+   careful pass, not a rushed afterthought.
+5. Ship it the same way every phase has: shadow-mode first (`?pg_shadow=1`, admin-only, diffed
+   against live production), then cutover — never a direct hot-swap.
+
+Once search itself is proven this way, it plugs directly into the write-path and rollback design
+already written in §2 and §4 — the search engine was the one genuinely open sub-problem in this
+document; the rest of the plan doesn't change.

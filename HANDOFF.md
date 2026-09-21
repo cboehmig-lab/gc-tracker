@@ -1,7 +1,55 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-21 · Current version: v2.16.29 (Admin-only diagnostic: search-syntax usage stats, for Phase F design) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-21 · Current version: v2.16.30 (Removed dead fuzzy/strict search mode + updated search-syntax help text) · Domain: gcgeartracker.com*
 
 ---
+
+## v2.16.30 — 2026-09-21: Removed the dead fuzzy/strict search mode; help text now matches reality
+
+**Why**: `/api/search-syntax-stats` (v2.16.29) showed zero real usage of `filter_strict`
+("fuzzy"/contains-anywhere search mode) across all 343 real saved searches. Investigating why
+turned up something better than "unused" — it's actually **unreachable**: `git log -S` shows the
+`strict-search-btn` element was removed from the HTML around the v2.10.x era, but the JS state
+variable (`window._strictSearch`), five defensive `getElementById('strict-search-btn')` call
+sites, and the request payload field (`filter_strict`) were all left behind as orphaned wiring
+with no way for a real user to ever trigger them. Same story for `_toggleKeywordStrict()` — a
+function with zero callers anywhere in the codebase. Decided to remove both outright now, ahead
+of the bigger Phase F search rebuild (`POSTGRES_PHASE_F_DESIGN.md`), rather than carry dead
+weight into that rewrite.
+
+**What changed**:
+- `static/gc.js`: removed `window._strictSearch`, both orphaned functions
+  (`_toggleStrictSearch`, `_toggleKeywordStrict`), and every read/write site (state capture/
+  restore, saved-search apply, the two clear-search functions, the browse-filters payload
+  builder, the clear-filters-button visibility check). The per-keyword `=` "strict" prefix
+  *display* logic (the badge shown on old saved keywords) is left in place — it's read-only
+  backward-compat rendering for any keyword a user saved before this button disappeared, not
+  something this change touches.
+- `gc_tracker_app.py`: dropped `filter_strict`/`f_strict` reading in both
+  `/api/saved-search-counts` and `api_browse()`; `_compile_fq_clauses()` is now always called
+  without `fuzzy=`, so it uses its own default (whole-word). Deliberately did NOT touch
+  `_compile_query()`'s internal `fuzzy` parameter/branch — that whole function gets replaced by
+  the Phase F `tsquery` translator soon, and it's an unused-but-harmless parameter now, not worth
+  a second pass through code with real DoS-cap tuning history for zero user-facing benefit.
+- Search-syntax help text (both the Want List `ⓘ` popover and the main search box `ⓘ` popover):
+  removed the `*drive*` ("contains drive anywhere") example, since real production wildcard usage
+  (checked via the same diagnostic) is suffix-only (`OD*`-style) in every real instance found —
+  the help text now only documents syntax that's actually supported and will keep working through
+  the upcoming search rebuild. Backend wildcard matching itself is UNCHANGED — mid-word wildcards
+  still technically work today, this only stops advertising them, since ripping out a
+  currently-functioning (if unused) capability from the delicate `_compile_query` matcher for no
+  functional reason isn't worth the risk this close to replacing that function anyway.
+
+**Verification**: `python3 -m py_compile` and `node --check` both clean. Disposable-venv route-
+table build: 61 routes (unchanged — no routes added/removed this version), `/api/browse` present,
+`APP_VERSION` confirmed `2.16.30`. Grepped the whole codebase afterward for `filter_strict`,
+`_strictSearch`, and `strict-search-btn` — zero references remain outside the still-useful
+`/api/search-syntax-stats` diagnostic (which reads historical `filter_strict` data from storage
+to report on it, not live input) and one unchanged historical comment explaining the v2.16.0
+shared-compiler rationale.
+
+**Status**: pure cleanup, no behavior change for any real user (the removed code paths were
+already unreachable). Shrinks the surface area the upcoming Phase F `tsquery` translator needs to
+account for.
 
 ## v2.16.29 — 2026-09-21: Admin-only diagnostic endpoint — real search-syntax usage stats
 

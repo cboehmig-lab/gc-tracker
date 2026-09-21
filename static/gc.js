@@ -1320,7 +1320,6 @@ function _captureFilterState() {
     priceMin:       window._priceMin,
     priceMax:       window._priceMax,
     searchQ:        (document.getElementById('res-search') || {}).value || '',
-    strictSearch:   window._strictSearch || false,
     watchActive:    _watchFilterActive,
     priceDropActive:_priceDropFilterActive,
     vintageActive:  _vintageFilterActive,
@@ -1380,13 +1379,10 @@ function _restoreFilterState() {
   ['price-min','price-min-dd'].forEach(function(id){var el=document.getElementById(id);if(el)el.value=pMinStr;});
   ['price-max','price-max-dd'].forEach(function(id){var el=document.getElementById(id);if(el)el.value=pMaxStr;});
   _updatePriceBtn && _updatePriceBtn();
-  // Restore search box + strict toggle
+  // Restore search box
   const rsEl = document.getElementById('res-search');
   if (rsEl) { rsEl.value = state.searchQ; }
   _updateResSearchClear && _updateResSearchClear();
-  window._strictSearch = state.strictSearch;
-  const strictBtn = document.getElementById('strict-search-btn');
-  if (strictBtn) strictBtn.classList.toggle('active', window._strictSearch);
   _updateFilterDot && _updateFilterDot();
   _srvLoading = false;
   _srvPage = 1;
@@ -1437,7 +1433,6 @@ let _srvTotalPages = 1;
 let _srvLoading = false;
 let _baseItemCount = 0;   // full catalog count (set on load, reset target when filters clear)
 let _baseStoreCount = 0;  // full store count (set on load)
-window._strictSearch = false;  // Strict/whole-word search mode for the main search bar
 
 function _getBrowseFilters() {
   return {
@@ -1449,7 +1444,6 @@ function _getBrowseFilters() {
     filter_watched:         _watchFilterActive,
     filter_price_drop_only: _priceDropFilterActive,
     vintage_only:           _vintageFilterActive,
-    filter_strict:          window._strictSearch || false,
     filter_price_min:       window._priceMin,
     filter_price_max:       window._priceMax,
   };
@@ -1588,7 +1582,7 @@ async function _fetchBrowsePage(page) {
       countEl.textContent = '';
     }
     const clearBtn = document.getElementById('clear-filters-btn');
-    if (clearBtn) clearBtn.style.display = (filters.filter_q || (filters.filter_brands && filters.filter_brands.length) || (filters.filter_conditions && filters.filter_conditions.length) || (filters.filter_categories && filters.filter_categories.length) || (filters.filter_subcategories && filters.filter_subcategories.length) || filters.filter_strict || filters.filter_price_drop_only || filters.filter_watched || filters.vintage_only) ? '' : 'none';
+    if (clearBtn) clearBtn.style.display = (filters.filter_q || (filters.filter_brands && filters.filter_brands.length) || (filters.filter_conditions && filters.filter_conditions.length) || (filters.filter_categories && filters.filter_categories.length) || (filters.filter_subcategories && filters.filter_subcategories.length) || filters.filter_price_drop_only || filters.filter_watched || filters.vintage_only) ? '' : 'none';
 
     // Populate filter dropdowns from server-provided options
     _populateFiltersFromServer(d.brands || [], d.conditions || [], d.categories || [], d.subcategories || [], filters);
@@ -2270,7 +2264,6 @@ function _applySavedSearch(id) {
   window._selectedConds  = f.filter_conditions  || [];
   window._selectedCats   = f.filter_categories  || [];
   window._selectedSubs   = f.filter_subcategories || [];
-  window._strictSearch   = !!f.filter_strict;
   const rsEl = document.getElementById('res-search');
   if (rsEl) rsEl.value = f.filter_q || '';
   _updateResSearchClear && _updateResSearchClear();
@@ -2282,15 +2275,6 @@ function _applySavedSearch(id) {
   _accRenderCat   && _accRenderCat();
   _accRenderSub   && _accRenderSub();
   _accUpdateSummaries && _accUpdateSummaries();
-  // Update strict button
-  const strictBtn = document.getElementById('strict-search-btn');
-  if (strictBtn) {
-    strictBtn.textContent = '≈';
-    strictBtn.classList.toggle('active', window._strictSearch);
-    strictBtn.title = window._strictSearch
-      ? '≈ Fuzzy (contains) mode on — click to restore whole-word default'
-      : 'Whole-word search (default) — click for ≈ fuzzy (contains) mode';
-  }
   // Restore watch / price-drop chip state
   _watchFilterActive = !!f.filter_watched;
   const wtBtn = document.getElementById('watchlist-toggle');
@@ -2452,30 +2436,6 @@ function clearAllKeywords() {
   _lsSet('keywords', window._keywords);
   _syncToServer();
   renderKeywordList();
-}
-
-function _toggleKeywordStrict(i) {
-  const kw = window._keywords[i];
-  if (kw === undefined) return;
-  window._keywords[i] = kw.startsWith('=') ? kw.slice(1) : '=' + kw;
-  _lsSet('keywords', window._keywords);
-  _syncToServer();
-  renderKeywordList();
-}
-
-function _toggleStrictSearch() {
-  window._strictSearch = !window._strictSearch;
-  const btn = document.getElementById('strict-search-btn');
-  if (btn) {
-    btn.textContent = '≈';
-    btn.classList.toggle('active', window._strictSearch);
-    btn.title = window._strictSearch
-      ? '≈ Fuzzy (contains) mode on — click to restore whole-word default'
-      : 'Whole-word search (default) — click for ≈ fuzzy (contains) mode';
-  }
-  _srvLoading = false;
-  _srvPage = 1;
-  _fetchBrowsePage(1);
 }
 
 function _escapeRegex(s) {
@@ -3792,14 +3752,11 @@ function clearFilters() {
   window._selectedSubs = []; _updateSubcatBtn(); _setSubList([]);
   document.getElementById('clear-filters-btn').style.display = 'none';
   _accCloseAll(); _accUpdateSummaries();
-  // Clear keyword search box and reset strict mode
+  // Clear keyword search box
   const resSearch = document.getElementById('res-search');
   if (resSearch) { resSearch.value = ''; }
   document.getElementById('res-search-count').textContent = '';
   _updateResSearchClear();
-  window._strictSearch = false;
-  const _strictBtn = document.getElementById('strict-search-btn');
-  if (_strictBtn) { _strictBtn.textContent = '≈'; _strictBtn.classList.remove('active'); _strictBtn.title = 'Whole-word search (default) — click for ≈ fuzzy (contains) mode'; }
   // Also turn off watch/price-drop filters if active
   if (_watchFilterActive) {
     _watchFilterActive = false;
@@ -3845,9 +3802,6 @@ function clearResSearch() {
   if (el) el.value = '';
   document.getElementById('res-search-count').textContent = '';
   _updateResSearchClear();
-  window._strictSearch = false;
-  const _strictBtn = document.getElementById('strict-search-btn');
-  if (_strictBtn) { _strictBtn.textContent = '≈'; _strictBtn.classList.remove('active'); _strictBtn.title = 'Whole-word search (default) — click for ≈ fuzzy (contains) mode'; }
   // Clear want-list / global search mode so the ✕ button fully exits those states
   // (without this, _globalSearchActive stays true and re-fetches keep returning
   // want-list-filtered results even though the chip looks inactive)
