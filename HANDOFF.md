@@ -1,7 +1,82 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-22 · Current version: v2.16.32 (Phase F stage 2 — tsquery translator, not wired to any route) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-22 · Current version: v2.16.33 (Phase F stage 3 — tsquery diff-check admin endpoint, not wired to any live route) · Domain: gcgeartracker.com*
 
 ---
+
+## v2.16.33 — 2026-09-22: Phase F stage 3 — tsquery diff-check admin endpoint (verification tooling, not wired into any live route)
+
+**Why**: third step of the Phase F search-engine build (`POSTGRES_PHASE_F_DESIGN.md` §7) — the
+piece that actually PROVES stage 2's tsquery translator produces the same matches as the current
+Python regex matcher, against the real production want-list-keyword and saved-search `filter_q`
+strings (not just structural self-tests against synthetic input, which is all stage 2 could do
+from this sandbox). Nothing here changes any live request path — this is read-only verification
+tooling, same posture as `/api/pg-parity-check` and `/api/search-syntax-stats` before it.
+
+**What shipped**: two new admin-only routes, `POST /api/tsquery-diff-check` (starts a run on a
+background thread, 409 if one's already in progress) and `GET /api/tsquery-diff-check` (polls
+status/result), plus the machinery behind them — placed right after `/api/search-syntax-stats`.
+Its own dedicated `_TSQUERY_DIFF_LOCK`/`_TSQUERY_DIFF_STATE`, deliberately NOT the scan
+`_lock`/`_stop_event`/`_q` (that's the inventory-scan SSE stream; colliding with it would block or
+be blocked by a real scan).
+
+**The performance problem and how it's solved**: brute-forcing every real distinct want-list/
+filter_q entry (~1176 as of 2026-09) against the full ~450K-item cache is on the order of ~500M
+Python-level regex/substring operations — unacceptable GIL-held time on this app's shared
+`--workers=1` gunicorn config. Solution: build ONE inverted token index over the catalog per run
+(`_tsquery_diff_build_catalog_index`), then for each entry narrow candidates using the exact same
+required-tokens sound pre-filter rule the real matcher already trusts (the same "plain,
+non-wildcard, non-quoted subterm" rule `_wl_bool_compile`/`_kw_and` use today — factored out here
+as `_plain_req_tokens`). A narrowing is sound (never drops a true match) because a term's required
+tokens are a NECESSARY condition for a match, so intersecting the index's postings lists is a
+superset of the true match set. A bare wildcard or quoted-exact term gets NO pre-filter, same as
+production gives it none — both do unanchored substring matching not aligned to token boundaries
+(`'OD*'` matches inside "Wood", `'"amp"'` matches inside "Trampoline"), so a token-boundary index
+would be UNSOUND for those two term types specifically; they fall back to a full-catalog scan,
+same as production's own "exotic" bucket. Once candidates are narrowed, the real, unmodified
+matcher primitives (`_matches_all`/`_matches_any`/`_wl_bool_compile`/`_compile_query`/
+`_compile_fq_clauses`'s own per-token `_compile_query` calls) run as ground truth over just that
+narrowed set — this never re-derives matching rules, only which items are worth checking against
+them. The Postgres side runs the stage-2 translator's own SQL fragment via `SELECT sku FROM items
+WHERE search_vector @@ (...)` on a dedicated ad-hoc `psycopg2.connect()` (autocommit) — same
+precedent as `_pg_parity_check`/`_pg_full_backfill`: a rare background-thread diagnostic that can
+run for a while (one query per distinct entry) shouldn't hold a slot out of the pool's 2-12
+connections sized for concurrent request threads.
+
+**Universe consistency**: the catalog index covers `_cat_cache` in full — available or not — since
+Postgres's `items` table mirrors it 1:1 regardless of availability (Phase B dual-write) and this
+endpoint tests TEXT-matching correctness, not availability filtering; the Postgres query has no
+`available` filter either, for the same reason.
+
+**Privacy posture**: identical to `/api/search-syntax-stats` — aggregate counts (`total`,
+`unsupported`, `matched`, `mismatched`, `errors`) plus a small capped sample (20) of just the
+MISMATCHING/UNSUPPORTED/ERRORED entry TEXT, never SKUs, item names, or per-user data.
+
+**Verification**: `python3 -m py_compile`, `node --check` (untouched), a disposable venv (built in
+`/tmp`, not the mounted folder — see below) with Flask/psycopg2-binary installed, confirming the
+app imports cleanly and registers 63 routes total including both new `/api/tsquery-diff-check`
+routes. Then a structural self-test (`.phase_working/test_diff_harness.py`, not committed —
+scratch) against a hand-built synthetic catalog deliberately hitting the edge cases called out
+above (substring matches crossing token boundaries, colon-prefix expansion, all-negative
+`filter_q` clauses, comma-AND, bool OR/NOT, legacy `=` strip, internal-hyphen-isn't-NOT): compares
+the new candidate-narrowed ground truth against a naive brute-force reimplementation of the exact
+same production routing with zero indexing, across 21 cases (14 want-list + 7 filter_q). All pass.
+**This still can't test the translator-vs-Python-matcher comparison itself** — no live Postgres is
+reachable from this sandbox — only that the NEW ground-truth code (the thing that has to stay
+correct for the diff check to mean anything) agrees with the OLD production logic it's mirroring.
+The actual translator-vs-matcher diff only runs once this is live on Railway and someone (admin)
+calls `POST /api/tsquery-diff-check`.
+
+**A build-environment note for future sessions**: `python3 -m venv` fails with an `ensurepip`
+error when the venv is created inside the FUSE-mounted connected folder
+(`~/mnt/gc_tracker/...`) — build disposable venvs in `/tmp` instead (a real local filesystem on
+the device, separate from both the mounted folder and the device VM's own `$HOME`, which stays
+persistently near-full — see the v2.16.31 disk-space note in project memory). `/tmp` had 4.2G free
+as of this session.
+
+**Status**: two new admin-only diagnostic routes, zero behavior change for any real user or
+request path. Not yet run against live Postgres/production data — that's the very next action,
+manually, once this deploys. Step 4 (unify Tier 1/Tier 2 into one `_pg_browse()`) doesn't start
+until step 3 has run clean against real data.
 
 ## v2.16.32 — 2026-09-22: Phase F stage 2 — tsquery translator (new functions only, NOT wired into any live route)
 

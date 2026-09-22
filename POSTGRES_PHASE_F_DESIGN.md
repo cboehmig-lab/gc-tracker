@@ -486,3 +486,91 @@ privacy-sensitive, and Chuck's ask this session was specifically the translator 
 **Next**: implement and ship the `/api/tsquery-diff-check` endpoint described above, run it, and
 only proceed to step 4 (unifying Tier 1/Tier 2 into `_pg_browse()`) once it comes back clean on
 all 833+343 real strings.
+
+### Stage 3 — SHIPPED (v2.16.33, 2026-09-22): the tsquery diff-check admin endpoint
+
+Built the endpoint designed above almost exactly as specified, with one deliberate addition: the
+naive per-entry brute force described in the stage-2 addendum (`_compile_query`/`_wl_bool_compile`
+run directly against every item in `_cat_cache` for every one of the ~1176 real strings) turns out
+to be on the order of ~500M Python-level regex/substring operations — unacceptable GIL-held time
+on this app's shared `--workers=1` gunicorn config, even from a background thread (the GIL is
+still shared with every real customer request). So the actual ground-truth matcher
+(`_tsquery_diff_old_want_list_matches`/`_tsquery_diff_old_filter_q_matches`) narrows candidates
+first via a one-time inverted token index (`_tsquery_diff_build_catalog_index`) before running the
+real matcher primitives, rather than scanning the full catalog per entry.
+
+**Why the narrowing is sound, not an approximation**: a term's REQUIRED tokens (the words of its
+plain, non-wildcard, non-quoted subterms — `_plain_req_tokens`, factored out from the exact rule
+`_wl_bool_compile`/`_kw_and` already use in production) are a NECESSARY condition for a match, so
+intersecting the token index's postings lists for those required tokens is a SUPERSET of the true
+match set — it can only narrow candidates, never drop a true one. A bare wildcard or quoted-exact
+term gets NO pre-filter here, same as production gives it none: both do unanchored substring
+matching that isn't aligned to token boundaries (`'OD*'` matches inside "Wood" — a single token
+that doesn't START with "od"; `'"amp"'` matches inside "Trampoline" — a single token that doesn't
+CONTAIN "amp" as a separate word), so a token-boundary index would silently exclude true
+candidates for exactly those two term types. They fall back to a full-catalog scan, unchanged —
+same as production's own "exotic" bucket, which also can't pre-filter them. Once narrowed, the
+REAL unmodified matcher primitives (`_matches_all`/`_matches_any`/`_wl_bool_compile`/
+`_compile_query`/`_compile_fq_clauses`'s own per-token calls) run as ground truth — this module
+never re-derives matching *rules*, only which items are worth checking against them.
+
+**Endpoint shape**: `POST /api/tsquery-diff-check` (admin-gated, 409 if already running) starts a
+background thread with its own dedicated `_TSQUERY_DIFF_LOCK`/`_TSQUERY_DIFF_STATE` — deliberately
+NOT the scan `_lock`/`_stop_event`/`_q` (that's the inventory-scan SSE stream; sharing it would
+mean this diagnostic blocks, or is blocked by, a real scan). `GET /api/tsquery-diff-check` polls
+status/result. The Postgres side of each comparison runs the stage-2 translator's own SQL fragment
+unmodified via a dedicated ad-hoc `psycopg2.connect()` (autocommit, not the pooled `_pg_conn()`) —
+matching the existing precedent set by `_pg_parity_check`/`_pg_full_backfill`: a rare,
+background-thread-triggered diagnostic that can run for a while (one query per distinct entry, up
+to ~1176) shouldn't hold a slot out of the connection pool's 2-12 connections, which are sized for
+concurrent request threads. A per-entry Postgres query failure is caught and counted separately
+(`errors`) rather than aborting the whole run.
+
+**Universe consistency**: the catalog index and the ground-truth matcher cover `_cat_cache` in
+full — available or not. Postgres's `items` table mirrors `_cat_cache` 1:1 regardless of
+availability (Phase B dual-write), and this endpoint is testing TEXT-matching correctness, not
+availability filtering, so a mismatch here should never just be an availability-filter difference
+in disguise. The Postgres query has no `available` filter either, for the same reason.
+
+**Privacy**: identical posture to `/api/search-syntax-stats` — per group (`keywords`,
+`saved_searches`), aggregate counts (`total`/`matched`/`mismatched`/`unsupported`/`errors`) plus a
+capped sample (20) of MISMATCHING/UNSUPPORTED/ERRORED entry TEXT only. Never SKUs, item names, or
+any other per-user data.
+
+**Verified this session** (structural only — the real gap is below): `python3 -m py_compile`,
+`node --check` (untouched), a disposable venv (see the build-environment note — had to build it in
+`/tmp`, not the mounted connected folder, which fails `ensurepip`) confirming the app imports
+cleanly and registers all 63 routes including both new `/api/tsquery-diff-check` routes. Then a
+21-case self-test (`.phase_working/test_diff_harness.py`, not committed — scratch) against a
+hand-built synthetic catalog specifically constructed to hit the two unsound-narrowing traps
+(`"Wood"` for `'OD*'`, `"Trampoline"` for `'"amp"'`) plus colon-prefix expansion, comma-AND, bool
+OR/NOT via `;`/`-`, the internal-hyphen-isn't-NOT-syntax case, legacy `=` strip, and an
+all-negative `filter_q` clause. Compares the new candidate-narrowed ground truth against a naive
+brute-force reimplementation of the exact same production routing with NO indexing at all — all 21
+cases (14 want-list + 7 filter_q) match exactly.
+
+**The real gap, same shape as stage 1 and 2**: this only proves the NEW ground-truth code (the
+thing that has to stay correct for the diff check to mean anything) agrees with the OLD production
+logic it mirrors, on synthetic data. It does **not** yet prove the stage-2 translator's tsquery
+output matches the same SKUs as the Python matcher on REAL production want-list/filter_q strings,
+because this sandbox still has no live Postgres access. That comparison only happens once
+v2.16.33 is deployed and an admin actually calls `POST /api/tsquery-diff-check` against the real
+Railway database.
+
+**A build-environment note for future sessions**: `python3 -m venv` fails with an `ensurepip`
+error when the venv is created inside the FUSE-mounted connected folder (`~/mnt/gc_tracker/...`).
+Build disposable venvs in `/tmp` instead — a real local filesystem on the device, separate from
+both the mounted folder and the device VM's own `$HOME` (which stays persistently near-full; keep
+using the mounted folder, e.g. `.phase_working/`, for scratch files, never bare `$HOME` — see the
+disk-space note from earlier this session in project memory). `/tmp` had 4.2G free this session.
+
+**Next**: deploy v2.16.33, run `POST /api/tsquery-diff-check` against real production data, and
+read the results. Clean (zero real mismatches, `unsupported` accounted for by the known
+zero-real-usage non-suffix-wildcard case) means stage 2's translator is proven and step 4 (unify
+Tier 1/Tier 2 into one `_pg_browse()`, with a per-entry fallback to the dormant `_kw_match` path
+for any `_TsqueryUnsupported` case) can start. Any real mismatch needs to be reproduced by hand for
+that one entry and diagnosed as either a stage-2 translator bug or a stage-3 ground-truth-mirror
+bug before touching any code — the stage-3 module's own docstring in `gc_tracker_app.py` lists the
+two known, deliberate, already-documented semantic narrowings (suffix-wildcard prefix matching,
+quoted-phrase word-boundary matching), so a mismatch explained by one of those is expected, not a
+bug.

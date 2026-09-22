@@ -4257,6 +4257,360 @@ def _tsquery_filter_q(fq, max_tokens=12, max_clauses=4):
     return " || ".join(clause_frags), params
 
 
+# ── Phase F stage 3: tsquery diff harness (POSTGRES_PHASE_F_DESIGN.md §7
+# step 3) ─────────────────────────────────────────────────────────────────
+# Verifies the Stage 2 tsquery translator's output matches the CURRENT Python
+# regex matcher's output, entry-by-entry, against the real production
+# want-list-keyword and saved-search filter_q strings. Nothing here is wired
+# into any live route -- this is read-only verification tooling, same as
+# /api/pg-parity-check and /api/search-syntax-stats before it. Once this runs
+# clean, step 4 unifies Tier 1/Tier 2 around the translator.
+#
+# Naive brute force (real 2026-09 data: ~1176 distinct entries x ~450K cache
+# items) is on the order of ~500M Python-level regex/substring operations --
+# unacceptable GIL-held time on this app's shared --workers=1 gunicorn config
+# (see HANDOFF.md's DoS-budget history -- required-tokens pre-filtering, sound
+# pre-filters, and per-type caps all exist in this file for exactly this
+# reason). Instead of brute-forcing every entry against the full catalog:
+#   1. Build ONE inverted token index over the catalog, once per run
+#      (_tsquery_diff_build_catalog_index) -- token -> frozenset(sku).
+#   2. For each entry, derive its REQUIRED tokens using the exact same sound
+#      pre-filter rule the real matcher already trusts and ships today
+#      (_wl_bool_compile's own req computation for bool clauses; the same
+#      "plain, non-wildcard, non-quoted subterm" rule, factored out here as
+#      _plain_req_tokens, for comma-AND and plain-phrase entries). A term
+#      whose required tokens are all present in an item is a NECESSARY (not
+#      sufficient) condition for that item to match -- so intersecting the
+#      token index's postings lists is a SOUND superset of the true match
+#      set, never a subset. It can only ever narrow candidates, never drop
+#      a true match.
+#   3. A bare wildcard or quoted-exact term gets NO pre-filter here, same as
+#      production gives it none -- both do UNANCHORED SUBSTRING matching
+#      that isn't aligned to token boundaries (see the Stage 2 module note
+#      above _TsqueryUnsupported: '"amp"' matches inside "trampoline", 'OD*'
+#      matches inside "Wood"), so a token-boundary index would be UNSOUND
+#      for those two term types specifically -- narrowing by req would risk
+#      silently dropping a true candidate before the diff check ever saw it,
+#      which would make this endpoint lie about matching the real matcher.
+#      Those terms fall back to a full-catalog scan, same as production;
+#      2026-09 production data shows this bucket is a small minority of
+#      real entries (see /api/search-syntax-stats's kw_with_star/
+#      kw_with_quote counters), so the aggregate cost stays well clear of
+#      the ~500M-op naive case.
+#   4. Once candidates are narrowed, the REAL, UNMODIFIED matcher primitives
+#      (_matches_all/_matches_any/_wl_bool_compile/_compile_query/
+#      _compile_fq_clauses's own per-token _compile_query calls) run as
+#      ground truth over just that narrowed set. This module never
+#      re-derives matching *rules* -- only re-derives which items are worth
+#      running the real rules against. A side-by-side read against
+#      _kw_match/_wl_bool_compile/_compile_fq_clauses/_fq_text_match is how
+#      to audit this for drift, same as the Stage 2 translator above.
+#
+# Privacy posture matches /api/search-syntax-stats exactly: aggregate counts
+# plus a small capped sample of MISMATCHING/UNSUPPORTED/ERRORED entry TEXT
+# only -- never SKUs, item names, or per-user data. Temporary diagnostic
+# tooling, not meant to stay in the codebase long-term.
+
+_TSQUERY_DIFF_SAMPLE_CAP = 20
+_TSQUERY_DIFF_LOCK  = threading.Lock()
+_TSQUERY_DIFF_STATE = {"status": "idle"}  # idle | running | done | error
+
+
+def _tsquery_diff_build_catalog_index():
+    """One pass over the FULL _cat_cache -- available or not. Postgres's
+    `items` table mirrors _cat_cache 1:1 regardless of availability (Phase B
+    dual-write), and this endpoint tests TEXT-matching correctness, not
+    availability filtering, so both sides must see the same universe or a
+    mismatch here could just be an availability-filter difference in
+    disguise. Returns (texts, token_index, all_skus): texts is
+    {sku: "name_lower brand_lower"} (exactly _kw_match's own `text`), and
+    token_index is {token: frozenset(sku)} via the same _KW_SPLIT_RE
+    tokenizer the real matcher already uses for its own required-tokens
+    pre-filter."""
+    texts = {}
+    token_index = {}
+    for sku, cached in _cat_cache.items():
+        name_l  = (cached.get("name")  or "").lower()
+        brand_l = (cached.get("brand") or "").lower()
+        text = name_l + " " + brand_l
+        texts[sku] = text
+        for tok in set(_KW_SPLIT_RE.split(text)) - {''}:
+            s = token_index.get(tok)
+            if s is None:
+                token_index[tok] = {sku}
+            else:
+                s.add(sku)
+    all_skus = frozenset(texts)
+    token_index = {tok: frozenset(skus) for tok, skus in token_index.items()}
+    return texts, token_index, all_skus
+
+
+def _tsquery_diff_candidates(req, token_index, all_skus):
+    """Sound (superset) candidate narrowing: every sku whose token set is a
+    superset of req. Empty req -> the full catalog -- a term with no
+    derivable required tokens (bare wildcard/quoted, or an all-negative
+    filter_q clause) gets no pre-filter, same as production gives it none."""
+    if not req:
+        return all_skus
+    sets = []
+    for tok in req:
+        s = token_index.get(tok)
+        if not s:
+            return frozenset()  # no item has this required token at all
+        sets.append(s)
+    sets.sort(key=len)
+    result = set(sets[0])
+    for s in sets[1:]:
+        result &= s
+        if not result:
+            break
+    return result
+
+
+def _plain_req_tokens(term_text):
+    """Required word-tokens contributed by term_text's PLAIN (non-wildcard,
+    non-quoted) comma-parts -- the identical rule _kw_and/_wl_bool_compile
+    already use before running _matches_all on a want-list comma-AND term.
+    Reused here for filter_q tokens too (each already-space-split filter_q
+    token is itself comma-splittable, same as a want-list part)."""
+    req = set()
+    for part in term_text.split(','):
+        pp = part.strip().lower()
+        if pp and '*' not in pp and not (pp.startswith('"') and pp.endswith('"') and len(pp) > 2):
+            req |= set(_KW_SPLIT_RE.split(pp)) - {''}
+    return req
+
+
+def _tsquery_diff_old_want_list_matches(kw, texts, token_index, all_skus):
+    """Ground truth for ONE want-list entry, mirroring -- one for one -- the
+    routing api_browse()'s matcher-build loop does for a keyword (the block
+    just above _kw_match's own definition): strip legacy '=', v2.16.3
+    colon-prefix expansion, v2.16.0 bool (OR/NOT) path tried first, then
+    plain single-word / wildcard-or-quoted / comma-AND / phrase, in that
+    order. Returns the set of matching skus for this ONE entry (not OR'd
+    with any other entry -- the diff check compares one entry at a time)."""
+    base = kw.lstrip('=').strip()
+    if not base:
+        return set()
+    base = _expand_colon_prefix(base, join=', ')
+    wl_clauses = _wl_bool_compile(base) if (';' in base or '-' in base) else None
+    matched = set()
+    if wl_clauses is not None:
+        # v2.16.0 OR/NOT entry: matches if ANY clause matches. _wl_bool_compile
+        # already computed each clause's own required-tokens set (its 3rd
+        # tuple element) using this same rule -- reused directly, not rederived.
+        for pos, neg, req in wl_clauses:
+            for sku in _tsquery_diff_candidates(req, token_index, all_skus):
+                if sku in matched:
+                    continue
+                if _matches_all(texts[sku], pos) and not (neg and _matches_any(texts[sku], neg)):
+                    matched.add(sku)
+        return matched
+    if _SIMPLE_KW_RE.match(base):
+        # Plain single word: production uses token-SET membership, not a
+        # regex -- the candidate-narrowing result over {word} IS that exact
+        # check (a sku is a candidate iff `word` is one of its tokens).
+        return set(_tsquery_diff_candidates({base.lower()}, token_index, all_skus))
+    if '*' in base or (base.startswith('"') and base.endswith('"') and len(base) > 2):
+        # Wildcard / quoted-exact: unanchored substring match, not
+        # pre-filterable (see module note above) -- full-catalog scan, same
+        # as production's own "exotic" bucket gets no pre-filter either.
+        pat = _kw_or_pattern(base)
+        if not pat:
+            return matched
+        rx = re.compile(pat, re.IGNORECASE)
+        for sku in all_skus:
+            if rx.search(texts[sku]):
+                matched.add(sku)
+        return matched
+    if ',' in base:
+        terms = _compile_query(base)
+        if not terms:
+            return matched
+        req = _plain_req_tokens(base)
+        for sku in _tsquery_diff_candidates(req, token_index, all_skus):
+            if _matches_all(texts[sku], terms):
+                matched.add(sku)
+        return matched
+    # Ordinary phrase or punctuated single term -> exact whole-word match,
+    # pre-filtered the same way the production _kw_phrases bucket is.
+    req = _plain_req_tokens(base)
+    rx = re.compile(r'\b' + re.escape(base) + r'\b', re.IGNORECASE)
+    for sku in _tsquery_diff_candidates(req, token_index, all_skus):
+        if rx.search(texts[sku]):
+            matched.add(sku)
+    return matched
+
+
+def _tsquery_diff_filter_q_clauses(fq, max_tokens=12, max_clauses=4):
+    """Mirrors _compile_fq_clauses(fq) exactly for the matcher output (same
+    colon-prefix expansion, same ';'=OR / space=AND / leading '-'=NOT
+    tokenization via _FQ_TOKEN_RE, same _compile_query per token, same
+    token/clause budget) while ALSO returning each clause's required-token
+    set (this module's own addition, not part of the real matcher) for sound
+    candidate narrowing -- req is built only from POSITIVE tokens, since a
+    negative term's absence can never be a *required* token (an item lacking
+    every token of a negated term still needs to be considered a candidate:
+    that's exactly the case where the negation is satisfied)."""
+    fq = _expand_colon_prefix(fq, join=' ')
+    clauses = []
+    budget = max_tokens
+    for cl in fq.split(';'):
+        cl = cl.strip()
+        if not cl or budget <= 0:
+            continue
+        toks = _FQ_TOKEN_RE.findall(cl)[:budget]
+        budget -= len(toks)
+        pos, neg, req = [], [], set()
+        for tok in toks:
+            is_neg = len(tok) > 1 and tok[0] == '-'
+            term_text = tok[1:] if is_neg else tok
+            terms = _compile_query(term_text)
+            if is_neg:
+                neg.extend(terms)
+            else:
+                pos.extend(terms)
+                req |= _plain_req_tokens(term_text)
+        if pos or neg:
+            clauses.append((pos, neg, req))
+        if len(clauses) >= max_clauses:
+            break
+    return clauses
+
+
+def _tsquery_diff_old_filter_q_matches(fq, texts, token_index, all_skus):
+    """Ground truth for ONE saved-search filter_q string, mirroring
+    _fq_text_match's own per-clause semantics exactly: a clause matches if
+    (no positives, or all positives present) AND (no negatives, or none
+    present). Returns the set of matching skus for this ONE filter_q
+    string."""
+    clauses = _tsquery_diff_filter_q_clauses(fq)
+    matched = set()
+    for pos, neg, req in clauses:
+        for sku in _tsquery_diff_candidates(req, token_index, all_skus):
+            if sku in matched:
+                continue
+            if pos and not _matches_all(texts[sku], pos):
+                continue
+            if neg and _matches_any(texts[sku], neg):
+                continue
+            matched.add(sku)
+    return matched
+
+
+def _tsquery_diff_check_group(entries, old_matcher_fn, translate_fn, texts, token_index, all_skus, cur):
+    """Runs one group of entries (all distinct want-list keywords, or all
+    distinct saved-search filter_q strings, seen across every real account)
+    through both the Stage 2 tsquery translator and the ground-truth Python
+    matcher above, and tallies results. `old_matcher_fn(entry, texts,
+    token_index, all_skus) -> set(sku)`; `translate_fn(entry) -> (sql_frag,
+    params)` (Stage 2, unmodified -- may raise _TsqueryUnsupported, or
+    return (None, []) for an empty/no-op entry, in which case the pg side is
+    treated as "matches nothing" too). `cur` is an autocommit psycopg2
+    cursor, reused across the whole run -- a per-entry query failure is
+    caught and counted rather than aborting the run (autocommit means it
+    can't poison later queries the way a failed statement in an open
+    transaction would)."""
+    result = {
+        "total": 0, "unsupported": 0, "matched": 0, "mismatched": 0, "errors": 0,
+        "sample_unsupported": [], "sample_mismatched": [], "sample_errors": [],
+    }
+    for entry in entries:
+        result["total"] += 1
+        try:
+            frag, params = translate_fn(entry)
+        except _TsqueryUnsupported:
+            result["unsupported"] += 1
+            if len(result["sample_unsupported"]) < _TSQUERY_DIFF_SAMPLE_CAP:
+                result["sample_unsupported"].append(entry)
+            continue
+        if frag is None:
+            pg_skus = set()
+        else:
+            try:
+                cur.execute(f"SELECT sku FROM items WHERE search_vector @@ ({frag})", params)
+                pg_skus = {row[0] for row in cur.fetchall()}
+            except Exception as e:
+                result["errors"] += 1
+                if len(result["sample_errors"]) < _TSQUERY_DIFF_SAMPLE_CAP:
+                    result["sample_errors"].append({"entry": entry, "error": f"{type(e).__name__}: {e}"})
+                continue
+        old_skus = old_matcher_fn(entry, texts, token_index, all_skus)
+        if pg_skus == old_skus:
+            result["matched"] += 1
+        else:
+            result["mismatched"] += 1
+            if len(result["sample_mismatched"]) < _TSQUERY_DIFF_SAMPLE_CAP:
+                result["sample_mismatched"].append({
+                    "entry":    entry,
+                    "pg_count":  len(pg_skus),
+                    "old_count": len(old_skus),
+                    "only_pg":   len(pg_skus - old_skus),
+                    "only_old":  len(old_skus - pg_skus),
+                })
+    return result
+
+
+def _tsquery_diff_check():
+    """Top-level orchestration (called on the background thread started by
+    POST /api/tsquery-diff-check). Loads the real distinct want-list-keyword
+    and saved-search filter_q strings from every account in gc_users.db
+    (same query /api/search-syntax-stats uses), builds the catalog index
+    once, and diffs both groups. Uses its OWN ad-hoc psycopg2 connection
+    (autocommit) rather than the pooled _pg_conn() -- same deliberate
+    precedent as _pg_parity_check/_pg_full_backfill: this is a rare,
+    background-thread-triggered admin diagnostic that can run for a while
+    (one query per distinct entry), not a per-request hot path, so it
+    shouldn't hold a slot out of the pool's 2-12 connections sized for
+    concurrent request threads (see the pool's own module comment)."""
+    _load_cat_cache()
+    t0 = time.time()
+    texts, token_index, all_skus = _tsquery_diff_build_catalog_index()
+
+    with _user_db() as conn:
+        rows = conn.execute("SELECT keywords, saved_searches FROM user_data").fetchall()
+    kw_entries, fq_entries = set(), set()
+    for row in rows:
+        try:
+            kws = json.loads(row["keywords"] or "[]")
+        except Exception:
+            kws = []
+        try:
+            ss = json.loads(row["saved_searches"] or "[]")
+        except Exception:
+            ss = []
+        for k in kws:
+            ks = str(k).strip()
+            if ks:
+                kw_entries.add(ks)
+        for s in ss:
+            fq = ((s or {}).get("filters") or {}).get("filter_q") or ""
+            fq = fq.strip()
+            if fq:
+                fq_entries.add(fq)
+
+    pg_conn = psycopg2.connect(PG_DATABASE_URL, connect_timeout=10)
+    pg_conn.autocommit = True
+    try:
+        with pg_conn.cursor() as cur:
+            kw_result = _tsquery_diff_check_group(
+                sorted(kw_entries), _tsquery_diff_old_want_list_matches,
+                _tsquery_want_list_entry, texts, token_index, all_skus, cur)
+            fq_result = _tsquery_diff_check_group(
+                sorted(fq_entries), _tsquery_diff_old_filter_q_matches,
+                _tsquery_filter_q, texts, token_index, all_skus, cur)
+    finally:
+        pg_conn.close()
+
+    return {
+        "checked_at":      datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "elapsed_seconds": round(time.time() - t0, 1),
+        "catalog_size":    len(all_skus),
+        "keywords":        kw_result,
+        "saved_searches":  fq_result,
+    }
+
+
 @app.route("/api/saved-search-counts", methods=["POST"])
 def api_saved_search_counts():
     """Return match counts for each saved search in a single batch call."""
@@ -6246,6 +6600,53 @@ def api_search_syntax_stats():
     stats["sample_strict_filter_q"] = sample_strict_fq
     return jsonify(stats)
 
+@app.route("/api/tsquery-diff-check", methods=["POST"])
+@optional_user_context
+def api_tsquery_diff_check_start():
+    """Admin-only. Starts the Phase F step-3 diff harness (see the
+    "Phase F stage 3" module above _tsquery_diff_build_catalog_index) on a
+    background thread -- its own dedicated lock/state, deliberately NOT the
+    scan _lock/_stop_event/_q (that machinery is the inventory-scan SSE
+    stream; colliding with it would either block a real scan or be blocked
+    by one). Poll GET /api/tsquery-diff-check for status/results."""
+    denied = _require_admin_api()
+    if denied:
+        return denied
+    if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL):
+        return jsonify({"error": "Postgres not configured"}), 503
+    if not _TSQUERY_DIFF_LOCK.acquire(blocking=False):
+        return jsonify({"error": "A run is already in progress."}), 409
+
+    def _run():
+        try:
+            _TSQUERY_DIFF_STATE.clear()
+            _TSQUERY_DIFF_STATE["status"] = "running"
+            _TSQUERY_DIFF_STATE["started_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            result = _tsquery_diff_check()
+            _TSQUERY_DIFF_STATE["status"] = "done"
+            _TSQUERY_DIFF_STATE["result"] = result
+        except Exception as e:
+            _TSQUERY_DIFF_STATE["status"] = "error"
+            _TSQUERY_DIFF_STATE["error"] = f"{type(e).__name__}: {e}"
+            print(f"[pg] tsquery diff check failed: {type(e).__name__}: {e}")
+        finally:
+            try: _TSQUERY_DIFF_LOCK.release()
+            except RuntimeError: pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"status": "started"})
+
+@app.route("/api/tsquery-diff-check")
+@optional_user_context
+def api_tsquery_diff_check_poll():
+    """Admin-only. Poll for the status/result of the most recent run started
+    by POST /api/tsquery-diff-check."""
+    denied = _require_admin_api()
+    if denied:
+        return denied
+    return jsonify(_TSQUERY_DIFF_STATE)
+
+
 @app.route("/api/pg-full-backfill", methods=["POST"])
 @optional_user_context
 def api_pg_full_backfill():
@@ -7733,7 +8134,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.32"
+APP_VERSION = "2.16.33"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
