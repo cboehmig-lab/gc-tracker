@@ -768,3 +768,33 @@ would have missed — plus idempotent re-run). Real translator module run agains
 re-run the production diff-check to confirm the Mesa/Boogie cluster closes live, THEN (as a
 separate follow-up commit, not bundled here) delete the two temporary diagnostic endpoints
 (`/api/search-syntax-stats`, `/api/tsquery-diff-check`) and their supporting code.
+
+
+---
+
+### Addendum 13 (2026-09-22, v2.16.37) — temporary diagnostic endpoints removed; search-parity sub-project fully closed out
+
+Chuck's explicit ask ("why not get those two things cleaned up now"), second half: with v2.16.36
+(Mesa/Boogie fix) live-verified using the diff-check tool, both temporary Phase F verification
+endpoints were deleted — `/api/search-syntax-stats` and `/api/tsquery-diff-check` (both routes plus
+the whole "Phase F stage 3: tsquery diff harness" module: `_tsquery_diff_build_catalog_index`,
+`_tsquery_diff_candidates`, `_plain_req_tokens`, `_tsquery_diff_old_want_list_matches`,
+`_tsquery_diff_filter_q_clauses`, `_tsquery_diff_old_filter_q_matches`, `_tsquery_diff_check_group`,
+`_tsquery_diff_check`, `_TSQUERY_DIFF_SAMPLE_CAP`, `_TSQUERY_DIFF_LOCK`, `_TSQUERY_DIFF_STATE`).
+487 lines removed.
+
+**Explicitly kept**: the actual Stage 2 tsquery translator (`_tsquery_compile_term`,
+`_tsquery_compile_query`, `_tsquery_bool_clauses`, `_tsquery_want_list_entry`, `_tsquery_filter_q`,
+`_TsqueryUnsupported`, `_tsquery_safe_lexeme`, `_like_escape`) — that's the real deliverable step 4
+will wire in, not diagnostic tooling. It's currently unused by any live route, which is expected
+(step 4 hasn't started) and unrelated to this cleanup. `/api/pg-parity-check` (an older, separate
+Phase A/B diagnostic) was also left alone — out of scope for this ask.
+
+Full writeup: HANDOFF.md's 2026-09-22 v2.16.37 entry. Verified via `grep` across the whole file
+plus `static/gc.js` and templates for every deleted name — no dangling references, nothing in the
+admin UI ever linked to either endpoint. `py_compile`/`node --check` clean.
+
+**This closes out Phase F's search-parity sub-project (steps 1-3 of 5) completely — build AND
+cleanup.** Step 4 (unify Tier 1/Tier 2 browse around the translator) and step 5 (shadow-mode
+cutover + JSON retirement) remain not started; see the Design section above for the locked-in plan
+whenever that work picks back up.

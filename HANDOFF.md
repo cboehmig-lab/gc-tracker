@@ -1,5 +1,53 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-22 · Current version: v2.16.36 (Phase F stage 2 — Mesa/Boogie slash-tokenization fix) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-22 · Current version: v2.16.37 (removed the two temporary Phase F diagnostic endpoints) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.37 — 2026-09-22: removed the two temporary Phase F diagnostic endpoints
+
+**Why**: `/api/search-syntax-stats` (v2.16.29) and `/api/tsquery-diff-check` (v2.16.33) were both
+built as temporary, admin-only verification tooling for the Phase F search-engine rebuild — never
+wired into any UI, always documented as "safe to delete once the search design is locked in."
+Chuck's explicit instruction this session: clean both up now, sequenced AFTER v2.16.36 (the
+Mesa/Boogie slash fix) was live-verified using the diff-check tool one last time — see that
+version's entry for the live confirmation this cleanup depended on.
+
+**Removed**:
+- The `/api/search-syntax-stats` route and its inline stats-computation body (aggregate
+  want-list/saved-search syntax-feature counts — wildcard usage, quote usage, `filter_strict`
+  usage, etc. — used earlier to confirm real usage of `pg_trgm`-requiring features was
+  effectively zero, which justified the "no hybrid, tsquery-only" design decision documented in
+  `POSTGRES_PHASE_F_DESIGN.md`).
+- The `/api/tsquery-diff-check` routes (`POST` to start a background run, `GET` to poll status)
+  and the entire "Phase F stage 3: tsquery diff harness" module that backed them:
+  `_tsquery_diff_build_catalog_index`, `_tsquery_diff_candidates`, `_plain_req_tokens`,
+  `_tsquery_diff_old_want_list_matches`, `_tsquery_diff_filter_q_clauses`,
+  `_tsquery_diff_old_filter_q_matches`, `_tsquery_diff_check_group`, `_tsquery_diff_check`,
+  `_TSQUERY_DIFF_SAMPLE_CAP`, `_TSQUERY_DIFF_LOCK`, `_TSQUERY_DIFF_STATE`.
+
+**Explicitly NOT removed**: the actual Stage 2 tsquery translator itself — `_tsquery_compile_term`,
+`_tsquery_compile_query`, `_tsquery_bool_clauses`, `_tsquery_want_list_entry`, `_tsquery_filter_q`,
+`_TsqueryUnsupported`, `_tsquery_safe_lexeme`, `_like_escape`. These are the real, load-bearing
+deliverable of the search-engine rebuild — the diff-harness module was verification tooling that
+called them, not part of them. They're currently unused by any live route (by design: step 4,
+unifying Tier 1/Tier 2 around this translator, hasn't started yet), but that's expected and
+unrelated to this cleanup — deleting them would undo the actual Phase F work, not just tidy up
+diagnostics. `/api/pg-parity-check` (a separate, older diagnostic for the Postgres/JSON backfill
+itself, Phase A/B-era) was also left alone — Chuck's ask was specifically the two Phase F
+search-verification endpoints, not every admin diagnostic in the file.
+
+**Verified**: `grep` across the whole file (and `static/gc.js`, and the repo's templates) for every
+deleted name and both route paths returns nothing — no dangling references, nothing in the admin
+UI ever linked to either endpoint (both were curl/browser-console-only tools). `py_compile` clean.
+`node --check static/gc.js` clean (JS untouched — these were server-only diagnostics with no UI).
+487 lines removed net.
+
+**Status**: built and verified locally, NOT yet pushed as of this writing. Next: Chuck pushes,
+confirm the deploy is healthy (this is a pure code-removal — no schema change, no migration, just
+gunicorn restart — so a much lighter deploy than v2.16.35/36's full-table rewrites). With this
+done, Phase F's search-parity sub-project (steps 1-3 of 5) is fully closed out, including cleanup;
+step 4 (unifying Tier 1/Tier 2 browse around the translator) is the next real work whenever Chuck
+wants to pick it up — see `POSTGRES_PHASE_F_DESIGN.md`'s Design section for the locked-in plan.
 
 ---
 
