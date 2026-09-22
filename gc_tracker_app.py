@@ -422,13 +422,27 @@ def _pg_concurrent_statements(concurrent_sql):
     return [s.strip() for s in code_only.split(";") if s.strip()]
 
 def _pg_migrate_search_vector_if_stale(conn):
-    """One-time self-migration (v2.16.35): if items.search_vector already exists but was
-    built from the PRE-v2.16.35 generated expression (no regexp_replace hyphen
-    normalization — see pg_schema.sql's v2.16.35 comment for the hyphen-digit tokenization
-    bug this fixes), drop it so the schema-init step right after this recreates it fresh
-    with the new expression. No-ops forever after the first deploy that runs this
-    successfully. DROP COLUMN also drops the dependent GIN index (confirmed — no CASCADE
-    needed); the concurrent-index step below rebuilds it, alongside the new trigram index."""
+    """One-time self-migration: if items.search_vector already exists but was built from an
+    OLDER generated expression than the current one in pg_schema.sql, drop it so the
+    schema-init step right after this recreates it fresh. No-ops forever after the first
+    deploy that runs this successfully. DROP COLUMN also drops the dependent GIN index
+    (confirmed — no CASCADE needed); the concurrent-index step below rebuilds it, alongside
+    the trigram index.
+
+    Version history (see pg_schema.sql's own comments for the full reasoning on each):
+      - pre-v2.16.35: no regexp_replace at all.
+      - v2.16.35: hyphens normalized to spaces (fixes the hyphen-before-digit
+        negative-number-sign tokenization bug, e.g. "ES-335" wrongly emitting lexeme '-335').
+      - v2.16.36: slashes ALSO normalized to spaces (fixes a different Postgres parser quirk —
+        "word/word" fuses into one compound lexeme instead of splitting, e.g. "Mesa/Boogie"
+        never matching a plain "mesa" search).
+
+    Staleness is detected by checking for the '/' literal in the stored expression string —
+    present only once the current (v2.16.36+) expression has actually been applied. This
+    correctly catches BOTH older versions (pre-v2.16.35 has no regexp_replace at all and no
+    '/'; v2.16.35 has regexp_replace but still no '/' literal, since it only handles hyphens),
+    while a naive 'regexp_replace' not in ... check (v2.16.35's own check) would have wrongly
+    treated the v2.16.35 hyphen-only expression as already current."""
     with conn.cursor() as cur:
         cur.execute("SELECT to_regclass('items')")
         if cur.fetchone()[0] is None:
@@ -440,10 +454,10 @@ def _pg_migrate_search_vector_if_stale(conn):
             WHERE d.adrelid = 'items'::regclass AND a.attname = 'search_vector'
         """)
         row = cur.fetchone()
-        if row and row[0] and 'regexp_replace' not in row[0]:
+        if row and row[0] and "'/'" not in row[0]:
             cur.execute("ALTER TABLE items DROP COLUMN search_vector")
             conn.commit()
-            print("[pg] migrated search_vector to hyphen-normalized generated expression")
+            print("[pg] migrated search_vector to hyphen+slash-normalized generated expression")
 
 def _init_pg_schema():
     if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL):
@@ -4216,7 +4230,21 @@ def _tsquery_compile_term(part):
         space in its query-string mini-language outright. Confirmed via direct Postgres
         testing; no real production want-list/saved-search entry uses a hyphenated suffix
         wildcard today (POSTGRES_PHASE_F_DESIGN.md §3), so falling back to the dormant
-        Python matcher for this one rare case is the conservative, correct choice."""
+        Python matcher for this one rare case is the conservative, correct choice.
+
+    v2.16.36 change (found via the v2.16.35 production diff-check re-run): non-quoted terms
+    ALSO get slashes normalized to spaces, same reasoning as hyphens — Postgres's 'simple'
+    parser fuses a bare "word/word" pattern into one compound lexeme instead of splitting it
+    (confirmed: to_tsvector('simple', 'Mesa/Boogie Rectifier') emits ONE lexeme
+    'mesa/boogie'), so a plain search for "mesa" never matched "Mesa/Boogie"-branded items.
+    The wildcard fast path needs no separate exclusion for '/' the way it does for '-':
+    _TSQUERY_LEXEME_RE's charset never included '/', so a wildcard word containing one
+    already falls through to _TsqueryUnsupported on its own — confirmed via direct testing
+    that an un-normalized slash wildcard (to_tsquery parses 'mesa/b:*' as one valid lexeme,
+    unlike hyphen's phrase-separator behavior) still wouldn't match the now-normalized
+    document text anyway, so excluding it is correct either way, and normalizing a wildcard
+    word's slash to a space hits the exact same "bare space rejected" syntax error hyphen
+    does."""
     if part.startswith('"') and part.endswith('"') and len(part) > 2:
         pattern = '%' + _like_escape(part[1:-1]) + '%'
         return "(coalesce(name, '') || ' ' || coalesce(brand, '')) ILIKE %s", [pattern]
@@ -4228,8 +4256,10 @@ def _tsquery_compile_term(part):
         raise _TsqueryUnsupported(f"non-suffix or multi-word wildcard: {part!r}")
     # Plain word or an un-quoted multi-word phrase -> phraseto_tsquery, the native
     # equivalent of _compile_query's 'word' \b...\b branch (both are whole-word/phrase,
-    # order- and adjacency-preserving). Hyphens normalized to spaces first — see docstring.
-    return "search_vector @@ phraseto_tsquery('simple', %s)", [part.replace('-', ' ')]
+    # order- and adjacency-preserving). Hyphens and slashes normalized to spaces first —
+    # see docstring.
+    normalized = part.replace('-', ' ').replace('/', ' ')
+    return "search_vector @@ phraseto_tsquery('simple', %s)", [normalized]
 
 def _tsquery_compile_query(query_str):
     """Mirrors _compile_query(query_str): comma-separated parts, ANDed. Returns
@@ -8261,7 +8291,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.35"
+APP_VERSION = "2.16.36"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

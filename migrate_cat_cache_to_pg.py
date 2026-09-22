@@ -56,7 +56,10 @@ def _concurrent_statements(concurrent_sql):
 
 def _migrate_search_vector_if_stale(conn):
     """Mirrors gc_tracker_app.py's _pg_migrate_search_vector_if_stale() -- see that
-    function's docstring for the full reasoning (v2.16.35 hyphen-normalization fix)."""
+    function's docstring for the full reasoning (v2.16.35 hyphen-normalization fix,
+    v2.16.36 added slash-normalization too). Staleness check: the '/' literal is only
+    present in the stored expression once the current (v2.16.36+) version is applied --
+    catches both the original pre-v2.16.35 expression and the v2.16.35 hyphen-only one."""
     with conn.cursor() as cur:
         cur.execute("SELECT to_regclass('items')")
         if cur.fetchone()[0] is None:
@@ -68,10 +71,10 @@ def _migrate_search_vector_if_stale(conn):
             WHERE d.adrelid = 'items'::regclass AND a.attname = 'search_vector'
         """)
         row = cur.fetchone()
-        if row and row[0] and 'regexp_replace' not in row[0]:
+        if row and row[0] and "'/'" not in row[0]:
             cur.execute("ALTER TABLE items DROP COLUMN search_vector")
             conn.commit()
-            print("  migrated search_vector to hyphen-normalized generated expression")
+            print("  migrated search_vector to hyphen+slash-normalized generated expression")
 
 # Same 20-column shape as _cat_cache's per-item dict (see _run()'s merge block
 # and _build_base_item_list() in gc_tracker_app.py) plus the `sku` key.

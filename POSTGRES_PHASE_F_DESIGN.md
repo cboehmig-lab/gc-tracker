@@ -726,3 +726,45 @@ both sides, which is the point of the fix). `py_compile` clean.
 healthy (this is a real schema change — full-table rewrite + two concurrent index builds), then
 re-run the production diff-check to confirm both fixes close their respective mismatch clusters
 live.
+
+
+---
+
+### Addendum 12 (2026-09-22, v2.16.36) — Mesa/Boogie slash-tokenization gap fixed and verified
+
+Found via the v2.16.35 production diff-check re-run (see Addendum 11's own "Status" note about
+re-running the diff-check after v2.16.35 shipped). Chuck's explicit instruction: "why not get
+those two things cleaned up now" — referring to this fix and the diagnostic-endpoint cleanup.
+Full writeup in HANDOFF.md's 2026-09-22 v2.16.36 entry — summary here:
+
+- **Root cause**: Postgres's `'simple'` parser fuses a bare `word/word` pattern into ONE compound
+  lexeme instead of splitting it (`to_tsvector('simple', 'Mesa/Boogie Rectifier')` → single lexeme
+  `'mesa/boogie'`), so a plain `mesa` search never matched Mesa/Boogie-branded items. Different
+  parser quirk than the v2.16.35 hyphen bug (that one misread hyphen-before-digit as a negative
+  sign); slash just doesn't split at all.
+- **Fix**: same shape as the hyphen fix — `/` normalized to a space alongside `-`, both in
+  `search_vector`'s generated expression and in `_tsquery_compile_term`'s plain-word path
+  (`part.replace('-', ' ').replace('/', ' ')`).
+- **Wildcard fast path needed no code change**: `_TSQUERY_LEXEME_RE`'s charset never allowed `/`,
+  so slash-containing wildcard words already fall back to `_TsqueryUnsupported` automatically —
+  confirmed this is correct (an un-normalized slash wildcard wouldn't match normalized text anyway,
+  and a normalized one hits the same "bare space" `to_tsquery` syntax error hyphen does).
+- **Staleness-check bug caught before shipping**: the v2.16.35 check (`'regexp_replace' not in
+  expr`) would have wrongly treated an already-migrated v2.16.35 database as current, since that
+  expression DOES contain `regexp_replace` (just not slash handling). Fixed by switching to
+  `"'/'" not in expr` — the literal `/` only appears in `pg_get_expr()`'s reflected output once the
+  combined hyphen+slash expression is actually live, confirmed by direct inspection. Mirrored in
+  `migrate_cat_cache_to_pg.py`.
+
+**Verified**: full migration flow simulated against FOUR local Postgres states this time (fresh
+deploy, pre-v2.16.35, and critically, upgrade-from-live-v2.16.35 — the case the old staleness check
+would have missed — plus idempotent re-run). Real translator module run against real Postgres with
+4 new slash-pattern catalog items and 9 new test cases (mesa, boogie, Mesa/Boogie, mesa/boogie,
+3/4, "3/4", 3, rectifier, Mesa -Rectifier) — all 9 pass exactly, no regressions to the existing
+42-case suite (52/55 total, 3 pre-existing documented tradeoffs, 0 new failures). `py_compile` and
+`node --check` both clean.
+
+**Status**: built and verified locally, NOT yet pushed. Next: Chuck pushes, confirm deploy healthy,
+re-run the production diff-check to confirm the Mesa/Boogie cluster closes live, THEN (as a
+separate follow-up commit, not bundled here) delete the two temporary diagnostic endpoints
+(`/api/search-syntax-stats`, `/api/tsquery-diff-check`) and their supporting code.

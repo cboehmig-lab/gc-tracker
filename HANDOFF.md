@@ -1,5 +1,91 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-22 · Current version: v2.16.35 (Phase F stage 2 rebuilt for parity — hyphen tokenization + quoted-phrase punctuation/plural fixes) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-22 · Current version: v2.16.36 (Phase F stage 2 — Mesa/Boogie slash-tokenization fix) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.36 — 2026-09-22: Phase F stage 2 — Mesa/Boogie slash-tokenization fix (found via the v2.16.35 production diff-check re-run)
+
+**Why**: after v2.16.35 shipped and was confirmed live, a production diff-check re-run was used to
+verify the hyphen and quoted-phrase fixes actually closed their mismatch clusters (they did — most
+of the residual "mismatches" turned out to be the diff-check's own exact-match metric flagging
+cases where Postgres was now finding a strict SUPERSET of old's results, not real regressions).
+That re-run also surfaced one new, previously undocumented gap: a bare `word/word` pattern (e.g.
+`Mesa/Boogie`) never matched a plain single-word search like `mesa`. Chuck's explicit instruction:
+"why not get those two things cleaned up now" — fix this now rather than deferring it, alongside
+retiring the diagnostic endpoints (that second half is sequenced as its own follow-up commit, see
+Status below).
+
+**Root cause**: confirmed via direct local Postgres testing — the `'simple'` text search parser
+fuses a bare `word/word` pattern into ONE compound lexeme instead of splitting it the way it splits
+on most other punctuation: `to_tsvector('simple', 'Mesa/Boogie Rectifier')` emits a single lexeme
+`'mesa/boogie'`, never separate `'mesa'`/`'boogie'` lexemes. This is a different parser quirk than
+the v2.16.35 hyphen bug (hyphen-before-digit was misread as a negative-number sign); slash just
+doesn't get split at all. Net effect: any Mesa/Boogie-branded item (brand field literally
+`"Mesa/Boogie"`) was invisible to a plain `mesa` or `boogie` search, even though the old Python
+`\W+`-based tokenizer (`_KW_SPLIT_RE`) always split on `/` and matched those searches fine.
+
+**Fix**: identical shape to the v2.16.35 hyphen fix — normalize `/` to a space on both sides of the
+match, alongside the existing hyphen normalization, so `search_vector` and every query-side
+`to_tsquery`/`phraseto_tsquery` call tokenize identically and match `_KW_SPLIT_RE`'s own behavior
+(which already treats `/` as a separator, same as `-`).
+
+- `pg_schema.sql`: `search_vector`'s generated expression now wraps the existing hyphen
+  `regexp_replace` in a second one for `/`:
+  `regexp_replace(regexp_replace(coalesce(name,'') || ' ' || coalesce(brand,''), '-', ' ', 'g'), '/', ' ', 'g')`.
+- `gc_tracker_app.py`'s `_tsquery_compile_term`: the plain-word/phrase path now runs
+  `part.replace('-', ' ').replace('/', ' ')` before `phraseto_tsquery`, same reasoning as hyphen.
+- **Wildcard fast path needed NO code change** (documented in the docstring instead) — confirmed
+  via direct testing that `_TSQUERY_LEXEME_RE`'s allowed charset (`[A-Za-z0-9'-]`) never included
+  `/` in the first place, so `_tsquery_safe_lexeme()` already rejects any slash-containing wildcard
+  word and falls back to `_TsqueryUnsupported`, automatically, with no explicit `'/' not in word`
+  check needed (unlike hyphen, which DID need one). Verified this is correct either way: an
+  un-normalized slash-wildcard query still wouldn't match the now-normalized document text
+  (confirmed `false`), and normalizing a wildcard word's slash to a space hits the same "bare space
+  rejected" `to_tsquery` syntax error hyphen does.
+- **Self-migrating schema, staleness check updated**: because a `GENERATED ALWAYS AS (...) STORED`
+  column's expression can't be altered in place (still needs `DROP COLUMN` + re-`ADD COLUMN`,
+  another full-table rewrite), `_pg_migrate_search_vector_if_stale()` needed to detect staleness
+  again. The v2.16.35 check (`'regexp_replace' not in expr`) would have been WRONG here — the
+  v2.16.35 hyphen-only expression DOES contain `regexp_replace`, so that check would have silently
+  treated an already-deployed v2.16.35 database as "already current" and never picked up the new
+  slash normalization. Caught this during design, before it could cause a real bug. New check:
+  `"'/'" not in expr` — the literal `/` character only appears in the reflected `pg_get_expr()`
+  output once the combined hyphen+slash expression has actually been applied, confirmed by direct
+  inspection of Postgres's own expression-reflection format. This correctly catches both older
+  states (pre-v2.16.35 with no `regexp_replace` at all, and v2.16.35's hyphen-only version).
+  Mirrored in `migrate_cat_cache_to_pg.py`'s `_migrate_search_vector_if_stale()`.
+
+No new index needed — the existing `idx_items_search_vector` GIN index and `idx_items_name_brand_trgm`
+trigram index are both rebuilt automatically by the same drop-and-recreate migration mechanism
+already in place from v2.16.35; nothing about the CONCURRENT-INDEXES section changed.
+
+**Verified**: (1) the full schema+migration flow simulated end to end against a local throwaway
+Postgres, covering FOUR states this time — fresh deploy, upgrade from pre-v2.16.35 (no
+`regexp_replace` at all), and critically, upgrade from a live v2.16.35 database (hyphen-only
+`regexp_replace` — the exact case the old staleness check would have missed), plus an idempotent
+re-run on an already-v2.16.36 schema. All four produce the correct combined expression, both
+indexes valid, `pg_trgm` installed. (2) The real translator module (`gc_tracker_app.py`, imported
+directly, not reimplemented) run against real Postgres over the existing 42-case self-test catalog
+plus 4 new slash-pattern catalog items (`Mesa/Boogie Rectifier Half Stack`, `Mesa/Boogie Mark V
+Combo`, `3/4 Size Travel Guitar`, `Boogie Board Practice Pad`) and 9 new test cases (`mesa`,
+`boogie`, `Mesa/Boogie`, `mesa/boogie`, `3/4`, `"3/4"`, `3`, `rectifier`, `Mesa, -Rectifier`) — all
+9 new cases pass EXACTLY (pg output identical to old's), confirming both the fix itself and no
+regression to any existing behavior (fraction-style `3/4` splits and matches correctly too, same
+as old's `\W+` tokenizer). Total: 52/55 pass, 3 pre-existing documented/expected mismatches (2 the
+already-known wildcard mid-word-substring tradeoff, 1 the already-known intentional `"ES 335"`
+hyphen-fix side effect) — zero new or unexplained failures. `py_compile` clean on both
+`gc_tracker_app.py` and `migrate_cat_cache_to_pg.py`; `node --check` on `static/gc.js` clean (JS
+untouched, no JS changes this version).
+
+**Status**: built and verified locally end-to-end, NOT yet pushed as of this writing. **Next**:
+Chuck pushes from his Mac terminal, confirm the deploy is ACTIVE/healthy (same real-schema-change
+caveat as v2.16.35 — full-table `ALTER TABLE ... DROP/ADD COLUMN` rewrite plus two concurrent index
+builds), then re-run `POST /api/tsquery-diff-check` against real production data to confirm the
+Mesa/Boogie mismatch cluster actually closes live. Once confirmed, the two temporary diagnostic
+endpoints (`/api/search-syntax-stats` and `/api/tsquery-diff-check`, plus their supporting
+functions) get deleted as a follow-up cleanup commit — deferred to its own commit rather than
+bundled into this one, so the diff-check tool is still available to verify THIS fix in production
+before it's removed.
 
 ---
 

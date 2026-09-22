@@ -58,15 +58,27 @@ CREATE INDEX IF NOT EXISTS idx_items_price       ON items (price)       WHERE av
 -- this, Postgres's 'simple' parser treats a hyphen immediately followed by digits as a NEGATIVE
 -- NUMBER sign (confirmed: to_tsvector('simple', 'ES-335') emits lexeme '-335', not '335'), so a
 -- plain search for '335' silently never matched a hyphenated model number like "ES-335" — see the
--- diff-check-run addenda in POSTGRES_PHASE_F_DESIGN.md for the real-production repro. The SAME
--- normalization must be applied to every query-side to_tsquery/phraseto_tsquery call too (see
--- gc_tracker_app.py's _tsquery_compile_term) so both sides tokenize identically. If this column
--- already exists from before v2.16.35 with the OLD (non-normalized) expression, _init_pg_schema()
--- and migrate_cat_cache_to_pg.py both migrate it (DROP + this ADD, which rebuilds it fresh) before
--- reaching this statement — see _pg_migrate_search_vector_if_stale() in gc_tracker_app.py.
+-- diff-check-run addenda in POSTGRES_PHASE_F_DESIGN.md for the real-production repro.
+--
+-- v2.16.36: slashes get the SAME normalization, for a different Postgres parser quirk found via
+-- the v2.16.35 production diff-check re-run: Postgres's 'simple' parser treats a bare "word/word"
+-- pattern as a single fused compound lexeme rather than splitting it (confirmed:
+-- to_tsvector('simple', 'Mesa/Boogie Rectifier') emits ONE lexeme 'mesa/boogie', never separate
+-- 'mesa'/'boogie' lexemes), so a plain search for "mesa" never matched "Mesa/Boogie"-branded
+-- items. Same fix, same reasoning as the hyphen case above — normalize on both the stored column
+-- and every query-side to_tsquery/phraseto_tsquery call (see gc_tracker_app.py's
+-- _tsquery_compile_term) so both sides tokenize identically, and matches _KW_SPLIT_RE's own
+-- \W+ splitting (which already treats '/' as a separator, same as '-').
+--
+-- If this column already exists from before v2.16.36 with an OLDER expression (either the
+-- original non-normalized one, or v2.16.35's hyphen-only one), _init_pg_schema() and
+-- migrate_cat_cache_to_pg.py both migrate it (DROP + this ADD, which rebuilds it fresh) before
+-- reaching this statement — see _pg_migrate_search_vector_if_stale() in gc_tracker_app.py, which
+-- detects staleness by checking for the '/' literal in the stored expression (present only once
+-- this v2.16.36 version has actually been applied).
 ALTER TABLE items ADD COLUMN IF NOT EXISTS search_vector tsvector
     GENERATED ALWAYS AS (
-        to_tsvector('simple', regexp_replace(coalesce(name, '') || ' ' || coalesce(brand, ''), '-', ' ', 'g'))
+        to_tsvector('simple', regexp_replace(regexp_replace(coalesce(name, '') || ' ' || coalesce(brand, ''), '-', ' ', 'g'), '/', ' ', 'g'))
     ) STORED;
 
 -- v2.16.35: pg_trgm backs a literal, punctuation-preserving, substring-anywhere match for

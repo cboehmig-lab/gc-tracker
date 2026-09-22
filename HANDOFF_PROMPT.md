@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-22 · Version: v2.16.35 (Phase F stage 2 rebuilt for parity — hyphen tokenization + quoted-phrase punctuation/plural fixes — see HANDOFF.md's 2026-09-22 v2.16.35 entry) · Live at: gcgeartracker.com*
+*Generated: 2026-09-22 · Version: v2.16.36 (Phase F stage 2 — Mesa/Boogie slash-tokenization fix — see HANDOFF.md's 2026-09-22 v2.16.36 entry) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 

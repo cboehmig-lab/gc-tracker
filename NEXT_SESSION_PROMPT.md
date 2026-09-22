@@ -1,58 +1,57 @@
-# Next Session Prompt — v2.16.35 built (not yet pushed): both open tsquery-parity findings fixed — hyphen tokenization + quoted-phrase punctuation/plural
+# Next Session Prompt — v2.16.36 built (not yet pushed): Mesa/Boogie slash-tokenization fix
 
 ## Where things stand
 
-v2.16.34 (params/fragment-order bug fix) shipped and was confirmed live against real production
-data: keyword mismatches dropped 48→43, saved-search mismatches held at 23 (expected — those two
-findings below weren't fixed yet at that point).
+v2.16.35 (hyphen tokenization + quoted-phrase punctuation/plural fixes) shipped, was confirmed
+live and healthy, and a production diff-check re-run confirmed both fixes work: most residual
+"mismatches" turned out to be the diff-check's own exact-match metric flagging cases where Postgres
+now finds a strict SUPERSET of old's results (a real improvement, not a bug) — see
+POSTGRES_PHASE_F_DESIGN.md's Addendum 11 status note and HANDOFF.md's v2.16.35 entry.
 
-This session, per Chuck's explicit instruction ("change those two to get as close to parity as
-possible with old"), both remaining open findings from the v2.16.34 production diff-check run were
-root-caused, fixed, and verified — not just documented:
+That same re-run surfaced one new, previously undocumented gap: Postgres's `'simple'` parser fuses
+a bare `word/word` pattern (e.g. `Mesa/Boogie`) into ONE compound lexeme instead of splitting it,
+so a plain `mesa` search never matched Mesa/Boogie-branded items. Chuck's explicit instruction this
+session: "why not get those two things cleaned up now" (this fix, plus retiring the diagnostic
+endpoints). This session built and verified the fix — not yet the endpoint cleanup, deliberately
+sequenced after (see below).
 
-1. **Hyphen-adjacent digits now tokenize correctly.** `search_vector`'s generated column and every
-   query-side `to_tsquery`/`phraseto_tsquery` call normalize `-` to a space before tokenizing, so
-   `ES-335` and a plain `335` search now match consistently. Needed a self-migrating schema
-   (`_pg_migrate_search_vector_if_stale()`) since the generated column's expression can't be
-   altered in place. New: the wildcard fast path now excludes hyphenated words (falls back to the
-   dormant Python matcher) rather than risk a wrong match there — a separate quirk in how
-   `to_tsquery` parses hyphens in the QUERY string, confirmed via direct testing.
-2. **Quoted-phrase punctuation/plural narrowing fixed.** Quoted terms now use a `pg_trgm`-backed
-   ILIKE substring match instead of `phraseto_tsquery`, restoring the old Python matcher's exact
-   substring semantics (plural tolerance, punctuation sensitivity, mid-word matching). New trigram
-   index backs it so it stays index-searchable.
-
-This forced an architectural change: `_tsquery_compile_term` now returns a COMPLETE boolean SQL
-predicate per term (ILIKE or `search_vector @@ (...)`) rather than a bare tsquery fragment, since
-the two predicate types can't compose under tsquery's own `&&`/`||`/`!!` operators. All translator
-functions now compose with plain SQL `AND`/`OR`/`NOT`. Full writeup: HANDOFF.md's 2026-09-22
-v2.16.35 entry and `POSTGRES_PHASE_F_DESIGN.md`'s Addendum 11.
+**Fix, same shape as v2.16.35's hyphen fix**: `/` is now normalized to a space alongside `-`, in
+both `search_vector`'s generated column expression and every query-side
+`to_tsquery`/`phraseto_tsquery` call. No wildcard-path code change needed (the lexeme regex already
+excludes `/`). The self-migrating schema's staleness check was updated from `'regexp_replace' not
+in expr` (which would have wrongly treated a live v2.16.35 database as current) to `"'/'" not in
+expr`. Full writeup: HANDOFF.md's 2026-09-22 v2.16.36 entry and POSTGRES_PHASE_F_DESIGN.md's
+Addendum 12.
 
 **Verified locally, NOT yet verified against live production**: (1) the full schema-migration flow
-simulated end to end against a local Postgres cluster, covering fresh-deploy / upgrade-from-old /
-idempotent-rerun states. (2) The rewritten translator run against real Postgres over an extended
-25→42-case self-test — 39/42 pass exactly, the 3 differences all explained (2 pre-existing
-documented wildcard tradeoffs unrelated to this session, 1 new intentional side effect of the
-hyphen fix itself). `py_compile` clean; JS untouched.
+simulated against four local Postgres states — fresh deploy, pre-v2.16.35, upgrade-from-live-v2.16.35
+(the critical new case), and idempotent re-run. (2) The real translator module run against real
+Postgres with new Mesa/Boogie-style catalog items and test cases — 9/9 new cases pass exactly, no
+regressions (52/55 total including the pre-existing suite, 3 already-documented tradeoffs, 0 new
+failures). `py_compile` and `node --check` clean.
 
 ## Concrete next steps
 
-1. Chuck pushes v2.16.35 from his Mac terminal (`cd ~/Desktop/gc_tracker`, `rm -f
+1. Chuck pushes v2.16.36 from his Mac terminal (`cd ~/Desktop/gc_tracker`, `rm -f
    .git/index.lock`, commit, push — exact commands given at end of session).
-2. Confirm the deploy is ACTIVE/healthy. This one applies a REAL schema change (full-table
-   `ALTER TABLE ... DROP/ADD COLUMN` on `items`, ~450K+ rows, plus building TWO concurrent
-   indexes) — check Railway deploy logs for `[pg] migrated search_vector to hyphen-normalized
-   generated expression` → `[pg] items table ready` → `[pg] concurrent indexes ready` with no
-   errors, and sanity-check timing against stage 1's original ~10s index-build precedent (this one
-   may take longer: two indexes, plus the DROP/rebuild).
-3. Re-run `POST /api/tsquery-diff-check` against real production data (admin session, same pattern
-   as prior sessions). Expect the keyword/saved-search mismatch counts to drop further from
-   v2.16.34's 43/23 baseline — ideally close to zero, modulo ordinary catalog-churn drift during
-   the run (already-documented, not a bug) and the two pre-existing wildcard-tradeoff cases (which
-   are DESIGNED to still show as "mismatches" against the old matcher, not something to chase).
-4. Bring the new counts back to Chuck. If clean (modulo the above), step 4 of the original plan
-   (unifying Tier 1/Tier 2 browse around the translator) becomes the next real work — not started,
-   not blocking on anything else right now.
+2. Confirm the deploy is ACTIVE/healthy — another real schema change (full-table
+   `ALTER TABLE ... DROP/ADD COLUMN` on `items`, plus rebuilding two concurrent indexes). Check
+   Railway deploy logs for `[pg] migrated search_vector to hyphen+slash-normalized generated
+   expression` → `[pg] items table ready` → `[pg] concurrent indexes ready` with no errors.
+3. Re-run `POST /api/tsquery-diff-check` against real production data. Expect the Mesa/Boogie
+   (and any other slash-joined brand) mismatches to disappear from the keyword/saved-search
+   mismatch counts.
+4. **Only once step 3 confirms the fix works live**: delete the two temporary diagnostic endpoints
+   — `/api/search-syntax-stats` and `/api/tsquery-diff-check` — and their supporting code
+   (`_tsquery_diff_build_catalog_index`, `_tsquery_diff_candidates`, `_plain_req_tokens`,
+   `_tsquery_diff_old_want_list_matches`, `_tsquery_diff_check_group`, `_TSQUERY_DIFF_SAMPLE_CAP`,
+   `_TSQUERY_DIFF_LOCK`, `_TSQUERY_DIFF_STATE`, and whatever `/api/search-syntax-stats`'s own
+   stats-computation code consists of — re-examine the file for the exact deletion scope, it
+   hasn't been re-checked since these were built). This was deliberately sequenced AFTER live
+   verification rather than bundled into v2.16.36, so the diff-check tool is still available to
+   confirm the fix in production before removing it. Ship as its own commit (v2.16.37).
+5. Once that's clean, step 4 of the original Phase F plan (unifying Tier 1/Tier 2 browse around the
+   translator) becomes the next real work — not started, not blocking on anything else.
 
 ## Standing rules (unchanged, worth repeating)
 
@@ -61,6 +60,6 @@ hyphen fix itself). `py_compile` clean; JS untouched.
 - Update HANDOFF.md/HANDOFF_PROMPT.md with a changelog entry for every version bump.
 - Git pushes happen from Chuck's Mac terminal only — `cd ~/Desktop/gc_tracker` FIRST, then
   `rm -f .git/index.lock` (that order matters).
-- Investigate before proposing fixes — every real fix this session (and the last) came from
+- Investigate before proposing fixes — every real fix across this whole Phase F effort came from
   reproducing the exact mismatch against real Postgres execution in a local throwaway cluster,
   never from guessing at root causes from aggregate counts alone.
