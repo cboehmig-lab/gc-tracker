@@ -1,5 +1,91 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-22 · Current version: v2.16.33 (Phase F stage 3 — tsquery diff-check admin endpoint, not wired to any live route) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-22 · Current version: v2.16.34 (Phase F stage 3 diff-check RUN against production, real translator bug found+fixed) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.34 — 2026-09-22: Phase F stage 3 RUN against real production data — found + fixed a real tsquery translator bug (params/fragment order)
+
+**Why**: v2.16.33's diff-check endpoint (`/api/tsquery-diff-check`) was run against real production
+data for the first time. Not clean: 48/810 want-list keywords mismatched, 23/294 saved searches
+mismatched. Root-caused every distinct pattern rather than guessing at a fix (per this project's
+standing rule) using a local throwaway Postgres cluster spun up in the sandbox (`pg_lsclusters`
+showed one preinstalled) — this let every hypothesis get tested against REAL Postgres execution
+with a synthetic catalog, closing the "never verified against live Postgres" gap every session
+since stage 1 had flagged, without touching production data at all.
+
+**Real bug found and fixed — params/SQL-fragment ordering in `_tsquery_bool_clauses` and
+`_tsquery_filter_q`.** Both functions build `pos_frags`/`neg_frags` in one pass over the
+comma/space-separated terms, but the OLD code appended each term's SQL params to a flat `params`
+list in the ORIGINAL left-to-right encounter order — while the SQL string itself reorders
+fragments as `pos_frags + [negated frags]` before joining. Whenever a negative term appeared
+BEFORE a later positive term in the same clause (e.g. `'Ampeg, -pedal, AMG*'` — `-pedal` sits
+between `Ampeg` and `AMG*`), the flat params list and the reordered SQL placeholders diverged:
+psycopg2 substitutes `%s` placeholders strictly left-to-right through the SQL text, so params
+ended up in the WRONG placeholders — sometimes turning a NOT into a positive requirement and
+vice versa. Confirmed with a synthetic catalog against real Postgres: the buggy translator for
+`'Ampeg, -pedal: AMG*; AMB*'` matched the ONE synthetic item that WAS a pedal, and missed both
+real Ampeg AMG/AMB matches — the exact inversion the mechanism predicts. This explains the
+`Ampeg, -pedal: AMG*; AMB*` and `Carvin, -amp, -cabinet, -acoustic: guitar` production mismatches
+(disjoint result sets, zero overlap between old and pg — the strongest signal in the diff-check
+output that something structural, not just a semantic nuance, was wrong). A clause with the
+negative term already LAST (e.g. `'Ampeg, AMG*, -pedal'`) happened to work by coincidence, which
+is why the stage-2 structural self-test (comma-then-dash-last cases only) never caught this.
+
+**Fix**: keep params bucketed as `pos_params`/`neg_params` in parallel with `pos_frags`/
+`neg_frags`, and append them to the shared `params` list in the SAME order the fragments are
+joined (`pos_params` then `neg_params`) — not the original encounter order. Applied identically
+to both `_tsquery_bool_clauses` (want-list) and `_tsquery_filter_q` (search box / saved searches),
+since both had the identical bug shape.
+
+**Verified**: a local throwaway Postgres cluster (`pg_ctlcluster 16 main start`, a fresh `gc_test`
+database, `pg_schema.sql` applied verbatim) with a synthetic catalog reproduced the exact
+production failure end to end (buggy translator matches the pedal, not the real matches; fixed
+translator matches correctly). Then ran the FULL stage-2 translator against real Postgres (not
+just Python-side structural comparison) over the existing self-test catalog plus new negative-
+term-ordering cases (`-pedal` first/middle/last) for both want-list and filter_q — 22/26 cases
+pass exactly; the 4 "mismatches" are the two ALREADY-DOCUMENTED deliberate narrowings from stage
+2's own module docstring (wildcard → true lexeme-prefix match instead of unanchored substring;
+quoted phrase → word-boundary phrase match instead of raw substring containment), confirmed
+working exactly as designed, not bugs. `py_compile`/`node --check` clean.
+
+**Two more real findings from the same production run, NOT fixed this session — need a decision,
+not just a patch:**
+
+1. **Hyphen-adjacent numeric tokens don't match.** Confirmed directly:
+   `to_tsvector('simple', 'Gibson ES-335 Memphis')` → `'-335':3 'es':2 'gibson':1 'memphis':4` —
+   Postgres's parser treats a hyphen immediately before digits as a NEGATIVE-NUMBER sign, so the
+   lexeme is `-335`, not `335`. A plain search for `335` (`phraseto_tsquery('simple','335')` →
+   `'335'`) never matches it. The Python regex tokenizer (`\W+`-split) has no such behavior — it
+   cleanly splits `ES-335` into `es`/`335`. This explains the largest block of production
+   mismatches by item count (`335`, `339`, `heritage 535`, `gibson es 335`, likely part of `59`/
+   `69*`/`beyer* M*` too — all only-in-old, undercounting on the pg side). Fix options: (a)
+   preprocess text before both `to_tsvector` (in the generated column) and query-side
+   `to_tsquery`/`phraseto_tsquery` calls to replace `-` with a space when followed by a digit,
+   keeping both sides consistent; (b) something narrower. Option (a) means redefining the
+   generated `search_vector` column (another full-table `ALTER TABLE` rewrite, like stage 1's) —
+   a real schema change, not a code-only patch, so it needs Chuck's sign-off before building.
+2. **Quoted-phrase narrowing is NOT invisible on real data**, contrary to stage 2's original
+   expectation. `'"jam pedal"'` (singular) went from old=90 to pg=3 in production — because
+   `'simple'` config does no stemming, so `pedal`/`pedals` are different lexemes, and
+   `phraseto_tsquery` requires an exact adjacent-lexeme match while the old code's raw substring
+   check tolerated the trailing `s` for free (`"jam pedal"` is a literal substring of
+   `"jam pedals ..."`). Also newly observed: punctuation is now insensitive on the pg side in a
+   way the old matcher wasn't (`"Mr. Black"` and `"mr black"` both converge to the same pg count,
+   since `to_tsvector`/`phraseto_tsquery` strip periods entirely) — arguably a usability
+   improvement, but a real behavior change worth Chuck knowing about explicitly rather than
+   discovering by surprise later.
+
+**Also confirmed as NOT a bug**: about a dozen production mismatches were off by only 1-8 items on
+counts in the hundreds-to-hundreds-of-thousands range (`Boss` 19853→19851, `Gibson` 10673→10671,
+etc.) — consistent with ordinary catalog churn during the diff-check's 21.5s run (ground truth
+snapshots `_cat_cache` once at the start; Postgres is queried live per-entry), not a correctness
+issue.
+
+**Status**: v2.16.34 built and verified locally (structural + live-Postgres synthetic-catalog
+tests), NOT yet pushed. Once deployed, the diff-check should be re-run against real production
+data to confirm the params-bug fix actually closes those specific mismatches live, and to size
+what's left (the two open findings above, which are expected to still show up as mismatches until
+a follow-up decision is made on each).
 
 ---
 

@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-22 · Version: v2.16.33 (Phase F stage 3 — tsquery diff-check admin endpoint, not wired to any live route — see HANDOFF.md's 2026-09-22 entry) · Live at: gcgeartracker.com*
+*Generated: 2026-09-22 · Version: v2.16.34 (Phase F stage 3 diff-check RUN against production; found+fixed a real tsquery translator params/fragment-order bug — see HANDOFF.md's 2026-09-22 v2.16.34 entry) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 

@@ -4183,6 +4183,7 @@ def _tsquery_bool_clauses(base):
         if not cl:
             continue
         pos_frags, neg_frags = [], []
+        pos_params, neg_params = [], []
         for p in cl.split(','):
             p = p.strip()
             if not p:
@@ -4190,14 +4191,30 @@ def _tsquery_bool_clauses(base):
             if len(p) > 1 and p[0] == '-':
                 frag, prm = _tsquery_compile_term(p[1:].strip())
                 neg_frags.append(frag)
+                neg_params.extend(prm)
             else:
                 frag, prm = _tsquery_compile_term(p)
                 pos_frags.append(frag)
-            params.extend(prm)
+                pos_params.extend(prm)
         if not pos_frags:
             continue  # matches _wl_bool_compile: needs >=1 positive part
+        # v2.16.34 fix: params must be appended in the SAME order the SQL
+        # fragments are joined below (positives, then negatives) -- NOT the
+        # original left-to-right token order. Before this fix, a negative
+        # term appearing before a later positive term in the same clause
+        # (e.g. 'A, -B, C') left `params` in encounter order [A, B, C] while
+        # `parts` reordered to [fragA, fragC, !!(fragB)] -- so psycopg2
+        # substituted B's text into C's placeholder and C's text into B's
+        # (negated) placeholder, silently testing the wrong words and
+        # sometimes inverting a NOT into a requirement. Confirmed via a real
+        # want-list entry ('Ampeg, -pedal: AMG*; AMB*') against a synthetic
+        # catalog: the buggy version matched the one item that WAS a pedal
+        # and missed both real Ampeg AMG/AMB matches -- see the diff-check
+        # addendum in POSTGRES_PHASE_F_DESIGN.md for the full repro.
         parts = pos_frags + [f"!!({f})" for f in neg_frags]
         clause_frags.append("(" + " && ".join(parts) + ")")
+        params.extend(pos_params)
+        params.extend(neg_params)
     if not clause_frags:
         return None, []
     return " || ".join(clause_frags), params
@@ -4239,17 +4256,27 @@ def _tsquery_filter_q(fq, max_tokens=12, max_clauses=4):
         toks = _FQ_TOKEN_RE.findall(cl)[:budget]
         budget -= len(toks)
         pos_frags, neg_frags = [], []
+        pos_params, neg_params = [], []
         for tok in toks:
             is_neg = len(tok) > 1 and tok[0] == '-'
             term_text = tok[1:] if is_neg else tok
             frag, prm = _tsquery_compile_query(term_text)
             if frag is None:
                 continue
-            (neg_frags if is_neg else pos_frags).append(frag)
-            params.extend(prm)
+            if is_neg:
+                neg_frags.append(frag)
+                neg_params.extend(prm)
+            else:
+                pos_frags.append(frag)
+                pos_params.extend(prm)
         if pos_frags or neg_frags:
+            # v2.16.34 fix: same params/fragment-order bug as
+            # _tsquery_bool_clauses above -- see its comment for the full
+            # explanation and production repro.
             parts = pos_frags + [f"!!({f})" for f in neg_frags]
             clause_frags.append("(" + " && ".join(parts) + ")")
+            params.extend(pos_params)
+            params.extend(neg_params)
         if len(clause_frags) >= max_clauses:
             break
     if not clause_frags:
@@ -8134,7 +8161,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.33"
+APP_VERSION = "2.16.34"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
