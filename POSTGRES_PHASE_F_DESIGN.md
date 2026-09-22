@@ -342,3 +342,56 @@ residual case and collapses Tier 1/Tier 2 into one query path.
 Once search itself is proven this way, it plugs directly into the write-path and rollback design
 already written in §2 and §4 — the search engine was the one genuinely open sub-problem in this
 document; the rest of the plan doesn't change.
+
+---
+
+### Stage 1 — SHIPPED (v2.16.31, 2026-09-22)
+
+The generated `search_vector tsvector` column + GIN index from step 1 above are in
+`pg_schema.sql`, but NOT quite as step 1 originally described ("folded into `pg_schema.sql`...
+so `_init_pg_schema()` applies it on its own" — true in spirit, but the mechanism needed a real
+fix, not a drop-in append).
+
+**The bug this surfaced**: `_init_pg_schema()` and `migrate_cat_cache_to_pg.py` both apply
+`pg_schema.sql` as ONE multi-statement string via a single `cur.execute()` call on a connection
+with `autocommit=False` — i.e. inside an explicit transaction. Postgres rejects `CREATE INDEX
+CONCURRENTLY` outright when it runs inside a transaction block, full stop, regardless of
+`IF NOT EXISTS`. Appending the GIN index as literally described in step 1 would have made
+`_init_pg_schema()` throw on every app startup from the moment this file first deployed —
+caught by the function's own try/except (so it wouldn't have blocked startup), but the index
+would never have been built, silently, forever, with no signal beyond a Railway log line.
+
+**Fix**: `pg_schema.sql` now has a `-- ==CONCURRENT-INDEXES==` marker. Both callers
+(`_init_pg_schema()`, `migrate_cat_cache_to_pg.py`) split the file on that marker: everything
+above runs as before (one transaction, one commit); the single `CREATE INDEX CONCURRENTLY IF NOT
+EXISTS` statement below it runs afterward on its own `autocommit=True` connection, its own
+statement, its own try/except (a build failure/timeout there doesn't block startup or roll back
+the schema changes that already committed). `pg_schema.sql` also documents the CONCURRENTLY
+leftover-invalid-index operational gotcha (a build interrupted by a redeploy leaves an index
+Postgres considers "exists" but won't use — `IF NOT EXISTS` won't rebuild it) with the
+`pg_index.indisvalid` check to diagnose it and the `DROP INDEX CONCURRENTLY` to clear it.
+
+**Verified**: `python3 -m py_compile` on both `gc_tracker_app.py` and
+`migrate_cat_cache_to_pg.py`, `node --check static/gc.js` (unchanged, checked anyway), a
+disposable-venv import + route-table build (61 routes, unchanged — this is a schema-only change,
+no routes touched — `/api/browse` present, `APP_VERSION` confirmed `2.16.31`), and a standalone
+Python check that `pg_schema.sql`'s own marker-partition produces exactly the expected split
+(`main_sql` ends cleanly at the `ALTER TABLE` statement, `concurrent_sql` contains exactly the
+one `CREATE INDEX CONCURRENTLY` statement, ignoring comments).
+
+**NOT verified**: no live Postgres was reachable from the device shell this session (no root, no
+Docker/Homebrew, apt blocked — same constraint noted in the 2026-09-04/08 sessions), so none of
+this DDL has actually run against a real server yet. The `ALTER TABLE ... ADD COLUMN ...
+GENERATED ALWAYS AS (...) STORED` is a full-table rewrite under an `ACCESS EXCLUSIVE` lock — for
+~450K rows (including historical sold/delisted items `_cat_cache` keeps forever) expect it to
+take real seconds-to-tens-of-seconds during the FIRST startup after this deploys, not
+instantaneous. Since this app runs `--workers=1` (deliberately, for in-process scan/SSE state —
+see HANDOFF.md's v2.16.10 entry) and Railway is not known to run >1 replica of this service, the
+lock should only be visible as slightly extended startup time on that one deploy, not as
+contention with a second live instance — worth Chuck double-checking Railway's replica count
+before/after this deploys, since that assumption was not verified against the Railway dashboard
+this session. After deploy, check Railway's logs for `[pg] items table ready` followed by either
+`[pg] concurrent indexes ready` or a `[pg] concurrent index build skipped: ...` line with the
+actual exception — that line is the only signal this new code path worked.
+
+**Next**: stage 2, the `tsquery` translator (step 2 above) — not started.

@@ -1,7 +1,55 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-21 · Current version: v2.16.30 (Removed dead fuzzy/strict search mode + updated search-syntax help text) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-22 · Current version: v2.16.31 (Phase F stage 1 — tsvector column + GIN index, schema only) · Domain: gcgeartracker.com*
 
 ---
+
+## v2.16.31 — 2026-09-22: Phase F stage 1 — search_vector tsvector column + GIN index (schema only, no behavior change)
+
+**Why**: first concrete step of the Phase F search-engine build recommended in
+`POSTGRES_PHASE_F_DESIGN.md` §7 — a generated `tsvector` column on `items` backing Postgres
+full-text search, which will eventually replace the Python regex `_compile_query`/`_kw_match`
+matcher entirely (stage 2+, not started). This version ships ONLY the schema — nothing on any
+request path reads `search_vector` yet, same "schema first, nothing wired up" pattern as Phase
+A's own first step.
+
+**What shipped**: `pg_schema.sql` gets `search_vector tsvector GENERATED ALWAYS AS
+(to_tsvector('simple', coalesce(name,'') || ' ' || coalesce(brand,''))) STORED` — matches
+exactly what `_kw_match()` already searches over (`name_l + " " + brand_l`) and uses the
+`'simple'` text-search config (no stemming/stopword removal) to keep matching close to today's
+literal whole-word semantics. Backed by a GIN index, built `CONCURRENTLY` so it doesn't take a
+long lock on `items` while it builds.
+
+**The real work — a transaction-block bug this surfaced before it shipped**: `_init_pg_schema()`
+and `migrate_cat_cache_to_pg.py` both apply the entire `pg_schema.sql` file as one multi-statement
+`cur.execute()` call inside an explicit transaction (`autocommit=False`). Postgres flatly refuses
+to run `CREATE INDEX CONCURRENTLY` inside a transaction block — appending it to the file as a
+plain statement, as the design doc's step 1 literally described, would have made schema init
+throw that error on every single app startup from the day this deployed (caught by the existing
+try/except, so it wouldn't have blocked startup — but the index would silently never get built,
+forever). Fixed by adding a `-- ==CONCURRENT-INDEXES==` marker to `pg_schema.sql`: both callers
+now split the file on it and run the `CREATE INDEX CONCURRENTLY IF NOT EXISTS` statement
+afterward on its own `autocommit=True` connection, its own try/except, non-blocking either way.
+Also documented (in `pg_schema.sql` itself) the known CONCURRENTLY footgun where a build
+interrupted by a redeploy leaves an "exists but invalid" index that `IF NOT EXISTS` will never
+retry — with the `pg_index.indisvalid` check and `DROP INDEX CONCURRENTLY` fix.
+
+**Verification**: `python3 -m py_compile` on `gc_tracker_app.py` AND `migrate_cat_cache_to_pg.py`,
+`node --check static/gc.js` (untouched, checked anyway), disposable-venv import + route-table
+build (61 routes, unchanged — schema-only change touches no routes — `/api/browse` present,
+`APP_VERSION` confirmed `2.16.31`), and a standalone check that the file's marker-partition
+produces exactly the intended split. **Not verified against a live Postgres** — no DB reachable
+from the device shell this session (same no-root/no-Docker constraint as prior sessions). The
+generated-column `ALTER TABLE` is a full-table rewrite (`ACCESS EXCLUSIVE` lock) over ~450K rows
+— expect real seconds-to-tens-of-seconds on the first startup after this deploys, not
+instant. Should only show up as slightly longer startup time given this app's single-instance/
+`--workers=1` posture, but Chuck should double check Railway's replica count isn't >1 before
+relying on that. After deploy, check Railway logs for `[pg] items table ready` then either
+`[pg] concurrent indexes ready` or a `[pg] concurrent index build skipped: ...` line — that line
+is the only signal the new code path actually worked. Full detail in
+`POSTGRES_PHASE_F_DESIGN.md`'s new "Stage 1 — SHIPPED" addendum under §7.
+
+**Status**: schema only, zero behavior change for any real user or request path. Stage 2 (the
+`tsquery` translator) is next, not started.
 
 ## v2.16.30 — 2026-09-21: Removed the dead fuzzy/strict search mode; help text now matches reality
 

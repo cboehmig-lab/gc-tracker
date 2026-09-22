@@ -1,64 +1,81 @@
-# Next Session Prompt — Phase E closed out; store-filter bug fully resolved; Phase F not started
+# Next Session Prompt — v2.16.31 built (not yet deployed); Phase F search-engine stage 1 shipped, stage 2 (translator) next
 
 Copy and paste this to start the next Cowork session.
 
 ---
 
 We're working on **GC Gear Tracker** (`gcgeartracker.com`), a Flask app on Railway tracking
-Guitar Center used inventory. Read `HANDOFF.md` first — then project memory file
-`postgres_migration_plan_2026-08-31.md` for full Postgres-migration status.
+Guitar Center used inventory. Read `HANDOFF.md` first — then project memory files
+`postgres_migration_plan_2026-08-31.md` and `postgres_phase_f_design_2026-09-21.md` for full
+Postgres-migration status. The actual Phase F design doc lives in the repo at
+`POSTGRES_PHASE_F_DESIGN.md` — read it before writing any more Phase F code, especially the new
+"Stage 1 — SHIPPED" addendum under §7 (what changed, the transaction-block bug it caught, and
+what's NOT yet verified) and §7 step 2 (the translator, the actual next step).
 
 **All repo work happens via the device bridge in `~/Desktop/gc_tracker`, never the cloud sandbox
 filesystem — check `device_bash` works before starting anything.**
 
-## Where things stand (as of 2026-09-21)
+## Where things stand (as of 2026-09-22)
 
-Postgres Phase E (Tier 2 keyword/free-text candidate narrowing) cut over 2026-09-15 (v2.16.26) and
-its post-cutover health check (2026-09-21, 6 days out) came back clean. **Phase E is closed out —
-no further watching needed.**
+Postgres Phases A–E are all complete, deployed, and healthy — nothing left to watch on any of
+them. Phase F (retire the JSON catalog, make Postgres sole source of truth) has a full written
+design and has now shipped its first real code:
 
-Two bugs were found and fixed this session, both deployed as v2.16.27 and v2.16.28:
-
-- **v2.16.27**: (1) a `RuntimeError: release unlocked lock` scan-lock race, found during the
-  Phase E health check — fixed by wrapping the unguarded `_lock.release()` calls in
-  try/except. (2) The Favorite/selected-stores filter wasn't applying to Watch List or Want List
-  (reported via Discord) — fixed so both now send the current store selection like every other
-  filter.
-- **v2.16.28**: live-browser testing of the v2.16.27 store-filter fix (clicking through both
-  "Favorites → Want List" and "Want List → Favorites" orderings on the production site) surfaced
-  a follow-on bug: toggling store selection while Want List was already open didn't refresh the
-  displayed results (stale display), because Want List's `_globalSearchActive` flag made
-  `updateCount()`'s auto-refresh guard treat it like a nationwide keyword search. Watch List was
-  unaffected. Fixed in `updateCount()`. **Needs a quick post-deploy live spot-check** (open Want
-  List, then toggle Favorites, confirm results narrow instead of staying stale) — see HANDOFF.md's
-  v2.16.28 entry for the exact repro steps used pre-fix.
-
-See project memory `feature_store_filter_watch_want_2026-09-21.md` and
-`bug_scan_lock_race_2026-09-21.md` for full investigation detail on both.
+- **v2.16.31** (built this session, **NOT YET PUSHED/DEPLOYED** — confirm git status before
+  assuming otherwise): `pg_schema.sql` gets a generated `search_vector tsvector` column
+  (`'simple'` config, over `name`+`brand` — matches `_kw_match()` exactly) plus a GIN index built
+  `CONCURRENTLY`. Along the way, found and fixed a real bug the design doc's step 1 would have
+  shipped: `_init_pg_schema()` and `migrate_cat_cache_to_pg.py` both apply the whole schema file
+  as one transactional `cur.execute()` call, and Postgres rejects `CREATE INDEX CONCURRENTLY`
+  outright inside a transaction block. Fixed with a `-- ==CONCURRENT-INDEXES==` marker in
+  `pg_schema.sql` that both callers split on, running the concurrent statement afterward on its
+  own autocommit connection. Full detail in `POSTGRES_PHASE_F_DESIGN.md`'s Stage 1 addendum and
+  `HANDOFF.md`'s v2.16.31 entry.
+- **Verified**: py_compile (both `gc_tracker_app.py` and `migrate_cat_cache_to_pg.py`),
+  `node --check`, a disposable-venv import + 61-route table build, and a standalone check that
+  the marker-partition splits the schema file exactly as intended.
+- **NOT verified**: no live Postgres was reachable from the device shell this session (no root,
+  no Docker/Homebrew) — none of this DDL has run against a real server yet. First thing to do
+  after Chuck pushes and Railway redeploys: check Railway's deploy logs for `[pg] items table
+  ready` followed by `[pg] concurrent indexes ready` (or a `[pg] concurrent index build skipped:
+  ...` line with the actual exception, which means it didn't work and needs a follow-up). Also
+  worth Chuck double-checking Railway isn't running >1 replica of the `web` service before this
+  deploys — the `ALTER TABLE ... ADD COLUMN ... STORED` is a full-table rewrite under an
+  `ACCESS EXCLUSIVE` lock (~450K rows including historical sold/delisted items), and the safety
+  reasoning for why that's fine assumed a single instance.
 
 ## The task
 
-Nothing urgent is queued beyond the v2.16.28 post-deploy spot-check above. Options for next
-session, in rough priority order if Chuck wants to keep moving:
+**Once v2.16.31 is confirmed live and healthy** (the log lines above, no new errors in Railway),
+**next step: the `tsquery` translator**, `POSTGRES_PHASE_F_DESIGN.md` §7 step 2 — a new function
+that turns the ALREADY-BUILT parsed query structure (`_compile_query`'s AND/phrase/suffix-
+wildcard token classification, `_wl_bool_compile`'s OR-of-AND-with-NOT clause shape) into a
+Postgres query, composed via parameterized `to_tsquery('simple', %s)` calls + SQL `&&`/`||`/`!!`
+operators — never by string-concatenating a raw tsquery expression (avoids ever having to
+hand-escape tsquery's own operator syntax against a user-typed term). Then step 3: extend
+`/api/search-syntax-stats`'s query into a real diff harness against the 833 real keyword entries
++ 343 real saved searches (pull fresh numbers, don't reuse the 2026-09-21 sample) plus synthetic
+edge cases (genuine mid-word wildcards, punctuation, apostrophes, empty/very-long input) — diff
+old Python matcher vs. new translator, byte-for-byte on the resulting SKU sets, before touching
+any live code path. Steps 4 (unify Tier 1/Tier 2 into one `_pg_browse()`) and 5 (shadow-mode
+then cutover) come after that.
 
-1. **Phase F (retire JSON entirely)** — the big remaining lever on the original memory-pressure
-   problem, since `_cat_cache` still stays resident in memory at all times regardless of Phases D/E.
-   Not started, not designed yet — the open design question is keyword search's dependency on the
-   full in-memory list. This is a much bigger project than D/E, worth a dedicated design session
-   before any code.
-2. Otherwise, check in with Chuck on what he wants to prioritize — Android app groundwork, other
-   feature ideas in `HANDOFF.md`'s "Future Ideas" section, etc.
+**Versioning**: Chuck is planning to bump to v2.17.0 when Phase F fully lands (JSON dual-write
+retired, Postgres sole source of truth) — see `postgres_phase_f_design_2026-09-21` memory file's
+versioning-note addendum. Keep bumping patch versions before that milestone lands.
 
 ## Standing rules (same as always)
 
 - Bump `APP_VERSION` in `gc_tracker_app.py` for every logical change.
 - Verify with `python3 -m py_compile gc_tracker_app.py` AND `node --check static/gc.js` — and for
   any change touching Flask routes, actually import the module in a disposable venv and confirm
-  the route table builds.
+  the route table builds (a `SECRET_KEY=dummy DATABASE_URL= python3 -c "import gc_tracker_app"`
+  style check works from a venv with `requirements.txt` installed).
 - Git pushes happen from Chuck's Mac terminal only, never from the sandbox or the device bridge.
-  Give him the exact commands; do not attempt `git push` yourself anywhere. If `git commit` fails
-  with "cannot lock ref HEAD", a stale lock file is the cause — tell Chuck to
-  `rm -f .git/HEAD.lock .git/refs/heads/main.lock` in `~/Desktop/gc_tracker` and retry.
+  Give him the exact commands; do not attempt `git push` yourself anywhere. If `git commit`/`git
+  status` fails with a lock error, a stale lock file is the cause — tell Chuck to
+  `rm -f .git/index.lock .git/HEAD.lock .git/refs/heads/main.lock` in `~/Desktop/gc_tracker` and
+  retry (the device bridge cannot remove these itself — permission denied by design).
 - All JS lives in `static/gc.js` (or a new file under `static/`) — CSP blocks inline scripts AND
   inline `onclick=`/event-handler attributes.
 - Update `HANDOFF.md` and `HANDOFF_PROMPT.md` with a changelog entry for every version bump.

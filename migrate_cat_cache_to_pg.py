@@ -90,9 +90,26 @@ def main():
     conn.autocommit = False
     try:
         print("Ensuring schema exists (pg_schema.sql)...")
+        # pg_schema.sql marks off its CREATE INDEX CONCURRENTLY statement (see the marker
+        # comment in that file) because Postgres rejects CONCURRENTLY outright inside a
+        # transaction block — which this cur.execute() call, on an autocommit=False
+        # connection, is. Apply everything above the marker here as before; the concurrent
+        # index build below it runs afterward on its own autocommit connection.
+        schema_sql = SCHEMA_FILE.read_text()
+        main_sql, marker_found, concurrent_sql = schema_sql.partition("-- ==CONCURRENT-INDEXES==")
         with conn.cursor() as cur:
-            cur.execute(SCHEMA_FILE.read_text())
+            cur.execute(main_sql)
         conn.commit()
+        if marker_found and concurrent_sql.strip():
+            print("Building concurrent indexes (may take a while on a large table)...")
+            concurrent_conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
+            concurrent_conn.autocommit = True
+            try:
+                with concurrent_conn.cursor() as ccur:
+                    ccur.execute(concurrent_sql)
+                print("  concurrent indexes ready")
+            finally:
+                concurrent_conn.close()
 
         rows = [row_for(sku, it) for sku, it in cache.items()]
         insert_sql = (

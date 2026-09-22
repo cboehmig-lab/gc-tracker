@@ -396,6 +396,13 @@ def _save_cat_cache():
 # same DDL without duplicating it — see that script's docstring.
 PG_SCHEMA_FILE = SCRIPT_DIR / "pg_schema.sql"
 
+# pg_schema.sql splits on this marker (see that file's own comment above the marker for the
+# full reasoning): everything above it is safe to run as one multi-statement blob inside a
+# normal transaction; everything below it is CREATE INDEX CONCURRENTLY, which Postgres rejects
+# outright if it runs inside any transaction block, so it must be sent on its own
+# autocommit=True connection as its own single statement instead.
+PG_SCHEMA_CONCURRENT_MARKER = "-- ==CONCURRENT-INDEXES=="
+
 def _init_pg_schema():
     if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL):
         return
@@ -404,11 +411,12 @@ def _init_pg_schema():
     except OSError as e:
         print(f"[pg] schema init skipped — can't read {PG_SCHEMA_FILE.name}: {e}")
         return
+    main_sql, marker_found, concurrent_sql = schema_sql.partition(PG_SCHEMA_CONCURRENT_MARKER)
     try:
         conn = psycopg2.connect(PG_DATABASE_URL, connect_timeout=10)
         try:
             with conn.cursor() as cur:
-                cur.execute(schema_sql)
+                cur.execute(main_sql)
             conn.commit()
         finally:
             conn.close()
@@ -417,6 +425,25 @@ def _init_pg_schema():
         # Never let a Postgres hiccup block startup — same tolerance as every
         # other best-effort persistence path in this app.
         print(f"[pg] schema init skipped: {type(e).__name__}: {e}")
+        return  # don't attempt the concurrent-index step against a schema that may not have applied
+
+    if not (marker_found and concurrent_sql.strip()):
+        return
+    # CREATE INDEX CONCURRENTLY, on its own autocommit connection — see the marker comment in
+    # pg_schema.sql. Best-effort and non-blocking like the step above: Tier 1/Tier 2 reads don't
+    # depend on this index existing yet (Phase F's search engine, which does, isn't built yet),
+    # so a slow build or a hiccup here never blocks startup or degrades current traffic.
+    try:
+        conn = psycopg2.connect(PG_DATABASE_URL, connect_timeout=10)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(concurrent_sql)
+        finally:
+            conn.close()
+        print("[pg] concurrent indexes ready")
+    except Exception as e:
+        print(f"[pg] concurrent index build skipped: {type(e).__name__}: {e}")
 
 _init_pg_schema()
 
@@ -7504,7 +7531,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.30"
+APP_VERSION = "2.16.31"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

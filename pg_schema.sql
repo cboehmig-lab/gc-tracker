@@ -46,3 +46,33 @@ CREATE INDEX IF NOT EXISTS idx_items_category    ON items (category)    WHERE av
 CREATE INDEX IF NOT EXISTS idx_items_subcategory ON items (subcategory) WHERE available;
 CREATE INDEX IF NOT EXISTS idx_items_date_listed ON items (date_listed DESC) WHERE available;
 CREATE INDEX IF NOT EXISTS idx_items_price       ON items (price)       WHERE available;
+
+-- Phase F (2026-09-22, POSTGRES_PHASE_F_DESIGN.md §7 stage 1): a generated tsvector column
+-- backing Postgres full-text search, replacing the Python regex `_compile_query`/`_kw_match`
+-- matcher (which searches `name_l + " " + brand_l` — see _kw_match() in gc_tracker_app.py).
+-- 'simple' config on purpose — no stemming/stopword removal — so matching stays close to
+-- today's literal whole-word semantics rather than introducing new fuzziness nobody asked for.
+ALTER TABLE items ADD COLUMN IF NOT EXISTS search_vector tsvector
+    GENERATED ALWAYS AS (
+        to_tsvector('simple', coalesce(name, '') || ' ' || coalesce(brand, ''))
+    ) STORED;
+
+-- ==CONCURRENT-INDEXES==
+-- Everything below this marker CANNOT be executed as part of the same multi-statement blob as
+-- everything above: CREATE INDEX CONCURRENTLY is rejected outright by Postgres when it runs
+-- inside a transaction block, and both callers of this file (_init_pg_schema() in
+-- gc_tracker_app.py and migrate_cat_cache_to_pg.py) apply everything above this marker as one
+-- cur.execute() call inside an explicit transaction (autocommit=False). Both callers split this
+-- file on this exact marker string and run the statement below on its own autocommit=True
+-- connection instead. Keep exactly ONE statement below this marker — see the callers' comments
+-- for why multiple statements here would reintroduce the same implicit-transaction problem even
+-- under autocommit.
+--
+-- Operational note: if the app restarts mid-build (a Railway redeploy racing this), Postgres
+-- can leave an INVALID index behind under this exact name. IF NOT EXISTS treats "exists" as
+-- "a relation with this name is present", not "is valid", so a leftover invalid index silently
+-- blocks any future automatic rebuild. Check `SELECT indexrelid::regclass, indisvalid FROM
+-- pg_index WHERE indexrelid = 'idx_items_search_vector'::regclass;` if search ever seems to be
+-- falling back to a sequential scan on `items`; `DROP INDEX CONCURRENTLY idx_items_search_vector`
+-- and let the next app startup rebuild it if so.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_items_search_vector ON items USING gin (search_vector);
