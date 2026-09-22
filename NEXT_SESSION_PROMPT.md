@@ -1,4 +1,4 @@
-# Next Session Prompt — v2.16.31 built (not yet deployed); Phase F search-engine stage 1 shipped, stage 2 (translator) next
+# Next Session Prompt — v2.16.32 built (not yet pushed); Phase F stage 2 (tsquery translator) shipped, step 3 (live diff harness) next
 
 Copy and paste this to start the next Cowork session.
 
@@ -8,57 +8,50 @@ We're working on **GC Gear Tracker** (`gcgeartracker.com`), a Flask app on Railw
 Guitar Center used inventory. Read `HANDOFF.md` first — then project memory files
 `postgres_migration_plan_2026-08-31.md` and `postgres_phase_f_design_2026-09-21.md` for full
 Postgres-migration status. The actual Phase F design doc lives in the repo at
-`POSTGRES_PHASE_F_DESIGN.md` — read it before writing any more Phase F code, especially the new
-"Stage 1 — SHIPPED" addendum under §7 (what changed, the transaction-block bug it caught, and
-what's NOT yet verified) and §7 step 2 (the translator, the actual next step).
+`POSTGRES_PHASE_F_DESIGN.md` — read it before writing any more Phase F code, especially the
+"Stage 2 — SHIPPED" addendum under §7 (what the translator does, the two deliberate semantic
+narrowings, the want-list-vs-filter_q asymmetry it preserves, and the concrete design for step 3).
 
 **All repo work happens via the device bridge in `~/Desktop/gc_tracker`, never the cloud sandbox
 filesystem — check `device_bash` works before starting anything.**
 
 ## Where things stand (as of 2026-09-22)
 
-Postgres Phases A–E are all complete, deployed, and healthy — nothing left to watch on any of
-them. Phase F (retire the JSON catalog, make Postgres sole source of truth) has a full written
-design and has now shipped its first real code:
+Postgres Phases A–E are complete/deployed/healthy. Phase F stage 1 (schema) is live and confirmed
+healthy (v2.16.31). Stage 2 (the tsquery translator) is built:
 
-- **v2.16.31** (built this session, **NOT YET PUSHED/DEPLOYED** — confirm git status before
-  assuming otherwise): `pg_schema.sql` gets a generated `search_vector tsvector` column
-  (`'simple'` config, over `name`+`brand` — matches `_kw_match()` exactly) plus a GIN index built
-  `CONCURRENTLY`. Along the way, found and fixed a real bug the design doc's step 1 would have
-  shipped: `_init_pg_schema()` and `migrate_cat_cache_to_pg.py` both apply the whole schema file
-  as one transactional `cur.execute()` call, and Postgres rejects `CREATE INDEX CONCURRENTLY`
-  outright inside a transaction block. Fixed with a `-- ==CONCURRENT-INDEXES==` marker in
-  `pg_schema.sql` that both callers split on, running the concurrent statement afterward on its
-  own autocommit connection. Full detail in `POSTGRES_PHASE_F_DESIGN.md`'s Stage 1 addendum and
-  `HANDOFF.md`'s v2.16.31 entry.
-- **Verified**: py_compile (both `gc_tracker_app.py` and `migrate_cat_cache_to_pg.py`),
-  `node --check`, a disposable-venv import + 61-route table build, and a standalone check that
-  the marker-partition splits the schema file exactly as intended.
-- **NOT verified**: no live Postgres was reachable from the device shell this session (no root,
-  no Docker/Homebrew) — none of this DDL has run against a real server yet. First thing to do
-  after Chuck pushes and Railway redeploys: check Railway's deploy logs for `[pg] items table
-  ready` followed by `[pg] concurrent indexes ready` (or a `[pg] concurrent index build skipped:
-  ...` line with the actual exception, which means it didn't work and needs a follow-up). Also
-  worth Chuck double-checking Railway isn't running >1 replica of the `web` service before this
-  deploys — the `ALTER TABLE ... ADD COLUMN ... STORED` is a full-table rewrite under an
-  `ACCESS EXCLUSIVE` lock (~450K rows including historical sold/delisted items), and the safety
-  reasoning for why that's fine assumed a single instance.
+- **v2.16.32** (built this session, **NOT YET PUSHED** — confirm git status before assuming
+  otherwise): five new functions in `gc_tracker_app.py` (`_tsquery_compile_term`,
+  `_tsquery_compile_query`, `_tsquery_bool_clauses`, `_tsquery_want_list_entry`,
+  `_tsquery_filter_q`, `_TsqueryUnsupported`) that translate want-list-keyword/`filter_q` parsed
+  structure into parameterized Postgres tsquery SQL. **Not wired into any route** — every live
+  request still uses the unmodified Python matcher. Verified structurally (py_compile, node
+  --check, 61-route table build, a 22-case self-test covering every syntax branch) — all pass.
+  **Not verified against live Postgres** — this sandbox has no DB access, so nothing confirms the
+  generated SQL actually matches the same SKUs the Python matcher does. That's step 3.
 
 ## The task
 
-**Once v2.16.31 is confirmed live and healthy** (the log lines above, no new errors in Railway),
-**next step: the `tsquery` translator**, `POSTGRES_PHASE_F_DESIGN.md` §7 step 2 — a new function
-that turns the ALREADY-BUILT parsed query structure (`_compile_query`'s AND/phrase/suffix-
-wildcard token classification, `_wl_bool_compile`'s OR-of-AND-with-NOT clause shape) into a
-Postgres query, composed via parameterized `to_tsquery('simple', %s)` calls + SQL `&&`/`||`/`!!`
-operators — never by string-concatenating a raw tsquery expression (avoids ever having to
-hand-escape tsquery's own operator syntax against a user-typed term). Then step 3: extend
-`/api/search-syntax-stats`'s query into a real diff harness against the 833 real keyword entries
-+ 343 real saved searches (pull fresh numbers, don't reuse the 2026-09-21 sample) plus synthetic
-edge cases (genuine mid-word wildcards, punctuation, apostrophes, empty/very-long input) — diff
-old Python matcher vs. new translator, byte-for-byte on the resulting SKU sets, before touching
-any live code path. Steps 4 (unify Tier 1/Tier 2 into one `_pg_browse()`) and 5 (shadow-mode
-then cutover) come after that.
+**Step 3: build and ship the live diff harness**, per `POSTGRES_PHASE_F_DESIGN.md`'s Stage 2
+addendum. Key finding from this session: this CANNOT be a Chuck's-Mac-terminal script like
+`migrate_cat_cache_to_pg.py` — the real 833+343 keyword/saved-search strings live in
+`gc_users.db` (`user_data.keywords`/`user_data.saved_searches`) on the Railway volume, not
+locally, and there's no local copy the way `gc_category_cache.json` has one. Instead, build a new
+admin-only, read-only endpoint (e.g. `/api/tsquery-diff-check`), following the exact precedent
+`/api/search-syntax-stats` (v2.16.29) set: it runs server-side (where `_cat_cache`, `gc_users.db`,
+and `_PG_POOL`/`_pg_conn()` all already live in the same process), and returns AGGREGATE mismatch
+counts plus a small capped sample of just the mismatching entries' raw TEXT — never SKUs or item
+names, matching that endpoint's existing privacy posture.
+
+For each real keyword/filter_q string: (a) run it through the existing single-entry
+`_compile_query`/`_wl_bool_compile` path against `_cat_cache` (the FULL catalog including
+sold/delisted history, not just `available` items — apples-to-apples with Postgres's `items`
+table) to get the OLD matching SKU set; (b) run it through the new translator and execute
+`SELECT sku FROM items WHERE search_vector @@ (...)` via `_pg_conn()` to get the NEW set;
+(c) diff; (d) aggregate. Catch `_TsqueryUnsupported` per entry (expected to basically never fire,
+per the zero-real-usage finding in §3) and count it separately from an actual mismatch. Once this
+runs clean on all real data, step 4 (unify Tier 1/Tier 2 into one `_pg_browse()`) and step 5
+(shadow-mode then cutover) follow.
 
 **Versioning**: Chuck is planning to bump to v2.17.0 when Phase F fully lands (JSON dual-write
 retired, Postgres sole source of truth) — see `postgres_phase_f_design_2026-09-21` memory file's

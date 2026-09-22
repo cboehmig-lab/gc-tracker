@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-22 · Version: v2.16.31 (Phase F stage 1 — tsvector column + GIN index, schema only — see HANDOFF.md's 2026-09-22 entry) · Live at: gcgeartracker.com*
+*Generated: 2026-09-22 · Version: v2.16.32 (Phase F stage 2 — tsquery translator, not wired to any route — see HANDOFF.md's 2026-09-22 entry) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 

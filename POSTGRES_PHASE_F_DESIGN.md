@@ -395,3 +395,94 @@ this session. After deploy, check Railway's logs for `[pg] items table ready` fo
 actual exception — that line is the only signal this new code path worked.
 
 **Next**: stage 2, the `tsquery` translator (step 2 above) — not started.
+
+---
+
+### Stage 2 — SHIPPED (v2.16.32, 2026-09-22): the tsquery translator
+
+Five new module-level functions, placed right after `_wl_bool_compile` (the "Shared
+query-matching helpers" section): `_tsquery_compile_term`, `_tsquery_compile_query`,
+`_tsquery_bool_clauses`, `_tsquery_want_list_entry`, `_tsquery_filter_q`, plus a
+`_TsqueryUnsupported` exception. **Not wired into any live route yet** — nothing calls these,
+`_compile_query`/`_wl_bool_compile`/`_compile_fq_clauses`/`_kw_match` are untouched and still
+what every real request uses. That wiring is step 4 (unify Tier 1/Tier 2), which needs step 3
+(the live diff harness, see below) to pass first.
+
+**Approach**: each function mirrors its Python-matcher counterpart's OWN parsing/routing
+decisions one for one (same comma=AND, `;`=OR, leading `-`=NOT, same gate for when the OR/NOT
+path even engages — e.g. `_tsquery_bool_clauses` reimplements `_wl_bool_compile`'s exact
+`has_neg`/`;` check so it returns `(None, [])` in precisely the same cases, meaning "OD-1"
+correctly falls through to the plain path instead of being misparsed as NOT-syntax) — rather than
+re-deriving the rules independently. This means auditing it is a side-by-side read against
+`_compile_query`/`_wl_bool_compile`/`_compile_fq_clauses`, not a fresh review from scratch.
+One real behavioral divergence caught doing this line-by-line: `_compile_fq_clauses` (filter_q)
+KEEPS an all-negative clause (`if pos or neg:`) — `"-electric"` alone means "everything except
+electric" — while `_wl_bool_compile` (want-list) REQUIRES at least one positive term per clause
+and drops an all-negative entry entirely. `_tsquery_filter_q` and `_tsquery_bool_clauses` preserve
+this exact asymmetry; getting it wrong either direction would have been a silent, hard-to-notice
+divergence.
+
+Builds each entry as multiple parameterized `to_tsquery()`/`phraseto_tsquery()` calls joined by
+SQL's own tsquery operators (`&&`/`||`/`!!`) in the query text — never string-concatenating raw
+tsquery syntax — exactly per step 2's safety note (a user-typed term can never be interpreted as
+tsquery operator syntax this way). `phraseto_tsquery('simple', %s)` turns out to be the right
+native primitive for BOTH plain single words and un-quoted multi-word phrases (Postgres handles
+the single-lexeme case fine too), which is cleaner than hand-building `<->` chains term by term.
+
+**Two deliberate, documented semantic narrowings** (both directions are "tsquery is stricter /
+more correct", never looser — see the long code comment above the functions for the full
+reasoning):
+1. Suffix wildcards (`OD*`) → `to_tsquery('simple','od:*')`, a true lexeme-PREFIX match. The
+   Python regex is unanchored substring matching over the whole "name brand" text (no boundary at
+   the wildcard end), so `OD*` can incidentally match inside "Wood" today; tsquery's prefix match
+   won't.
+2. Quoted `"exact phrase"` → `phraseto_tsquery` (word-boundary-respecting), vs. the Python path's
+   raw substring containment (`_matches_all`'s `val in text_lower`), which technically allows
+   mid-word matches (`"amp"` matching "trampoline"). This is genuinely the closest available
+   tsquery primitive — there's no cheap way to express "phrase as a raw substring, mid-word
+   matches allowed" in tsquery without pg_trgm, which §3 already ruled out for this phase (real
+   usage of the one feature that needed it was zero).
+
+Anything not expressible in pure tsquery (a non-suffix wildcard — leading, mid-word, multiple
+stars, or a wildcard inside a multi-word term) raises `_TsqueryUnsupported` rather than being
+silently mistranslated. §3's real-data pass found zero non-suffix-wildcard usage in production, so
+this is expected to never actually fire — but step 4's job is to catch it per-entry and fall back
+to the dormant `_kw_match` path for just that one entry, never guess or drop it silently.
+
+**Verified this session** (structural only — see the real gap below): `python3 -m py_compile`,
+`node --check` (untouched), a disposable-venv import + 61-route table build (unchanged — nothing
+wired to a route yet), and a 22-case self-test
+(`.phase_working/test_tsquery_translator.py`, not committed — scratch, kept locally) exercising
+every branch: plain word, quoted phrase, suffix wildcard, three flavors of unsupported wildcard
+(leading/mid-word/multi-word), comma-AND, `;`-OR, leading-`-`-NOT, the internal-hyphen
+non-NOT-syntax case (`"OD-1"`), colon-prefix expansion, the want-list-vs-filter_q all-negative-
+clause asymmetry, and the token/clause budget caps. All 22 pass. **This checks STRUCTURE only —
+does each input route correctly and produce the right fragment shape/params — not that the
+generated SQL actually matches the same SKUs as the Python matcher when run against real
+Postgres**, because this sandbox has no live Postgres access (same constraint noted for stage 1).
+
+**Step 3 (the real diff harness) — designed, not built, and NOT a Chuck's-Mac-terminal script
+like `migrate_cat_cache_to_pg.py`.** Investigated where the 833+343 real strings actually live:
+`gc_users.db` (`user_data.keywords`/`user_data.saved_searches`) is on the Railway volume, not on
+Chuck's Mac — `migrate_cat_cache_to_pg.py` only works locally because `gc_category_cache.json` is
+a file Chuck happens to have a local copy of; there's no local equivalent for `gc_users.db`.
+`/api/search-syntax-stats` (v2.16.29) establishes the right precedent instead: an admin-only,
+read-only endpoint that runs SERVER-SIDE (where both `_cat_cache`/`gc_users.db` and
+`PG_DATABASE_URL`/`_PG_POOL` already live in the same process) and returns AGGREGATE counts plus a
+small capped sample — deliberately never a user's full keyword/saved-search list. The diff harness
+should follow the same shape: a new admin endpoint (e.g. `/api/tsquery-diff-check`) that, for each
+real keyword/filter_q string, (a) runs it through the existing single-entry `_compile_query`/
+`_wl_bool_compile` path against the in-memory `_cat_cache` to get the OLD matching SKU set
+(compare against the FULL catalog, not just `available` items, so it's apples-to-apples with
+Postgres's `items` table, which also keeps full sold/delisted history), (b) runs it through the
+new translator and executes `SELECT sku FROM items WHERE search_vector @@ (...)` via `_pg_conn()`
+to get the NEW set, (c) diffs the two sets, and (d) returns aggregate mismatch counts plus a
+capped sample of just the MISMATCHING entries' raw text (same privacy posture as
+`/api/search-syntax-stats`'s existing sample fields) — never SKUs or item names. This is real,
+scoped follow-up work, not done this session; building AND shipping a new live-Postgres-querying
+admin endpoint in the same pass as the translator itself risked rushing something
+privacy-sensitive, and Chuck's ask this session was specifically the translator (stage 2).
+
+**Next**: implement and ship the `/api/tsquery-diff-check` endpoint described above, run it, and
+only proceed to step 4 (unifying Tier 1/Tier 2 into `_pg_browse()`) once it comes back clean on
+all 833+343 real strings.

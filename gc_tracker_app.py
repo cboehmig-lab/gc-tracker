@@ -4055,6 +4055,208 @@ def _wl_bool_compile(base):
     return clauses or None
 
 
+# ── Phase F stage 2: tsquery translator (search_vector-backed) ──────────────
+# POSTGRES_PHASE_F_DESIGN.md §7 step 2. NOT wired into any live route yet —
+# step 3 (a diff harness against real production want-list/filter_q strings)
+# has to run clean first, then step 4 unifies Tier 1/Tier 2 around it. Step 3
+# has to be a new admin-only server-side endpoint, NOT a Chuck's-Mac-terminal
+# script like migrate_cat_cache_to_pg.py — the real keyword/saved-search data
+# lives in gc_users.db on the Railway volume, not locally, so it only exists
+# where this app itself already runs. See the "Stage 2 — SHIPPED" addendum in
+# POSTGRES_PHASE_F_DESIGN.md §7 for that endpoint's design.
+# _compile_query/_wl_bool_compile/_compile_fq_clauses/_kw_match above are all
+# UNCHANGED and still what every live request path uses.
+#
+# Mirrors the ABOVE functions' own parsing/routing decisions one for one
+# (same comma=AND, ';'=OR, leading '-'=NOT, same gate for when the OR/NOT
+# path even engages) rather than re-deriving the rules independently, so a
+# side-by-side read against _wl_bool_compile/_compile_fq_clauses/
+# _compile_query is how to audit this for drift. Builds ONE tsquery
+# expression per entry as multiple parameterized to_tsquery()/
+# phraseto_tsquery() calls joined by SQL's own tsquery operators (&&/||/!!)
+# in the query text — never by string-concatenating raw tsquery syntax, so a
+# user-typed term can never be interpreted as tsquery operator syntax.
+#
+# Two DELIBERATE semantic narrowings versus the Python regex matcher, both
+# expected to be invisible on real data — the step 3 diff harness must
+# specifically exercise wildcard and quoted-phrase entries to confirm that,
+# not just trust this reasoning:
+#   1. Suffix wildcards ('OD*') translate to a true lexeme-PREFIX match
+#      (to_tsquery('simple', 'od:*') — only matches a token that STARTS WITH
+#      "od"). The Python regex is unanchored substring matching (val.search()
+#      over the whole "name brand" text with no boundary at the wildcard
+#      end), so e.g. 'OD*' can also match inside "Wood" today; tsquery's
+#      prefix match won't. Tightening, not broadening.
+#   2. Quoted "exact phrase" terms ('"Big Muff"') translate to a tsquery
+#      phrase (phraseto_tsquery — <->-chained lexemes, word-boundary
+#      respecting) rather than the Python path's raw substring containment
+#      (_matches_all's `val in text_lower`, which technically allows
+#      mid-word matches — '"amp"' would match "trampoline" today).
+#      Tightening, not broadening.
+# Anything NOT expressible in pure tsquery (a non-suffix wildcard — '*'
+# leading, mid-word, multiple, or inside a multi-word term) raises
+# _TsqueryUnsupported rather than being silently mistranslated. September
+# 2026 production data showed zero real non-suffix-wildcard usage
+# (POSTGRES_PHASE_F_DESIGN.md §3), so this is expected to never fire on a
+# real want list/saved search, but a caller must not swallow it silently —
+# step 4's job is to fall back to the dormant Python _kw_match path for just
+# that one entry, never guess.
+#
+# Performance note for step 4, not a step-2 correctness concern: a clause
+# that's all-NOT (no positive term — filter_q alone allows this, see
+# _tsquery_filter_q below) produces a bare `!!(...)` tsquery, which a GIN
+# index can't use directly (negation isn't index-searchable). Rare in
+# practice (needs a search of just "-word" with nothing else) but step 4
+# should keep it ANDed with an indexed predicate (store/availability) rather
+# than ever letting it drive a bare sequential scan of `items`.
+
+class _TsqueryUnsupported(Exception):
+    """A parsed term/entry has no pure-tsquery translation (see module notes
+    above) — the only case today is a non-suffix wildcard. Callers must
+    catch this per-entry, never let it silently drop or mistranslate a
+    user's search."""
+
+# Conservative on purpose: only plain word characters plus internal hyphen/
+# apostrophe are allowed to be spliced as a bare lexeme (word or word:*) in a
+# to_tsquery() argument string — nothing tsquery's own operator syntax
+# (&|!():*<>) could ever parse as more than one plain token. Anything else
+# either goes through phraseto_tsquery() (a %s parameter, never spliced) or
+# raises _TsqueryUnsupported.
+_TSQUERY_LEXEME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9'-]*$")
+
+def _tsquery_safe_lexeme(word):
+    return bool(word) and bool(_TSQUERY_LEXEME_RE.match(word))
+
+def _tsquery_compile_term(part):
+    """One already-comma-split piece, mirroring _compile_query's per-part
+    branching (quoted-exact / wildcard / plain word-or-phrase). Returns
+    (sql_fragment, params). Raises _TsqueryUnsupported for a non-suffix or
+    multi-word wildcard."""
+    if part.startswith('"') and part.endswith('"') and len(part) > 2:
+        return "phraseto_tsquery('simple', %s)", [part[1:-1]]
+    if '*' in part:
+        if part.count('*') == 1 and part.endswith('*'):
+            word = part[:-1]
+            if word and ' ' not in word and _tsquery_safe_lexeme(word):
+                return "to_tsquery('simple', %s)", [word + ':*']
+        raise _TsqueryUnsupported(f"non-suffix or multi-word wildcard: {part!r}")
+    # Plain word or an un-quoted multi-word phrase -> phraseto_tsquery, the
+    # native equivalent of _compile_query's 'word' \b...\b branch (both are
+    # whole-word/phrase, order- and adjacency-preserving).
+    return "phraseto_tsquery('simple', %s)", [part]
+
+def _tsquery_compile_query(query_str):
+    """Mirrors _compile_query(query_str): comma-separated parts, ANDed.
+    Returns (sql_fragment, params), or (None, []) if query_str has no
+    non-empty parts. Raises _TsqueryUnsupported if any part isn't
+    pure-tsquery-expressible — never a partial/silent translation."""
+    frags, params = [], []
+    for part in query_str.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        frag, p = _tsquery_compile_term(part)
+        frags.append(frag)
+        params.extend(p)
+    if not frags:
+        return None, []
+    return " && ".join(frags), params
+
+def _tsquery_bool_clauses(base):
+    """Mirrors _wl_bool_compile(base) exactly, including ITS gate for when
+    the OR/NOT path applies at all (';' present, OR a leading-dash
+    comma-part somewhere — not just 'a dash appears anywhere', so an
+    internal hyphen like 'OD-1' correctly does NOT engage this path, same as
+    the original). Returns (None, []) when _wl_bool_compile would return
+    None (caller falls through to the plain _tsquery_compile_query path,
+    exactly like the real matcher-build loop). A clause with no positive
+    term is dropped (never engages), matching _wl_bool_compile's own "a
+    clause needs at least one positive part" rule — filter_q's version below
+    is deliberately different here, see _tsquery_filter_q."""
+    parts_all = [p.strip() for cl in base.split(';') for p in cl.split(',')]
+    has_neg = any(len(p) > 1 and p[0] == '-' for p in parts_all)
+    if ';' not in base and not has_neg:
+        return None, []
+    clause_frags, params = [], []
+    for cl in base.split(';'):
+        cl = cl.strip()
+        if not cl:
+            continue
+        pos_frags, neg_frags = [], []
+        for p in cl.split(','):
+            p = p.strip()
+            if not p:
+                continue
+            if len(p) > 1 and p[0] == '-':
+                frag, prm = _tsquery_compile_term(p[1:].strip())
+                neg_frags.append(frag)
+            else:
+                frag, prm = _tsquery_compile_term(p)
+                pos_frags.append(frag)
+            params.extend(prm)
+        if not pos_frags:
+            continue  # matches _wl_bool_compile: needs >=1 positive part
+        parts = pos_frags + [f"!!({f})" for f in neg_frags]
+        clause_frags.append("(" + " && ".join(parts) + ")")
+    if not clause_frags:
+        return None, []
+    return " || ".join(clause_frags), params
+
+def _tsquery_want_list_entry(kw):
+    """Mirrors the want-list keyword routing the matcher-build loop in
+    api_browse() does (strip legacy '=' prefix, v2.16.3 colon-prefix
+    expansion, bool-clause path tried first, plain comma-AND/phrase/
+    wildcard/quoted path as fallback). Returns (sql_fragment, params), or
+    (None, []) for an empty/no-op entry."""
+    base = kw.lstrip('=').strip()
+    if not base:
+        return None, []
+    base = _expand_colon_prefix(base, join=', ')
+    frag, params = _tsquery_bool_clauses(base)
+    if frag is not None:
+        return frag, params
+    return _tsquery_compile_query(base)
+
+def _tsquery_filter_q(fq, max_tokens=12, max_clauses=4):
+    """Mirrors _compile_fq_clauses(fq) exactly: colon-prefix expansion, ';'
+    = OR between clauses, SPACE-separated tokens within a clause (quoted
+    phrases stay one token, via the same _FQ_TOKEN_RE), leading '-' = NOT.
+    Same token/clause budget as the Python path (max_tokens/max_clauses
+    default to _compile_fq_clauses' own defaults) so this can't be made to
+    do more work than the regex matcher already allows. Unlike
+    _tsquery_bool_clauses/_wl_bool_compile, a clause with ONLY negative
+    terms is kept (matches _compile_fq_clauses: `if pos or neg:`, not `if
+    pos:`) — filter_q genuinely supports "-word" meaning "everything except
+    word" as a whole query, want-list entries don't. Returns
+    (sql_fragment, params), or (None, []) if fq has no clauses."""
+    fq = _expand_colon_prefix(fq, join=' ')
+    clause_frags, params = [], []
+    budget = max_tokens
+    for cl in fq.split(';'):
+        cl = cl.strip()
+        if not cl or budget <= 0:
+            continue
+        toks = _FQ_TOKEN_RE.findall(cl)[:budget]
+        budget -= len(toks)
+        pos_frags, neg_frags = [], []
+        for tok in toks:
+            is_neg = len(tok) > 1 and tok[0] == '-'
+            term_text = tok[1:] if is_neg else tok
+            frag, prm = _tsquery_compile_query(term_text)
+            if frag is None:
+                continue
+            (neg_frags if is_neg else pos_frags).append(frag)
+            params.extend(prm)
+        if pos_frags or neg_frags:
+            parts = pos_frags + [f"!!({f})" for f in neg_frags]
+            clause_frags.append("(" + " && ".join(parts) + ")")
+        if len(clause_frags) >= max_clauses:
+            break
+    if not clause_frags:
+        return None, []
+    return " || ".join(clause_frags), params
+
+
 @app.route("/api/saved-search-counts", methods=["POST"])
 def api_saved_search_counts():
     """Return match counts for each saved search in a single batch call."""
@@ -7531,7 +7733,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.31"
+APP_VERSION = "2.16.32"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

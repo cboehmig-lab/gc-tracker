@@ -1,7 +1,55 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-22 · Current version: v2.16.31 (Phase F stage 1 — tsvector column + GIN index, schema only) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-22 · Current version: v2.16.32 (Phase F stage 2 — tsquery translator, not wired to any route) · Domain: gcgeartracker.com*
 
 ---
+
+## v2.16.32 — 2026-09-22: Phase F stage 2 — tsquery translator (new functions only, NOT wired into any live route)
+
+**Why**: second step of the Phase F search-engine build (`POSTGRES_PHASE_F_DESIGN.md` §7) — a
+translator that turns the existing want-list-keyword/`filter_q` parsed structure into a
+Postgres `tsquery` expression, ready to run against the `search_vector` column v2.16.31 added.
+This version ships ONLY the translator functions — nothing calls them yet, every live request
+still goes through the unmodified `_compile_query`/`_wl_bool_compile`/`_compile_fq_clauses`/
+`_kw_match` Python path.
+
+**What shipped**: five new module-level functions (`_tsquery_compile_term`,
+`_tsquery_compile_query`, `_tsquery_bool_clauses`, `_tsquery_want_list_entry`,
+`_tsquery_filter_q`) plus a `_TsqueryUnsupported` exception, placed right after
+`_wl_bool_compile`. Each mirrors its Python-matcher counterpart's own parsing/routing decisions
+one for one (comma=AND, `;`=OR, leading `-`=NOT, same "does the OR/NOT path even engage" gate) so
+it can be audited side by side with the functions it's replacing, rather than re-deriving the
+rules independently. Composes each entry as multiple parameterized `to_tsquery()`/
+`phraseto_tsquery()` calls joined by SQL's `&&`/`||`/`!!` tsquery operators — never string-
+concatenating raw tsquery syntax, so a user-typed term can never be read as tsquery operator
+syntax. Two deliberate, documented semantic narrowings versus the Python regex matcher (suffix
+wildcards become true lexeme-prefix matches instead of unanchored substring matches; quoted exact
+phrases become word-boundary phrase matches instead of raw substring containment) — both
+directions are "stricter/more correct," never looser. A non-suffix wildcard (leading, mid-word,
+multiple, or inside a multi-word term) raises `_TsqueryUnsupported` rather than being silently
+mistranslated — production data showed zero real usage of this shape, so it's expected to never
+actually fire.
+
+**A real behavioral asymmetry caught doing this line-by-line**: `_compile_fq_clauses` (the search
+box) keeps an all-negative clause — `"-electric"` alone means "everything except electric" — while
+`_wl_bool_compile` (want-list keywords) requires at least one positive term per clause and drops
+an all-negative entry. `_tsquery_filter_q`/`_tsquery_bool_clauses` preserve this exact asymmetry;
+getting it wrong either way would have been a silent, easy-to-miss divergence between search-box
+and want-list behavior once this actually goes live.
+
+**Verification**: `python3 -m py_compile`, `node --check` (untouched), a disposable-venv import +
+61-route table build (unchanged — nothing wired to a route), and a 22-case self-test covering
+every branch (plain word, quoted phrase, suffix wildcard, three unsupported-wildcard shapes,
+comma-AND, `;`-OR, leading-`-`-NOT, the internal-hyphen-isn't-NOT-syntax case, colon-prefix
+expansion, the want-list-vs-filter_q all-negative asymmetry, token/clause budget caps) — all pass.
+**This is structural verification only** — it checks each input routes correctly and produces the
+right SQL shape, not that the generated SQL actually matches the same SKUs as the Python matcher
+against real Postgres, since this sandbox has no live Postgres access. Full detail, plus the
+design for the real live diff harness (step 3 — an admin-only endpoint, not a Chuck's-terminal
+script, since the real keyword/search data lives on the Railway volume, not locally) in
+`POSTGRES_PHASE_F_DESIGN.md`'s new "Stage 2 — SHIPPED" addendum under §7.
+
+**Status**: new functions only, zero behavior change for any real user or request path (nothing
+calls them). Step 3 (the live diff harness) is next, not started.
 
 ## v2.16.31 — 2026-09-22: Phase F stage 1 — search_vector tsvector column + GIN index (schema only, no behavior change)
 
