@@ -42,6 +42,37 @@ DATABASE_URL = (os.environ.get("DATABASE_URL") or "").strip()
 CACHE_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else (SCRIPT_DIR / "gc_category_cache.json")
 SCHEMA_FILE = SCRIPT_DIR / "pg_schema.sql"
 
+
+def _concurrent_statements(concurrent_sql):
+    """Mirrors gc_tracker_app.py's _pg_concurrent_statements() -- see that function's
+    docstring. Kept in sync by hand since this script intentionally doesn't import from
+    the app module (see this script's own docstring: no dependency on request-path code)."""
+    code_only = "\n".join(
+        line for line in concurrent_sql.splitlines()
+        if line.strip() and not line.strip().startswith("--")
+    )
+    return [s.strip() for s in code_only.split(";") if s.strip()]
+
+
+def _migrate_search_vector_if_stale(conn):
+    """Mirrors gc_tracker_app.py's _pg_migrate_search_vector_if_stale() -- see that
+    function's docstring for the full reasoning (v2.16.35 hyphen-normalization fix)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('items')")
+        if cur.fetchone()[0] is None:
+            return
+        cur.execute("""
+            SELECT pg_get_expr(d.adbin, d.adrelid)
+            FROM pg_attrdef d
+            JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+            WHERE d.adrelid = 'items'::regclass AND a.attname = 'search_vector'
+        """)
+        row = cur.fetchone()
+        if row and row[0] and 'regexp_replace' not in row[0]:
+            cur.execute("ALTER TABLE items DROP COLUMN search_vector")
+            conn.commit()
+            print("  migrated search_vector to hyphen-normalized generated expression")
+
 # Same 20-column shape as _cat_cache's per-item dict (see _run()'s merge block
 # and _build_base_item_list() in gc_tracker_app.py) plus the `sku` key.
 COLS = ["sku", "name", "brand", "category", "subcategory", "condition", "condition_note",
@@ -97,6 +128,7 @@ def main():
         # index build below it runs afterward on its own autocommit connection.
         schema_sql = SCHEMA_FILE.read_text()
         main_sql, marker_found, concurrent_sql = schema_sql.partition("-- ==CONCURRENT-INDEXES==")
+        _migrate_search_vector_if_stale(conn)
         with conn.cursor() as cur:
             cur.execute(main_sql)
         conn.commit()
@@ -106,7 +138,8 @@ def main():
             concurrent_conn.autocommit = True
             try:
                 with concurrent_conn.cursor() as ccur:
-                    ccur.execute(concurrent_sql)
+                    for stmt in _concurrent_statements(concurrent_sql):
+                        ccur.execute(stmt)
                 print("  concurrent indexes ready")
             finally:
                 concurrent_conn.close()

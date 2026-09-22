@@ -1,5 +1,101 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-22 · Current version: v2.16.34 (Phase F stage 3 diff-check RUN against production, real translator bug found+fixed) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-22 · Current version: v2.16.35 (Phase F stage 2 rebuilt for parity — hyphen tokenization + quoted-phrase punctuation/plural fixes) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.35 — 2026-09-22: Phase F stage 2 rebuilt for parity — hyphen-digit tokenization fixed, quoted-phrase punctuation/plural narrowing fixed
+
+**Why**: v2.16.34's production diff-check run left two confirmed, undecided findings (see that
+entry and `POSTGRES_PHASE_F_DESIGN.md`'s addenda). Chuck's explicit instruction this session:
+"change those two to get as close to parity as possible with old." Both are now fixed, verified
+against real Postgres with an extended synthetic catalog, and applied — not just documented.
+
+**Fix 1 — hyphen-adjacent digits.** `search_vector`'s generated expression now runs
+`regexp_replace(coalesce(name,'') || ' ' || coalesce(brand,''), '-', ' ', 'g')` before
+`to_tsvector('simple', ...)`, turning every hyphen into a space before tokenization — so
+`Gibson ES-335 Memphis` produces clean adjacent lexemes `'es' '335'` instead of `'es' '-335'`.
+Every query-side call in `_tsquery_compile_term` gets the identical `part.replace('-', ' ')`
+normalization before `to_tsquery`/`phraseto_tsquery`, so both sides tokenize hyphenated text the
+same way. Because a `GENERATED ALWAYS AS (...) STORED` column's expression can't be altered in
+place (confirmed directly — needs `DROP COLUMN` + re-`ADD COLUMN`, another full-table rewrite),
+this needed a self-migrating schema: `_pg_migrate_search_vector_if_stale()` runs at startup
+before the idempotent schema-apply step, detects the column's CURRENT generated expression via
+`pg_attrdef`/`pg_get_expr()`, and `DROP COLUMN`s it only if it's still the pre-v2.16.35 (no
+`regexp_replace`) version — confirmed `DROP COLUMN` auto-drops the dependent GIN index too (no
+`CASCADE` needed), so the schema-apply step right after rebuilds both index and column fresh. A
+one-time, self-healing no-op on every deploy after the first one that runs it. The wildcard fast
+path (`word:*`) now explicitly excludes hyphenated words instead of trying to normalize them —
+confirmed via direct testing that `to_tsquery`'s QUERY-string parser treats an internal hyphen as
+a phrase separator (`to_tsquery('simple', 'ES-3:*')` parses as TWO adjacent prefix lexemes,
+`'es':* <-> '-3':*`, not one `'es-3'` lexeme) and rejects a literal space in its mini-language
+outright, so neither the old nor a naively-normalized form is safe there; a hyphenated suffix
+wildcard now falls back to `_TsqueryUnsupported` (the dormant Python matcher path) rather than
+risk a wrong match — real production data shows zero want-list/saved-search entries use this
+pattern today.
+
+**Fix 2 — quoted-phrase punctuation/plural narrowing.** Quoted terms (`'"jam pedal"'`) no longer
+compile to `phraseto_tsquery`. They now compile to a `pg_trgm`-backed `ILIKE '%...%'` match against
+`coalesce(name,'') || ' ' || coalesce(brand,'')`, restoring the old Python matcher's raw-substring
+semantics exactly: plural tolerance (`"jam pedal"` matches "Jam Pedals" — literal substring, no
+stemming needed), punctuation sensitivity (`"Mr. Black"` ≠ `"mr black"` again — ILIKE doesn't
+strip periods the way `to_tsvector`/`phraseto_tsquery` do), and even the old's mid-word substring
+behavior (`"amp"` still matches inside "Trampoline"). A new `pg_trgm` GIN index
+(`idx_items_name_brand_trgm`, on `(coalesce(name,'')||' '||coalesce(brand,'')) gin_trgm_ops`)
+backs it so this stays index-searchable rather than falling to a sequential scan. New
+`_like_escape()` helper escapes `\`, `%`, `_` in that order (order matters — reversing it
+double-escapes a literal backslash) before splicing into the `%...%` pattern.
+
+**Architectural change this forced**: `_tsquery_compile_term` now returns a COMPLETE boolean SQL
+predicate per term (either `search_vector @@ (...)` or an ILIKE clause) instead of a bare
+tsquery/tsvector fragment, because a boolean ILIKE predicate and a tsquery value are different
+type systems that can't compose under tsquery's own `&&`/`||`/`!!` operators — mixing them
+wouldn't even type-check. `_tsquery_compile_query`, `_tsquery_bool_clauses`, and
+`_tsquery_filter_q` all changed their composition from tsquery operators to plain SQL boolean
+operators (`&&`→`AND`, `||`→`OR`, `!!(...)`→`NOT (...)`), keeping the v2.16.34 params-order fix
+intact throughout. The stage-3 diff-check's execute call site dropped its
+`WHERE search_vector @@ ({frag})` wrapper in favor of `WHERE ({frag})`, since `frag` is now a
+complete predicate on its own.
+
+**A second, smaller mechanical fix needed to ship two `CREATE INDEX CONCURRENTLY` statements
+instead of one**: `CREATE INDEX CONCURRENTLY` is rejected inside any transaction block, and
+Postgres implicitly wraps EVERY multi-statement `cur.execute()` call in one transaction — even
+under `autocommit=True` — regardless of how many `;`-separated statements are in the string.
+`_init_pg_schema()`'s concurrent-index step (and `migrate_cat_cache_to_pg.py`'s mirror) now loop,
+running each statement in the CONCURRENT-INDEXES section of `pg_schema.sql` as its own
+`cur.execute()` call (`_pg_concurrent_statements()`), which sidesteps the implicit wrapping
+entirely (each becomes its own simple-query protocol message). Full-line SQL comments are
+stripped before splitting on `;` — `pg_schema.sql`'s own comments include example commands that
+end in `;` (the "DROP INDEX CONCURRENTLY ..." operational note), which a naive split would
+otherwise mistake for a statement boundary. One statement failing no longer aborts the rest (each
+wrapped in its own try/except, logged and skipped) — relevant now that there's more than one.
+
+**Verified**: (1) the full schema+migration flow simulated end to end against a local throwaway
+Postgres (`gc_test`), covering all three real-world states — fresh deploy (no `items` table yet),
+upgrading from the pre-v2.16.35 schema (drops stale column, rebuilds both indexes + `pg_trgm`,
+confirmed `indisvalid = true` on both), and an idempotent re-run on an already-migrated schema
+(no-op, confirmed). (2) The rewritten translator ran against REAL Postgres (not just Python-side
+structural comparison) over the existing 25-case self-test catalog plus new cases targeting both
+fixes directly (hyphenated model numbers, quoted-phrase punctuation/plurals, and mixed
+quoted-ILIKE + tsquery term composition within one bool clause) — 39/42 pass exactly. The 3
+remaining differences are all explained, not bugs: 2 are the ALREADY-DOCUMENTED wildcard
+mid-word-substring tradeoff from stage 2's original design (`'OD*'` matching inside "Wood" — old
+matcher behavior for wildcards specifically, unrelated to today's two fixes), and 1 is a new,
+intentional, desirable side effect of the hyphen fix itself (an unquoted space-separated query
+like `"ES 335"` now also matches hyphenated `"ES-335"` text — hyphens and spaces are now
+equivalent at the token level on purpose, which is the whole point of normalizing them the same
+way on both sides). `py_compile` clean; JS untouched, not re-verified this session (no JS changes).
+
+**Status**: v2.16.35 built and verified locally end-to-end (schema migration + translator, both
+against live local Postgres), NOT yet pushed as of this writing. **Next**: Chuck pushes from his
+Mac terminal, confirm the deploy is ACTIVE/healthy — this one applies a real schema change (a
+full-table `ALTER TABLE ... DROP/ADD COLUMN` rewrite on `items`, ~450K+ rows, plus building TWO
+concurrent indexes), so check deploy logs for `[pg] migrated search_vector to hyphen-normalized
+generated expression` → `[pg] items table ready` → `[pg] concurrent indexes ready` with no errors,
+and sanity-check timing against stage 1's original ~10s index-build precedent. Then re-run
+`POST /api/tsquery-diff-check` against real production data to confirm both fixes actually close
+the hyphen and quoted-phrase mismatch clusters live (expect a further drop from v2.16.34's
+43-mismatch keyword / 23-mismatch saved-search baseline, ideally close to zero modulo any
+remaining benign catalog-churn drift).
 
 ---
 

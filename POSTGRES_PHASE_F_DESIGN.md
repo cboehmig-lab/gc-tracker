@@ -674,3 +674,55 @@ diff-check against real production data to confirm the params-bug fix actually c
 specific mismatches live and to size what's left (expected: the two open findings above, still
 showing as mismatches until separately decided), then bring the new numbers + the two open
 questions back to Chuck.
+
+
+---
+
+### Addendum 11 (2026-09-22, v2.16.35) — both open findings fixed and verified: hyphen tokenization + quoted-phrase punctuation/plural parity
+
+Chuck's explicit instruction: "change those two to get as close to parity as possible with old" —
+referring to Addendum 9/10's two open findings. Both fixed this session, not just documented. Full
+writeup in HANDOFF.md's 2026-09-22 v2.16.35 entry — summary here:
+
+- **Hyphen-adjacent digits**: `search_vector`'s generated expression and every query-side
+  `to_tsquery`/`phraseto_tsquery` call now normalize `-` to a space before tokenizing
+  (`regexp_replace(..., '-', ' ', 'g')` / `part.replace('-', ' ')`), so `ES-335` and a plain `335`
+  query tokenize consistently on both sides. Required a self-migrating schema
+  (`_pg_migrate_search_vector_if_stale()`, since a `GENERATED ALWAYS AS (...) STORED` column's
+  expression can't be altered in place — confirmed needs `DROP COLUMN` + re-`ADD COLUMN`, another
+  full-table rewrite). The wildcard fast path now excludes hyphenated words (falls back to
+  `_TsqueryUnsupported`) rather than risk a wrong match — `to_tsquery`'s query-string parser
+  treats an internal hyphen as a phrase separator, unlike `to_tsvector`'s document parser, so
+  normalizing it the same way doesn't work there; confirmed via direct Postgres testing.
+- **Quoted-phrase punctuation/plural narrowing**: quoted terms now compile to a `pg_trgm`-backed
+  `ILIKE '%...%'` match against `name || ' ' || brand` instead of `phraseto_tsquery`, restoring
+  the old Python matcher's raw-substring semantics (plural tolerance, punctuation sensitivity,
+  mid-word substring matching) exactly. New `idx_items_name_brand_trgm` GIN trigram index backs
+  it. New `_like_escape()` helper for safe `%`/`_`/`\` embedding in the pattern.
+- **Forced architectural change**: `_tsquery_compile_term` now returns a COMPLETE boolean SQL
+  predicate per term (ILIKE or `search_vector @@ (...)`), not a bare tsquery fragment — an ILIKE
+  predicate and a tsquery value don't compose under tsquery's `&&`/`||`/`!!` operators (different
+  type systems). All four translator functions now compose with plain SQL `AND`/`OR`/`NOT`
+  instead. The stage-3 diff-check's execute call site dropped its `search_vector @@ (...)` wrapper
+  accordingly.
+- **Mechanical fix to ship 2 `CREATE INDEX CONCURRENTLY` statements instead of 1**: Postgres
+  implicitly wraps every multi-statement `cur.execute()` call in one transaction even under
+  `autocommit=True`, and `CONCURRENTLY` is rejected inside any transaction block regardless of
+  autocommit. Fixed by splitting the CONCURRENT-INDEXES section into individual `cur.execute()`
+  calls, one per statement, with full-line SQL comments stripped first (the file's own comments
+  contain example commands ending in `;`, which a naive split-on-`;` would otherwise mistake for a
+  statement boundary).
+
+**Verified**: full schema+migration flow simulated end to end locally against all three real
+states (fresh deploy, upgrade from old schema, idempotent re-run on already-migrated schema).
+Rewritten translator run against real Postgres over the existing self-test catalog plus new
+hyphen/quoted-phrase/mixed-composition cases — 39/42 pass exactly; the 3 differences are the
+pre-existing documented wildcard mid-word-substring tradeoff (2 cases, unrelated to this session's
+fixes) and one new, intentional, desirable side effect of the hyphen fix (`"ES 335"` now also
+matches hyphenated `ES-335` text — hyphens and spaces are now equivalent at the token level on
+both sides, which is the point of the fix). `py_compile` clean.
+
+**Status**: built and verified locally, NOT yet pushed. Next: Chuck pushes, confirm deploy
+healthy (this is a real schema change — full-table rewrite + two concurrent index builds), then
+re-run the production diff-check to confirm both fixes close their respective mismatch clusters
+live.

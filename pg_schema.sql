@@ -52,10 +52,33 @@ CREATE INDEX IF NOT EXISTS idx_items_price       ON items (price)       WHERE av
 -- matcher (which searches `name_l + " " + brand_l` — see _kw_match() in gc_tracker_app.py).
 -- 'simple' config on purpose — no stemming/stopword removal — so matching stays close to
 -- today's literal whole-word semantics rather than introducing new fuzziness nobody asked for.
+--
+-- v2.16.35: hyphens are normalized to spaces BEFORE tokenizing (regexp_replace below), matching
+-- gc_tracker_app.py's own _KW_SPLIT_RE (\W+) tokenizer, which always splits on a hyphen. Without
+-- this, Postgres's 'simple' parser treats a hyphen immediately followed by digits as a NEGATIVE
+-- NUMBER sign (confirmed: to_tsvector('simple', 'ES-335') emits lexeme '-335', not '335'), so a
+-- plain search for '335' silently never matched a hyphenated model number like "ES-335" — see the
+-- diff-check-run addenda in POSTGRES_PHASE_F_DESIGN.md for the real-production repro. The SAME
+-- normalization must be applied to every query-side to_tsquery/phraseto_tsquery call too (see
+-- gc_tracker_app.py's _tsquery_compile_term) so both sides tokenize identically. If this column
+-- already exists from before v2.16.35 with the OLD (non-normalized) expression, _init_pg_schema()
+-- and migrate_cat_cache_to_pg.py both migrate it (DROP + this ADD, which rebuilds it fresh) before
+-- reaching this statement — see _pg_migrate_search_vector_if_stale() in gc_tracker_app.py.
 ALTER TABLE items ADD COLUMN IF NOT EXISTS search_vector tsvector
     GENERATED ALWAYS AS (
-        to_tsvector('simple', coalesce(name, '') || ' ' || coalesce(brand, ''))
+        to_tsvector('simple', regexp_replace(coalesce(name, '') || ' ' || coalesce(brand, ''), '-', ' ', 'g'))
     ) STORED;
+
+-- v2.16.35: pg_trgm backs a literal, punctuation-preserving, substring-anywhere match for
+-- QUOTED-exact want-list/search terms (e.g. '"jam pedal"'), replacing a strict tsquery phrase
+-- match (phraseto_tsquery) that couldn't reproduce two things the old Python regex substring
+-- matcher did for free: matching "Jam Pedals" (plural) from a singular "jam pedal" query (no
+-- stemming in the 'simple' config), and treating "Mr. Black" / "mr black" as different queries
+-- (to_tsvector/phraseto_tsquery strip punctuation entirely, so both converged on the same
+-- result in testing). See gc_tracker_app.py's _tsquery_compile_term for where this is used — a
+-- plain ILIKE '%...%' against name+brand, backed by the trigram index below rather than a
+-- sequential scan.
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 -- ==CONCURRENT-INDEXES==
 -- Everything below this marker CANNOT be executed as part of the same multi-statement blob as
@@ -63,16 +86,20 @@ ALTER TABLE items ADD COLUMN IF NOT EXISTS search_vector tsvector
 -- inside a transaction block, and both callers of this file (_init_pg_schema() in
 -- gc_tracker_app.py and migrate_cat_cache_to_pg.py) apply everything above this marker as one
 -- cur.execute() call inside an explicit transaction (autocommit=False). Both callers split this
--- file on this exact marker string and run the statement below on its own autocommit=True
--- connection instead. Keep exactly ONE statement below this marker — see the callers' comments
--- for why multiple statements here would reintroduce the same implicit-transaction problem even
--- under autocommit.
+-- file on this exact marker string, then (v2.16.35) run EACH ';'-separated statement below it as
+-- its OWN cur.execute() call on a shared autocommit=True connection. Before v2.16.35 this section
+-- was limited to "exactly ONE statement", because sending SEVERAL statements in a single
+-- cur.execute() call — even on an autocommit connection — has Postgres implicitly wrap that whole
+-- simple-query message in one transaction, which CONCURRENTLY still refuses; splitting into
+-- separate cur.execute() calls (each its own simple-query message) avoids that, so this section
+-- can now hold more than one CONCURRENTLY statement, each on its own line ending in `;`.
 --
 -- Operational note: if the app restarts mid-build (a Railway redeploy racing this), Postgres
--- can leave an INVALID index behind under this exact name. IF NOT EXISTS treats "exists" as
--- "a relation with this name is present", not "is valid", so a leftover invalid index silently
+-- can leave an INVALID index behind under one of these exact names. IF NOT EXISTS treats "exists"
+-- as "a relation with this name is present", not "is valid", so a leftover invalid index silently
 -- blocks any future automatic rebuild. Check `SELECT indexrelid::regclass, indisvalid FROM
--- pg_index WHERE indexrelid = 'idx_items_search_vector'::regclass;` if search ever seems to be
--- falling back to a sequential scan on `items`; `DROP INDEX CONCURRENTLY idx_items_search_vector`
--- and let the next app startup rebuild it if so.
+-- pg_index WHERE indexrelid = '<name>'::regclass;` if search ever seems to be falling back to a
+-- sequential scan on `items`; `DROP INDEX CONCURRENTLY <name>` and let the next app startup
+-- rebuild it if so.
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_items_search_vector ON items USING gin (search_vector);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_items_name_brand_trgm ON items USING gin ((coalesce(name, '') || ' ' || coalesce(brand, '')) gin_trgm_ops);

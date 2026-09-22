@@ -403,6 +403,48 @@ PG_SCHEMA_FILE = SCRIPT_DIR / "pg_schema.sql"
 # autocommit=True connection as its own single statement instead.
 PG_SCHEMA_CONCURRENT_MARKER = "-- ==CONCURRENT-INDEXES=="
 
+def _pg_concurrent_statements(concurrent_sql):
+    """Splits the CONCURRENT-INDEXES section of pg_schema.sql into individual
+    statements, one per cur.execute() call (v2.16.35 — see PG_SCHEMA_CONCURRENT_MARKER's
+    comment and pg_schema.sql's own comment above that marker for why: sending several
+    statements in a single cur.execute() call has Postgres implicitly wrap that whole
+    simple-query message in one transaction even under autocommit, and CREATE INDEX
+    CONCURRENTLY is rejected inside any transaction block).
+
+    Full-line SQL comments are stripped before splitting on ';' — pg_schema.sql's own
+    comments include example commands that end in ';' (e.g. the "DROP INDEX CONCURRENTLY
+    <name>" operational note), which a naive split-on-';' would otherwise mistake for a
+    statement boundary, producing an empty/garbage "statement" that fails execute()."""
+    code_only = "\n".join(
+        line for line in concurrent_sql.splitlines()
+        if line.strip() and not line.strip().startswith("--")
+    )
+    return [s.strip() for s in code_only.split(";") if s.strip()]
+
+def _pg_migrate_search_vector_if_stale(conn):
+    """One-time self-migration (v2.16.35): if items.search_vector already exists but was
+    built from the PRE-v2.16.35 generated expression (no regexp_replace hyphen
+    normalization — see pg_schema.sql's v2.16.35 comment for the hyphen-digit tokenization
+    bug this fixes), drop it so the schema-init step right after this recreates it fresh
+    with the new expression. No-ops forever after the first deploy that runs this
+    successfully. DROP COLUMN also drops the dependent GIN index (confirmed — no CASCADE
+    needed); the concurrent-index step below rebuilds it, alongside the new trigram index."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('items')")
+        if cur.fetchone()[0] is None:
+            return  # fresh deploy, items table doesn't exist yet — nothing to migrate
+        cur.execute("""
+            SELECT pg_get_expr(d.adbin, d.adrelid)
+            FROM pg_attrdef d
+            JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+            WHERE d.adrelid = 'items'::regclass AND a.attname = 'search_vector'
+        """)
+        row = cur.fetchone()
+        if row and row[0] and 'regexp_replace' not in row[0]:
+            cur.execute("ALTER TABLE items DROP COLUMN search_vector")
+            conn.commit()
+            print("[pg] migrated search_vector to hyphen-normalized generated expression")
+
 def _init_pg_schema():
     if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL):
         return
@@ -415,6 +457,7 @@ def _init_pg_schema():
     try:
         conn = psycopg2.connect(PG_DATABASE_URL, connect_timeout=10)
         try:
+            _pg_migrate_search_vector_if_stale(conn)
             with conn.cursor() as cur:
                 cur.execute(main_sql)
             conn.commit()
@@ -429,16 +472,22 @@ def _init_pg_schema():
 
     if not (marker_found and concurrent_sql.strip()):
         return
-    # CREATE INDEX CONCURRENTLY, on its own autocommit connection — see the marker comment in
-    # pg_schema.sql. Best-effort and non-blocking like the step above: Tier 1/Tier 2 reads don't
-    # depend on this index existing yet (Phase F's search engine, which does, isn't built yet),
-    # so a slow build or a hiccup here never blocks startup or degrades current traffic.
+    # CREATE INDEX CONCURRENTLY statements, each its own cur.execute() call on a shared
+    # autocommit connection — see _pg_concurrent_statements() and the marker comment in
+    # pg_schema.sql. Best-effort and non-blocking like the step above: Tier 1/Tier 2 reads
+    # don't depend on these indexes existing yet, so a slow build or a hiccup here never
+    # blocks startup or degrades current traffic. One statement failing (e.g. a leftover
+    # INVALID index from a prior interrupted build) doesn't abort the rest.
     try:
         conn = psycopg2.connect(PG_DATABASE_URL, connect_timeout=10)
         conn.autocommit = True
         try:
             with conn.cursor() as cur:
-                cur.execute(concurrent_sql)
+                for stmt in _pg_concurrent_statements(concurrent_sql):
+                    try:
+                        cur.execute(stmt)
+                    except Exception as e:
+                        print(f"[pg] concurrent statement skipped: {type(e).__name__}: {e} — {stmt[:80]}")
         finally:
             conn.close()
         print("[pg] concurrent indexes ready")
@@ -4127,29 +4176,68 @@ _TSQUERY_LEXEME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9'-]*$")
 def _tsquery_safe_lexeme(word):
     return bool(word) and bool(_TSQUERY_LEXEME_RE.match(word))
 
+def _like_escape(s):
+    """Escapes a literal string for safe embedding in an ILIKE pattern under Postgres's
+    default ESCAPE '\\'. Order matters: backslash first, THEN the two LIKE wildcard
+    characters — escaping % or _ first and backslash second would double-escape the
+    backslash that step just introduced."""
+    return s.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+
 def _tsquery_compile_term(part):
-    """One already-comma-split piece, mirroring _compile_query's per-part
-    branching (quoted-exact / wildcard / plain word-or-phrase). Returns
-    (sql_fragment, params). Raises _TsqueryUnsupported for a non-suffix or
-    multi-word wildcard."""
+    """One already-comma-split piece, mirroring _compile_query's per-part branching
+    (quoted-exact / wildcard / plain word-or-phrase). Returns (sql_fragment, params) — a
+    COMPLETE boolean SQL predicate (e.g. `search_vector @@ (...)` or an ILIKE clause), NOT
+    a bare tsquery/tsvector expression, so callers compose these with plain SQL AND/OR/NOT
+    rather than tsquery's &&/||/!! operators (v2.16.35 — see _tsquery_compile_query and
+    _tsquery_bool_clauses). Raises _TsqueryUnsupported for a non-suffix or multi-word
+    wildcard.
+
+    v2.16.35 changes (POSTGRES_PHASE_F_DESIGN.md's diff-check addenda — real production
+    data showed both of these mismatching the old Python matcher):
+      - Quoted terms now compile to a pg_trgm-backed ILIKE substring match instead of
+        phraseto_tsquery. The 'simple' text-search config has no stemming (so a singular
+        quoted query like '"jam pedal"' never matched a plural "Jam Pedals" listing) and
+        strips punctuation entirely (so '"Mr. Black"' and '"mr black"' converged on the
+        same tsquery). ILIKE against the literal name+brand string restores both: plural/
+        substring tolerance (a straight substring match) and punctuation sensitivity —
+        matching the old Python matcher's raw substring/regex behavior for quoted terms.
+      - Non-quoted terms have hyphens normalized to spaces before hitting to_tsquery/
+        phraseto_tsquery, mirroring search_vector's own regexp_replace normalization in
+        pg_schema.sql. Without this, Postgres's 'simple' parser treats a hyphen
+        immediately followed by digits as a NEGATIVE NUMBER sign (confirmed:
+        to_tsvector('simple', 'ES-335') emits lexeme '-335', not '335'), so a plain search
+        for '335' silently never matched a hyphenated model number like "ES-335".
+      - The wildcard fast path explicitly excludes words containing a hyphen (falls
+        through to _TsqueryUnsupported instead) rather than risk a wrong match: unlike
+        to_tsvector's document parser, to_tsquery's QUERY parser treats an internal hyphen
+        as a phrase separator (to_tsquery('simple', 'ES-3:*') parses as two ADJACENT
+        prefix-matched lexemes, 'es':* <-> '-3':*, not one 'es-3' lexeme), and replacing
+        the hyphen with a space first doesn't work either — to_tsquery rejects a bare
+        space in its query-string mini-language outright. Confirmed via direct Postgres
+        testing; no real production want-list/saved-search entry uses a hyphenated suffix
+        wildcard today (POSTGRES_PHASE_F_DESIGN.md §3), so falling back to the dormant
+        Python matcher for this one rare case is the conservative, correct choice."""
     if part.startswith('"') and part.endswith('"') and len(part) > 2:
-        return "phraseto_tsquery('simple', %s)", [part[1:-1]]
+        pattern = '%' + _like_escape(part[1:-1]) + '%'
+        return "(coalesce(name, '') || ' ' || coalesce(brand, '')) ILIKE %s", [pattern]
     if '*' in part:
         if part.count('*') == 1 and part.endswith('*'):
             word = part[:-1]
-            if word and ' ' not in word and _tsquery_safe_lexeme(word):
-                return "to_tsquery('simple', %s)", [word + ':*']
+            if word and ' ' not in word and '-' not in word and _tsquery_safe_lexeme(word):
+                return "search_vector @@ to_tsquery('simple', %s)", [word + ':*']
         raise _TsqueryUnsupported(f"non-suffix or multi-word wildcard: {part!r}")
-    # Plain word or an un-quoted multi-word phrase -> phraseto_tsquery, the
-    # native equivalent of _compile_query's 'word' \b...\b branch (both are
-    # whole-word/phrase, order- and adjacency-preserving).
-    return "phraseto_tsquery('simple', %s)", [part]
+    # Plain word or an un-quoted multi-word phrase -> phraseto_tsquery, the native
+    # equivalent of _compile_query's 'word' \b...\b branch (both are whole-word/phrase,
+    # order- and adjacency-preserving). Hyphens normalized to spaces first — see docstring.
+    return "search_vector @@ phraseto_tsquery('simple', %s)", [part.replace('-', ' ')]
 
 def _tsquery_compile_query(query_str):
-    """Mirrors _compile_query(query_str): comma-separated parts, ANDed.
-    Returns (sql_fragment, params), or (None, []) if query_str has no
-    non-empty parts. Raises _TsqueryUnsupported if any part isn't
-    pure-tsquery-expressible — never a partial/silent translation."""
+    """Mirrors _compile_query(query_str): comma-separated parts, ANDed. Returns
+    (sql_fragment, params), or (None, []) if query_str has no non-empty parts. Raises
+    _TsqueryUnsupported if any part isn't pure-tsquery-expressible — never a partial/
+    silent translation. v2.16.35: joins with plain SQL AND rather than tsquery's && —
+    each part is now a complete boolean predicate, not a bare tsquery (see
+    _tsquery_compile_term)."""
     frags, params = [], []
     for part in query_str.split(','):
         part = part.strip()
@@ -4160,7 +4248,7 @@ def _tsquery_compile_query(query_str):
         params.extend(p)
     if not frags:
         return None, []
-    return " && ".join(frags), params
+    return " AND ".join(frags), params
 
 def _tsquery_bool_clauses(base):
     """Mirrors _wl_bool_compile(base) exactly, including ITS gate for when
@@ -4211,13 +4299,19 @@ def _tsquery_bool_clauses(base):
         # catalog: the buggy version matched the one item that WAS a pedal
         # and missed both real Ampeg AMG/AMB matches -- see the diff-check
         # addendum in POSTGRES_PHASE_F_DESIGN.md for the full repro.
-        parts = pos_frags + [f"!!({f})" for f in neg_frags]
-        clause_frags.append("(" + " && ".join(parts) + ")")
+        #
+        # v2.16.35: NOT/AND/OR instead of tsquery's !!/&&/|| -- each frag is now a
+        # complete boolean predicate (ILIKE or search_vector @@ (...)), which may mix
+        # both types in one clause (e.g. a quoted positive ANDed with a wildcard
+        # negative), and those two predicate types don't compose under tsquery's own
+        # operators. See _tsquery_compile_term's docstring for why each side changed.
+        parts = pos_frags + [f"NOT ({f})" for f in neg_frags]
+        clause_frags.append("(" + " AND ".join(parts) + ")")
         params.extend(pos_params)
         params.extend(neg_params)
     if not clause_frags:
         return None, []
-    return " || ".join(clause_frags), params
+    return " OR ".join(clause_frags), params
 
 def _tsquery_want_list_entry(kw):
     """Mirrors the want-list keyword routing the matcher-build loop in
@@ -4273,15 +4367,16 @@ def _tsquery_filter_q(fq, max_tokens=12, max_clauses=4):
             # v2.16.34 fix: same params/fragment-order bug as
             # _tsquery_bool_clauses above -- see its comment for the full
             # explanation and production repro.
-            parts = pos_frags + [f"!!({f})" for f in neg_frags]
-            clause_frags.append("(" + " && ".join(parts) + ")")
+            # v2.16.35: NOT/AND instead of !!/&& -- see _tsquery_bool_clauses' comment.
+            parts = pos_frags + [f"NOT ({f})" for f in neg_frags]
+            clause_frags.append("(" + " AND ".join(parts) + ")")
             params.extend(pos_params)
             params.extend(neg_params)
         if len(clause_frags) >= max_clauses:
             break
     if not clause_frags:
         return None, []
-    return " || ".join(clause_frags), params
+    return " OR ".join(clause_frags), params
 
 
 # ── Phase F stage 3: tsquery diff harness (POSTGRES_PHASE_F_DESIGN.md §7
@@ -4555,7 +4650,12 @@ def _tsquery_diff_check_group(entries, old_matcher_fn, translate_fn, texts, toke
             pg_skus = set()
         else:
             try:
-                cur.execute(f"SELECT sku FROM items WHERE search_vector @@ ({frag})", params)
+                # v2.16.35: frag is now a complete boolean predicate (may mix
+                # `search_vector @@ (...)` and ILIKE sub-fragments), not a bare tsquery --
+                # see _tsquery_compile_term's docstring. No `search_vector @@` wrapper here
+                # anymore; wrapping a complete boolean expression in `tsvector @@ (...)`
+                # doesn't even type-check.
+                cur.execute(f"SELECT sku FROM items WHERE ({frag})", params)
                 pg_skus = {row[0] for row in cur.fetchall()}
             except Exception as e:
                 result["errors"] += 1
@@ -8161,7 +8261,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.34"
+APP_VERSION = "2.16.35"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
