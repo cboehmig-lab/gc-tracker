@@ -287,7 +287,21 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 // Handle orientation change / resize
+let _lastLayoutMobile = _isMobile();
 window.addEventListener('resize', () => {
+  // v2.16.42: results are rendered as mobile cards or a desktop table depending on
+  // width at render time. Crossing the 820px breakpoint (rotating a tablet, resizing
+  // a browser window) left the old markup in place — giant card images and unstyled
+  // links in desktop layout. Re-render the current page once when the layout flips.
+  const nowMobile = _isMobile();
+  if (nowMobile !== _lastLayoutMobile) {
+    _lastLayoutMobile = nowMobile;
+    if (_browseMode === 'server') {
+      if (window._lastBrowseItems) _fetchBrowsePage(_srvPage);
+    } else if (typeof renderTable === 'function') {
+      renderTable();
+    }
+  }
   const gcFilters = document.getElementById('gc-filter-collapsible');
   if (!_isMobile()) {
     // Switching to desktop: reset sheet state, show sidebars
@@ -1328,6 +1342,8 @@ function _captureFilterState() {
     globalQuery:    _globalSearchQuery,
     sortField:      _srvSortField,
     sortDir:        _srvSortDir,
+    sortCol:        window._sortCol,
+    sortDirNum:     window._sortDir,
   };
 }
 
@@ -1392,6 +1408,11 @@ function _restoreFilterState() {
   if (rsEl) { rsEl.value = state.searchQ; }
   _updateResSearchClear && _updateResSearchClear();
   _updateFilterDot && _updateFilterDot();
+  // Restore sort (v2.16.42) — captured all along but never restored, so leaving
+  // Want List (which forces Newest) dropped the user's e.g. Price ↑ sort.
+  if (state.sortField) { _srvSortField = state.sortField; _srvSortDir = state.sortDir; }
+  if (state.sortCol !== undefined) { window._sortCol = state.sortCol; window._sortDir = state.sortDirNum; }
+  _updateMobileSortBtns && _updateMobileSortBtns();
   _srvLoading = false;
   _srvPage = 1;
   _fetchBrowsePage(1);
@@ -1567,6 +1588,12 @@ async function _fetchBrowsePage(page) {
     // accordingly instead of always claiming "nationwide", which would be wrong once
     // a subset of stores is selected.
     const _wlScopeNationwide = !_srvStores.length || _srvStores.length >= allStores.length;
+    // The search box searches the selected stores (not nationwide) unless all are
+    // selected — keep the placeholder honest (v2.16.42).
+    const _rsEl = document.getElementById('res-search');
+    if (_rsEl) _rsEl.placeholder = _wlScopeNationwide
+      ? 'Search all stores…'
+      : `Search ${_srvStores.length} selected store${_srvStores.length !== 1 ? 's' : ''}…`;
     const _wlScopeLabel = _wlScopeNationwide
       ? 'nationwide'
       : `in ${_srvStores.length} selected store${_srvStores.length !== 1 ? 's' : ''}`;
@@ -2275,9 +2302,14 @@ async function _fetchSavedSearchCounts() {
     const r = await fetch('/api/saved-search-counts', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({searches: searches.map(function(ss) {
-        return {filters: ss.filters, stores: ss.stores};
-      })})
+      body: JSON.stringify({
+        // Same per-user scope /api/browse uses, so the badge equals what applying shows.
+        user_last_scan: window._lastRunISO || '',
+        watchlist_ids: Object.keys(window._watchlist || {}),
+        searches: searches.map(function(ss) {
+          return {filters: ss.filters, stores: ss.stores};
+        })
+      })
     });
     const d = await r.json();
     if (!d.counts) return;
@@ -3189,6 +3221,9 @@ function autoSizeItemColumn() {
 
   document.addEventListener('mouseenter', function(e) {
     if (_isMobile()) return;  // No hover thumbnails on mobile
+    // Capture-phase mouseenter also fires with target = document / text nodes,
+    // which have no .closest() — threw an uncaught TypeError on every page entry.
+    if (!e.target || typeof e.target.closest !== 'function') return;
     // GC results
     const gcLink = e.target.closest('#res-body a');
     // CL results
@@ -3223,6 +3258,7 @@ function autoSizeItemColumn() {
   }, true);
 
   document.addEventListener('mouseleave', function(e) {
+    if (!e.target || typeof e.target.closest !== 'function') return;
     const link = e.target.closest('#res-body a') || e.target.closest('#cl-body a');
     if (!link) return;
     clearTimeout(hoverTimer);

@@ -4468,6 +4468,45 @@ def api_saved_search_counts():
         return jsonify({"counts": []})
     # Hard cap so even authenticated users can't send thousands of searches.
     searches = searches[:50]
+
+    # v2.16.42: count in Postgres with _pg_browse(count_only=True) — the exact
+    # WHERE /api/browse uses (available-only, per-user scan gate, vintage /
+    # watched toggles). The JSON count below counted UNAVAILABLE items too, so
+    # badges ran ~5x high (e.g. 96,645 for a search that returns 19,812). The
+    # JSON path is kept only as a per-search fallback (no pool / untranslatable
+    # filter_q) until Phase F step 5 deletes it.
+    user_last_scan = (data.get("user_last_scan") or "").strip()
+    wl_ids = set(data.get("watchlist_ids") or [])
+    def _f(v):
+        try: return float(v) if v is not None and v != '' else None
+        except (TypeError, ValueError): return None
+    pg_counts = []
+    for search in searches:
+        n = None
+        if _PG_POOL is not None:
+            try:
+                stores = list(search.get("stores") or [])
+                f = search.get("filters") or {}
+                n = _pg_browse(
+                    store_set=set(stores), search_all=not stores,
+                    user_last_scan=user_last_scan, kw_entries=[],
+                    fq=(f.get("filter_q") or "").lower().strip()[:200],
+                    f_brands=f.get("filter_brands") or [], f_conds=f.get("filter_conditions") or [],
+                    f_cats=f.get("filter_categories") or [], f_subs=f.get("filter_subcategories") or [],
+                    f_watched=bool(f.get("filter_watched")), wl_ids=wl_ids, f_want_only=False,
+                    f_price_drop_only=bool(f.get("filter_price_drop_only")),
+                    f_vintage_only=bool(f.get("vintage_only")),
+                    f_price_min=_f(f.get("filter_price_min")), f_price_max=_f(f.get("filter_price_max")),
+                    sort_field="date", sort_dir="desc", user_sorted=True,
+                    new_ids=set(), fav_stores=set(), page=1, per_page=1, count_only=True)
+            except _PgBrowseIneligible:
+                n = None
+            except Exception as e:
+                print(f"[pg] saved-search count failed, using JSON fallback: {type(e).__name__}: {e}")
+                n = None
+        pg_counts.append(n)
+    if all(n is not None for n in pg_counts):
+        return jsonify({"counts": pg_counts})
     # Use the mtime-memoized in-memory cache (v2.13.0) instead of re-reading and
     # re-parsing the 51MB file from disk on every call (~400ms, GIL-held — it stalled
     # every other request thread). Same read-only snapshot idiom as /api/browse.
@@ -4478,7 +4517,10 @@ def api_saved_search_counts():
         return jsonify({"counts": [0] * len(searches)})
 
     counts = []
-    for search in searches:
+    for _si, search in enumerate(searches):
+        if pg_counts[_si] is not None:
+            counts.append(pg_counts[_si])
+            continue
         stores   = set(search.get("stores") or [])
         f        = search.get("filters") or {}
         fq       = (f.get("filter_q") or "").lower().strip()[:200]   # clamp len, parity with /api/browse (v2.13.0)
@@ -4489,6 +4531,7 @@ def api_saved_search_counts():
         f_pdrop  = bool(f.get("filter_price_drop_only"))
 
         items = [i for i in all_items if i.get("store") in stores] if stores else list(all_items)
+        items = [i for i in items if i.get("available", True)]   # v2.16.42: parity with browse
 
         if fq:
             # v2.16.0: use the SAME shared clause compiler + the SAME name+brand text
@@ -5182,7 +5225,7 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
                f_brands, f_conds, f_cats, f_subs, f_watched, wl_ids,
                f_want_only, f_price_drop_only, f_vintage_only,
                f_price_min, f_price_max, sort_field, sort_dir, user_sorted,
-               new_ids, fav_stores, page, per_page) -> dict:
+               new_ids, fav_stores, page, per_page, count_only=False) -> dict:
     """Same JSON shape as api_browse()'s response, for ANY request, computed
     in Postgres. Raises _PgBrowseIneligible (untranslatable search) or any
     DB error — the caller decides what to do (today: shadow compare only)."""
@@ -5259,6 +5302,15 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
     filtered_where_sql = (f"{base_where_sql} AND {brand_clause} AND {cond_clause} "
                           f"AND {cat_clause} AND {sub_clause}")
     params["no_brand_label"] = NO_BRAND_LABEL
+
+    if count_only:
+        # v2.16.42: /api/saved-search-counts asks for just the total_count this
+        # exact request would return — same WHERE, so a saved search's badge can't
+        # drift from what applying it shows. Returns an int, not the response dict.
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT COUNT(*) FROM items WHERE {filtered_where_sql}", params)
+                return int(cur.fetchone()[0])
 
     # ── ORDER BY (whitelisted columns only, same as Tier 1) ────────────────
     is_new_sql = "(sku = ANY(%(new_ids)s))"
@@ -8693,7 +8745,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.41"
+APP_VERSION = "2.16.42"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

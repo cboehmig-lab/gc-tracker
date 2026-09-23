@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-23 · Version: v2.16.41 (view-switching fixes; Phase F step 4b CUTOVER live since v2.16.40 — see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-09-23 · Version: v2.16.42 (saved-search counts on Postgres + UI fixes; v2.16.41 view-switching fixes; Phase F step 4b CUTOVER live since v2.16.40 — see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,7 +88,16 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.41 — view-switching fixes (2026-09-23)
+## Current State: v2.16.42 — saved-search counts + UI quirks (2026-09-23)
+
+`/api/saved-search-counts` now counts via `_pg_browse(count_only=True)` (same WHERE as browse; JSON
+count kept only as a per-search fallback and now filters `available`) — badges were ~5x high because
+the JSON catalog includes unavailable items. gc.js: sort restored when leaving Want List; results
+re-render when crossing the 820px mobile/desktop breakpoint; search placeholder reflects selected
+stores; hover-thumbnail listener no longer throws on document enter/leave. Full detail: HANDOFF.md
+v2.16.42.
+
+## Previous: v2.16.41 — view-switching fixes (2026-09-23)
 
 Frontend-only (`static/gc.js`). Fixed four bugs in switching between Watch List / Want List / Saved
 Searches: (1) the pre-special-view snapshot was re-captured on every lateral switch, so turning Watch

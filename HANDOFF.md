@@ -1,5 +1,60 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-23 · Current version: v2.16.41 (view-switching fixes for Watch/Want List/Saved Searches; Phase F step 4b cutover live since v2.16.40) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-23 · Current version: v2.16.42 (saved-search counts on Postgres + UI quirk fixes; v2.16.41 view-switching fixes; Phase F step 4b cutover live since v2.16.40) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.42 — 2026-09-23: saved-search counts on Postgres + UI quirks from a click-through
+
+v2.16.41 was confirmed live first (all view-switching repros re-run on the real build, incl. the
+delayed-response race). Then a user-style click-through of the site found these; all verified by
+hot-patching the live page (JS) or a mocked-DB Flask test client (server).
+
+### 1. Saved Searches dropdown badges were ~5x too high (server + gc.js)
+`/api/saved-search-counts` still counted over the JSON `_cat_cache`, which includes UNAVAILABLE
+items, and ignored the per-user scan gate, `vintage_only` and `filter_watched`. Live on 2026-09-23:
+badges 922 / 138 / 1,909 / 324 / 96,645 / 86 vs what applying each search actually returned: 171 /
+23 / 435 / 68 / 19,812 / 22 (the browse numbers were identical with/without the scan gate, so
+availability was the whole gap). Fix: `_pg_browse(..., count_only=True)` — new kwarg that builds the
+identical `filtered_where_sql` and returns `SELECT COUNT(*)` instead of the page, so the badge can't
+drift from browse. The endpoint tries it per search; `_PgBrowseIneligible` (e.g. `*muff`) or any DB
+error → that one search uses the old JSON count, which now also filters `available`. If every search
+counted in SQL, `_load_cat_cache()` isn't touched at all. gc.js now sends `user_last_scan` and
+`watchlist_ids` with the request (same scope as `/api/browse`). Tested with a mocked `_pg_conn`:
+generated SQL matches browse's WHERE for category/subcategory/vintage, filter_q+brand, and
+watched+price-min searches; mixed ineligible/eligible → 1 SQL query + JSON fallback (unavailable
+item excluded); no pool → JSON; anonymous → 401. **Phase F step 5 note**: this endpoint is now SQL
+first; step 5 only has to delete the JSON fallback.
+
+### 2. Leaving Want List dropped the user's sort
+`_captureFilterState` saved `sortField/sortDir` but `_restoreFilterState` never restored them, and
+Want List forces Newest — so Price ↑ → Want List → off came back as Newest. Now restores
+`_srvSortField/_srvSortDir` plus the desktop column sort (`window._sortCol/_sortDir`, newly captured)
+and refreshes the mobile sort buttons. Verified: price/asc → Want → off = price/asc, header arrow back.
+
+### 3. Crossing the 820px breakpoint left the wrong markup
+Results render as mobile cards or the desktop table based on width at render time; resizing across
+820px (tablet rotation, narrowing a browser window) kept the old markup — desktop layout with giant
+card images and unstyled links. The resize handler now re-fetches the current page once when
+`_isMobile()` flips (local/scan mode calls `renderTable()`). Verified both directions.
+
+### 4. Search box placeholder lied about scope
+It always said "Search all stores…" but searches only the selected stores (Favorites on: 9
+telecasters vs 1,352 nationwide). `_fetchBrowsePage` now sets it to "Search N selected stores…" when
+a subset is selected.
+
+### 5. Console error spam from hover thumbnails
+The capture-phase `mouseenter`/`mouseleave` listeners called `e.target.closest` when the target was
+the document itself → uncaught TypeError on every page entry/exit. Guarded.
+
+### Noticed, not changed
+- `#res-title` (e.g. "Watch List — 7 items", "↓ Price Drops — …") is `display:none` at every width;
+  users only see `#filter-item-count`. The title's label also ignores stacked filters (Price Drops +
+  Vintage + search all read "↓ Price Drops — N items"). Moot while hidden — decide whether to show it.
+- Header "Items: 114,245" vs browse "114,184 Items": header counts the whole catalog (JSON-derived
+  `/api/state`), browse applies the per-user scan gate. Step 5 moves `/api/state` totals to Postgres.
+- Watch List toggled off from inside a saved search returns to the pre-special-view baseline, not
+  the saved search (consistent with v2.16.41's rule: the baseline is the state before the first
+  special view).
 
 ---
 
