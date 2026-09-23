@@ -1,5 +1,101 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-22 · Current version: v2.16.37 (removed the two temporary Phase F diagnostic endpoints) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-22 · Current version: v2.16.38 (Phase F step 4a — unified `_pg_browse()` built, shadow only) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.38 — 2026-09-22: Phase F step 4a — unified `_pg_browse()` built, SHADOW ONLY (no real user affected)
+
+**What this is**: step 4 of POSTGRES_PHASE_F_DESIGN.md §7 ("unify Tier 1 + Tier 2") split into
+4a (build + prove, shadow only — this version), 4b (cutover), 4c (delete Tier 1/Tier 2/the Python
+filter loop). Every real `/api/browse` request still runs exactly the pre-v2.16.38 path (Tier 1 SQL,
+Tier 2 narrowing, Python keyword matching) — the only live-path edits are mechanical, listed below.
+
+### 1. `api_browse()` refactored into a thin wrapper + `_browse_compute(data, *, logged_in, pg_diag, engine)`
+Needed so the new path can be compared against the current one on the SAME request body, both
+per-request and in bulk. The body moved verbatim; the only edits inside it:
+- `request.json` → the `data` param; `session.get("user_id")` → `logged_in`;
+  `?pg_shadow=1 and _is_admin()` → `pg_diag` (the wrapper computes it — same semantics, `_is_admin()`
+  still only evaluated when a `pg_shadow` arg is present); the four `return jsonify(...)` → return
+  the dict (the wrapper jsonifies).
+- `_kw_accepted`: the matcher-build loop now also records every raw want-list entry that actually
+  landed in a bucket, i.e. survived the per-type DoS caps (750/250 words, 300 phrases, 30 exotic,
+  200 comma-AND, 50 bool). `_pg_browse` translates exactly that list, so the SQL path drops the same
+  over-cap entries the Python matcher drops instead of silently matching more.
+- `engine="pg"` branch (only reached by the comparison tooling): after the keyword build and the
+  `has_store_data` check, calls `_pg_browse()` and RAISES rather than falling back —
+  `_PgBrowseIneligible` for an unrecognized sort_field or a `_TsqueryUnsupported` search term, any
+  other exception is a real DB/SQL error — so a comparison can tell those apart.
+
+### 2. `_pg_browse()` — the unified path (new, not live)
+Structurally `_pg_tier1_browse()` (live since Phase D) plus the two things Tier 1 couldn't do:
+- **filter_q** → one more WHERE predicate from `_tsquery_filter_q`, in the `_apply_base` scope (so it
+  narrows facets/totals but NOT `total_unfiltered`/`new_count`, exactly like Python). A non-empty fq
+  that compiles to no clauses (e.g. `;`) → `FALSE`, matching Python's `fq_clauses and ...`.
+- **want-list keywords** → a `kw_match` boolean EXPRESSION, not a filter. It's used in the four places
+  Python's `kwMatch` matters: WHERE only when want-list-only is on; the default sort's 3-tier
+  partition as `ORDER BY (is_new AND kw) DESC, is_new DESC, <primary>, sku` ((T,T)/(F,T)/(F,F) =
+  new+want / new / rest); `new_want_count` as `COUNT(*) FILTER (WHERE is_new AND kw)` over the
+  filtered set; and the page's own `kwMatch` flags via a tiny 5th query over just that page's SKUs.
+- **Performance shape**: entries whose translation is exactly one `search_vector @@ <tsquery>`
+  predicate (~all real ones: plain words/phrases/suffix wildcards) are MERGED into one tsquery OR-tree
+  (`search_vector @@ (q1 || q2 || ...)`) — one @@ per row / one GIN probe, instead of hundreds of
+  separate tests (the SQL twin of the O(items×keywords) problem the Python bucketing solved). Quoted
+  ILIKE / comma-AND / bool entries stay separate OR'd branches. `is_new` goes first inside the ANDs so
+  non-NEW rows never evaluate the keyword expression.
+- Positional `%s` params from the translator are renamed to unique `%(_kwN)s`/`%(_fqN)s` by
+  `_pg_name_params` (psycopg2 can't mix positional and named in one statement; translator fragments
+  never contain a literal `%` — ILIKE patterns are parameter values).
+- Any `_TsqueryUnsupported` (non-suffix wildcard — measured zero real usage) makes the whole request
+  ineligible rather than per-entry falling back; the production path keeps serving it. Simpler and
+  correct; a per-entry Python fallback would need Python over every row anyway.
+
+### 3. Translator fix found by this work: all-negative want-list entries
+`_tsquery_want_list_entry("-fender")` used to fall through to `_tsquery_compile_query`, whose hyphen
+normalization made it a plain `fender` search — highlighting exactly what the user asked to exclude.
+Python's `_wl_bool_compile` returns None for an all-negative entry (deliberately: "never highlight the
+whole catalog") and it then falls to a literal `\b-fender\b` regex that effectively never matches. Now:
+if the OR/NOT gate engages (`;` present or a leading-dash part) but no clause has a positive term,
+the entry is a no-op. Only the (not-yet-live) translator changed.
+
+### 4. Comparison tooling (temporary — delete in 4c, same lifecycle as v2.16.33's diff-check)
+- `POST /api/browse?pg_shadow=2` (admin only; non-admins get the normal response, nothing extra):
+  serves the normal production response plus `_pg_browse_shadow: {status, current_ms, pg_ms, diff}`.
+- `POST /api/pg-browse-diff-check` (admin, optional `{"max_accounts": N}`) + `GET` to poll: background
+  thread, own lock (never the scan `_lock`). Rebuilds realistic request bodies from every account's
+  real synced state in gc_users.db (keywords, favorites, watchlist, new_ids, last_run, saved searches
+  — no user id/email carried) and diffs both engines. Per account with a want list: all-stores
+  default sort; want-list-only; all-stores price-asc page 2 (user_sorted); favorites-only default. Plus
+  one scenario per saved search (its stores + filters + the account's keywords). Report: counts by
+  scenario kind (match / mismatch / ineligible / error), average ms per engine, and up to 25 samples;
+  a sample with `kwMatch` differences gets `kw_explain` — per item, which want-list entries match in
+  Python only vs SQL only. 0.05s pause between scenarios to yield the GIL (1 gunicorn worker).
+- `_browse_diff()`: scalars, facet counts (and facet order), page item order, per-field item diffs.
+
+### Verified locally (sandbox Postgres 16, synthetic catalogs, `run_test.py`-style harness in scratch)
+- **Plumbing parity, "clean" want lists** (entries where the translator and the Python matcher agree
+  by construction — plain words, phrases, comma-AND, bool, colon-prefix, suffix wildcards on real
+  word starts, quoted substrings): **222/222** scenarios exact match on a 30K catalog, **231/231** on a
+  150K catalog (~127K available, production-scale). Covers facets, NEW/want tiers, new_want_count,
+  kwMatch flags, pagination, saved-search filters (brands incl. `(none)`, conditions, watched,
+  price-drop, vintage, price range), favorites, user_last_scan gating.
+- **DoS-cap parity**: 31st quoted entry, 51st bool entry, 251st anonymous word — dropped by both
+  engines identically; plain Tier 1 browse + want-only-with-no-keywords also identical.
+- **Adversarial want lists**: every remaining mismatch is a KNOWN text-semantics class, not plumbing:
+  suffix wildcards matching mid-word in Python (`TS*`→"Gretsch", `od*`→"POD"/"Body" — the accepted
+  v2.16.32 tradeoff), punctuation variants where SQL is more forgiving (`dr z`→"Dr. Z", `'69`→"'69
+  Thinline" — Python's `\b'69\b` can't match after a space), a lone `-` as filter_q (Python's `\b-\b`
+  matches hyphenated words; SQL matches nothing), and `*muff` → ineligible as designed.
+- Timing (local, no network): current path avg ~1130ms vs `_pg_browse` ~305ms on keyword requests at
+  150K. Production will add network round trips (5 queries); measure there.
+- Route checks via Flask test client: non-admin `?pg_shadow=2` gets nothing extra; admin gets the
+  report; `?pg_shadow=1` Tier 1 diagnostics unchanged; diff-check endpoint 401s for non-admin.
+- `py_compile` clean; `node --check static/gc.js` clean (JS untouched).
+
+### Next (4a's production half)
+Push, confirm deploy, then run `/api/pg-browse-diff-check` against production (maybe `max_accounts: 10`
+first to gauge duration/load). Expect mismatches ONLY in the known classes above; anything else —
+especially facet/total/order diffs with no `kw_explain` or filter_q explanation — is a real bug to
+root-cause before 4b.
 
 ---
 

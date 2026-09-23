@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-22 · Version: v2.16.37 (removed the two temporary Phase F diagnostic endpoints — see HANDOFF.md's 2026-09-22 v2.16.37 entry) · Live at: gcgeartracker.com*
+*Generated: 2026-09-22 · Version: v2.16.38 (Phase F step 4a: unified `_pg_browse()` built, SHADOW ONLY — see HANDOFF.md's 2026-09-22 v2.16.38 entry) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -85,6 +85,22 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 - **JSON-LD**: `WebSite` schema with `SearchAction` (`potentialAction`) — injected as `<script type="application/ld+json">` (not blocked by CSP `script-src 'self'`)
 - **Noscript store list**: `_build_stores_noscript()` called in `index()` — reads `STORES_CACHE` fresh, generates `<noscript>` block listing all ~240+ store names. Invisible to JS users, crawlable by Google. Updates automatically when store list is refreshed.
 - **Footer**: `.seo-footer` — visible "Privacy Policy · Not affiliated with Guitar Center, Inc." in `#555` gray. No hidden text.
+
+---
+
+## Current State: v2.16.38 — Phase F step 4a: unified `_pg_browse()` built, shadow only (2026-09-22)
+
+`/api/browse` is now a thin wrapper around `_browse_compute(data, *, logged_in, pg_diag, engine)`.
+Real requests use `engine="current"` — byte-for-byte the old Tier 1 / Tier 2 / Python path.
+`_pg_browse()` (new) serves ANY browse shape entirely in SQL: Tier 1's logic plus filter_q as a WHERE
+predicate and want-list keywords as a `kw_match` expression (merged tsquery OR-tree) feeding
+want-only, NEW+want tiering, `new_want_count` and per-item `kwMatch`. Reached only via the admin
+comparison tooling: `POST /api/browse?pg_shadow=2` (attaches `_pg_browse_shadow` diff report) and
+`POST/GET /api/pg-browse-diff-check` (replays every account's real want list/favorites/saved searches
+through both engines). Locally 222/222 + 231/231 exact on clean synthetic want lists; adversarial
+mismatches are all known text-semantics classes. Also fixed a translator bug: an all-negative want-list
+entry (`-fender`) now a no-op instead of matching `fender`. Next: run the diff check on production, then
+4b cutover, then 4c deletes Tier 1/Tier 2 + the comparison tooling. Full detail: HANDOFF.md v2.16.38.
 
 ---
 

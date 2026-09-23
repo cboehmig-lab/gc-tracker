@@ -798,3 +798,32 @@ admin UI ever linked to either endpoint. `py_compile`/`node --check` clean.
 cleanup.** Step 4 (unify Tier 1/Tier 2 browse around the translator) and step 5 (shadow-mode
 cutover + JSON retirement) remain not started; see the Design section above for the locked-in plan
 whenever that work picks back up.
+
+---
+
+### Addendum 14 (2026-09-22, v2.16.38) — step 4a: unified `_pg_browse()` built, shadow only
+
+Step 4 split into **4a** (build + prove in shadow — this), **4b** (cutover: `api_browse` calls
+`_pg_browse` for every request, current path kept as the exception fallback), **4c** (delete
+`_pg_tier1_browse`, `_pg_tier2_narrow_items`, the Python filter/facet/sort loop and the 4a comparison
+tooling; `_kw_match` machinery stays dormant as the manual escape hatch per the Design section).
+
+Decisions made while building it, deviating from or sharpening the plan above:
+- **Whole-request, not per-entry, fallback on `_TsqueryUnsupported`.** The plan said "fall back to
+  `_kw_match` for just that one entry". But a per-entry Python fallback still has to run Python over
+  every candidate row, which is the whole cost being removed; and real usage of the only unsupported
+  shape (non-suffix wildcard) is zero. So `_pg_browse` raises `_PgBrowseIneligible` and the caller
+  serves the request from the existing path. Revisit only if 4c's deletion of that path needs it —
+  at that point an unsupported entry could simply be dropped with a logged warning, or rejected at
+  want-list save time.
+- **Caps honored by translating `_kw_accepted`**, the post-cap list the Python matcher actually used,
+  rather than the raw request list.
+- **kw_match is an expression, not a filter**, merged into one tsquery OR-tree for every
+  single-predicate entry; evaluated only where needed (`is_new AND kw` short-circuits for non-NEW
+  rows; page kwMatch flags via a separate query over the page's SKUs). The "hard sub-piece" this doc
+  flagged (contextual facet counts) turned out not to need new work: Tier 1's UNION-of-4-GROUP-BYs
+  already does it, and filter_q/want-only just join the shared base WHERE.
+- **Translator fix**: all-negative want-list entries are a no-op (see HANDOFF.md v2.16.38 §3).
+
+Local verification and the known-divergence classes: HANDOFF.md v2.16.38. Production verification
+(`/api/pg-browse-diff-check`) is the gate for 4b.

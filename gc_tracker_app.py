@@ -4356,6 +4356,19 @@ def _tsquery_want_list_entry(kw):
     frag, params = _tsquery_bool_clauses(base)
     if frag is not None:
         return frag, params
+    # (v2.16.38) The OR/NOT path ENGAGED (same gate as _wl_bool_compile: ';'
+    # present or a leading-dash part) but produced no clause with a positive
+    # term — an all-negative entry like "-fender" or "-a; -b". The Python
+    # matcher treats that as "never highlight the whole catalog": its
+    # _wl_bool_compile returns None and the entry falls through to a literal
+    # regex (\b-fender\b) that effectively never matches. Before this fix the
+    # translator fell through to _tsquery_compile_query, whose hyphen
+    # normalization turned "-fender" into a plain "fender" search — i.e.
+    # highlighting exactly the items the user asked to EXCLUDE. Found by the
+    # step-4a browse diff harness on synthetic data. Treat it as a no-op.
+    parts_all = [p.strip() for cl in base.split(';') for p in cl.split(',')]
+    if ';' in base or any(len(p) > 1 and p[0] == '-' for p in parts_all):
+        return None, []
     return _tsquery_compile_query(base)
 
 def _tsquery_filter_q(fq, max_tokens=12, max_clauses=4):
@@ -5015,18 +5028,369 @@ def _pg_tier2_narrow_items(*, store_set, search_all, user_last_scan) -> list:
                 })
     return items
 
+# ── Phase F step 4a: unified Postgres browse path (v2.16.38, shadow only) ─────
+# POSTGRES_PHASE_F_DESIGN.md §7 step 4. ONE function serving every
+# /api/browse shape — Tier 1's no-search case AND Tier 2's want-list/filter_q
+# case — entirely in SQL: availability + store + scan-gate + _apply_base's
+# filters + filter_q (via the Stage 2 tsquery translator) + contextual facet
+# counts + NEW/want tiering + sort + paginate. Structurally it's
+# _pg_tier1_browse() (live since Phase D, already proven against production)
+# with the two things Tier 1 couldn't do bolted in:
+#   1. filter_q  -> one more WHERE predicate (_tsquery_filter_q), part of the
+#      _apply_base scope exactly like the Python path (so it narrows facets/
+#      totals but NOT total_unfiltered/new_count).
+#   2. want-list keywords -> a kw_match boolean EXPRESSION, not a WHERE
+#      clause. In the Python path kwMatch doesn't filter anything on its own;
+#      it feeds (a) the "want list only" filter, (b) the NEW+want tier of the
+#      default sort, (c) new_want_count, (d) each returned item's kwMatch flag.
+#      Each of those uses it in the matching SQL position below.
+#
+# NOT wired into any real request yet (4a = shadow only). Reached only via
+# _browse_compute(engine="pg"), i.e. the admin ?pg_shadow=2 compare and
+# /api/pg-browse-diff-check. Step 4b is the cutover, 4c deletes Tier 1/Tier 2.
+#
+# Performance shape of kw_match — the reason this isn't just
+# " OR ".join(_tsquery_want_list_entry(kw) for kw in keywords):
+#   * Real want lists run to hundreds of entries, and ~all of them are plain
+#     words/phrases, each translating to `search_vector @@ phraseto_tsquery(
+#     'simple', %s)`. Hundreds of separate @@ tests per row would be the SQL
+#     equivalent of the O(items x keywords) regex loop the Python matcher's
+#     bucketing exists to avoid. So every entry whose translation is exactly
+#     that single-predicate shape gets MERGED into one tsquery OR-tree —
+#     `search_vector @@ (q1 || q2 || ...)` — one @@ per row, and one GIN
+#     index probe when it's used as a filter. to_tsquery/phraseto_tsquery
+#     with an explicit regconfig are IMMUTABLE, so with literal args Postgres
+#     constant-folds the whole tree once at plan time.
+#   * Everything else (quoted ILIKE, comma-AND, ';'/'-' bool entries) stays
+#     its own OR'd branch — rare, and each still index-backed on its
+#     positive side.
+#   * The expression is only evaluated where it matters: `is_new AND kw` in
+#     the tier ORDER BY / new_want_count (AND short-circuits, so only NEW
+#     rows pay for it), as a WHERE predicate only when want-list-only is on,
+#     and for the page's own kwMatch flags via a separate tiny query over
+#     just that page's SKUs.
+#
+# Want-list entries honored are exactly the ones the Python matcher kept
+# after its per-type DoS caps (_kw_accepted in _browse_compute), not the raw
+# list. Any entry or filter_q with no pure-SQL translation
+# (_TsqueryUnsupported — a non-suffix wildcard; measured zero real usage)
+# makes the WHOLE request ineligible (_PgBrowseIneligible) rather than being
+# dropped or guessed — the caller keeps serving it from the Python path.
+
+# Matches a translated fragment that is exactly ONE `search_vector @@ <tsquery>`
+# predicate — the only shape safe to fold into the merged tsquery OR-tree.
+_PG_KW_MERGEABLE_RE = re.compile(
+    r"^search_vector @@ ((?:phraseto_tsquery|to_tsquery)\('simple', %s\))$")
+
+
+def _pg_name_params(frag, params, prefix, out):
+    """Rewrite a translator fragment's positional %s placeholders as uniquely
+    named %(prefixN)s ones, adding the values to `out`. _pg_browse builds all
+    its other SQL with named params (like _pg_tier1_browse), and psycopg2
+    can't mix positional and named in one statement. Translator fragments
+    never contain a literal '%' (ILIKE patterns are passed as parameter
+    VALUES, not spliced), so every '%s' is a placeholder."""
+    params = list(params)
+    assert frag.count("%s") == len(params), (frag, params)
+    def _sub(_m):
+        key = f"{prefix}{len(out)}"
+        out[key] = params.pop(0)
+        return f"%({key})s"
+    return re.sub(r"%s", _sub, frag)
+
+
+def _pg_kw_expr(kw_entries, out_params):
+    """kw_match boolean SQL expression for a (post-cap) want list, or None if
+    no entry produces anything. Raises _TsqueryUnsupported (see above)."""
+    merged, others = [], []
+    for kw in kw_entries:
+        frag, prm = _tsquery_want_list_entry(kw)
+        if frag is None:
+            continue
+        m = _PG_KW_MERGEABLE_RE.match(frag)
+        if m:
+            merged.append(_pg_name_params(m.group(1), prm, "_kw", out_params))
+        else:
+            others.append("(" + _pg_name_params(frag, prm, "_kw", out_params) + ")")
+    parts = []
+    if merged:
+        parts.append("search_vector @@ (" + " || ".join(merged) + ")")
+    parts.extend(others)
+    return ("(" + " OR ".join(parts) + ")") if parts else None
+
+
+def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
+               f_brands, f_conds, f_cats, f_subs, f_watched, wl_ids,
+               f_want_only, f_price_drop_only, f_vintage_only,
+               f_price_min, f_price_max, sort_field, sort_dir, user_sorted,
+               new_ids, fav_stores, page, per_page) -> dict:
+    """Same JSON shape as api_browse()'s response, for ANY request, computed
+    in Postgres. Raises _PgBrowseIneligible (untranslatable search) or any
+    DB error — the caller decides what to do (today: shadow compare only)."""
+    import psycopg2.extras as _pg_extras
+
+    # ── Translate search terms FIRST, before touching the DB ───────────────
+    tparams = {}
+    try:
+        kw_sql = _pg_kw_expr(kw_entries, tparams) if kw_entries else None
+        fq_sql = None
+        if fq:
+            _frag, _prm = _tsquery_filter_q(fq)
+            # Python path: `if fq:` then `fq_clauses and _fq_text_match(...)`
+            # — a non-empty fq that compiles to no clauses matches NOTHING.
+            fq_sql = _pg_name_params(_frag, _prm, "_fq", tparams) if _frag is not None else "FALSE"
+    except _TsqueryUnsupported as e:
+        raise _PgBrowseIneligible(str(e))
+    kw_bool = f"COALESCE({kw_sql}, FALSE)" if kw_sql else "FALSE"
+
+    # ── Q1 scope: availability + store + per-user scan gate ────────────────
+    scope = ["available"]
+    params = dict(tparams)
+    params["new_ids"] = list(new_ids)
+    if not search_all:
+        scope.append("store = ANY(%(stores)s)")
+        params["stores"] = list(store_set) if store_set else []
+    if user_last_scan:
+        scope.append("(first_seen = '' OR first_seen <= %(user_last_scan)s)")
+        params["user_last_scan"] = user_last_scan
+    scope_sql = " AND ".join(scope)
+
+    # ── _apply_base() scope: + filter_q + the non-facet toggles ────────────
+    where = list(scope)
+    if fq_sql:
+        where.append(f"({fq_sql})")
+    if f_want_only:
+        where.append(f"({kw_sql})" if kw_sql else "FALSE")
+    if f_price_drop_only:
+        where.append("price_drop > 0")
+    if f_vintage_only:
+        where.append("is_vintage")
+    if f_watched:
+        where.append("sku = ANY(%(wl_ids)s)")
+        params["wl_ids"] = list(wl_ids)
+    if f_price_min is not None:
+        where.append("price >= %(price_min)s")
+        params["price_min"] = f_price_min
+    if f_price_max is not None:
+        where.append("price <= %(price_max)s")
+        params["price_max"] = f_price_max
+    base_where_sql = " AND ".join(where)
+
+    # ── Facet clauses (identical to _pg_tier1_browse) ─────────────────────
+    def _facet_clause(col, values, key):
+        if not values:
+            return "TRUE"
+        if col == "brand":
+            real = [v for v in values if v != NO_BRAND_LABEL]
+            want_no_brand = NO_BRAND_LABEL in values
+            if real:
+                params[key] = real
+            if real and want_no_brand:
+                return f"(brand = ANY(%({key})s) OR brand = '')"
+            if want_no_brand:
+                return "brand = ''"
+            return f"brand = ANY(%({key})s)"
+        params[key] = list(values)
+        return f"{col} = ANY(%({key})s)"
+
+    brand_clause = _facet_clause("brand", f_brands, "_f_brand")
+    cond_clause  = _facet_clause("condition", f_conds, "_f_cond")
+    cat_clause   = _facet_clause("category", f_cats, "_f_cat")
+    sub_clause   = _facet_clause("subcategory", f_subs, "_f_sub")
+    filtered_where_sql = (f"{base_where_sql} AND {brand_clause} AND {cond_clause} "
+                          f"AND {cat_clause} AND {sub_clause}")
+    params["no_brand_label"] = NO_BRAND_LABEL
+
+    # ── ORDER BY (whitelisted columns only, same as Tier 1) ────────────────
+    is_new_sql = "(sku = ANY(%(new_ids)s))"
+    reverse = (sort_dir == "desc")
+    order_parts = []
+    if not user_sorted:
+        # Python path's 3-tier partition: new+want, new-only, rest — each
+        # internally in primary-sort order. Two leading boolean keys do it:
+        # (T,T) / (F,T) / (F,F). is_new is first inside the AND so non-NEW
+        # rows never evaluate the keyword expression.
+        if kw_sql:
+            order_parts.append(f"({is_new_sql} AND {kw_bool}) DESC")
+        order_parts.append(f"{is_new_sql} DESC")
+    if sort_field == "condition":
+        order_parts.append(f"{_PG_COND_KNOWN_SQL} DESC")
+        order_parts.append(f"{_PG_COND_RANK_SQL} {'DESC' if reverse else 'ASC'}")
+    else:
+        col, lower = _PG_SORT_MAP[sort_field]
+        expr = f"LOWER({col})" if lower else col
+        order_parts.append(f"{expr} {'DESC' if reverse else 'ASC'}")
+    order_parts.append("sku ASC")   # tiebreak — see _pg_tier1_browse
+    order_sql = ", ".join(order_parts)
+
+    new_want_sql = (f"COUNT(*) FILTER (WHERE {is_new_sql} AND {kw_bool})"
+                    if kw_sql else "0")
+
+    with _pg_conn() as conn:
+        with conn.cursor(cursor_factory=_pg_extras.RealDictCursor) as cur:
+            # Q1 — total_unfiltered / new_count (pre-_apply_base scope)
+            cur.execute(
+                f"SELECT COUNT(*) AS total_unfiltered, "
+                f"COUNT(*) FILTER (WHERE {is_new_sql}) AS new_count "
+                f"FROM items WHERE {scope_sql}", params)
+            row = cur.fetchone()
+            total_unfiltered, new_count = row["total_unfiltered"], row["new_count"]
+
+            # Q2 — contextual facet counts (each facet: all OTHER facets)
+            facet_sql = " UNION ALL ".join([
+                f"SELECT 'brand' AS facet, COALESCE(NULLIF(brand,''), %(no_brand_label)s) AS value, "
+                f"COUNT(*) AS n FROM items WHERE {base_where_sql} AND {cond_clause} AND {cat_clause} "
+                f"AND {sub_clause} GROUP BY value",
+                f"SELECT 'condition' AS facet, condition AS value, COUNT(*) AS n FROM items "
+                f"WHERE {base_where_sql} AND {brand_clause} AND {cat_clause} AND {sub_clause} "
+                f"AND condition <> '' GROUP BY value",
+                f"SELECT 'category' AS facet, category AS value, COUNT(*) AS n FROM items "
+                f"WHERE {base_where_sql} AND {brand_clause} AND {cond_clause} AND {sub_clause} "
+                f"AND category <> '' GROUP BY value",
+                f"SELECT 'subcategory' AS facet, subcategory AS value, COUNT(*) AS n FROM items "
+                f"WHERE {base_where_sql} AND {brand_clause} AND {cond_clause} AND {cat_clause} "
+                f"AND subcategory <> '' GROUP BY value",
+            ])
+            cur.execute(facet_sql, params)
+            brand_ctx, cond_ctx, cat_ctx, sub_ctx = {}, {}, {}, {}
+            _ctx = {"brand": brand_ctx, "condition": cond_ctx,
+                    "category": cat_ctx, "subcategory": sub_ctx}
+            for r in cur.fetchall():
+                _ctx[r["facet"]][r["value"]] = r["n"]
+            for b in f_brands: brand_ctx.setdefault(b, 0)
+            for c in f_conds:  cond_ctx.setdefault(c, 0)
+            for c in f_cats:   cat_ctx.setdefault(c, 0)
+            for s in f_subs:   sub_ctx.setdefault(s, 0)
+
+            # Q3 — totals over the fully filtered set
+            cur.execute(
+                f"SELECT COUNT(*) AS total_filtered, "
+                f"COUNT(DISTINCT NULLIF(store, '')) AS store_count, "
+                f"{new_want_sql} AS new_want_count "
+                f"FROM items WHERE {filtered_where_sql}", params)
+            row = cur.fetchone()
+            total_filtered = row["total_filtered"]
+            store_count = row["store_count"]
+            new_want_count = row["new_want_count"]
+
+            total_pages = max(1, -(-total_filtered // per_page))
+            page = min(page, total_pages)
+            start = (page - 1) * per_page
+
+            # Q4 — the page
+            cur.execute(
+                f"SELECT sku, name, brand, category, subcategory, condition, condition_note, "
+                f"price, list_price, price_drop, price_drop_since, store, location, url, "
+                f"image_id, is_vintage, date_listed "
+                f"FROM items WHERE {filtered_where_sql} ORDER BY {order_sql} "
+                f"LIMIT %(_limit)s OFFSET %(_offset)s",
+                {**params, "_limit": per_page, "_offset": start})
+            page_rows = cur.fetchall()
+
+            # Q5 — kwMatch flags for just this page's rows
+            kw_hits = set()
+            if kw_sql and page_rows:
+                cur.execute(
+                    f"SELECT sku FROM items WHERE sku = ANY(%(_page_skus)s) AND {kw_bool}",
+                    {**params, "_page_skus": [r["sku"] for r in page_rows]})
+                kw_hits = {r["sku"] for r in cur.fetchall()}
+
+    page_items = []
+    for r in page_rows:
+        sku = r["sku"]
+        store = r["store"] or ""
+        price_raw = float(r["price"] or 0)
+        page_items.append({
+            "id":               sku,
+            "name":             r["name"] or "",
+            "brand":            r["brand"] or "",
+            "price":            f"${price_raw:,.2f}" if price_raw else "",
+            "price_raw":        price_raw,
+            "list_price_raw":   float(r["list_price"] or 0),
+            "price_drop":       float(r["price_drop"] or 0),
+            "price_drop_since": r["price_drop_since"] or "",
+            "store":            store,
+            "location":         r["location"] or "",
+            "url":              r["url"] or "",
+            "category":         r["category"] or "",
+            "subcategory":      r["subcategory"] or "",
+            "condition":        r["condition"] or "",
+            "date":             _fmt_date(r["date_listed"] or ""),
+            "date_raw":         r["date_listed"] or "",
+            "image_id":         r["image_id"] or "",
+            "is_vintage":       bool(r["is_vintage"]),
+            "condition_note":   r["condition_note"] or "",
+            "watched":          sku in wl_ids,
+            "isNew":            sku in new_ids,
+            "kwMatch":          sku in kw_hits,
+            "isFav":            store in fav_stores if fav_stores else False,
+        })
+
+    _cond_order = {"Excellent": 0, "Great": 1, "Good": 2, "Fair": 3, "Poor": 4}
+    return {
+        "items":            page_items,
+        "page":             page,
+        "per_page":         per_page,
+        "total_count":      total_filtered,
+        "total_unfiltered": total_unfiltered,
+        "total_pages":      total_pages,
+        "store_count":      store_count,
+        "new_count":        new_count,
+        "new_want_count":   new_want_count,
+        "no_store_data":    False,
+        "brands":        [{"name": b, "count": c} for b, c in sorted(brand_ctx.items(), key=lambda x: (-x[1], x[0]))],
+        "conditions":    [{"name": c, "count": n} for c, n in sorted(cond_ctx.items(), key=lambda x: _cond_order.get(x[0], 5))],
+        "categories":    [{"name": c, "count": n} for c, n in sorted(cat_ctx.items())],
+        "subcategories": [{"name": s, "count": n} for s, n in sorted(sub_ctx.items())],
+    }
+
+
 
 @app.route("/api/browse", methods=["POST"])
 @optional_user_context
 def api_browse():
     """Return cached inventory for selected stores with server-side
     pagination, sorting, and filtering.  Sends only one page at a time
-    so the browser never has to hold 80K items in memory."""
+    so the browser never has to hold 80K items in memory.
+
+    (v2.16.38, Phase F step 4a) Thin route wrapper — the actual work lives in
+    _browse_compute(data, ...) so the new unified Postgres path (_pg_browse)
+    can be diffed against today's production path both per-request
+    (?pg_shadow=2, admin only — see _browse_shadow_compare) and in bulk
+    (/api/pg-browse-diff-check, which replays real accounts' want lists and
+    saved searches through both). Real users' responses are unchanged: with
+    no ?pg_shadow=2 this is exactly the pre-v2.16.38 code path."""
     data = request.json or {}
+    pg_shadow = request.args.get("pg_shadow") or ""
+    is_admin = _is_admin() if pg_shadow else False
+    logged_in = bool(session.get("user_id"))
+    if pg_shadow == "2" and is_admin:
+        return jsonify(_browse_shadow_compare(data, logged_in=logged_in))
+    return jsonify(_browse_compute(data, logged_in=logged_in,
+                                   pg_diag=(pg_shadow == "1" and is_admin)))
+
+
+class _PgBrowseIneligible(Exception):
+    """engine="pg" was asked for a request _pg_browse() deliberately doesn't
+    serve (an unrecognized sort_field, or a want-list entry / filter_q with no
+    pure-SQL translation — _TsqueryUnsupported). Not an error: the production
+    path handles these exactly as it does today. Shadow compare / the batch
+    diff check count these separately from real mismatches."""
+
+
+def _browse_compute(data, *, logged_in, pg_diag=False, engine="current"):
+    """Body of /api/browse, returning the response dict instead of a Flask
+    response. engine="current" is today's production routing (Tier 1 SQL /
+    Tier 2 narrowing / legacy Python), byte-for-byte the pre-v2.16.38 logic.
+    engine="pg" runs the new Phase F step-4 unified path (_pg_browse) and
+    RAISES instead of falling back — _PgBrowseIneligible for a request it
+    deliberately doesn't serve, anything else for a real DB/SQL error — so a
+    comparison caller can tell the difference. pg_diag replaces the old
+    inline `?pg_shadow=1 and _is_admin()` check (the caller now decides)."""
     stores = data.get("stores", [])
     search_all = bool(data.get("all_stores"))
     if not stores and not search_all:
-        return jsonify({"items": [], "no_store_data": True})
+        return {"items": [], "no_store_data": True}
 
     # Pagination params
     page     = max(int(data.get("page", 1)), 1)
@@ -5073,7 +5437,7 @@ def api_browse():
     # `_pg_shadow`/`_pg_shadow_ms` diagnostic fields to be added to an
     # admin's own response (see the gate further down). See
     # POSTGRES_MIGRATION_PLAN.md §3/§7 Phase D.
-    _pg_shadow_requested = request.args.get("pg_shadow") == "1"
+    _pg_shadow_requested = pg_diag
 
     _load_cat_cache()
     # Watchlist and keywords now come from the client (localStorage)
@@ -5100,7 +5464,7 @@ def api_browse():
             if kl and kl not in _seen:
                 _seen.add(kl)
                 _dedup.append(ks)
-        _kw_cap = 750 if session.get("user_id") else 250
+        _kw_cap = 750 if logged_in else 250
         keywords = _dedup[:_kw_cap]
     else:
         keywords = []
@@ -5162,6 +5526,12 @@ def api_browse():
     _kw_or_pats  = []   # wildcard + quoted-exact patterns -> one alternation (capped)
     _kw_and      = []   # comma-AND: (term-list, set-of-required-plain-word-tokens) — pre-filtered
     _kw_bool     = []   # v2.16.0 OR/NOT entries: list of (pos, neg, req) clause lists
+    # (v2.16.38) Raw entries that actually made it into one of the buckets
+    # above — i.e. survived the per-type caps below. _pg_browse() translates
+    # exactly this list, so the Postgres path honors the same DoS caps (and
+    # drops the same over-cap entries) as the Python matcher, rather than
+    # translating the full uncapped list and silently matching more.
+    _kw_accepted = []
     for _kw in keywords:
         _base = _kw.lstrip('=').strip()
         if not _base:
@@ -5183,17 +5553,21 @@ def api_browse():
                 # 30-cap (the v2.13.1 DoS boundary).
                 if _exotic_n < _EXOTIC_KW_CAP:
                     _kw_bool.append(_wl_clauses)
+                    _kw_accepted.append(_kw)
                     _exotic_n += 1
             elif _bool_n < _BOOL_KW_CAP:
                 _kw_bool.append(_wl_clauses)
+                _kw_accepted.append(_kw)
                 _bool_n += 1
         elif _SIMPLE_KW_RE.match(_base):
             _kw_word_set.add(_base.lower())
+            _kw_accepted.append(_kw)
         elif '*' in _base or (_base.startswith('"') and _base.endswith('"') and len(_base) > 2):
             if _exotic_n < _EXOTIC_KW_CAP:
                 _p = _kw_or_pattern(_base)
                 if _p:
                     _kw_or_pats.append(_p)
+                    _kw_accepted.append(_kw)
                     _exotic_n += 1
         elif ',' in _base:
             if _and_n < _AND_KW_CAP:
@@ -5207,6 +5581,7 @@ def api_browse():
                         if _pp and '*' not in _pp and not (_pp.startswith('"') and _pp.endswith('"') and len(_pp) > 2):
                             _req |= set(_KW_SPLIT_RE.split(_pp)) - {''}
                     _kw_and.append((_t, _req))
+                    _kw_accepted.append(_kw)
                     _and_n += 1
         else:
             # Ordinary phrase or punctuated single term -> exact whole-word match, but
@@ -5214,6 +5589,7 @@ def api_browse():
             if _phrase_n < _PHRASE_KW_CAP:
                 _words = set(_KW_SPLIT_RE.split(_base.lower())) - {''}
                 _kw_phrases.append((_re.compile(r'\b' + _re.escape(_base) + r'\b', _re.IGNORECASE), _words))
+                _kw_accepted.append(_kw)
                 _phrase_n += 1
     _kw_combo = _re.compile('|'.join(_kw_or_pats), _re.IGNORECASE) if _kw_or_pats else None
     _has_kw = bool(_kw_word_set or _kw_phrases or _kw_combo or _kw_and or _kw_bool)
@@ -5250,8 +5626,28 @@ def api_browse():
     # Check if any cache entries have store field
     has_store_data = any(v.get("store") for v in _cat_cache.values())
     if not has_store_data:
-        return jsonify({"items": [], "no_store_data": True,
-                        "message": "Run 'Check for New Items' once to populate store data."})
+        return {"items": [], "no_store_data": True,
+                        "message": "Run 'Check for New Items' once to populate store data."}
+
+    # ── Phase F step 4 unified path (v2.16.38, shadow/comparison only) ─────
+    # Only reached when a caller explicitly asks for engine="pg" (the admin
+    # ?pg_shadow=2 compare and /api/pg-browse-diff-check). Every real
+    # request uses engine="current" and skips this block entirely.
+    if engine == "pg":
+        if _PG_POOL is None:
+            raise RuntimeError("Postgres pool not available")
+        if sort_field not in _PG_TIER1_SORTABLE:
+            raise _PgBrowseIneligible(f"sort_field {sort_field!r} not SQL-sortable")
+        return _pg_browse(
+            store_set=store_set, search_all=search_all,
+            user_last_scan=user_last_scan, kw_entries=_kw_accepted, fq=fq,
+            f_brands=f_brands, f_conds=f_conds, f_cats=f_cats, f_subs=f_subs,
+            f_watched=f_watched, wl_ids=wl_ids, f_want_only=f_want_only,
+            f_price_drop_only=f_price_drop_only, f_vintage_only=f_vintage_only,
+            f_price_min=f_price_min, f_price_max=f_price_max,
+            sort_field=sort_field, sort_dir=sort_dir, user_sorted=user_sorted,
+            new_ids=new_ids, fav_stores=fav_stores, page=page, per_page=per_page,
+        )
 
     # ── Postgres Tier 1 read path — THE CUTOVER (Phase D, v2.16.22) ────────
     # Every request that qualifies as Tier 1 (no want-list keywords, no
@@ -5285,10 +5681,10 @@ def api_browse():
             # it only controls whether the diagnostic timing fields get
             # attached, and only for an admin's own request, so a real user
             # passing the flag can't pull internal timing into their response.
-            if _pg_shadow_requested and _is_admin():
+            if _pg_shadow_requested:
                 _pg_result["_pg_shadow"] = True
                 _pg_result["_pg_shadow_ms"] = round((time.time() - _pg_t0) * 1000, 1)
-            return jsonify(_pg_result)
+            return _pg_result
         except Exception as e:
             # Never let a Postgres/SQL bug affect a real response — every
             # caller falls back to the legacy path below exactly as if
@@ -5583,11 +5979,325 @@ def api_browse():
     # _pg_shadow_ms (see the comment at _pg_shadow_requested's assignment):
     # a non-admin passing ?pg_shadow=1 gets nothing extra, so shadow-mode
     # internals never leak to a real caller even before the eventual cutover.
-    if _pg_shadow_requested and _is_admin() and _pg_tier2_shadow_count is not None:
+    if _pg_shadow_requested and _pg_tier2_shadow_count is not None:
         _resp["_pg_tier2_shadow"] = True
         _resp["_pg_tier2_shadow_ms"] = _pg_tier2_shadow_ms
         _resp["_pg_tier2_shadow_candidate_count"] = _pg_tier2_shadow_count
-    return jsonify(_resp)
+    return _resp
+
+# ── Phase F step 4a: comparison tooling (v2.16.38, admin only) ──────────────
+# Temporary — same lifecycle as v2.16.33's /api/tsquery-diff-check: exists to
+# prove _pg_browse() against today's production path on real data, then gets
+# deleted once step 4b's cutover is live and confirmed (step 4c).
+
+_BROWSE_DIFF_SCALARS = ("page", "per_page", "total_count", "total_unfiltered",
+                        "total_pages", "store_count", "new_count",
+                        "new_want_count", "no_store_data")
+_BROWSE_DIFF_FACETS = ("brands", "conditions", "categories", "subcategories")
+_BROWSE_DIFF_SAMPLE = 5
+
+
+def _browse_diff(cur, pg):
+    """Structural diff of two /api/browse response dicts. Returns {"match":
+    True} or a compact summary of exactly what differs. Item comparison is
+    positional (order is part of the contract — the page IS a sorted slice)
+    plus per-field for SKUs present in both."""
+    out = {}
+    scal = {k: [cur.get(k), pg.get(k)] for k in _BROWSE_DIFF_SCALARS
+            if cur.get(k) != pg.get(k)}
+    if scal:
+        out["scalars"] = scal
+    fac = {}
+    for k in _BROWSE_DIFF_FACETS:
+        a = {d["name"]: d["count"] for d in cur.get(k) or []}
+        b = {d["name"]: d["count"] for d in pg.get(k) or []}
+        if a != b:
+            bad = sorted(n for n in set(a) | set(b) if a.get(n) != b.get(n))
+            fac[k] = {"n_diff": len(bad),
+                      "sample": [[n, a.get(n), b.get(n)] for n in bad[:_BROWSE_DIFF_SAMPLE]]}
+        elif [d["name"] for d in cur.get(k) or []] != [d["name"] for d in pg.get(k) or []]:
+            fac[k] = {"order_only": True}
+    if fac:
+        out["facets"] = fac
+    ai = cur.get("items") or []
+    bi = pg.get("items") or []
+    aid = [i["id"] for i in ai]
+    bid = [i["id"] for i in bi]
+    if aid != bid:
+        first = next((n for n, (x, y) in enumerate(zip(aid, bid)) if x != y),
+                     min(len(aid), len(bid)))
+        out["items_order"] = {
+            "first_diff_index": first,
+            "only_current": [x for x in aid if x not in set(bid)][:_BROWSE_DIFF_SAMPLE],
+            "only_pg":      [x for x in bid if x not in set(aid)][:_BROWSE_DIFF_SAMPLE],
+            "n_only_current": len(set(aid) - set(bid)),
+            "n_only_pg":      len(set(bid) - set(aid)),
+        }
+    bmap = {i["id"]: i for i in bi}
+    fields = {}
+    for i in ai:
+        j = bmap.get(i["id"])
+        if j is None:
+            continue
+        for f in set(i) | set(j):
+            if i.get(f) != j.get(f):
+                ent = fields.setdefault(f, {"n": 0, "sample": []})
+                ent["n"] += 1
+                if len(ent["sample"]) < 3:
+                    ent["sample"].append([i["id"], i.get(f), j.get(f)])
+    if fields:
+        out["item_fields"] = fields
+    out["match"] = not out
+    return out
+
+
+def _browse_run_both(data, *, logged_in):
+    """Run the request through engine="current" and engine="pg". Returns
+    (current_response, report)."""
+    t0 = time.time()
+    cur = _browse_compute(data, logged_in=logged_in, engine="current")
+    cur_ms = round((time.time() - t0) * 1000, 1)
+    report = {"current_ms": cur_ms}
+    t1 = time.time()
+    try:
+        pg = _browse_compute(data, logged_in=logged_in, engine="pg")
+        report["pg_ms"] = round((time.time() - t1) * 1000, 1)
+        report["status"] = "ok"
+        report["diff"] = _browse_diff(cur, pg)
+    except _PgBrowseIneligible as e:
+        report["status"] = "ineligible"
+        report["reason"] = str(e)[:200]
+    except Exception as e:
+        report["status"] = "error"
+        report["reason"] = f"{type(e).__name__}: {str(e)[:300]}"
+    return cur, report
+
+
+def _browse_shadow_compare(data, *, logged_in):
+    """?pg_shadow=2 (admin only, gated by api_browse): serve the normal
+    production response, with a `_pg_browse_shadow` report attached saying
+    whether _pg_browse() would have returned the identical thing."""
+    cur, report = _browse_run_both(data, logged_in=logged_in)
+    cur = dict(cur)
+    cur["_pg_browse_shadow"] = report
+    return cur
+
+
+def _py_kw_entry_match(kw, text_lower):
+    """Does ONE want-list entry match (Python semantics)? Mirrors the routing
+    in _browse_compute's matcher-build loop minus the caps/bucketing — used
+    only to explain a kwMatch mismatch in the batch diff report."""
+    base = kw.lstrip('=').strip()
+    if not base:
+        return False
+    base = _expand_colon_prefix(base, join=', ')
+    cl = _wl_bool_compile(base) if (';' in base or '-' in base) else None
+    toks = set(_KW_SPLIT_RE.split(text_lower))
+    if cl is not None:
+        return any(_matches_all(text_lower, p) and not (n and _matches_any(text_lower, n))
+                   for p, n, _r in cl)
+    if _SIMPLE_KW_RE.match(base):
+        return base.lower() in toks
+    if '*' in base or (base.startswith('"') and base.endswith('"') and len(base) > 2):
+        return bool(re.search(_kw_or_pattern(base), text_lower, re.IGNORECASE))
+    if ',' in base:
+        t = _compile_query(base)
+        return bool(t) and _matches_all(text_lower, t)
+    return bool(re.search(r'\b' + re.escape(base) + r'\b', text_lower, re.IGNORECASE))
+
+
+def _explain_kw_mismatch(kw_entries, skus):
+    """For SKUs whose kwMatch differs between engines: which entries match
+    each in Python vs in SQL. Text-only (entry strings + item name)."""
+    out = []
+    if not skus:
+        return out
+    with _pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT sku, name, brand FROM items WHERE sku = ANY(%s)", (list(skus),))
+            rows = cur.fetchall()
+            for sku, name, brand in rows:
+                text = ((name or "") + " " + (brand or "")).lower()
+                py = [k for k in kw_entries if _py_kw_entry_match(k, text)]
+                sq = []
+                for k in kw_entries:
+                    try:
+                        frag, prm = _tsquery_want_list_entry(k)
+                    except _TsqueryUnsupported:
+                        continue
+                    if frag is None:
+                        continue
+                    cur.execute(f"SELECT COALESCE(({frag}), FALSE) FROM items WHERE sku = %s",
+                                list(prm) + [sku])
+                    r = cur.fetchone()
+                    if r and r[0]:
+                        sq.append(k)
+                out.append({"item": f"{name} | {brand}",
+                            "python_only": [k for k in py if k not in sq][:5],
+                            "sql_only":    [k for k in sq if k not in py][:5]})
+    return out
+
+
+_PG_BROWSE_DIFF_LOCK = threading.Lock()
+_PG_BROWSE_DIFF_STATE: dict = {}
+_PG_BROWSE_DIFF_SAMPLE_CAP = 25
+
+
+def _pg_browse_diff_scenarios(max_accounts=None):
+    """Realistic /api/browse request bodies rebuilt from every account's real
+    synced state in gc_users.db — no user id or email carried along."""
+    with _user_db() as conn:
+        rows = conn.execute(
+            "SELECT keywords, favorites, watchlist, new_ids, last_run, saved_searches "
+            "FROM user_data").fetchall()
+    def _j(v, d):
+        try:
+            x = json.loads(v or "")
+            return x if isinstance(x, type(d)) else d
+        except Exception:
+            return d
+    scen = []
+    n_acct = 0
+    for row in rows:
+        kws  = [str(k) for k in _j(row["keywords"], []) if str(k).strip()]
+        favs = [str(f) for f in _j(row["favorites"], [])]
+        wl   = list(_j(row["watchlist"], {}).keys())
+        new  = [str(x) for x in _j(row["new_ids"], [])]
+        ss   = _j(row["saved_searches"], [])
+        if not kws and not ss:
+            continue
+        n_acct += 1
+        if max_accounts and n_acct > max_accounts:
+            break
+        common = {"page": 1, "per_page": 50, "sort_field": "date", "sort_dir": "desc",
+                  "user_sorted": False, "fav_stores": favs, "keywords": kws,
+                  "watchlist_ids": wl, "new_ids": new,
+                  "user_last_scan": row["last_run"] or ""}
+        if kws:
+            scen.append(("all_stores_default", {**common, "all_stores": True}))
+            scen.append(("want_list_only", {**common, "all_stores": True,
+                                            "filter_want_list_only": True}))
+            scen.append(("all_stores_price_asc_p2", {**common, "all_stores": True, "page": 2,
+                                                     "sort_field": "price", "sort_dir": "asc",
+                                                     "user_sorted": True}))
+            if favs:
+                scen.append(("favorites_default", {**common, "stores": favs}))
+        for s in ss[:20]:
+            if not isinstance(s, dict):
+                continue
+            f = s.get("filters") or {}
+            stores = [str(x) for x in (s.get("stores") or [])]
+            body = {**common, **{k: v for k, v in f.items() if k.startswith("filter_") or k == "vintage_only"}}
+            if stores:
+                body["stores"] = stores
+            else:
+                body["all_stores"] = True
+            scen.append(("saved_search", body))
+    return scen, n_acct
+
+
+def _pg_browse_diff_check(max_accounts=None, pause=0.05):
+    _load_cat_cache()
+    t0 = time.time()
+    scen, n_acct = _pg_browse_diff_scenarios(max_accounts)
+    by_kind, samples = {}, []
+    cur_ms_tot = pg_ms_tot = 0.0
+    for n, (kind, body) in enumerate(scen):
+        _PG_BROWSE_DIFF_STATE["progress"] = f"{n}/{len(scen)}"
+        k = by_kind.setdefault(kind, {"checked": 0, "match": 0, "mismatch": 0,
+                                      "ineligible": 0, "error": 0})
+        k["checked"] += 1
+        try:
+            _cur, rep = _browse_run_both(body, logged_in=True)
+        except Exception as e:
+            rep = {"status": "error", "reason": f"current engine: {type(e).__name__}: {e}"}
+        st = rep["status"]
+        if st == "ok":
+            cur_ms_tot += rep["current_ms"]; pg_ms_tot += rep["pg_ms"]
+            if rep["diff"]["match"]:
+                k["match"] += 1
+                st = None
+            else:
+                k["mismatch"] += 1
+        else:
+            k[st] += 1
+        if st and len(samples) < _PG_BROWSE_DIFF_SAMPLE_CAP:
+            smp = {"kind": kind, **{x: rep.get(x) for x in ("status", "reason", "diff")}}
+            if body.get("filter_q"):
+                smp["filter_q"] = body["filter_q"]
+            # Explain kwMatch differences entry-by-entry
+            kwf = ((rep.get("diff") or {}).get("item_fields") or {}).get("kwMatch")
+            if kwf:
+                try:
+                    smp["kw_explain"] = _explain_kw_mismatch(
+                        body.get("keywords") or [], [s[0] for s in kwf["sample"]])
+                except Exception as e:
+                    smp["kw_explain_error"] = f"{type(e).__name__}: {e}"
+            samples.append(smp)
+        if pause:
+            time.sleep(pause)   # yield the GIL to real request threads (1 worker)
+    ok_n = sum(v["match"] + v["mismatch"] for v in by_kind.values())
+    return {
+        "checked_at":      datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "elapsed_seconds": round(time.time() - t0, 1),
+        "accounts":        n_acct,
+        "scenarios":       len(scen),
+        "by_kind":         by_kind,
+        "avg_current_ms":  round(cur_ms_tot / ok_n, 1) if ok_n else None,
+        "avg_pg_ms":       round(pg_ms_tot / ok_n, 1) if ok_n else None,
+        "samples":         samples,
+    }
+
+
+@app.route("/api/pg-browse-diff-check", methods=["POST"])
+@optional_user_context
+def api_pg_browse_diff_check_start():
+    """Admin-only. Replays every account's real want list / favorites /
+    saved searches through both /api/browse engines (see
+    _pg_browse_diff_scenarios) on a background thread with its own lock —
+    never the scan _lock. Optional JSON body {"max_accounts": N}. Poll GET
+    for status/results."""
+    denied = _require_admin_api()
+    if denied:
+        return denied
+    if _PG_POOL is None:
+        return jsonify({"error": "Postgres pool not available"}), 503
+    if not _PG_BROWSE_DIFF_LOCK.acquire(blocking=False):
+        return jsonify({"error": "A run is already in progress."}), 409
+    body = request.get_json(silent=True) or {}
+    try:
+        max_accounts = int(body.get("max_accounts") or 0) or None
+    except (TypeError, ValueError):
+        max_accounts = None
+
+    def _run():
+        try:
+            _PG_BROWSE_DIFF_STATE.clear()
+            _PG_BROWSE_DIFF_STATE["status"] = "running"
+            _PG_BROWSE_DIFF_STATE["started_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            result = _pg_browse_diff_check(max_accounts=max_accounts)
+            _PG_BROWSE_DIFF_STATE["status"] = "done"
+            _PG_BROWSE_DIFF_STATE["result"] = result
+        except Exception as e:
+            _PG_BROWSE_DIFF_STATE["status"] = "error"
+            _PG_BROWSE_DIFF_STATE["error"] = f"{type(e).__name__}: {e}"
+            print(f"[pg] browse diff check failed: {type(e).__name__}: {e}")
+        finally:
+            try: _PG_BROWSE_DIFF_LOCK.release()
+            except RuntimeError: pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"status": "started"})
+
+
+@app.route("/api/pg-browse-diff-check")
+@optional_user_context
+def api_pg_browse_diff_check_poll():
+    denied = _require_admin_api()
+    if denied:
+        return denied
+    return jsonify(_PG_BROWSE_DIFF_STATE)
+
 
 
 # (Dead legacy global-file endpoints removed in v2.14.5 — /api/watchlist GET+POST,
@@ -7804,7 +8514,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.37"
+APP_VERSION = "2.16.38"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
