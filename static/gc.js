@@ -1331,6 +1331,14 @@ function _captureFilterState() {
   };
 }
 
+// Capture the pre-special-view baseline only when entering the FIRST special view.
+// Switching laterally (Want List -> Watch List, Watch List -> a saved search, ...)
+// must keep the original baseline; re-capturing there made toggling Watch List off
+// "restore" the Want List (with its button unlit).
+function _enterSpecialView() {
+  if (!_preSpecialViewState) _preSpecialViewState = _captureFilterState();
+}
+
 function _restoreFilterState() {
   const state = _preSpecialViewState;
   if (!state) return;
@@ -1431,6 +1439,13 @@ let _srvTotalCount = 0;
 let _srvTotalUnfiltered = 0;
 let _srvTotalPages = 1;
 let _srvLoading = false;
+// Latest-request-wins: every _fetchBrowsePage call bumps _browseSeq and aborts the
+// previous in-flight request. A response whose seq is no longer current is dropped
+// before it touches the DOM, so a slow earlier view (e.g. Want List) can never
+// overwrite a newer one (e.g. Watch List). Replaces the old "if (_srvLoading) return"
+// guard, which silently dropped requests whenever a caller forgot to reset it.
+let _browseSeq = 0;
+let _browseAbort = null;
 let _baseItemCount = 0;   // full catalog count (set on load, reset target when filters clear)
 let _baseStoreCount = 0;  // full store count (set on load)
 
@@ -1450,7 +1465,10 @@ function _getBrowseFilters() {
 }
 
 async function _fetchBrowsePage(page) {
-  if (_srvLoading) return;
+  const mySeq = ++_browseSeq;
+  if (_browseAbort) { try { _browseAbort.abort(); } catch (e) {} }
+  const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  _browseAbort = ctrl;
   _srvLoading = true;
   const filters = _getBrowseFilters();
   // In global search mode, override filter_q with the global query and search all stores
@@ -1488,9 +1506,11 @@ async function _fetchBrowsePage(page) {
     const r = await fetch('/api/browse', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal: ctrl ? ctrl.signal : undefined
     });
     const d = await r.json();
+    if (mySeq !== _browseSeq) return;  // superseded by a newer request — don't render
     if (d.no_store_data) {
       document.getElementById('res-panel').style.display = 'block';
       document.getElementById('res-title').textContent = 'No Browse Data Yet';
@@ -1502,9 +1522,22 @@ async function _fetchBrowsePage(page) {
     }
     if (!d.items || (!d.items.length && page === 1)) {
       document.getElementById('res-panel').style.display = 'block';
-      document.getElementById('res-title').textContent = 'No Items Found';
       document.getElementById('res-badge').textContent = '';
-      document.getElementById('res-body').innerHTML = '<div class="no-res">No cached inventory for selected store(s). Run Check for New Items to scan.</div>';
+      // Watch/Want List respect store selection, so "empty" usually means "none in these
+      // stores", not "no inventory cached" — say so instead of suggesting a scan.
+      const _emptyScope = (!_srvStores.length || _srvStores.length >= allStores.length)
+        ? 'nationwide' : `in the ${_srvStores.length} selected store${_srvStores.length !== 1 ? 's' : ''}`;
+      let _emptyTitle = 'No Items Found';
+      let _emptyMsg = 'No cached inventory for selected store(s). Run Check for New Items to scan.';
+      if (_watchFilterActive) {
+        _emptyTitle = 'Watch List — no matches';
+        _emptyMsg = `None of your watched items are currently available ${_emptyScope}.`;
+      } else if (_wantListSearchActive) {
+        _emptyTitle = 'No Want List matches found';
+        _emptyMsg = `No Want List matches ${_emptyScope}.`;
+      }
+      document.getElementById('res-title').textContent = _emptyTitle;
+      document.getElementById('res-body').innerHTML = '<div class="no-res">' + _emptyMsg + '</div>';
       return;
     }
 
@@ -1622,8 +1655,11 @@ async function _fetchBrowsePage(page) {
 
     _updateSaveSearchBtn();
 
+  } catch (e) {
+    if (e && e.name === 'AbortError') return;  // superseded — expected
+    throw e;
   } finally {
-    _srvLoading = false;
+    if (mySeq === _browseSeq) { _srvLoading = false; _browseAbort = null; }
   }
 }
 
@@ -1969,9 +2005,15 @@ async function browseCache() {
     const stores = getSelected();
     if (!stores.length) return;
     _browseMode = 'server';
-    _globalSearchActive = false;
-    _globalSearchQuery = '';
-    _resetWantListLink();
+    // Want List now respects store selection (v2.16.27/28), so a store change while
+    // it's open must keep it active. Previously this un-lit the Want List button while
+    // _wantListSearchActive stayed true: results stayed want-only and the next click on
+    // the button turned it OFF instead of on.
+    if (!_wantListSearchActive) {
+      _globalSearchActive = false;
+      _globalSearchQuery = '';
+      _resetWantListLink();
+    }
     _srvStores = stores;
     _srvPage = 1;
     // Preserve current sort and all active filters (brand/condition/category/subcategory/
@@ -2028,7 +2070,7 @@ function toggleWatchFilter() {
   const btn = document.getElementById('watchlist-toggle');
   if (!_watchFilterActive) {
     // Activating — save current state, then clear all other filters for a clean view
-    _preSpecialViewState = _captureFilterState();
+    _enterSpecialView();
     // Clear all filter state
     window._selectedBrands = []; _updateBrandBtn();
     window._selectedConds  = []; _updateCondBtn();
@@ -2253,11 +2295,18 @@ function _applySavedSearch(id) {
   const ss = (window._savedSearches || []).find(function(s) { return s.id === id; });
   if (!ss) return;
   // Save current state before applying so the "← Back" button can restore it
-  _preSpecialViewState = _captureFilterState();
+  _enterSpecialView();
   // The saved search takes ownership of the store selection — drop any ZIP
   // radius narrowing state so a stale snapshot can't restore wrong stores later.
   _resetZipRadiusState();
   _closeSavedSearchesDropdown();
+  // A saved search replaces the current view entirely. Saved filters never include
+  // Want List / nationwide-search mode, so exit it — otherwise applying a saved
+  // search while Want List is open shows "N Want List matches" instead of the search.
+  _wantListSearchActive = false;
+  _globalSearchActive = false;
+  _globalSearchQuery = '';
+  _resetWantListLink();
   const f = ss.filters || {};
   // Restore filter state
   window._selectedBrands = f.filter_brands      || [];
@@ -2556,6 +2605,7 @@ function globalSearch() {
 }
 
 function clearGlobalSearch() {
+  if (_wantListSearchActive && !_watchFilterActive) _preSpecialViewState = null;
   _globalSearchActive = false; _wantListSearchActive = false;
   _globalSearchQuery = '';
   const el = document.getElementById('res-search');
@@ -2593,7 +2643,7 @@ function searchWantList() {
     return;
   }
   // Activating — save current state before clearing
-  _preSpecialViewState = _captureFilterState();
+  _enterSpecialView();
   _globalSearchActive = true;
   _wantListSearchActive = true;
   _globalSearchQuery = '';
@@ -2840,6 +2890,7 @@ function showResults(msg, isBaseline) {
     _srvSortField = 'date';
     _srvSortDir = 'desc';
     window._sortCol = null; window._sortDir = 1;
+    _preSpecialViewState = null;  // scan results replace any special view outright
     _watchFilterActive = false;
     document.getElementById('watchlist-toggle').classList.remove('wl-active');
     _priceDropFilterActive = false;
@@ -3727,6 +3778,7 @@ function _globalKeywordSearch() {
   // Without this, _globalSearchActive=true causes _fetchBrowsePage to override
   // filter_q with _globalSearchQuery='' and the typed text is silently ignored.
   if (_globalSearchActive || _wantListSearchActive) {
+    if (_wantListSearchActive && !_watchFilterActive) _preSpecialViewState = null;
     _globalSearchActive = false;
     _wantListSearchActive = false;
     _globalSearchQuery = '';
@@ -3746,6 +3798,7 @@ function _globalKeywordSearch() {
 }
 
 function clearFilters() {
+  _preSpecialViewState = null;  // explicit reset — no stale baseline to restore later
   window._selectedBrands = []; _updateBrandBtn();
   window._selectedConds = []; _updateCondBtn();
   window._selectedCats = []; _updateCatBtn();
@@ -3805,6 +3858,7 @@ function clearResSearch() {
   // Clear want-list / global search mode so the ✕ button fully exits those states
   // (without this, _globalSearchActive stays true and re-fetches keep returning
   // want-list-filtered results even though the chip looks inactive)
+  if (_wantListSearchActive && !_watchFilterActive) _preSpecialViewState = null;
   _globalSearchActive = false;
   _wantListSearchActive = false;
   _globalSearchQuery = '';

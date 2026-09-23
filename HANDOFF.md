@@ -1,5 +1,63 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-23 · Current version: v2.16.40 (Phase F step 4b — CUTOVER: unified SQL browse path serves every request, legacy path as per-request fallback) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-23 · Current version: v2.16.41 (view-switching fixes for Watch/Want List/Saved Searches; Phase F step 4b cutover live since v2.16.40) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.41 — 2026-09-23: view-switching fixes (Watch List / Want List / Saved Searches) — frontend only
+
+**Report (Chuck)**: toggling between Watch List, Want List, Saved Searches etc. — "sometimes the list
+won't update, sometimes it will jumble, it won't show what it's supposed to." Reproduced all of it live
+in the browser on v2.16.40 (instrumented `fetch`, clicked the real buttons). **Not caused by the
+v2.16.40 SQL cutover** — the server returned correct results for every request; all four bugs are in
+`static/gc.js` and predate it. Server untouched apart from the version bump.
+
+### Bug 1 — toggling a view off "restored" the previous special view
+`toggleWatchFilter`, `searchWantList`, `_applySavedSearch` each did
+`_preSpecialViewState = _captureFilterState()` unconditionally on activation. Going Want List → Watch
+List captured the *Want List* state as the baseline, so turning Watch List off restored Want List
+results with no button lit ("80 Want List matches" under an all-dark toolbar). Fix: new
+`_enterSpecialView()` only captures when no baseline exists, so lateral switches keep the original
+pre-special-view state. The baseline is dropped on explicit exits so it can't go stale:
+`clearFilters()`, scan results replacing the view (`showResults` use_browse branch), and leaving Want
+List via the search box / ✕ / `clearGlobalSearch` (only when Watch List isn't also active).
+
+### Bug 2 — out-of-order responses overwrote the current view ("jumble")
+`_fetchBrowsePage` had no way to ignore a stale response. Every toggle set `_srvLoading = false` to
+force a new fetch, but the older in-flight request still rendered whenever it returned. Want List
+requests (~300-700ms) are slower than Watch List (~200ms), so Want → Watch quickly could paint Want
+List / all-items rows under a "Watch List" header (reproduced by delaying one response: header read
+"Watch List — 113,704 items nationwide" with 49 of 50 rows unwatched). The stale response also ran
+`_populateFiltersFromServer`, pruning brand/category selections against the wrong view's facets. And
+any caller that didn't reset `_srvLoading` got silently dropped by `if (_srvLoading) return` ("won't
+update"). Fix: latest-request-wins — each call bumps `_browseSeq`, aborts the previous request with an
+`AbortController`, and returns without touching the DOM if superseded after `r.json()`. AbortError is
+swallowed; `_srvLoading` is only cleared by the current request. The early-return guard is gone.
+
+### Bug 3 — store change during Want List un-lit the Want List button
+`browseCache()` (fires on Favorites toggle / store checkbox) reset `_globalSearchActive` and called
+`_resetWantListLink()` but left `_wantListSearchActive = true`. Results stayed want-only with the
+button dark, and the next click on Want List turned it OFF. Follow-on to v2.16.27/28 (Want List now
+respects stores). Fix: skip that reset while Want List is active.
+
+### Bug 4 — applying a saved search while Want List was open stayed in Want mode
+`_applySavedSearch` reset watch/price-drop/vintage chips but not Want List, so "Local Effects" showed
+"1 Want List matches in 2 selected stores" instead of its 171 items. Saved filters never contain
+Want List mode, so it now exits Want List first.
+
+### Small UX: empty Watch/Want List message
+An empty page-1 result always said "No Items Found — No cached inventory... run a scan", which is
+wrong for Watch/Want List (they respect store selection, so empty usually means "none in these
+stores"). Now: "Watch List — no matches / None of your watched items are currently available in the
+N selected stores" (or "nationwide"), and the equivalent for Want List.
+
+### Verified
+Hot-patched the new functions into the live v2.16.40 page (same logic, via `Function.toString`
+replacement + rebinding the two toggle buttons) and re-ran every repro against production data:
+Want→Watch→off returns to the base "114,184 Items"; with Want responses artificially delayed 1s the
+Watch List stays at its 7 watched items; Want + store change keeps the button lit and one click
+exits cleanly; Want → saved search → Watch → off → Back all land correctly. `node --check
+static/gc.js` and `py_compile` clean. **After deploy**: repeat the Want→Watch→off and Want→saved
+search clicks on the real build.
 
 ---
 

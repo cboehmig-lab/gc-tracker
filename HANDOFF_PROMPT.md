@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-23 · Version: v2.16.40 (Phase F step 4b CUTOVER — see HANDOFF.md's 2026-09-23 v2.16.40 entry) · Live at: gcgeartracker.com*
+*Generated: 2026-09-23 · Version: v2.16.41 (view-switching fixes; Phase F step 4b CUTOVER live since v2.16.40 — see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,7 +88,17 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.40 — Phase F step 4b: THE CUTOVER (2026-09-23)
+## Current State: v2.16.41 — view-switching fixes (2026-09-23)
+
+Frontend-only (`static/gc.js`). Fixed four bugs in switching between Watch List / Want List / Saved
+Searches: (1) the pre-special-view snapshot was re-captured on every lateral switch, so turning Watch
+List off restored the Want List — now `_enterSpecialView()` captures only once; (2) stale `/api/browse`
+responses rendered over newer views — `_fetchBrowsePage` is now latest-request-wins (`_browseSeq` +
+AbortController); (3) a store change during Want List un-lit its button while it stayed active;
+(4) a saved search applied during Want List stayed in Want mode. Plus clearer empty Watch/Want
+messages. Phase F state below is unchanged. Full detail: HANDOFF.md v2.16.41.
+
+## Previous: v2.16.40 — Phase F step 4b: THE CUTOVER (2026-09-23)
 
 Every `/api/browse` request now runs `_browse_compute(engine="auto")`: the unified SQL path
 (`_pg_browse`) first, with the old Tier 1 / Tier 2 / Python path as a per-request fallback for an
