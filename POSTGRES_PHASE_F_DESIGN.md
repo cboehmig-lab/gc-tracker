@@ -827,3 +827,19 @@ Decisions made while building it, deviating from or sharpening the plan above:
 
 Local verification and the known-divergence classes: HANDOFF.md v2.16.38. Production verification
 (`/api/pg-browse-diff-check`) is the gate for 4b.
+
+---
+
+### Addendum 15 (2026-09-23, v2.16.39) — punctuation-normalized tokenization; first production diff check
+
+v2.16.38's first production `/api/pg-browse-diff-check` (10 accounts): 97/100 exact, 0 errors, 0
+ineligible, `_pg_browse` ~235ms vs ~1,200ms current. It surfaced a third Postgres parser fusion case —
+`word.word` → one `host` lexeme ("Dr.scientist") — after hyphen (v2.16.35) and slash (v2.16.36). Decision
+(Chuck: "do it all"): stop fixing these one character at a time. Both sides now normalize EVERY run of
+non-alphanumerics to a space, with the query side doing it in SQL so document and query always share
+the database's own character classification. This is the tokenization equivalent of the Python
+matcher's `\W+` split, closing the whole class. The diff check also now attributes every mismatch over
+the full result set and flags any it can't attribute to search semantics as `plumbing_suspect` — the
+4b gate is zero plumbing suspects plus an accepted list of search-semantics classes. Detail: HANDOFF.md
+v2.16.39.
+

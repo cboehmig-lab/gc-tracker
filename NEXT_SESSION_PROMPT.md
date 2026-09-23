@@ -1,4 +1,16 @@
-# Next Session Prompt — v2.16.38 built (not yet pushed): Phase F step 4a (unified `_pg_browse()`, shadow only)
+# Next Session Prompt — v2.16.39 built (not yet pushed): Phase F step 4a follow-up
+
+**Update 2026-09-23**: v2.16.38 is LIVE; its first production diff check (10 accounts) was 97/100
+exact, `_pg_browse` ~5x faster. v2.16.39 (punctuation-normalized `search_vector` — self-migrating
+column rebuild, ~20s on boot — plus full-set mismatch explanations with a `mismatch_plumbing_suspect`
+counter) is built and verified locally, not yet pushed. After pushing: confirm the `[pg] migrated
+search_vector to punctuation-normalized...` deploy log sequence, then rerun the diff check (10 accounts,
+then all). 4b gate: zero `mismatch_plumbing_suspect`, and every search-semantics class accepted.
+See HANDOFF.md v2.16.39. The v2.16.38 notes below are still accurate otherwise.
+
+---
+
+# (previous) v2.16.38 notes
 
 ## Where things stand
 

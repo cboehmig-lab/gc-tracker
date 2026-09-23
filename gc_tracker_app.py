@@ -436,6 +436,11 @@ def _pg_migrate_search_vector_if_stale(conn):
       - v2.16.36: slashes ALSO normalized to spaces (fixes a different Postgres parser quirk —
         "word/word" fuses into one compound lexeme instead of splitting, e.g. "Mesa/Boogie"
         never matching a plain "mesa" search).
+      - v2.16.39: generalized to '[^[:alnum:]]+' -> ' ' (every run of non-alphanumerics),
+        after the v2.16.38 production browse diff check found "word.word" ALSO fusing into
+        one lexeme ("Dr.scientist"). Staleness marker is now the '[:alnum:]' literal —
+        absent from every older expression. (The paragraph below describes the v2.16.36
+        check, kept for history.)
 
     Staleness is detected by checking for the '/' literal in the stored expression string —
     present only once the current (v2.16.36+) expression has actually been applied. This
@@ -454,10 +459,10 @@ def _pg_migrate_search_vector_if_stale(conn):
             WHERE d.adrelid = 'items'::regclass AND a.attname = 'search_vector'
         """)
         row = cur.fetchone()
-        if row and row[0] and "'/'" not in row[0]:
+        if row and row[0] and "[:alnum:]" not in row[0]:
             cur.execute("ALTER TABLE items DROP COLUMN search_vector")
             conn.commit()
-            print("[pg] migrated search_vector to hyphen+slash-normalized generated expression")
+            print("[pg] migrated search_vector to punctuation-normalized generated expression")
 
 def _init_pg_schema():
     if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL):
@@ -4187,6 +4192,16 @@ class _TsqueryUnsupported(Exception):
 # raises _TsqueryUnsupported.
 _TSQUERY_LEXEME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9'-]*$")
 
+# (v2.16.39) The ONE normalization both sides of every tsquery match go through: every run of
+# non-alphanumeric characters becomes a single space. Must stay byte-identical to the
+# regexp_replace in pg_schema.sql's search_vector expression. Applied in SQL (not Python) on the
+# query side so the database's own [:alnum:] classification is used on both sides.
+_PG_SEARCH_NORM_SQL = "regexp_replace(%s, '[^[:alnum:]]+', ' ', 'g')"
+# Suffix-wildcard words must be plain ASCII alphanumerics to be spliced as a `word:*` lexeme:
+# anything with punctuation would be split by the document-side normalization, so a single
+# prefix lexeme could never match it — falls through to _TsqueryUnsupported instead.
+_TSQUERY_WILDCARD_WORD_RE = re.compile(r"^[A-Za-z0-9]+$")
+
 def _tsquery_safe_lexeme(word):
     return bool(word) and bool(_TSQUERY_LEXEME_RE.match(word))
 
@@ -4251,15 +4266,17 @@ def _tsquery_compile_term(part):
     if '*' in part:
         if part.count('*') == 1 and part.endswith('*'):
             word = part[:-1]
-            if word and ' ' not in word and '-' not in word and _tsquery_safe_lexeme(word):
+            if word and _TSQUERY_WILDCARD_WORD_RE.match(word):
                 return "search_vector @@ to_tsquery('simple', %s)", [word + ':*']
         raise _TsqueryUnsupported(f"non-suffix or multi-word wildcard: {part!r}")
     # Plain word or an un-quoted multi-word phrase -> phraseto_tsquery, the native
     # equivalent of _compile_query's 'word' \b...\b branch (both are whole-word/phrase,
     # order- and adjacency-preserving). Hyphens and slashes normalized to spaces first —
     # see docstring.
-    normalized = part.replace('-', ' ').replace('/', ' ')
-    return "search_vector @@ phraseto_tsquery('simple', %s)", [normalized]
+    # (v2.16.39) Normalization now happens in SQL via _PG_SEARCH_NORM_SQL (every run of
+    # non-alphanumerics -> one space), identical to search_vector's own expression; this
+    # supersedes the v2.16.35/36 Python-side '-'/'/' replace.
+    return f"search_vector @@ phraseto_tsquery('simple', {_PG_SEARCH_NORM_SQL})", [part]
 
 def _tsquery_compile_query(query_str):
     """Mirrors _compile_query(query_str): comma-separated parts, ANDed. Returns
@@ -5080,7 +5097,9 @@ def _pg_tier2_narrow_items(*, store_set, search_all, user_last_scan) -> list:
 # Matches a translated fragment that is exactly ONE `search_vector @@ <tsquery>`
 # predicate — the only shape safe to fold into the merged tsquery OR-tree.
 _PG_KW_MERGEABLE_RE = re.compile(
-    r"^search_vector @@ ((?:phraseto_tsquery|to_tsquery)\('simple', %s\))$")
+    r"^search_vector @@ ("
+    + re.escape("phraseto_tsquery('simple', " + _PG_SEARCH_NORM_SQL + ")")
+    + "|" + re.escape("to_tsquery('simple', %s)") + r")$")
 
 
 def _pg_name_params(frag, params, prefix, out):
@@ -5117,6 +5136,30 @@ def _pg_kw_expr(kw_entries, out_params):
         parts.append("search_vector @@ (" + " || ".join(merged) + ")")
     parts.extend(others)
     return ("(" + " OR ".join(parts) + ")") if parts else None
+
+
+def _pg_match_skus(*, store_set, search_all, user_last_scan, kw_entries=None, fq=None):
+    """Comparison tooling only: the full set of in-scope (available + store +
+    scan-gate) SKUs matching the want list (kw_entries) or the filter_q (fq)
+    in SQL — the counterpart of _browse_compute's kw_skus_current /
+    fq_skus_current engines, used to explain diffs beyond page 1."""
+    tparams = {}
+    if kw_entries is not None:
+        pred = _pg_kw_expr(kw_entries, tparams) or "FALSE"
+    else:
+        _frag, _prm = _tsquery_filter_q(fq) if fq else (None, [])
+        pred = _pg_name_params(_frag, _prm, "_fq", tparams) if _frag is not None else "FALSE"
+    where = ["available", f"({pred})"]
+    if not search_all:
+        where.append("store = ANY(%(stores)s)")
+        tparams["stores"] = list(store_set) if store_set else []
+    if user_last_scan:
+        where.append("(first_seen = '' OR first_seen <= %(user_last_scan)s)")
+        tparams["user_last_scan"] = user_last_scan
+    with _pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT sku FROM items WHERE {' AND '.join(where)}", tparams)
+            return {r[0] for r in cur.fetchall()}
 
 
 def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
@@ -5633,6 +5676,11 @@ def _browse_compute(data, *, logged_in, pg_diag=False, engine="current"):
     # Only reached when a caller explicitly asks for engine="pg" (the admin
     # ?pg_shadow=2 compare and /api/pg-browse-diff-check). Every real
     # request uses engine="current" and skips this block entirely.
+    if engine in ("kw_skus_pg", "fq_skus_pg"):
+        return _pg_match_skus(store_set=store_set, search_all=search_all,
+                              user_last_scan=user_last_scan,
+                              kw_entries=_kw_accepted if engine == "kw_skus_pg" else None,
+                              fq=fq if engine == "fq_skus_pg" else None)
     if engine == "pg":
         if _PG_POOL is None:
             raise RuntimeError("Postgres pool not available")
@@ -5663,7 +5711,8 @@ def _browse_compute(data, *, logged_in, pg_diag=False, engine="current"):
     # the legacy path automatically rather than failing it. Reverting the
     # whole cutover, if ever needed, is putting `_is_admin()` back in front
     # of this condition, not a data-recovery operation.
-    if _PG_POOL is not None and _pg_tier1_eligible(fq, _has_kw, sort_field):
+    if (_PG_POOL is not None and engine == "current"
+            and _pg_tier1_eligible(fq, _has_kw, sort_field)):
         try:
             _pg_t0 = time.time()
             _pg_result = _pg_tier1_browse(
@@ -5794,6 +5843,15 @@ def _browse_compute(data, *, logged_in, pg_diag=False, engine="current"):
             "kwMatch":          kw_hit,
             "isFav":            store in fav_stores if fav_stores else False,
         })
+
+    # (v2.16.38+ comparison tooling) Full-scope match sets for the batch diff
+    # check's explain step — never reached by a real request.
+    if engine == "kw_skus_current":
+        return {i["id"] for i in all_items if i["kwMatch"]}
+    if engine == "fq_skus_current":
+        _fqc = _compile_fq_clauses(fq) if fq else None
+        return {i["id"] for i in all_items if _fqc and _fq_text_match(
+            ((i["name"] or "") + " " + (i["brand"] or "")).lower(), _fqc)}
 
     total_unfiltered = len(all_items)
     new_count_unfiltered = sum(1 for i in all_items if i.get("isNew"))
@@ -6138,6 +6196,48 @@ def _explain_kw_mismatch(kw_entries, skus):
     return out
 
 
+def _explain_browse_mismatch(body):
+    """(v2.16.39) Explain a mismatched scenario by diffing the FULL in-scope
+    match sets of each search component between engines — not just the page-1
+    items the response diff can see. Want list: which SKUs match only in
+    Python / only in SQL, and for up to 5 of them which entries are
+    responsible (_explain_kw_mismatch). filter_q: counts plus a few item
+    names on each side. If neither component differs, the mismatch is in the
+    non-search plumbing (facets/sort/filters) — the report says so
+    explicitly, since that's the class that would be a real 4b blocker."""
+    out = {}
+    plumbing = True
+    if body.get("keywords"):
+        py = _browse_compute(body, logged_in=True, engine="kw_skus_current")
+        sq = _browse_compute(body, logged_in=True, engine="kw_skus_pg")
+        if isinstance(py, set) and isinstance(sq, set) and py != sq:
+            plumbing = False
+            only_py, only_sq = sorted(py - sq), sorted(sq - py)
+            out["kw_set"] = {"n_python": len(py), "n_sql": len(sq),
+                             "n_only_python": len(only_py), "n_only_sql": len(only_sq),
+                             "explain": _explain_kw_mismatch(
+                                 body.get("keywords") or [], (only_py[:3] + only_sq[:3]))}
+    if body.get("filter_q"):
+        py = _browse_compute(body, logged_in=True, engine="fq_skus_current")
+        sq = _browse_compute(body, logged_in=True, engine="fq_skus_pg")
+        if isinstance(py, set) and isinstance(sq, set) and py != sq:
+            plumbing = False
+            only_py, only_sq = sorted(py - sq), sorted(sq - py)
+            names = {}
+            ids = only_py[:3] + only_sq[:3]
+            if ids:
+                with _pg_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT sku, name, brand FROM items WHERE sku = ANY(%s)", (ids,))
+                        names = {r[0]: f"{r[1]} | {r[2]}" for r in cur.fetchall()}
+            out["fq_set"] = {"n_python": len(py), "n_sql": len(sq),
+                             "only_python": [names.get(x, x) for x in only_py[:3]],
+                             "only_sql": [names.get(x, x) for x in only_sq[:3]],
+                             "n_only_python": len(only_py), "n_only_sql": len(only_sq)}
+    out["plumbing_suspect"] = plumbing
+    return out
+
+
 _PG_BROWSE_DIFF_LOCK = threading.Lock()
 _PG_BROWSE_DIFF_STATE: dict = {}
 _PG_BROWSE_DIFF_SAMPLE_CAP = 25
@@ -6166,9 +6266,9 @@ def _pg_browse_diff_scenarios(max_accounts=None):
         ss   = _j(row["saved_searches"], [])
         if not kws and not ss:
             continue
-        n_acct += 1
-        if max_accounts and n_acct > max_accounts:
+        if max_accounts and n_acct >= max_accounts:
             break
+        n_acct += 1
         common = {"page": 1, "per_page": 50, "sort_field": "date", "sort_dir": "desc",
                   "user_sorted": False, "fav_stores": favs, "keywords": kws,
                   "watchlist_ids": wl, "new_ids": new,
@@ -6205,7 +6305,9 @@ def _pg_browse_diff_check(max_accounts=None, pause=0.05):
     for n, (kind, body) in enumerate(scen):
         _PG_BROWSE_DIFF_STATE["progress"] = f"{n}/{len(scen)}"
         k = by_kind.setdefault(kind, {"checked": 0, "match": 0, "mismatch": 0,
-                                      "ineligible": 0, "error": 0})
+                                      "ineligible": 0, "error": 0,
+                                      "mismatch_search_semantics": 0,
+                                      "mismatch_plumbing_suspect": 0})
         k["checked"] += 1
         try:
             _cur, rep = _browse_run_both(body, logged_in=True)
@@ -6219,20 +6321,25 @@ def _pg_browse_diff_check(max_accounts=None, pause=0.05):
                 st = None
             else:
                 k["mismatch"] += 1
+                st = "mismatch"
         else:
             k[st] += 1
+        explain = None
+        if st == "mismatch":
+            # Explain EVERY mismatch (not just sampled ones) so the per-kind
+            # search-semantics vs plumbing-suspect split covers the whole run.
+            try:
+                explain = _explain_browse_mismatch(body)
+            except Exception as e:
+                explain = {"explain_error": f"{type(e).__name__}: {e}", "plumbing_suspect": True}
+            k["mismatch_plumbing_suspect" if explain.get("plumbing_suspect")
+              else "mismatch_search_semantics"] += 1
         if st and len(samples) < _PG_BROWSE_DIFF_SAMPLE_CAP:
             smp = {"kind": kind, **{x: rep.get(x) for x in ("status", "reason", "diff")}}
             if body.get("filter_q"):
                 smp["filter_q"] = body["filter_q"]
-            # Explain kwMatch differences entry-by-entry
-            kwf = ((rep.get("diff") or {}).get("item_fields") or {}).get("kwMatch")
-            if kwf:
-                try:
-                    smp["kw_explain"] = _explain_kw_mismatch(
-                        body.get("keywords") or [], [s[0] for s in kwf["sample"]])
-                except Exception as e:
-                    smp["kw_explain_error"] = f"{type(e).__name__}: {e}"
+            if explain:
+                smp.update(explain)
             samples.append(smp)
         if pause:
             time.sleep(pause)   # yield the GIL to real request threads (1 worker)
@@ -8514,7 +8621,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.38"
+APP_VERSION = "2.16.39"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

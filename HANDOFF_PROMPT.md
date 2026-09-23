@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-22 · Version: v2.16.38 (Phase F step 4a: unified `_pg_browse()` built, SHADOW ONLY — see HANDOFF.md's 2026-09-22 v2.16.38 entry) · Live at: gcgeartracker.com*
+*Generated: 2026-09-23 · Version: v2.16.39 (Phase F step 4a follow-up — see HANDOFF.md's 2026-09-23 v2.16.39 entry) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -85,6 +85,17 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 - **JSON-LD**: `WebSite` schema with `SearchAction` (`potentialAction`) — injected as `<script type="application/ld+json">` (not blocked by CSP `script-src 'self'`)
 - **Noscript store list**: `_build_stores_noscript()` called in `index()` — reads `STORES_CACHE` fresh, generates `<noscript>` block listing all ~240+ store names. Invisible to JS users, crawlable by Google. Updates automatically when store list is refreshed.
 - **Footer**: `.seo-footer` — visible "Privacy Policy · Not affiliated with Guitar Center, Inc." in `#555` gray. No hidden text.
+
+---
+
+## Current State: v2.16.39 — Phase F step 4a follow-up (2026-09-23)
+
+First production diff check on v2.16.38 (10 accounts): 97/100 exact, `_pg_browse` ~5x faster
+(~235ms vs ~1,200ms). v2.16.39 fixes what it surfaced: `search_vector` (and the translator's query side,
+in SQL) now turn every run of non-alphanumerics into a space — "Dr.scientist" was fusing into one
+lexeme, same class as Mesa/Boogie — via a self-migrating column rebuild. The diff check now explains
+every mismatch over the FULL result set and splits them into `mismatch_search_semantics` vs
+`mismatch_plumbing_suspect` (any plumbing suspect blocks 4b). Full detail: HANDOFF.md v2.16.39.
 
 ---
 

@@ -76,9 +76,17 @@ CREATE INDEX IF NOT EXISTS idx_items_price       ON items (price)       WHERE av
 -- reaching this statement — see _pg_migrate_search_vector_if_stale() in gc_tracker_app.py, which
 -- detects staleness by checking for the '/' literal in the stored expression (present only once
 -- this v2.16.36 version has actually been applied).
+-- v2.16.39: the hyphen+slash replace above is GENERALIZED to "every run of non-alphanumeric
+-- characters becomes one space" — '[^[:alnum:]]+'. Found via the v2.16.38 production browse diff
+-- check: Postgres's 'simple' parser also fuses "word.word" (e.g. "Dr.scientist", "K.Line") into a
+-- single 'host' lexeme, same class of bug as the v2.16.36 Mesa/Boogie slash fix. Rather than keep
+-- finding these one punctuation mark at a time, every separator is now normalized, which matches
+-- the Python matcher's own \W+ tokenization. The query side (_tsquery_compile_term) applies the
+-- IDENTICAL regexp_replace in SQL, so both sides always tokenize the same way regardless of the
+-- database's locale/ctype classification of non-ASCII letters.
 ALTER TABLE items ADD COLUMN IF NOT EXISTS search_vector tsvector
     GENERATED ALWAYS AS (
-        to_tsvector('simple', regexp_replace(regexp_replace(coalesce(name, '') || ' ' || coalesce(brand, ''), '-', ' ', 'g'), '/', ' ', 'g'))
+        to_tsvector('simple', regexp_replace(coalesce(name, '') || ' ' || coalesce(brand, ''), '[^[:alnum:]]+', ' ', 'g'))
     ) STORED;
 
 -- v2.16.35: pg_trgm backs a literal, punctuation-preserving, substring-anywhere match for

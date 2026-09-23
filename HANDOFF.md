@@ -1,5 +1,61 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-22 · Current version: v2.16.38 (Phase F step 4a — unified `_pg_browse()` built, shadow only) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-23 · Current version: v2.16.39 (Phase F step 4a follow-up — punctuation-normalized search + full-set diff explanations) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.39 — 2026-09-23: Phase F step 4a follow-up — punctuation-normalized search_vector + full-set mismatch explanations
+
+**Trigger**: the first production run of `/api/pg-browse-diff-check` on v2.16.38 (10 accounts, 100
+scenarios): 97 exact, 0 errors, 0 ineligible; avg current path ~1,200ms vs `_pg_browse` ~235ms. The
+3 mismatches (±1-4 items each): `beyer* M*` saved search (known mid-word-wildcard tradeoff), a
+"Dr.scientist" item missing from SQL, and extra "K Line"/"Casio" matches in SQL. The tool couldn't
+attribute the last two because it only explained kwMatch diffs among page-1 items. Chuck: "do it all".
+
+### 1. search_vector: every run of non-alphanumerics → one space (schema migration)
+Confirmed in Postgres: the 'simple' parser treats `word.word` as ONE `host` token
+(`ts_debug('simple','Dr.scientist')` → host `Dr.scientist`), so plain "scientist"/"dr" searches missed
+it — same bug class as v2.16.36's Mesa/Boogie slash. Instead of another one-character fix,
+`search_vector` is now `to_tsvector('simple', regexp_replace(name||' '||brand, '[^[:alnum:]]+', ' ',
+'g'))`, which matches the Python matcher's own `\W+` tokenization. Query side: `_tsquery_compile_term`
+now applies the IDENTICAL `regexp_replace` IN SQL (`_PG_SEARCH_NORM_SQL`) instead of Python-side
+`-`/`/` replaces — so both sides use the database's own `[:alnum:]` classification whatever its locale
+(verified locally: `Höfner` stays one lexeme under a UTF-8 ctype; under C ctype both sides would split
+it identically, so matching still agrees). Suffix-wildcard words must now be `^[A-Za-z0-9]+$` (anything
+with punctuation can't be one prefix lexeme against normalized text → `_TsqueryUnsupported`).
+`_PG_KW_MERGEABLE_RE` updated for the new fragment shape. Quoted terms (ILIKE on the raw text) are
+unaffected.
+- Self-migration: `_pg_migrate_search_vector_if_stale()` (and `migrate_cat_cache_to_pg.py`'s mirror)
+  now treats any expression without the `[:alnum:]` literal as stale → DROP COLUMN, schema init
+  re-ADDs it, concurrent-index step rebuilds the GIN index. Verified locally: upgrade from the live
+  v2.16.36 expression, idempotent second boot (no migrate line), fresh load via the migrate script;
+  all 11 `items` indexes valid afterward. Expect on deploy: `[pg] migrated search_vector to
+  punctuation-normalized generated expression` → `[pg] items table ready` → `[pg] concurrent indexes
+  ready`, ~20s like v2.16.36. The column rebuild holds a table lock for those seconds, so Tier 1/Tier 2
+  requests can stall briefly during boot (same as v2.16.35/36).
+- **No effect on what real users see**: `search_vector` is only read by the translator, which still
+  isn't wired into any live route.
+
+### 2. Diff check explains mismatches over the FULL result set
+- New `_explain_browse_mismatch(body)`, run for EVERY mismatched scenario: diffs the full in-scope
+  match sets per search component between engines — want list via new engines
+  `kw_skus_current` (Python kwMatch over `all_items`) / `kw_skus_pg` (`_pg_match_skus`), filter_q via
+  `fq_skus_current` / `fq_skus_pg`. Want-list diffs get per-entry attribution for up to 3 SKUs each
+  side (`_explain_kw_mismatch`); filter_q diffs get counts + item names.
+- If neither component differs, the mismatch must be in non-search plumbing (facets/sort/filters) →
+  `plumbing_suspect: true`. `by_kind` now also counts `mismatch_search_semantics` vs
+  `mismatch_plumbing_suspect` across the whole run (not just the 25 samples). **Any plumbing suspect
+  is a 4b blocker**; search-semantics mismatches are judged per class.
+- The `current` engine's Tier 1 early-return is now explicitly gated on `engine == "current"` (so the
+  set engines always reach the Python loop). Real requests always pass `engine="current"` — no change.
+- Fixed the account count off-by-one (reported 11 when `max_accounts` was 10).
+
+### Verified locally
+Synthetic catalog now includes Dr.scientist, K.Line, Höfner, `CZ-101 v2.0`, `CT-S1`. Clean want lists
+(now incl. `scientist`, `dr`, `höfner`, `2.0`, `ct-s1`, `px*`): **217/217 exact**. Adversarial: every
+mismatch attributed to search semantics, **0 plumbing suspects** — remaining classes are the known ones
+(`TS*`/`od*`/`Boss: OD*; DS*` mid-word wildcards Python-only; `dr z`/`'69` SQL-only; lone `-` and
+`dr. z` as filter_q). DoS-cap tests identical. `py_compile` (app + migrate script) and `node --check`
+clean.
 
 ---
 
