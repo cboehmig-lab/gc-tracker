@@ -1,6 +1,6 @@
-# Next Session Prompt — v2.16.40 built (not yet pushed): Phase F step 4b CUTOVER
+# Next Session Prompt — v2.16.40 LIVE (Phase F step 4b cutover): burn-in, then 4c
 
-**Update 2026-09-23 (latest)**: v2.16.40 = step 4b. Every `/api/browse` request now tries the unified
+**Update 2026-09-23 (latest)**: v2.16.40 = step 4b, PUSHED + LIVE and spot-checked (all request types served by `_pg_browse`, 0 fallbacks; Want List ~1.3s → ~0.15s, search box ~0.35s → ~0.12s, plain all-stores browse unchanged ~1s). Every `/api/browse` request now tries the unified
 SQL path (`_pg_browse`) first, falling back per-request to the legacy Tier 1/Tier 2/Python path only
 for an ineligible search or an exception (counted in `_PG_BROWSE_FALLBACKS`: admin-visible via
 `?pg_shadow=1` → `_pg_browse_fallbacks`, and in `GET /api/pg-browse-diff-check` → `fallbacks`; resets
@@ -15,6 +15,22 @@ path, `_pg_tier1_browse`, `_pg_tier2_narrow_items`, and all 4a comparison toolin
 retire the JSON catalog (scan writes, `/api/saved-search-counts`, `/api/state` totals, scan NEW
 detection → Postgres; short write-only JSON backup burn-in, then gone). Chuck confirmed that's the
 end state: no JSON, no old search code.
+
+## Phase G (proposed by Chuck, 2026-09-23): make the site faster and better for users
+
+Starts after Phase F is finished (4c + step 5). Chuck's idea; scope not locked yet. Candidate list:
+1. **Measure first**: per-request server timing logs for the main endpoints plus real browser page-load
+   numbers, so we fix what users actually wait on instead of guessing.
+2. **Plain all-stores browse (~0.8-1.2s)**: most of the time is the brand/category facet counts over
+   ~114K rows. Options: short-lived cache of counts per store scope, fewer/combined queries.
+3. **More than one server worker**: gunicorn is `--workers=1` because scan coordination + SSE state
+   live in process memory; moving that state into Postgres would let the site serve several people at
+   once without one slow request making everyone wait.
+4. **Memory sawtooth / restarts**: largely caused by the in-memory JSON catalog, so step 5 should
+   already help; re-measure after it.
+5. **Page load + feel**: size of static/gc.js, image lazy-loading/sizing, cache headers, keeping old
+   results visible while the next page loads, prefetching the next page, search-box debounce.
+6. **User-facing improvements**: collect ideas from Chuck / user feedback (e.g. Discord).
 
 **Update 2026-09-23 (later)**: v2.16.39 PUSHED and LIVE. Full production diff check (123 accounts,
 485 scenarios, ~11 min): 463 exact, 16 search-semantics mismatches, **0 plumbing suspects**, 6
