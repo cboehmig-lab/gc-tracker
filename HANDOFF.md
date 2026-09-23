@@ -1,5 +1,65 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-23 · Current version: v2.16.39 (Phase F step 4a follow-up — punctuation-normalized search + full-set diff explanations) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-23 · Current version: v2.16.40 (Phase F step 4b — CUTOVER: unified SQL browse path serves every request, legacy path as per-request fallback) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.40 — 2026-09-23: Phase F step 4b — CUTOVER: every /api/browse request now served by the unified SQL path
+
+**Gate that cleared this**: v2.16.39's full production `/api/pg-browse-diff-check` — 123 accounts,
+485 scenarios: 463 exact, **0 plumbing suspects**, 0 errors, 16 search-wording differences, 6
+ineligible (all one account's `Takamine TSP*` entry). Average legacy path ~1,040ms vs `_pg_browse`
+~195ms. Chuck approved both open decisions: (1) support a trailing wildcard on multi-word/punctuated
+terms, (2) accept start-of-word-only wildcards (e.g. a `69*` saved search no longer matches "ST69" —
+36 items fewer for that one saved search; same tradeoff accepted in v2.16.32).
+
+Accepted search-wording differences (SQL more forgiving, in the user's favor): `K-Line`→"K Line",
+`Gibson ES 335`→"ES-335", `Dr z`/`Dr. Z`/"Dr.z", runs of double spaces, a non-ASCII hyphen
+(`WA‑84`), `Casio, CZ*` (Python treated the whole entry as one literal regex containing ", ").
+Python-only: mid-word wildcard matches only.
+
+### 1. `_browse_compute` engines — real requests now use `engine="auto"`
+- `"auto"` (default; every real request): `_pg_browse()` first. `_PgBrowseIneligible` (untranslatable
+  term, unknown sort column, or no Postgres pool) or ANY exception → that one request falls through to
+  the legacy path (Tier 1 SQL / Tier 2 narrowing / Python matcher), unchanged. Real errors print
+  `[pg] unified browse failed, falling back to legacy path: ...`; ineligible ones are only counted.
+- The SQL attempt now runs BEFORE the JSON-based `has_store_data` check (the SQL path doesn't need the
+  JSON catalog). The legacy path still does that check itself.
+- `"legacy"`: old routing only (renamed from `"current"`, since "current" is now the SQL path). The
+  comparison tooling diffs `legacy` vs `pg`; report keys renamed `legacy_ms` / `avg_legacy_ms` /
+  `only_legacy`; explain engines renamed `kw_skus_legacy` / `fq_skus_legacy`.
+- `"pg"`: unchanged — raises instead of falling back.
+- **Rollback**: change the default engine in `api_browse()` to `"legacy"`. No data operation.
+
+### 2. Fallback counters (the burn-in signal for 4c)
+`_PG_BROWSE_FALLBACKS` (per process — resets on deploy): counts of `ineligible` / `error` fallbacks,
+first-seen timestamp, and the last reason for each. Admin-only, visible via `?pg_shadow=1` on
+`/api/browse` (`_pg_browse_fallbacks`, alongside the new `_pg_browse` / `_pg_browse_ms` fields) and
+under `fallbacks` in `GET /api/pg-browse-diff-check`. 4c should wait until `error` stays 0 through the
+burn-in and every `ineligible` is understood.
+
+### 3. Trailing wildcard on multi-word / punctuated terms
+`_tsquery_compile_term`: a term whose only `*` is at the end but which contains separators
+(`Takamine TSP*`, `ES-3*`, `Mesa/Boo*`, `big mu*`) is split on runs of non-alphanumerics, the same
+rule as the document side, and compiled to an adjacent phrase whose last word is a prefix:
+`to_tsquery('simple', 'Takamine <-> TSP:*')`. Every piece must be ASCII alphanumerics, so splicing
+into to_tsquery's syntax stays safe. Non-ASCII (`Höfner B*`) and non-trailing wildcards (`*muff`,
+`a*b`) still raise `_TsqueryUnsupported` → per-request legacy fallback. Checked against the
+Python matcher on a synthetic catalog: `Taylor Builder*` 204/204, `CZ-1*` 353/353, `Gibson ES-3*`
+177/177, `Casio CZ*` 251/251 (identical counts).
+
+### Verified locally
+Routing via Flask test client: SQL path serves normal requests (`_pg_browse: true` under
+`?pg_shadow=1`); `*muff` want list → legacy, `ineligible` counted; unknown sort → legacy; simulated
+`_pg_browse` exception → legacy + `error` counted + log line; no pool → legacy silently; non-admins see
+no diagnostics; `?pg_shadow=2` still diffs legacy vs pg. Diff harness re-run (clean + adversarial) and
+DoS-cap tests: clean want lists **217/217 exact**; adversarial lists 0 plumbing suspects, remaining
+differences only the known classes (`TS*`/`od*` mid-word wildcards Python-only; `dr z`/`'69` SQL-only;
+`*muff` ineligible); cap tests all identical. `py_compile` and `node --check` clean.
+
+### Next
+Push, confirm deploy (no schema change → plain restart), spot-check the site, then after a burn-in
+(suggest a few days) check `fallbacks` and do **4c**: delete the legacy path, `_pg_tier1_browse`,
+`_pg_tier2_narrow_items`, and the 4a comparison tooling. Then step 5 (retire the JSON catalog).
 
 ---
 

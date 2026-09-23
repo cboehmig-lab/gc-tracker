@@ -4268,6 +4268,21 @@ def _tsquery_compile_term(part):
             word = part[:-1]
             if word and _TSQUERY_WILDCARD_WORD_RE.match(word):
                 return "search_vector @@ to_tsquery('simple', %s)", [word + ':*']
+            # (v2.16.40) Trailing wildcard on a multi-word or punctuated term
+            # ('Takamine TSP*', 'ES-3*'): split on the SAME separator rule the
+            # document side uses (every run of non-alphanumerics), then match
+            # the words as an adjacent phrase whose LAST word is a prefix —
+            # 'takamine <-> tsp:*'. Found via the v2.16.39 production diff
+            # check: one real want-list entry of this shape made every request
+            # from that account ineligible for the SQL path. Each piece must be
+            # plain ASCII alphanumerics (so splicing it into to_tsquery's
+            # mini-language can't be read as operator syntax); anything else —
+            # non-ASCII letters, a '*' anywhere but the end — still raises.
+            pieces = [w for w in re.split(r'[^A-Za-z0-9]+', word) if w] if word else []
+            if (pieces and all(_TSQUERY_WILDCARD_WORD_RE.match(w) for w in pieces)
+                    and not re.search(r'[^\x00-\x7f]', word)):
+                return ("search_vector @@ to_tsquery('simple', %s)",
+                        [" <-> ".join(pieces[:-1] + [pieces[-1] + ':*'])])
         raise _TsqueryUnsupported(f"non-suffix or multi-word wildcard: {part!r}")
     # Plain word or an un-quoted multi-word phrase -> phraseto_tsquery, the native
     # equivalent of _compile_query's 'word' \b...\b branch (both are whole-word/phrase,
@@ -5062,9 +5077,10 @@ def _pg_tier2_narrow_items(*, store_set, search_all, user_last_scan) -> list:
 #      default sort, (c) new_want_count, (d) each returned item's kwMatch flag.
 #      Each of those uses it in the matching SQL position below.
 #
-# NOT wired into any real request yet (4a = shadow only). Reached only via
-# _browse_compute(engine="pg"), i.e. the admin ?pg_shadow=2 compare and
-# /api/pg-browse-diff-check. Step 4b is the cutover, 4c deletes Tier 1/Tier 2.
+# LIVE for every request since v2.16.40 (step 4b): _browse_compute's
+# engine="auto" calls this first and only falls back to the legacy Tier 1/
+# Tier 2/Python path for an ineligible request or an exception. 4c deletes
+# that legacy path (and Tier 1/Tier 2 with it) after burn-in.
 #
 # Performance shape of kw_match — the reason this isn't just
 # " OR ".join(_tsquery_want_list_entry(kw) for kw in keywords):
@@ -5141,8 +5157,8 @@ def _pg_kw_expr(kw_entries, out_params):
 def _pg_match_skus(*, store_set, search_all, user_last_scan, kw_entries=None, fq=None):
     """Comparison tooling only: the full set of in-scope (available + store +
     scan-gate) SKUs matching the want list (kw_entries) or the filter_q (fq)
-    in SQL — the counterpart of _browse_compute's kw_skus_current /
-    fq_skus_current engines, used to explain diffs beyond page 1."""
+    in SQL — the counterpart of _browse_compute's kw_skus_legacy /
+    fq_skus_legacy engines, used to explain diffs beyond page 1."""
     tparams = {}
     if kw_entries is not None:
         pred = _pg_kw_expr(kw_entries, tparams) or "FALSE"
@@ -5401,16 +5417,36 @@ def api_browse():
     can be diffed against today's production path both per-request
     (?pg_shadow=2, admin only — see _browse_shadow_compare) and in bulk
     (/api/pg-browse-diff-check, which replays real accounts' want lists and
-    saved searches through both). Real users' responses are unchanged: with
-    no ?pg_shadow=2 this is exactly the pre-v2.16.38 code path."""
+    saved searches through both). (v2.16.40, step 4b) Real requests now run
+    engine="auto": the unified SQL path first, legacy path as a per-request
+    fallback — see _browse_compute."""
     data = request.json or {}
     pg_shadow = request.args.get("pg_shadow") or ""
     is_admin = _is_admin() if pg_shadow else False
     logged_in = bool(session.get("user_id"))
     if pg_shadow == "2" and is_admin:
         return jsonify(_browse_shadow_compare(data, logged_in=logged_in))
-    return jsonify(_browse_compute(data, logged_in=logged_in,
-                                   pg_diag=(pg_shadow == "1" and is_admin)))
+    pg_diag = (pg_shadow == "1" and is_admin)
+    resp = _browse_compute(data, logged_in=logged_in, pg_diag=pg_diag)
+    if pg_diag:
+        resp = dict(resp)
+        resp["_pg_browse_fallbacks"] = _PG_BROWSE_FALLBACKS
+    return jsonify(resp)
+
+
+# (v2.16.40) Per-process counters for "auto" requests that fell back to the
+# legacy path — the burn-in signal for step 4c. Exposed to admins via
+# ?pg_shadow=1 (`_pg_browse_fallbacks`) and GET /api/pg-browse-diff-check.
+_PG_BROWSE_FALLBACKS = {"ineligible": 0, "error": 0, "since": None, "last": {}}
+
+
+def _pg_browse_fallback_note(kind, exc):
+    if _PG_BROWSE_FALLBACKS["since"] is None:
+        _PG_BROWSE_FALLBACKS["since"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    _PG_BROWSE_FALLBACKS[kind] += 1
+    _PG_BROWSE_FALLBACKS["last"][kind] = {
+        "at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "reason": f"{type(exc).__name__}: {str(exc)[:200]}"}
 
 
 class _PgBrowseIneligible(Exception):
@@ -5421,15 +5457,22 @@ class _PgBrowseIneligible(Exception):
     diff check count these separately from real mismatches."""
 
 
-def _browse_compute(data, *, logged_in, pg_diag=False, engine="current"):
+def _browse_compute(data, *, logged_in, pg_diag=False, engine="auto"):
     """Body of /api/browse, returning the response dict instead of a Flask
-    response. engine="current" is today's production routing (Tier 1 SQL /
-    Tier 2 narrowing / legacy Python), byte-for-byte the pre-v2.16.38 logic.
-    engine="pg" runs the new Phase F step-4 unified path (_pg_browse) and
-    RAISES instead of falling back — _PgBrowseIneligible for a request it
-    deliberately doesn't serve, anything else for a real DB/SQL error — so a
-    comparison caller can tell the difference. pg_diag replaces the old
-    inline `?pg_shadow=1 and _is_admin()` check (the caller now decides)."""
+    response. Engines:
+      - "auto" (every real request, v2.16.40 = Phase F step 4b CUTOVER): the
+        unified SQL path (_pg_browse) first; if it's ineligible
+        (_PgBrowseIneligible) or raises anything, that one request falls
+        through to the legacy path below, exactly as if 4b never happened.
+      - "legacy": the pre-4b routing only (Tier 1 SQL / Tier 2 narrowing /
+        Python matcher) — what the comparison tooling diffs against.
+      - "pg": _pg_browse only, RAISING instead of falling back, so a
+        comparison caller can tell ineligible from a real DB/SQL error.
+      - "kw_skus_legacy"/"fq_skus_legacy"/"kw_skus_pg"/"fq_skus_pg": full
+        match sets for the diff check's explain step (tooling only).
+    The legacy path and the non-auto engines are temporary: 4c deletes them
+    once 4b has burned in. pg_diag replaces the old inline
+    `?pg_shadow=1 and _is_admin()` check (the caller decides)."""
     stores = data.get("stores", [])
     search_all = bool(data.get("all_stores"))
     if not stores and not search_all:
@@ -5667,35 +5710,64 @@ def _browse_compute(data, *, logged_in, pg_diag=False, engine="current"):
         return False
 
     # Check if any cache entries have store field
-    has_store_data = any(v.get("store") for v in _cat_cache.values())
-    if not has_store_data:
-        return {"items": [], "no_store_data": True,
-                        "message": "Run 'Check for New Items' once to populate store data."}
-
-    # ── Phase F step 4 unified path (v2.16.38, shadow/comparison only) ─────
-    # Only reached when a caller explicitly asks for engine="pg" (the admin
-    # ?pg_shadow=2 compare and /api/pg-browse-diff-check). Every real
-    # request uses engine="current" and skips this block entirely.
+    # ── Phase F step 4b: unified SQL path — THE CUTOVER (v2.16.40) ────────
+    # engine="auto" (every real request) tries _pg_browse first. Proven before
+    # cutover by /api/pg-browse-diff-check against every real account (v2.16.39:
+    # 485 scenarios, 0 plumbing mismatches; remaining differences all
+    # accepted search-wording classes — see HANDOFF.md v2.16.39/v2.16.40).
+    # Runs BEFORE the JSON-based has_store_data check below on purpose: the
+    # SQL path doesn't depend on the JSON catalog at all.
+    #
+    # Rollback lever, same shape as Phase D/E: an ineligible request
+    # (_PgBrowseIneligible — an untranslatable search term or unknown sort
+    # column) or ANY exception falls through to the legacy path below for
+    # that one request. Reverting the whole cutover is changing the default
+    # engine back to "legacy" in api_browse(), not a data operation.
     if engine in ("kw_skus_pg", "fq_skus_pg"):
         return _pg_match_skus(store_set=store_set, search_all=search_all,
                               user_last_scan=user_last_scan,
                               kw_entries=_kw_accepted if engine == "kw_skus_pg" else None,
                               fq=fq if engine == "fq_skus_pg" else None)
-    if engine == "pg":
-        if _PG_POOL is None:
-            raise RuntimeError("Postgres pool not available")
-        if sort_field not in _PG_TIER1_SORTABLE:
-            raise _PgBrowseIneligible(f"sort_field {sort_field!r} not SQL-sortable")
-        return _pg_browse(
-            store_set=store_set, search_all=search_all,
-            user_last_scan=user_last_scan, kw_entries=_kw_accepted, fq=fq,
-            f_brands=f_brands, f_conds=f_conds, f_cats=f_cats, f_subs=f_subs,
-            f_watched=f_watched, wl_ids=wl_ids, f_want_only=f_want_only,
-            f_price_drop_only=f_price_drop_only, f_vintage_only=f_vintage_only,
-            f_price_min=f_price_min, f_price_max=f_price_max,
-            sort_field=sort_field, sort_dir=sort_dir, user_sorted=user_sorted,
-            new_ids=new_ids, fav_stores=fav_stores, page=page, per_page=per_page,
-        )
+    if engine in ("auto", "pg"):
+        try:
+            if _PG_POOL is None:
+                # Postgres not configured/unreachable at boot (e.g. a local run
+                # with no DATABASE_URL): counted, not logged per request.
+                raise _PgBrowseIneligible("Postgres pool not available")
+            if sort_field not in _PG_TIER1_SORTABLE:
+                raise _PgBrowseIneligible(f"sort_field {sort_field!r} not SQL-sortable")
+            _pgb_t0 = time.time()
+            _pgb = _pg_browse(
+                store_set=store_set, search_all=search_all,
+                user_last_scan=user_last_scan, kw_entries=_kw_accepted, fq=fq,
+                f_brands=f_brands, f_conds=f_conds, f_cats=f_cats, f_subs=f_subs,
+                f_watched=f_watched, wl_ids=wl_ids, f_want_only=f_want_only,
+                f_price_drop_only=f_price_drop_only, f_vintage_only=f_vintage_only,
+                f_price_min=f_price_min, f_price_max=f_price_max,
+                sort_field=sort_field, sort_dir=sort_dir, user_sorted=user_sorted,
+                new_ids=new_ids, fav_stores=fav_stores, page=page, per_page=per_page,
+            )
+            if _pg_shadow_requested:
+                _pgb["_pg_browse"] = True
+                _pgb["_pg_browse_ms"] = round((time.time() - _pgb_t0) * 1000, 1)
+            return _pgb
+        except _PgBrowseIneligible as e:
+            if engine == "pg":
+                raise
+            _pg_browse_fallback_note("ineligible", e)
+        except Exception as e:
+            if engine == "pg":
+                raise
+            _pg_browse_fallback_note("error", e)
+            print(f"[pg] unified browse failed, falling back to legacy path: "
+                  f"{type(e).__name__}: {e}")
+
+    # ── Legacy path (engine "legacy", or an "auto" fallback) — deleted in 4c ──
+    has_store_data = any(v.get("store") for v in _cat_cache.values())
+    if not has_store_data:
+        return {"items": [], "no_store_data": True,
+                        "message": "Run 'Check for New Items' once to populate store data."}
+
 
     # ── Postgres Tier 1 read path — THE CUTOVER (Phase D, v2.16.22) ────────
     # Every request that qualifies as Tier 1 (no want-list keywords, no
@@ -5711,7 +5783,7 @@ def _browse_compute(data, *, logged_in, pg_diag=False, engine="current"):
     # the legacy path automatically rather than failing it. Reverting the
     # whole cutover, if ever needed, is putting `_is_admin()` back in front
     # of this condition, not a data-recovery operation.
-    if (_PG_POOL is not None and engine == "current"
+    if (_PG_POOL is not None and engine in ("auto", "legacy")
             and _pg_tier1_eligible(fq, _has_kw, sort_field)):
         try:
             _pg_t0 = time.time()
@@ -5846,9 +5918,9 @@ def _browse_compute(data, *, logged_in, pg_diag=False, engine="current"):
 
     # (v2.16.38+ comparison tooling) Full-scope match sets for the batch diff
     # check's explain step — never reached by a real request.
-    if engine == "kw_skus_current":
+    if engine == "kw_skus_legacy":
         return {i["id"] for i in all_items if i["kwMatch"]}
-    if engine == "fq_skus_current":
+    if engine == "fq_skus_legacy":
         _fqc = _compile_fq_clauses(fq) if fq else None
         return {i["id"] for i in all_items if _fqc and _fq_text_match(
             ((i["name"] or "") + " " + (i["brand"] or "")).lower(), _fqc)}
@@ -6086,9 +6158,9 @@ def _browse_diff(cur, pg):
                      min(len(aid), len(bid)))
         out["items_order"] = {
             "first_diff_index": first,
-            "only_current": [x for x in aid if x not in set(bid)][:_BROWSE_DIFF_SAMPLE],
+            "only_legacy": [x for x in aid if x not in set(bid)][:_BROWSE_DIFF_SAMPLE],
             "only_pg":      [x for x in bid if x not in set(aid)][:_BROWSE_DIFF_SAMPLE],
-            "n_only_current": len(set(aid) - set(bid)),
+            "n_only_legacy": len(set(aid) - set(bid)),
             "n_only_pg":      len(set(bid) - set(aid)),
         }
     bmap = {i["id"]: i for i in bi}
@@ -6110,12 +6182,12 @@ def _browse_diff(cur, pg):
 
 
 def _browse_run_both(data, *, logged_in):
-    """Run the request through engine="current" and engine="pg". Returns
-    (current_response, report)."""
+    """Run the request through engine="legacy" and engine="pg". Returns
+    (legacy_response, report)."""
     t0 = time.time()
-    cur = _browse_compute(data, logged_in=logged_in, engine="current")
+    cur = _browse_compute(data, logged_in=logged_in, engine="legacy")
     cur_ms = round((time.time() - t0) * 1000, 1)
-    report = {"current_ms": cur_ms}
+    report = {"legacy_ms": cur_ms}
     t1 = time.time()
     try:
         pg = _browse_compute(data, logged_in=logged_in, engine="pg")
@@ -6208,7 +6280,7 @@ def _explain_browse_mismatch(body):
     out = {}
     plumbing = True
     if body.get("keywords"):
-        py = _browse_compute(body, logged_in=True, engine="kw_skus_current")
+        py = _browse_compute(body, logged_in=True, engine="kw_skus_legacy")
         sq = _browse_compute(body, logged_in=True, engine="kw_skus_pg")
         if isinstance(py, set) and isinstance(sq, set) and py != sq:
             plumbing = False
@@ -6218,7 +6290,7 @@ def _explain_browse_mismatch(body):
                              "explain": _explain_kw_mismatch(
                                  body.get("keywords") or [], (only_py[:3] + only_sq[:3]))}
     if body.get("filter_q"):
-        py = _browse_compute(body, logged_in=True, engine="fq_skus_current")
+        py = _browse_compute(body, logged_in=True, engine="fq_skus_legacy")
         sq = _browse_compute(body, logged_in=True, engine="fq_skus_pg")
         if isinstance(py, set) and isinstance(sq, set) and py != sq:
             plumbing = False
@@ -6312,10 +6384,10 @@ def _pg_browse_diff_check(max_accounts=None, pause=0.05):
         try:
             _cur, rep = _browse_run_both(body, logged_in=True)
         except Exception as e:
-            rep = {"status": "error", "reason": f"current engine: {type(e).__name__}: {e}"}
+            rep = {"status": "error", "reason": f"legacy engine: {type(e).__name__}: {e}"}
         st = rep["status"]
         if st == "ok":
-            cur_ms_tot += rep["current_ms"]; pg_ms_tot += rep["pg_ms"]
+            cur_ms_tot += rep["legacy_ms"]; pg_ms_tot += rep["pg_ms"]
             if rep["diff"]["match"]:
                 k["match"] += 1
                 st = None
@@ -6350,7 +6422,7 @@ def _pg_browse_diff_check(max_accounts=None, pause=0.05):
         "accounts":        n_acct,
         "scenarios":       len(scen),
         "by_kind":         by_kind,
-        "avg_current_ms":  round(cur_ms_tot / ok_n, 1) if ok_n else None,
+        "avg_legacy_ms":   round(cur_ms_tot / ok_n, 1) if ok_n else None,
         "avg_pg_ms":       round(pg_ms_tot / ok_n, 1) if ok_n else None,
         "samples":         samples,
     }
@@ -6403,7 +6475,7 @@ def api_pg_browse_diff_check_poll():
     denied = _require_admin_api()
     if denied:
         return denied
-    return jsonify(_PG_BROWSE_DIFF_STATE)
+    return jsonify({**_PG_BROWSE_DIFF_STATE, "fallbacks": _PG_BROWSE_FALLBACKS})
 
 
 
@@ -8621,7 +8693,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.39"
+APP_VERSION = "2.16.40"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

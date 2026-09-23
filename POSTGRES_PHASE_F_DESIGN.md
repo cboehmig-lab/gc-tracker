@@ -843,3 +843,17 @@ the full result set and flags any it can't attribute to search semantics as `plu
 4b gate is zero plumbing suspects plus an accepted list of search-semantics classes. Detail: HANDOFF.md
 v2.16.39.
 
+---
+
+### Addendum 16 (2026-09-23, v2.16.40) — step 4b cutover
+
+Gate met: v2.16.39's full production diff check (123 accounts, 485 scenarios) — 0 plumbing suspects,
+0 errors, remaining differences all accepted search-wording classes (SQL more forgiving on
+punctuation/spacing; start-of-word-only wildcards). Chuck approved the cutover and both open
+decisions. `_browse_compute(engine="auto")` now serves every request from `_pg_browse`, with the legacy
+path as a per-request fallback (ineligible or exception), counted for the burn-in. The one real
+ineligible shape found in production (phrase ending in a wildcard) is now translated. Chuck
+confirmed the end state explicitly: after 4c the legacy search code is gone, and after step 5 the
+JSON catalog is gone entirely (scan writes, saved-search counts, `/api/state` totals and the scan's
+in-memory NEW detection all move to Postgres, with a short write-only JSON backup burn-in first, per
+the rollback design above). Detail: HANDOFF.md v2.16.40.

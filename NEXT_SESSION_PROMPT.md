@@ -1,12 +1,31 @@
-# Next Session Prompt — v2.16.39 built (not yet pushed): Phase F step 4a follow-up
+# Next Session Prompt — v2.16.40 built (not yet pushed): Phase F step 4b CUTOVER
 
-**Update 2026-09-23**: v2.16.38 is LIVE; its first production diff check (10 accounts) was 97/100
-exact, `_pg_browse` ~5x faster. v2.16.39 (punctuation-normalized `search_vector` — self-migrating
-column rebuild, ~20s on boot — plus full-set mismatch explanations with a `mismatch_plumbing_suspect`
-counter) is built and verified locally, not yet pushed. After pushing: confirm the `[pg] migrated
-search_vector to punctuation-normalized...` deploy log sequence, then rerun the diff check (10 accounts,
-then all). 4b gate: zero `mismatch_plumbing_suspect`, and every search-semantics class accepted.
-See HANDOFF.md v2.16.39. The v2.16.38 notes below are still accurate otherwise.
+**Update 2026-09-23 (latest)**: v2.16.40 = step 4b. Every `/api/browse` request now tries the unified
+SQL path (`_pg_browse`) first, falling back per-request to the legacy Tier 1/Tier 2/Python path only
+for an ineligible search or an exception (counted in `_PG_BROWSE_FALLBACKS`: admin-visible via
+`?pg_shadow=1` → `_pg_browse_fallbacks`, and in `GET /api/pg-browse-diff-check` → `fallbacks`; resets
+on deploy). Also supports trailing wildcards on multi-word/punctuated terms (`Takamine TSP*`). Chuck
+approved accepting start-of-word-only wildcards. Rollback = default engine `"legacy"` in `api_browse()`.
+
+After pushing: confirm deploy (no schema change), spot-check the site (plain browse, want list,
+search box, a saved search), check `?pg_shadow=1` shows `_pg_browse: true`, re-run the diff check once
+(now diffs legacy vs pg; expect the same results as v2.16.39 minus the 6 Takamine ineligibles). Then
+burn in for a few days and check `fallbacks` (`error` should stay 0) before **4c**: delete the legacy
+path, `_pg_tier1_browse`, `_pg_tier2_narrow_items`, and all 4a comparison tooling. Then **step 5**:
+retire the JSON catalog (scan writes, `/api/saved-search-counts`, `/api/state` totals, scan NEW
+detection → Postgres; short write-only JSON backup burn-in, then gone). Chuck confirmed that's the
+end state: no JSON, no old search code.
+
+**Update 2026-09-23 (later)**: v2.16.39 PUSHED and LIVE. Full production diff check (123 accounts,
+485 scenarios, ~11 min): 463 exact, 16 search-semantics mismatches, **0 plumbing suspects**, 6
+ineligible, 0 errors. Avg current path ~1,040ms vs `_pg_browse` ~195ms. Dr.scientist gap confirmed fixed.
+Every SQL-only difference is SQL being more forgiving in the user's favor (`K-Line`→"K Line",
+`Gibson ES 335`→"ES-335", `Dr z`/`Dr. Z`/"Dr.z", double spaces, `WA‑84` with a non-ASCII hyphen, `Casio, CZ*`
+which Python treats as a literal "casio, cz" regex). Python-only: only mid-word wildcards (`69*`→"ST69",
+36 items in one saved search; `beyer* M*`). All 6 ineligible = ONE account's multi-word wildcard entry
+`Takamine TSP*` (every scenario for that account falls back). Open decision before 4b: support a
+trailing wildcard on a multi-word phrase (`takamine <-> tsp:*`) so that account doesn't need the
+fallback, and accept the mid-word-wildcard tradeoff (already accepted in v2.16.32).
 
 ---
 

@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-23 · Version: v2.16.39 (Phase F step 4a follow-up — see HANDOFF.md's 2026-09-23 v2.16.39 entry) · Live at: gcgeartracker.com*
+*Generated: 2026-09-23 · Version: v2.16.40 (Phase F step 4b CUTOVER — see HANDOFF.md's 2026-09-23 v2.16.40 entry) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -85,6 +85,19 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 - **JSON-LD**: `WebSite` schema with `SearchAction` (`potentialAction`) — injected as `<script type="application/ld+json">` (not blocked by CSP `script-src 'self'`)
 - **Noscript store list**: `_build_stores_noscript()` called in `index()` — reads `STORES_CACHE` fresh, generates `<noscript>` block listing all ~240+ store names. Invisible to JS users, crawlable by Google. Updates automatically when store list is refreshed.
 - **Footer**: `.seo-footer` — visible "Privacy Policy · Not affiliated with Guitar Center, Inc." in `#555` gray. No hidden text.
+
+---
+
+## Current State: v2.16.40 — Phase F step 4b: THE CUTOVER (2026-09-23)
+
+Every `/api/browse` request now runs `_browse_compute(engine="auto")`: the unified SQL path
+(`_pg_browse`) first, with the old Tier 1 / Tier 2 / Python path as a per-request fallback for an
+ineligible search or any exception (counted in `_PG_BROWSE_FALLBACKS`, visible to admins via
+`?pg_shadow=1` and `GET /api/pg-browse-diff-check`). Gate: v2.16.39's full production diff check, 485
+scenarios, 0 plumbing suspects. Also: trailing wildcards on multi-word/punctuated terms
+(`Takamine TSP*` → `takamine <-> tsp:*`). Rollback = default engine back to `"legacy"` in
+`api_browse()`. Next: burn-in, then 4c deletes the legacy path + comparison tooling, then step 5
+retires the JSON catalog. Full detail: HANDOFF.md v2.16.40.
 
 ---
 
