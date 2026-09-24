@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-23 · Version: v2.16.42 (saved-search counts on Postgres + UI fixes; v2.16.41 view-switching fixes; Phase F step 4b CUTOVER live since v2.16.40 — see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-09-24 · Version: v2.16.43 (all wildcard shapes served by the SQL browse path + fallback reasons tallied; v2.16.42 saved-search counts on Postgres; Phase F step 4b CUTOVER live since v2.16.40 — see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,7 +88,17 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.42 — saved-search counts + UI quirks (2026-09-23)
+## Current State: v2.16.43 — every wildcard shape in SQL (2026-09-24)
+
+4b burn-in check found `error: 0` but `ineligible: 119` in ~17h, last reason `'*50s*'` (leading
+wildcard) — served correctly by the legacy fallback, but 4c deletes that path. `_tsquery_compile_term`
+now compiles every non-trivial wildcard (leading/infix/both-ends/non-ASCII) to an ILIKE
+`'%p1%p2%'` over name+brand — identical to the legacy `_compile_query` `.*` regex semantics, on the
+existing trigram index. Plain trailing `X*` keeps its start-of-word prefix semantics. Fallback
+counters now tally every reason (`reasons`), not just the last. Next: push, burn in 1-2 days,
+expect `ineligible` ~0, then 4c. Full detail: HANDOFF.md v2.16.43.
+
+## Previous: v2.16.42 — saved-search counts + UI quirks (2026-09-23)
 
 `/api/saved-search-counts` now counts via `_pg_browse(count_only=True)` (same WHERE as browse; JSON
 count kept only as a per-search fallback and now filters `available`) — badges were ~5x high because

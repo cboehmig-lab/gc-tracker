@@ -4218,8 +4218,9 @@ def _tsquery_compile_term(part):
     COMPLETE boolean SQL predicate (e.g. `search_vector @@ (...)` or an ILIKE clause), NOT
     a bare tsquery/tsvector expression, so callers compose these with plain SQL AND/OR/NOT
     rather than tsquery's &&/||/!! operators (v2.16.35 — see _tsquery_compile_query and
-    _tsquery_bool_clauses). Raises _TsqueryUnsupported for a non-suffix or multi-word
-    wildcard.
+    _tsquery_bool_clauses). Since v2.16.43 every wildcard shape has a translation (leading/
+    infix/non-ASCII wildcards -> ILIKE, see below), so this no longer raises in practice;
+    _TsqueryUnsupported is kept as the contract for any future untranslatable syntax.
 
     v2.16.35 changes (POSTGRES_PHASE_F_DESIGN.md's diff-check addenda — real production
     data showed both of these mismatching the old Python matcher):
@@ -4283,7 +4284,19 @@ def _tsquery_compile_term(part):
                     and not re.search(r'[^\x00-\x7f]', word)):
                 return ("search_vector @@ to_tsquery('simple', %s)",
                         [" <-> ".join(pieces[:-1] + [pieces[-1] + ':*'])])
-        raise _TsqueryUnsupported(f"non-suffix or multi-word wildcard: {part!r}")
+        # (v2.16.43) Every other wildcard shape — leading ('*muff'), both ends
+        # ('*50s*'), infix ('a*b'), or a trailing wildcard the tsquery paths
+        # above can't express ('Höfner B*') — compiles to the SAME pattern the
+        # legacy Python matcher uses: _compile_query joins the '*'-split pieces
+        # with '.*' and re.search()es it unanchored over "name brand"
+        # (case-insensitive), which is exactly ILIKE '%p1%p2%...%' over the
+        # same string. Backed by the v2.16.35 pg_trgm index (same expression as
+        # quoted terms). Found via the v2.16.40 burn-in: 119 requests in ~17h
+        # fell back to the legacy path for '*50s*', and 4c removes that path.
+        pattern = '%' + '%'.join(_like_escape(p) for p in part.split('*')) + '%'
+        # (Consecutive '%' from '**' or edge '*' are harmless in LIKE; not collapsed, since a
+        # naive collapse could swallow an escaped '\\%'.)
+        return "(coalesce(name, '') || ' ' || coalesce(brand, '')) ILIKE %s", [pattern]
     # Plain word or an un-quoted multi-word phrase -> phraseto_tsquery, the native
     # equivalent of _compile_query's 'word' \b...\b branch (both are whole-word/phrase,
     # order- and adjacency-preserving). Hyphens and slashes normalized to spaces first —
@@ -5149,7 +5162,7 @@ def _pg_tier2_narrow_items(*, store_set, search_all, user_last_scan) -> list:
 # Want-list entries honored are exactly the ones the Python matcher kept
 # after its per-type DoS caps (_kw_accepted in _browse_compute), not the raw
 # list. Any entry or filter_q with no pure-SQL translation
-# (_TsqueryUnsupported — a non-suffix wildcard; measured zero real usage)
+# (_TsqueryUnsupported — none left since v2.16.43 made every wildcard shape translatable)
 # makes the WHOLE request ineligible (_PgBrowseIneligible) rather than being
 # dropped or guessed — the caller keeps serving it from the Python path.
 
@@ -5489,16 +5502,26 @@ def api_browse():
 # (v2.16.40) Per-process counters for "auto" requests that fell back to the
 # legacy path — the burn-in signal for step 4c. Exposed to admins via
 # ?pg_shadow=1 (`_pg_browse_fallbacks`) and GET /api/pg-browse-diff-check.
-_PG_BROWSE_FALLBACKS = {"ineligible": 0, "error": 0, "since": None, "last": {}}
+_PG_BROWSE_FALLBACKS = {"ineligible": 0, "error": 0, "since": None, "last": {},
+                        "reasons": {"ineligible": {}, "error": {}}}
+# (v2.16.43) Distinct reasons tallied per kind (was: only the most recent one
+# kept), capped so a flood of unique messages can't grow memory unbounded.
+_PG_BROWSE_FALLBACK_REASON_CAP = 50
 
 
 def _pg_browse_fallback_note(kind, exc):
     if _PG_BROWSE_FALLBACKS["since"] is None:
         _PG_BROWSE_FALLBACKS["since"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     _PG_BROWSE_FALLBACKS[kind] += 1
+    reason = f"{type(exc).__name__}: {str(exc)[:200]}"
     _PG_BROWSE_FALLBACKS["last"][kind] = {
         "at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "reason": f"{type(exc).__name__}: {str(exc)[:200]}"}
+        "reason": reason}
+    tally = _PG_BROWSE_FALLBACKS["reasons"][kind]
+    if reason in tally or len(tally) < _PG_BROWSE_FALLBACK_REASON_CAP:
+        tally[reason] = tally.get(reason, 0) + 1
+    else:
+        tally["(other)"] = tally.get("(other)", 0) + 1
 
 
 class _PgBrowseIneligible(Exception):
@@ -8745,7 +8768,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.42"
+APP_VERSION = "2.16.43"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

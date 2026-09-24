@@ -1,5 +1,62 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-23 · Current version: v2.16.42 (saved-search counts on Postgres + UI quirk fixes; v2.16.41 view-switching fixes; Phase F step 4b cutover live since v2.16.40) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-24 · Current version: v2.16.43 (every wildcard shape now served by the SQL browse path + fallback reasons tallied; v2.16.42 saved-search counts on Postgres; Phase F step 4b cutover live since v2.16.40) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.43 — 2026-09-24: leading/infix wildcards in SQL + fallback reason tally (4c prerequisite)
+
+**Why**: the 4b burn-in check on 2026-09-24 (counters since 2026-09-23T22:51Z, ~17h) showed
+`error: 0` but `ineligible: 119`, last reason `non-suffix or multi-word wildcard: '*50s*'`. Those
+requests were still answered correctly — `_browse_compute(engine="auto")` served them from the legacy
+Python path — but 4c deletes that path, so any search shape `_pg_browse` can't translate would have
+nowhere to go. This entry is new since the v2.16.39 full diff check (whose only ineligible entry,
+`Takamine TSP*`, v2.16.40 already fixed). The counter only kept the LAST reason, so it couldn't show
+whether all 119 were the same entry.
+
+### 1. Every wildcard shape now translates (`_tsquery_compile_term`)
+Previously any wildcard other than a plain trailing one (`OD*`, and since v2.16.40 `Takamine TSP*`)
+raised `_TsqueryUnsupported` → whole request `_PgBrowseIneligible` → legacy fallback. Now the
+remaining shapes — leading (`*muff`), both ends (`*50s*`), infix (`a*b`), bare `*`, and trailing
+wildcards the tsquery path can't express (non-ASCII: `Höfner B*`, `hö*`) — compile to
+`(coalesce(name,'') || ' ' || coalesce(brand,'')) ILIKE %s` with pattern
+`'%' + '%'.join(_like_escape(piece) for piece in part.split('*')) + '%'`.
+
+This is exactly the legacy semantics, not an approximation: `_compile_query` joins the `*`-split
+pieces with `.*` and `re.search()`es that unanchored, case-insensitively, over `name_l + " " +
+brand_l` — the same string, and `re.search('a.*b')` ≡ `ILIKE '%a%b%'`. Same expression as quoted
+terms, so it uses the existing v2.16.35 `idx_items_name_brand_trgm` GIN index (pieces < 3 chars
+can't use trigrams → scan of available rows; fine at our size). Consecutive `%` (from `**` or edge
+`*`) are left alone — harmless in LIKE, and collapsing them could swallow an escaped `\%`.
+
+Plain trailing wildcards keep the accepted v2.16.32/v2.16.40 start-of-word prefix semantics
+(`OD*` no longer matches inside "Wood", `50s*` not "1950s") — unchanged here. So `*50s*` is how a
+user gets substring matching, and now it works in SQL.
+
+Composition is unchanged: ILIKE fragments aren't mergeable into the want-list tsquery OR-tree
+(`_PG_KW_MERGEABLE_RE`), so they become their own OR'd branch, same as quoted terms; comma-AND,
+`;` OR and `-` NOT around them go through the existing plain-SQL AND/OR/NOT composition.
+
+**Verified locally** (sandbox Postgres 16, real `pg_schema.sql`, synthetic rows incl. '50s/1950s/
+50S/Muff/Muffin/Höfner/`_`/`%`): 18 filter terms compared SQL vs the real `_compile_query` +
+`_matches_all` — all new ILIKE shapes exact (`*50s*`, `*muff`, `*muff*`, `a*b`, `Höfner B*`, `hö*`,
+`*50s`, `**`, `*`, `*_score*`, `*od*`, `*50S*, fender`); the only 3 diffs are the known trailing-
+wildcard tradeoffs (`50s*`, `OD*`, `'50s*`). Want-list bool entries (`*muff, -ram`,
+`*50s*, -gibson;hofner`, `-*50s*, fender`) exact vs `_wl_bool_compile`. `_browse_compute(engine="pg")`
+end-to-end for want lists `["*50s*"]`, `["*muff","fender"]`, `["Höfner B*"]` and filter_q `*50s*` —
+served in SQL, no ineligible. `_TsqueryUnsupported` is kept (contract for future syntax) but nothing
+raises it today.
+
+### 2. Fallback reasons tallied (`_PG_BROWSE_FALLBACKS["reasons"]`)
+New `reasons: {"ineligible": {reason: count}, "error": {reason: count}}` alongside `last`, capped at
+`_PG_BROWSE_FALLBACK_REASON_CAP = 50` distinct reasons per kind (overflow → `"(other)"`). Visible
+wherever the counters already are (`?pg_shadow=1` → `_pg_browse_fallbacks`, `GET
+/api/pg-browse-diff-check` → `fallbacks`). Reasons can contain a user's search text — admin-only,
+same as `last` already was.
+
+### Next
+Push, confirm deploy (no schema change), then re-check the counters after a day or two: `ineligible`
+should be ~0 (the only remaining ineligible sources are an unknown `sort_field` or no Postgres pool),
+`error` 0. Then 4c.
 
 ---
 

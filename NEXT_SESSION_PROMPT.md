@@ -1,3 +1,18 @@
+# Next Session Prompt — v2.16.43 built (all wildcards in SQL): push, burn in, then 4c
+
+**Update 2026-09-24**: burn-in check of the v2.16.40 cutover (counters since 2026-09-23T22:51Z):
+`error: 0`, `ineligible: 119` (last: `'*50s*'`). Users still got results (legacy fallback), but 4c
+removes the fallback. v2.16.43 (built + locally verified, NOT yet pushed) translates every wildcard
+shape to SQL (leading/infix → ILIKE `%a%b%`, same as legacy) and tallies all fallback reasons in
+`_pg_browse_fallbacks.reasons`. Steps:
+1. Chuck pushes v2.16.43 (`cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, commit, push).
+2. Confirm deploy + footer v2.16.43; spot-check a `*50s*` search in the search box.
+3. After 1-2 days: `await (await fetch('/api/pg-browse-diff-check')).json()` → `fallbacks`.
+   Expect `ineligible` ~0 and `error` 0; read `reasons` for anything left.
+4. Then **4c** (delete legacy path + 4a tooling), then **step 5** (retire JSON).
+
+---
+
 # Next Session Prompt — v2.16.40 LIVE (Phase F step 4b cutover): burn-in, then 4c
 
 **Update 2026-09-23 (latest)**: v2.16.40 = step 4b, PUSHED + LIVE and spot-checked (all request types served by `_pg_browse`, 0 fallbacks; Want List ~1.3s → ~0.15s, search box ~0.35s → ~0.12s, plain all-stores browse unchanged ~1s). Every `/api/browse` request now tries the unified
