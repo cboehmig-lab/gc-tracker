@@ -1,5 +1,34 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-25 · Current version: v2.16.44 (Phase F step 4c: legacy browse path + 4a tooling deleted, SQL is the only /api/browse path; v2.16.43 all wildcards in SQL; v2.16.40 step 4b cutover) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-25 · Current version: v2.16.45 (search box prefix-matches the last word; v2.16.44 Phase F step 4c: SQL-only /api/browse; v2.16.43 all wildcards in SQL) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.45 — 2026-09-25: search box prefix-matches the last word ("sm81" finds "SM81LC")
+
+**Why**: Chuck searched for a Shure SM81LC (Emeryville, SKU 122844332, in the DB since 2026-09-18)
+and got nothing. The store was tracked and the item present; plain search terms were whole-word
+only (old Python `\bword\b`, and `phraseto_tsquery` since Phase F), and "SM81LC" is one word, so
+`sm81` matched nothing (`sm81lc` / `sm81*` found all 5 SM81LCs). Model numbers with suffixes
+(SM81LC, TS9DX, DS-1X) are exactly where this bites. Chuck chose prefix matching ("I wouldn't want
+to miss things"), accepting a few looser matches (`les` also matches "Lester").
+
+**Change** (`_tsquery_compile_term(part, prefix=False)`, `_tsquery_compile_query(..., prefix=False)`,
+`_tsquery_filter_q`): in the **search box / saved searches only** (filter_q), a POSITIVE plain term
+compiles to `to_tsquery('simple', 'w1 <-> w2 <-> wN:*')` — words split on runs of non-alphanumerics
+(`[\W_]+`, same rule as search_vector's `[^[:alnum:]]+`), earlier words exact and adjacent, the last
+word a prefix. So `sm81` → SM81LC, `strat` → Stratocaster, `ds-1` → DS-1 and DS-1X, `es-33` →
+ES-335, `höf` → Höfner. Pieces are pure alphanumerics, so nothing can be read as tsquery operator
+syntax. A lone one-character term (`a`) stays whole-word. Unchanged: negated terms (`-combo` still
+only excludes the word "combo", not "Combination" — a prefix NOT would hide more), quoted terms
+(substring), wildcards, and **Want List entries** (still whole-word, matching the client-side
+highlighter in gc.js). Saved-search badge counts use the same translator, so they stay equal to
+applied results; the saved-search-counts JSON fallback (only if Postgres fails; deleted in step 5)
+is still whole-word.
+
+**Verified locally** (sandbox Postgres): targeted rows — `sm81`, `SM81LC`, `strat`, `höf`, `es-33`,
+`335`, `ds-1` (DS-1 + DS-1X), `les`, `mesa/boo`, `sm81; strat`, `fender -comb` (keeps "Combination"),
+`a` (whole-word) all as designed; the 260-request corpus vs v2.16.44 — every want list / no-search
+request identical, saved-search counts identical. `py_compile` / `node --check` clean.
 
 ---
 

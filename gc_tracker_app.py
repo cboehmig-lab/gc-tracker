@@ -4160,7 +4160,7 @@ def _like_escape(s):
     backslash that step just introduced."""
     return s.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
 
-def _tsquery_compile_term(part):
+def _tsquery_compile_term(part, prefix=False):
     """One already-comma-split piece, mirroring _compile_query's per-part branching
     (quoted-exact / wildcard / plain word-or-phrase). Returns (sql_fragment, params) — a
     COMPLETE boolean SQL predicate (e.g. `search_vector @@ (...)` or an ILIKE clause), NOT
@@ -4252,9 +4252,26 @@ def _tsquery_compile_term(part):
     # (v2.16.39) Normalization now happens in SQL via _PG_SEARCH_NORM_SQL (every run of
     # non-alphanumerics -> one space), identical to search_vector's own expression; this
     # supersedes the v2.16.35/36 Python-side '-'/'/' replace.
+    if prefix:
+        # (v2.16.45) Search box only — see _tsquery_filter_q: the LAST word of
+        # a plain term also matches as the start of a longer word, so 'sm81'
+        # finds "SM81LC" and 'strat' finds "Stratocaster" (Chuck missed an
+        # SM81LC with plain whole-word matching, 2026-09-25). Split on the
+        # same separator rule the document side uses (runs of
+        # non-alphanumerics), so 'es-33' -> 'es <-> 33:*'. Pieces are pure
+        # alphanumerics (Unicode letters allowed: Postgres [:alnum:] and
+        # Python's [^\W_] agree on letters/digits), so splicing them into
+        # to_tsquery's mini-language can't be read as operator syntax. A
+        # lone one-character term stays whole-word ('a:*' would match nearly
+        # everything); as the tail of a phrase it's fine ('ds-1' -> 'ds <->
+        # 1:*' finds "DS-1X").
+        pieces = [w for w in re.split(r'[\W_]+', part) if w]
+        if pieces and (len(pieces) > 1 or len(pieces[0]) >= 2):
+            return ("search_vector @@ to_tsquery('simple', %s)",
+                    [" <-> ".join(pieces[:-1] + [pieces[-1] + ':*'])])
     return f"search_vector @@ phraseto_tsquery('simple', {_PG_SEARCH_NORM_SQL})", [part]
 
-def _tsquery_compile_query(query_str):
+def _tsquery_compile_query(query_str, prefix=False):
     """Mirrors _compile_query(query_str): comma-separated parts, ANDed. Returns
     (sql_fragment, params), or (None, []) if query_str has no non-empty parts. Raises
     _TsqueryUnsupported if any part isn't pure-tsquery-expressible — never a partial/
@@ -4266,7 +4283,7 @@ def _tsquery_compile_query(query_str):
         part = part.strip()
         if not part:
             continue
-        frag, p = _tsquery_compile_term(part)
+        frag, p = _tsquery_compile_term(part, prefix=prefix)
         frags.append(frag)
         params.extend(p)
     if not frags:
@@ -4390,7 +4407,12 @@ def _tsquery_filter_q(fq, max_tokens=12, max_clauses=4):
         for tok in toks:
             is_neg = len(tok) > 1 and tok[0] == '-'
             term_text = tok[1:] if is_neg else tok
-            frag, prm = _tsquery_compile_query(term_text)
+            # (v2.16.45) Positive terms prefix-match their last word ('sm81'
+            # finds "SM81LC"); negated terms stay whole-word, so '-combo'
+            # doesn't also hide "Combination..." — the goal is to not MISS
+            # things, and a prefix NOT would hide more. Want-list entries
+            # (_tsquery_want_list_entry) are unchanged: whole-word.
+            frag, prm = _tsquery_compile_query(term_text, prefix=not is_neg)
             if frag is None:
                 continue
             if is_neg:
@@ -7400,7 +7422,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.44"
+APP_VERSION = "2.16.45"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

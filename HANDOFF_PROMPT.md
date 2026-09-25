@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-25 · Version: v2.16.44 (Phase F step 4c: /api/browse is SQL-only — legacy Tier 1/Tier 2/Python path and 4a tooling deleted; v2.16.43 all wildcards in SQL — see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-09-25 · Version: v2.16.45 (search box prefix-matches last word; v2.16.44 Phase F step 4c: /api/browse is SQL-only — see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,7 +88,14 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.44 — Phase F step 4c: SQL-only browse (2026-09-25)
+## Current State: v2.16.45 — search box prefix match (2026-09-25)
+
+Search box / saved searches: a positive plain term's last word now also matches the start of a
+longer word (`sm81` finds "SM81LC", `ds-1` finds "DS-1X"); negated terms, quoted terms, wildcards and
+Want List entries unchanged (whole-word). Chuck's call after missing an SM81LC. Full detail:
+HANDOFF.md v2.16.45.
+
+## Previous: v2.16.44 — Phase F step 4c: SQL-only browse (2026-09-25)
 
 Burn-in clean (0 fallbacks since v2.16.43), so 4c deleted the legacy `/api/browse` path (Tier 1,
 Tier 2, the Python `_kw_match` matcher, `_build_base_item_list`) and all 4a comparison tooling

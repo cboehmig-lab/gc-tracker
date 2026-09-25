@@ -1,4 +1,20 @@
-# Next Session Prompt — v2.16.44 built (Phase F step 4c): push, verify, then step 5
+# Next Session Prompt — v2.16.45 built (search-box prefix match): push, verify, then counters + step 5
+
+**Update 2026-09-25 (latest)**: v2.16.45 built + locally verified, NOT yet pushed — the search box's
+last word now prefix-matches (`sm81` → "SM81LC"); Want List unchanged. After pushing: footer
+v2.16.45, search `sm81` nationwide should return the 5 SM81LCs (Emeryville ×2, Danvers ×2,
+N. Fort Worth), `fender -combo` should still behave. Then the error-counter check and step 5 below.
+
+---
+
+# Next Session Prompt — v2.16.44 LIVE (Phase F step 4c done): check error counters, then step 5
+
+**Update 2026-09-25 (later)**: v2.16.44 PUSHED + LIVE (footer confirmed). Live spot-check, all 200 with
+0 errors/retries: plain all-stores 114,616 items (~230ms server), one store (~25ms), search box
+`fender deluxe` (~108ms), `*50s*` 391 (~100ms), want-list-only with mixed shapes 4,595 (~200ms),
+bogus sort_field → date sort, facets+price+sort page 2 (~410ms). `/api/pg-browse-diff-check` → 404.
+Saved-search counts match browse totals (391 / 508). Remaining: steps 3-4 below.
+
 
 **Update 2026-09-25**: 4b burn-in clean (live counters on v2.16.43: `error 0, ineligible 0`, no
 fallback ever recorded since deploy). v2.16.44 = **step 4c**, built + locally verified, NOT yet
