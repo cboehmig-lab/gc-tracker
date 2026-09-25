@@ -493,9 +493,9 @@ def _init_pg_schema():
         return
     # CREATE INDEX CONCURRENTLY statements, each its own cur.execute() call on a shared
     # autocommit connection — see _pg_concurrent_statements() and the marker comment in
-    # pg_schema.sql. Best-effort and non-blocking like the step above: Tier 1/Tier 2 reads
-    # don't depend on these indexes existing yet, so a slow build or a hiccup here never
-    # blocks startup or degrades current traffic. One statement failing (e.g. a leftover
+    # pg_schema.sql. Best-effort and non-blocking like the step above: queries still run
+    # (just slower) without these indexes, so a slow build or a hiccup here never
+    # blocks startup. One statement failing (e.g. a leftover
     # INVALID index from a prior interrupted build) doesn't abort the rest.
     try:
         conn = psycopg2.connect(PG_DATABASE_URL, connect_timeout=10)
@@ -535,9 +535,9 @@ if _PSYCOPG2_AVAILABLE and PG_DATABASE_URL:
             2, 12, PG_DATABASE_URL, connect_timeout=10)
         print("[pg] connection pool ready (minconn=2, maxconn=12)")
     except Exception as e:
-        # Same tolerance as _init_pg_schema() — a pool that fails to init just
-        # means Tier 1 shadow reads no-op (see _pg_tier1_eligible's caller in
-        # api_browse); it can never block startup or any other Postgres path.
+        # Same tolerance as _init_pg_schema(): startup never blocks on it. Since
+        # v2.16.44 (Phase F 4c) /api/browse has no JSON fallback, so with no
+        # pool it answers 503 (see api_browse) until the next restart.
         print(f"[pg] connection pool init skipped: {type(e).__name__}: {e}")
         _PG_POOL = None
 
@@ -548,18 +548,54 @@ def _pg_conn():
     """Yield a pooled Postgres connection, committing on a clean exit and
     rolling back + discarding the connection back to the pool on error —
     mirrors _user_db()'s `with`-based pattern for SQLite, just pooled since
-    Postgres connections are more expensive to establish than SQLite's."""
+    Postgres connections are more expensive to establish than SQLite's.
+
+    (v2.16.44) When _PG_VALIDATE_CONN is set for the current request (only on
+    /api/browse's one retry after a connection-class error — see
+    _pg_is_conn_error), each connection is pinged with SELECT 1 first and any
+    dead one is closed and replaced. A Postgres restart leaves every idle
+    pooled connection dead; without this a retry could just draw the next
+    dead one. Normal requests never pay for the ping."""
     if _PG_POOL is None:
         raise RuntimeError("Postgres connection pool not available")
     conn = _PG_POOL.getconn()
+    if _PG_VALIDATE_CONN.get():
+        for _ in range(_PG_POOL.maxconn + 1):
+            try:
+                with conn.cursor() as _c:
+                    _c.execute("SELECT 1")
+                conn.rollback()
+                break
+            except Exception:
+                _PG_POOL.putconn(conn, close=True)
+                conn = _PG_POOL.getconn()
     try:
         yield conn
         conn.commit()
     except Exception:
-        conn.rollback()
+        # A dead connection can't roll back either; don't let that second
+        # error mask the real one. The pool drops closed connections itself.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         raise
     finally:
         _PG_POOL.putconn(conn)
+
+
+import contextvars as _contextvars
+_PG_VALIDATE_CONN = _contextvars.ContextVar("_PG_VALIDATE_CONN", default=False)
+
+
+def _pg_is_conn_error(exc):
+    """True for errors meaning 'this pooled connection was dead' (Postgres
+    restarted, network blip, idle timeout) rather than a bad query — the
+    only kind worth one retry."""
+    if not _PSYCOPG2_AVAILABLE:
+        return False
+    import psycopg2 as _pg2
+    return isinstance(exc, (_pg2.OperationalError, _pg2.InterfaceError))
 
 # ── Postgres dual-write (Phase B, v2.16.15) ───────────────────────────────────
 # Mirrors this scan's results into Postgres, best-effort, AFTER _cat_cache/JSON
@@ -802,78 +838,6 @@ def _pg_parity_check() -> dict:
         "field_mismatches_sample": mismatches[:20],
         "checked_at":              datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
-
-# ── Memoized /api/browse base item list (E2, v2.16.4) ────────────────────────
-# /api/browse used to rebuild this ~92K-item lightweight-dict list from scratch
-# on EVERY call — price/date formatting + name/brand lowercasing for every item
-# — even though none of that depends on who's asking or what they're filtering
-# by. That's ~110-230ms held under the GIL per call, on the threaded dev server,
-# on an endpoint hit by every filter click, keystroke, and page flip. Memoize
-# the expensive request-independent projection once per cache generation (keyed
-# off _cat_cache_mtime — the same trigger _load_cat_cache already uses) so each
-# request only pays for a cheap second pass: store-selection filter, per-user
-# scan-date gating, and the per-user annotations (watched/isNew/kwMatch/isFav)
-# that genuinely can't be cached.
-#
-# Deliberately memoizes ONE unfiltered list, not one per store-selection — with
-# up to 298 stores selectable in any combination, caching per-selection would
-# chase a combinatorial key space and blow memory. Store filtering stays a
-# cheap per-request pass over the single cached list instead.
-#
-# No lock: same unsynchronized memoize-by-mtime pattern as _load_cat_cache
-# (v2.13.0) — under Flask's threaded dev server + the GIL, two threads racing
-# to rebuild after a scan just do redundant identical work, not incorrect work
-# (both read the same _cat_cache snapshot via list(...)).
-_base_item_list: list = []
-_base_item_list_mtime = None
-
-def _build_base_item_list():
-    """The memoized half of the old all_items loop: every field that's the
-    same no matter who's asking, for every AVAILABLE item (the availability
-    filter is static per item, so items failing it are dropped here rather
-    than carried through every request). Does NOT include store filtering,
-    scan-date gating, or the per-user watched/isNew/kwMatch/isFav flags —
-    those stay a per-request pass in api_browse(). `first_seen`/`name_lower`/
-    `brand_lower` are internal-only (used for gating/matching), not part of
-    the JSON shape ultimately returned to the client."""
-    global _base_item_list, _base_item_list_mtime
-    if _base_item_list_mtime == _cat_cache_mtime and _base_item_list:
-        return _base_item_list
-    items = []
-    for sku, cached in list(_cat_cache.items()):
-        if not cached.get("available", True):
-            continue
-        price_raw = cached.get("price", 0) or 0
-        name      = cached.get("name", "")
-        brand     = cached.get("brand", "")
-        date_raw  = cached.get("date_listed", "")
-        items.append({
-            "id":               sku,
-            "name":             name,
-            "brand":            brand,
-            "name_lower":       name.lower(),
-            "brand_lower":      brand.lower(),
-            "price":            f"${price_raw:,.2f}" if price_raw else "",
-            "price_raw":        price_raw,
-            "list_price_raw":   cached.get("list_price", 0) or 0,
-            "price_drop":       cached.get("price_drop", 0) or 0,
-            "price_drop_since": cached.get("price_drop_since", "") or "",
-            "store":            cached.get("store", ""),
-            "location":         cached.get("location") or cached.get("store", ""),
-            "url":              cached.get("url", ""),
-            "category":         cached.get("category", ""),
-            "subcategory":      cached.get("subcategory", ""),
-            "condition":        cached.get("condition", ""),
-            "date":             _fmt_date(date_raw),
-            "date_raw":         date_raw,
-            "first_seen":       cached.get("first_seen", ""),
-            "image_id":         cached.get("image_id", ""),
-            "is_vintage":       bool(cached.get("is_vintage")),
-            "condition_note":   cached.get("condition_note", "") or "",
-        })
-    _base_item_list = items
-    _base_item_list_mtime = _cat_cache_mtime
-    return _base_item_list
 
 # ── Store list ────────────────────────────────────────────────────────────────
 
@@ -4038,19 +4002,6 @@ def _matches_any(text_lower, terms):
             return True
     return False
 
-def _kw_or_pattern(base):
-    """Regex pattern string for one OR-able want-list keyword, mirroring the
-    single-term branches of _compile_query so the alternation matches identically:
-      "phrase"  -> escaped substring (exact, no boundaries)
-      od*       -> escaped pieces joined by .*  (wildcard)
-      big muff  -> \\bbig\\ muff\\b             (whole-word / phrase)
-    Compiled case-insensitively by the caller."""
-    if base.startswith('"') and base.endswith('"') and len(base) > 2:
-        return re.escape(base[1:-1])
-    if '*' in base:
-        return '.*'.join(re.escape(p) for p in base.split('*'))
-    return r'\b' + re.escape(base) + r'\b'
-
 # search-box (filter_q) clause compiler: ';' OR-clauses of space-separated tokens,
 # '-tok' negated. Shared 12-token budget across all clauses, ≤4 clauses — same
 # unauthenticated-DoS budget as the old single-clause path (v2.13.0 cap).
@@ -4124,16 +4075,13 @@ def _wl_bool_compile(base):
 
 
 # ── Phase F stage 2: tsquery translator (search_vector-backed) ──────────────
-# POSTGRES_PHASE_F_DESIGN.md §7 step 2. NOT wired into any live route yet —
-# step 3 (a diff harness against real production want-list/filter_q strings)
-# has to run clean first, then step 4 unifies Tier 1/Tier 2 around it. Step 3
-# has to be a new admin-only server-side endpoint, NOT a Chuck's-Mac-terminal
-# script like migrate_cat_cache_to_pg.py — the real keyword/saved-search data
-# lives in gc_users.db on the Railway volume, not locally, so it only exists
-# where this app itself already runs. See the "Stage 2 — SHIPPED" addendum in
-# POSTGRES_PHASE_F_DESIGN.md §7 for that endpoint's design.
-# _compile_query/_wl_bool_compile/_compile_fq_clauses/_kw_match above are all
-# UNCHANGED and still what every live request path uses.
+# POSTGRES_PHASE_F_DESIGN.md §7 step 2. Since v2.16.40 (step 4b) this is THE
+# search implementation for /api/browse (via _pg_browse), and since v2.16.44
+# (step 4c) the only one — the Python matcher it was diffed against is gone
+# from browse. _compile_fq_clauses/_fq_text_match above survive only for
+# /api/saved-search-counts' JSON fallback, which step 5 deletes;
+# _wl_bool_compile/_compile_query/_expand_colon_prefix are still used by the
+# translator itself and by _kw_accept_capped.
 #
 # Mirrors the ABOVE functions' own parsing/routing decisions one for one
 # (same comma=AND, ';'=OR, leading '-'=NOT, same gate for when the OR/NOT
@@ -4166,9 +4114,9 @@ def _wl_bool_compile(base):
 # _TsqueryUnsupported rather than being silently mistranslated. September
 # 2026 production data showed zero real non-suffix-wildcard usage
 # (POSTGRES_PHASE_F_DESIGN.md §3), so this is expected to never fire on a
-# real want list/saved search, but a caller must not swallow it silently —
-# step 4's job is to fall back to the dormant Python _kw_match path for just
-# that one entry, never guess.
+# real want list/saved search, but a caller must not swallow it silently.
+# (v2.16.43 made every wildcard shape translatable, so nothing raises it
+# today; since 4c /api/browse answers it with a 400 rather than guessing.)
 #
 # Performance note for step 4, not a step-2 correctness concern: a clause
 # that's all-NOT (no positive term — filter_q alone allows this, see
@@ -4644,16 +4592,9 @@ def _algolia_health_probe(now: float):
     return jsonify(result)
 
 
-# ── Postgres Tier 1 read path (Phase C shadow / Phase D cutover) ──────────────
-# Pure-SQL equivalent of api_browse()'s _apply_base()/facet-count/sort/paginate
-# logic, for the dominant "no want-list keywords, no filter_q free text" case
-# (POSTGRES_MIGRATION_PLAN.md §3, Tier 1). Shipped shadow-mode-only (admin +
-# ?pg_shadow=1) in Phase C (v2.16.20/21); cut over to serve every real user in
-# Phase D (v2.16.22) — see the gate in api_browse(), which no longer checks
-# _is_admin()/the flag before calling this. Tier 2 (keyword/free-text search
-# active) is still explicitly out of scope — _pg_tier1_eligible() returns
-# False for it and api_browse() falls through to the existing unmodified
-# Python path.
+# ── Postgres browse: sort whitelist ───────────────────────────────────────────
+# (History: these came from Phase C/D's Tier 1 SQL path, _pg_tier1_browse,
+# which _pg_browse grew out of; Tier 1 and Tier 2 were deleted in v2.16.44.)
 #
 # sort_field is user-controlled (the request body), so every column reference
 # below comes from a fixed whitelist (_PG_SORT_MAP / the "condition" special
@@ -4661,8 +4602,8 @@ def _algolia_health_probe(now: float):
 # other value in every WHERE/ORDER BY fragment is passed as a psycopg2 %(name)s
 # parameter, never string-formatted into the SQL text.
 
-# sort_field -> (sql column, lowercase-compare?). Mirrors api_browse()'s sort
-# `elif` chain: "price"/"date"/"price_drop_since" get their own raw (unlowered)
+# sort_field -> (sql column, lowercase-compare?). Mirrors the old Python sort
+# `elif` chain (pre-v2.16.44): "price"/"date"/"price_drop_since" get their own raw (unlowered)
 # numeric/text comparison exactly like the Python elifs; everything else falls
 # in the Python `else` branch, which lowercases — same here. "condition" isn't
 # in this map; it gets the quality-rank CASE below, matching the Python
@@ -4681,7 +4622,7 @@ _PG_SORT_MAP = {
     "url":               ("url", True),
     "image_id":          ("image_id", True),
 }
-_PG_TIER1_SORTABLE = set(_PG_SORT_MAP) | {"condition"}
+_PG_SORTABLE = set(_PG_SORT_MAP) | {"condition"}
 _PG_COND_RANK_SQL = (
     "CASE condition "
     "WHEN 'Excellent' THEN 0 WHEN 'Great' THEN 1 WHEN 'Good' THEN 2 "
@@ -4690,440 +4631,13 @@ _PG_COND_RANK_SQL = (
 _PG_COND_KNOWN_SQL = "condition IN ('Excellent','Great','Good','Fair','Poor')"
 
 
-def _pg_tier1_eligible(fq: str, has_kw: bool, sort_field: str) -> bool:
-    """True iff this /api/browse request is the Tier 1 case: no filter_q free
-    text, no want-list keywords active, and a sort_field the SQL path actually
-    knows how to translate (the UI only ever sends the columns in
-    _PG_TIER1_SORTABLE — see static/gc.js's _SORT_COLS — so an unrecognized
-    value here means a client we don't recognize, not a real gap; falling
-    through to the legacy path is the safe choice either way).
-    f_want_only does NOT disqualify Tier 1 — see _pg_tier1_browse, it degrades
-    to a correctly-empty result exactly like the JSON path would with no
-    keywords active."""
-    return (not fq) and (not has_kw) and (sort_field in _PG_TIER1_SORTABLE)
-
-
-def _pg_tier1_browse(*, store_set, search_all, user_last_scan,
-                      f_brands, f_conds, f_cats, f_subs, f_watched, wl_ids,
-                      f_want_only, f_price_drop_only, f_vintage_only,
-                      f_price_min, f_price_max, sort_field, sort_dir, user_sorted,
-                      new_ids, fav_stores, page, per_page) -> dict:
-    """Returns the exact same JSON shape api_browse() returns for a Tier 1
-    request, computed entirely in Postgres (four small aggregate/paginated
-    queries against the `items` table) instead of materializing and
-    filtering/sorting the full catalog in Python. Raises on any DB error —
-    the caller (api_browse()) catches and falls back to the legacy path."""
-    import psycopg2.extras as _pg_extras
-
-    # ── Shared WHERE fragments (parameterized; see module note above) ──────
-    where = ["available"]
-    params = {}
-
-    if search_all:
-        pass
-    else:
-        where.append("store = ANY(%(stores)s)")
-        params["stores"] = list(store_set) if store_set else []
-
-    if user_last_scan:
-        where.append("(first_seen = '' OR first_seen <= %(user_last_scan)s)")
-        params["user_last_scan"] = user_last_scan
-
-    # ── Non-facet filters (api_browse()'s _apply_base(), minus fq/want_only-
-    # via-keywords which can't fire in Tier 1) ──────────────────────────────
-    if f_want_only:
-        # No keywords active (a Tier 1 precondition) => kwMatch is False for
-        # every item in the JSON path => "want-list matches only" can never
-        # match anything. Reproduce that exactly rather than special-casing
-        # eligibility around it.
-        where.append("FALSE")
-    if f_price_drop_only:
-        where.append("price_drop > 0")
-    if f_vintage_only:
-        where.append("is_vintage")
-    if f_watched:
-        where.append("sku = ANY(%(wl_ids)s)")
-        params["wl_ids"] = list(wl_ids)
-    if f_price_min is not None:
-        where.append("price >= %(price_min)s")
-        params["price_min"] = f_price_min
-    if f_price_max is not None:
-        where.append("price <= %(price_max)s")
-        params["price_max"] = f_price_max
-
-    base_where_sql = " AND ".join(where)
-
-    # ── Facet WHERE fragments — one per facet, each independently omittable
-    # so the 4 facet-count queries below can each apply "all OTHER facets"
-    # (api_browse()'s contextual-count semantics) ───────────────────────────
-    def _facet_clause(col: str, values, param_key: str):
-        if not values:
-            return "TRUE", {}
-        if col == "brand":
-            real = [v for v in values if v != NO_BRAND_LABEL]
-            want_no_brand = NO_BRAND_LABEL in values
-            if real and want_no_brand:
-                return f"(brand = ANY(%({param_key})s) OR brand = '')", {param_key: real}
-            if want_no_brand and not real:
-                return "brand = ''", {}
-            return f"brand = ANY(%({param_key})s)", {param_key: real}
-        return f"{col} = ANY(%({param_key})s)", {param_key: list(values)}
-
-    brand_clause, brand_p = _facet_clause("brand", f_brands, "_f_brand")
-    cond_clause,  cond_p  = _facet_clause("condition", f_conds, "_f_cond")
-    cat_clause,   cat_p   = _facet_clause("category", f_cats, "_f_cat")
-    sub_clause,   sub_p   = _facet_clause("subcategory", f_subs, "_f_sub")
-
-    filtered_where_sql = f"{base_where_sql} AND {brand_clause} AND {cond_clause} AND {cat_clause} AND {sub_clause}"
-    filtered_params = dict(params); filtered_params.update(brand_p); filtered_params.update(cond_p)
-    filtered_params.update(cat_p); filtered_params.update(sub_p)
-
-    # ── Sort clause (whitelisted columns only — see module note above) ─────
-    reverse = (sort_dir == "desc")
-    order_parts = []
-    if sort_field == "condition":
-        order_parts.append(f"{_PG_COND_KNOWN_SQL} DESC")  # unknowns always last
-        order_parts.append(f"{_PG_COND_RANK_SQL} {'DESC' if reverse else 'ASC'}")
-    else:
-        col, lower = _PG_SORT_MAP[sort_field]
-        expr = f"LOWER({col})" if lower else col
-        order_parts.append(f"{expr} {'DESC' if reverse else 'ASC'}")
-    if not user_sorted:
-        # NEW-on-top tiering (api_browse()'s post-sort partition). No keywords
-        # active in Tier 1 => kwMatch is always False => the "new+want-match"
-        # tier is always empty => this reduces to exactly two tiers: NEW
-        # first, then everything else, each internally in primary-sort order —
-        # a single leading ORDER BY term does that.
-        order_parts.insert(0, "(sku = ANY(%(new_ids)s)) DESC")
-    # Final tiebreak, always: Python's list.sort() is stable (ties keep their
-    # PRE-sort relative order, even with reverse=True — see the Python docs),
-    # and the pre-sort order of `filtered` in the JSON path traces back to
-    # _build_base_item_list()'s iteration of _cat_cache, i.e. plain ascending
-    # SKU order. On a low-cardinality sort column (condition/category/store/
-    # brand/etc, or even price/date with enough rows) that tie group can be
-    # huge, and Postgres gives no ordering guarantee at all among ties without
-    # an explicit tiebreak — found via the Phase C A/B diff harness (multiple
-    # "sort X" cases returned entirely different, though equally-valid-per-key,
-    # item orders). sku ASC reproduces the JSON path's tiebreak exactly.
-    order_parts.append("sku ASC")
-    order_sql = ", ".join(order_parts)
-
-    offset_params = dict(filtered_params)
-    offset_params["new_ids"] = list(new_ids)
-
-    with _pg_conn() as conn:
-        with conn.cursor(cursor_factory=_pg_extras.RealDictCursor) as cur:
-
-            # Q1 — total_unfiltered + new_count: BEFORE any _apply_base filter,
-            # matching api_browse()'s `all_items`/`total_unfiltered` scope
-            # (store selection + per-user scan-date gating only).
-            q1_where = ["available"]
-            q1_params = {"new_ids": list(new_ids)}
-            if not search_all:
-                q1_where.append("store = ANY(%(stores)s)")
-                q1_params["stores"] = list(store_set) if store_set else []
-            if user_last_scan:
-                q1_where.append("(first_seen = '' OR first_seen <= %(user_last_scan)s)")
-                q1_params["user_last_scan"] = user_last_scan
-            cur.execute(
-                f"SELECT COUNT(*) AS total_unfiltered, "
-                f"COUNT(*) FILTER (WHERE sku = ANY(%(new_ids)s)) AS new_count "
-                f"FROM items WHERE {' AND '.join(q1_where)}", q1_params)
-            row = cur.fetchone()
-            total_unfiltered = row["total_unfiltered"]
-            new_count = row["new_count"]
-
-            # Q2 — facet counts: one query, one pass per facet (mirrors the
-            # v2.16.12 "single pass" optimization, in SQL: 4 branches unioned
-            # instead of 4 separate round trips). Each branch's WHERE includes
-            # base_where + the OTHER three facets, exactly matching
-            # api_browse()'s contextual-count semantics.
-            facet_params = dict(params)
-            facet_params.update(brand_p); facet_params.update(cond_p)
-            facet_params.update(cat_p); facet_params.update(sub_p)
-            facet_params["no_brand_label"] = NO_BRAND_LABEL
-            facet_sql = " UNION ALL ".join([
-                f"SELECT 'brand' AS facet, COALESCE(NULLIF(brand,''), %(no_brand_label)s) AS value, "
-                f"COUNT(*) AS n FROM items WHERE {base_where_sql} AND {cond_clause} AND {cat_clause} "
-                f"AND {sub_clause} GROUP BY value",
-                f"SELECT 'condition' AS facet, condition AS value, COUNT(*) AS n FROM items "
-                f"WHERE {base_where_sql} AND {brand_clause} AND {cat_clause} AND {sub_clause} "
-                f"AND condition <> '' GROUP BY value",
-                f"SELECT 'category' AS facet, category AS value, COUNT(*) AS n FROM items "
-                f"WHERE {base_where_sql} AND {brand_clause} AND {cond_clause} AND {sub_clause} "
-                f"AND category <> '' GROUP BY value",
-                f"SELECT 'subcategory' AS facet, subcategory AS value, COUNT(*) AS n FROM items "
-                f"WHERE {base_where_sql} AND {brand_clause} AND {cond_clause} AND {cat_clause} "
-                f"AND subcategory <> '' GROUP BY value",
-            ])
-            cur.execute(facet_sql, facet_params)
-            brand_ctx, cond_ctx, cat_ctx, sub_ctx = {}, {}, {}, {}
-            _ctx_map = {"brand": brand_ctx, "condition": cond_ctx, "category": cat_ctx, "subcategory": sub_ctx}
-            for r in cur.fetchall():
-                _ctx_map[r["facet"]][r["value"]] = r["n"]
-            # Always include currently-selected values so users can deselect them
-            for b in f_brands:
-                brand_ctx.setdefault(b, 0)
-            for c in f_conds:
-                cond_ctx.setdefault(c, 0)
-            for c in f_cats:
-                cat_ctx.setdefault(c, 0)
-            for s in f_subs:
-                sub_ctx.setdefault(s, 0)
-
-            # Q3 — total_filtered + store_count over the fully-filtered set
-            # (v2.16.21) NULLIF(store, '') before COUNT(DISTINCT ...): a plain
-            # COUNT(DISTINCT store) counts an empty-string store as one more
-            # distinct value, but api_browse()'s own store_count explicitly
-            # excludes falsy store values (`if i.get("store")`, see the
-            # legacy JSON-path store_count line below) — a real production
-            # item with store == "" made this a 296-vs-297 mismatch caught by
-            # spot-checking ?pg_shadow=1 against live data after deploy (the
-            # 436K-row synthetic test data never had an empty-store item, so
-            # the offline diff harness missed this one). COUNT(DISTINCT ...)
-            # already ignores NULLs, so NULLIF(store, '') reproduces the
-            # Python truthy-check exactly.
-            cur.execute(
-                f"SELECT COUNT(*) AS total_filtered, "
-                f"COUNT(DISTINCT NULLIF(store, '')) AS store_count "
-                f"FROM items WHERE {filtered_where_sql}", filtered_params)
-            row = cur.fetchone()
-            total_filtered = row["total_filtered"]
-            store_count = row["store_count"]
-
-            total_pages = max(1, -(-total_filtered // per_page))
-            page = min(page, total_pages)
-            start = (page - 1) * per_page
-
-            # Q4 — the actual page of items
-            cur.execute(
-                f"SELECT sku, name, brand, category, subcategory, condition, condition_note, "
-                f"price, list_price, price_drop, price_drop_since, store, location, url, "
-                f"image_id, is_vintage, date_listed "
-                f"FROM items WHERE {filtered_where_sql} ORDER BY {order_sql} "
-                f"LIMIT %(_limit)s OFFSET %(_offset)s",
-                {**offset_params, "_limit": per_page, "_offset": start})
-            page_rows = cur.fetchall()
-
-    page_items = []
-    for r in page_rows:
-        sku = r["sku"]
-        store = r["store"] or ""
-        price_raw = float(r["price"] or 0)
-        page_items.append({
-            "id":               sku,
-            "name":             r["name"] or "",
-            "brand":            r["brand"] or "",
-            "price":            f"${price_raw:,.2f}" if price_raw else "",
-            "price_raw":        price_raw,
-            "list_price_raw":   float(r["list_price"] or 0),
-            "price_drop":       float(r["price_drop"] or 0),
-            "price_drop_since": r["price_drop_since"] or "",
-            "store":            store,
-            "location":         r["location"] or "",
-            "url":              r["url"] or "",
-            "category":         r["category"] or "",
-            "subcategory":      r["subcategory"] or "",
-            "condition":        r["condition"] or "",
-            "date":             _fmt_date(r["date_listed"] or ""),
-            "date_raw":         r["date_listed"] or "",
-            "image_id":         r["image_id"] or "",
-            "is_vintage":       bool(r["is_vintage"]),
-            "condition_note":   r["condition_note"] or "",
-            "watched":          sku in wl_ids,
-            "isNew":            sku in new_ids,
-            "kwMatch":          False,  # Tier 1 precondition: no keywords active
-            "isFav":            store in fav_stores if fav_stores else False,
-        })
-
-    _cond_order = {"Excellent": 0, "Great": 1, "Good": 2, "Fair": 3, "Poor": 4}
-    return {
-        "items":            page_items,
-        "page":             page,
-        "per_page":         per_page,
-        "total_count":      total_filtered,
-        "total_unfiltered": total_unfiltered,
-        "total_pages":      total_pages,
-        "store_count":      store_count,
-        "new_count":        new_count,
-        "new_want_count":   0,  # no keywords active in Tier 1 => always 0
-        "no_store_data":    False,
-        # (v2.16.20) Secondary alphabetical tiebreak on brand name: two brands
-        # with the same count used to fall back to dict-insertion order, which
-        # is really "SKU order" — an accidental, unspecified tiebreak nobody
-        # relied on, and one the Postgres Tier 1 path can't cheaply reproduce
-        # (SQL aggregation doesn't preserve row order). Made deterministic and
-        # identical in both paths instead of trying to replicate the old
-        # incidental order in SQL — found via the Phase C A/B diff harness.
-        "brands":        [{"name": b, "count": c} for b, c in sorted(brand_ctx.items(), key=lambda x: (-x[1], x[0]))],
-        "conditions":    [{"name": c, "count": n} for c, n in sorted(cond_ctx.items(), key=lambda x: _cond_order.get(x[0], 5))],
-        "categories":    [{"name": c, "count": n} for c, n in sorted(cat_ctx.items())],
-        "subcategories": [{"name": s, "count": n} for s, n in sorted(sub_ctx.items())],
-    }
-
-
-# ── Postgres Tier 2 candidate narrowing — Phase E CUTOVER (v2.16.26) ─────────
-# Tier 1 (above) serves the ENTIRE response from SQL. Tier 2 is different by
-# design (POSTGRES_MIGRATION_PLAN.md §3): the want-list/free-text keyword
-# matcher stays exactly as it is today — Python, unmodified — because it's
-# genuinely sophisticated (its own multi-session bug history: v2.13.1 DoS
-# caps, v2.14.4 cap-starvation fix, v2.16.0 operators, v2.16.3 colon-prefix)
-# and reimplementing it in SQL (tsquery/pg_trgm) is a real project on its own,
-# not worth doing without a proven need. So Phase E only narrows the
-# CANDIDATE row set the existing Python matcher runs over: push every filter
-# SQL can express that does NOT depend on keyword/free-text matching into a
-# WHERE clause, fetch that from Postgres, and hand it to api_browse()'s
-# existing per-request loop / _kw_match / _apply_base / facet-context-count /
-# sort / tiering / paginate code completely unchanged — see
-# _pg_tier2_narrow_items's docstring for exactly what is and isn't pushed
-# down and why.
-#
-# Shipped shadow-mode-only (admin + `?pg_shadow=1`) in v2.16.23-v2.16.25 while
-# the round-trip cost was investigated and narrowed (~12% slower on a
-# narrowing-eligible production request under v2.16.24, down to ~8% after the
-# v2.16.25 cursor-overhead fix — see
-# postgres_phase_e_v2.16.25_live_timing_2026-09-08.md in project memory). Cut
-# over to serve every real user in v2.16.26 — see the gate in api_browse(),
-# which no longer checks _is_admin()/the flag before calling
-# _pg_tier2_narrow_items(). Chuck's call: the remaining latency cost is
-# accepted for the Railway memory-pressure benefit (same rationale as Phase
-# D), not because the benchmark reversed.
-
-def _pg_tier2_eligible(fq: str, has_kw: bool) -> bool:
-    """True iff this /api/browse request is the Tier 2 case Phase E targets:
-    want-list keywords or filter_q free text active — exactly the case Tier 1
-    excludes (see _pg_tier1_eligible, which is `(not fq) and (not has_kw) and
-    ...`). Unlike Tier 1, sort_field doesn't matter here: Phase E only
-    narrows the candidate set fetched from Postgres, it never moves sorting
-    or pagination into SQL, so every sort_field the JSON path already
-    supports keeps working completely unchanged."""
-    return bool(fq) or has_kw
-
-
-def _pg_tier2_narrow_items(*, store_set, search_all, user_last_scan) -> list:
-    """Phase E (v2.16.23): fetch a candidate row set from Postgres, narrowed
-    by every filter SQL can express WITHOUT touching keyword/free-text
-    matching, the four facet dropdowns, OR any of _apply_base()'s own
-    filters (filter_q/want_only/price_drop_only/vintage_only/watched/price
-    range).
-
-    Deliberately EXCLUDED from the WHERE clause here (must stay Python-only,
-    downstream, exactly as today):
-      - filter_q / want-list keywords: compile to Python regexes (_kw_match /
-        _compile_fq_clauses), not reimplemented in SQL — see the module note
-        above.
-      - filter_want_list_only, filter_price_drop_only, vintage_only,
-        filter_watched, filter_price_min/max: these are _apply_base()'s own
-        filters, applied to `all_items` to produce `base_items` — and
-        api_browse()'s `total_unfiltered`/`new_count_unfiltered` are counted
-        on `all_items` BEFORE _apply_base runs (mirrors Tier 1's own Q1
-        query, which is deliberately store+scan-gate ONLY — see its
-        docstring). An earlier version of this function pushed these into
-        the WHERE clause here too, which silently shrank `all_items` itself
-        and corrupted total_unfiltered for every request using one of these
-        filters (caught by the offline diff harness — total_unfiltered
-        mismatched while total_count still matched, i.e. exactly a
-        pre-vs-post-_apply_base scope bug). So these stay exactly where they
-        already are: Python-side, inside _apply_base(), applied AFTER this
-        candidate set.
-      - brand/condition/category/subcategory facet filters: api_browse()'s
-        facet DROPDOWN COUNTS are "contextual" — each facet's count reflects
-        every OTHER active facet but never itself (see the single-pass facet
-        loop in api_browse(), just below where this function's result is
-        consumed), computed by iterating the FULL non-facet-filtered
-        candidate set in Python. Pre-filtering candidates by a facet in SQL
-        here would silently corrupt that math for every OTHER facet's count
-        (e.g. pre-filtering by brand would make every category/subcategory/
-        condition count wrong, since those are supposed to still reflect
-        "all brands"). So facet filtering stays exactly where it already is:
-        applied AFTER this candidate set, by the unchanged Python code.
-
-    What IS pushed down (availability + store selection + per-user scan-date
-    gating) exactly matches the scope `all_items`/`total_unfiltered` already
-    have in the legacy path — this function narrows the SAME population
-    Tier 1's Q1 query narrows to, just returns the rows instead of a count.
-
-    Returns a list of dicts in the EXACT shape _build_base_item_list()
-    produces (including the internal-only name_lower/brand_lower/first_seen
-    fields that function's own docstring calls out) so the caller can use
-    this as a drop-in replacement for that function's return value — every
-    line of api_browse() downstream (kw_match computation, _apply_base,
-    facet-context counting, facet filtering, sort, NEW-tiering, pagination,
-    response building) runs completely unchanged, exactly as
-    POSTGRES_MIGRATION_PLAN.md §3 calls for.
-
-    Raises on any DB error — the caller catches and falls back to
-    _build_base_item_list(), exactly like Tier 1's fallback (_pg_tier1_browse).
-    """
-    where = ["available"]
-    params = {}
-    if not search_all:
-        where.append("store = ANY(%(stores)s)")
-        params["stores"] = list(store_set) if store_set else []
-    if user_last_scan:
-        where.append("(first_seen = '' OR first_seen <= %(user_last_scan)s)")
-        params["user_last_scan"] = user_last_scan
-
-    where_sql = " AND ".join(where)
-
-    # (v2.16.25) Plain cursor + cur.description column-index lookup instead
-    # of RealDictCursor. RealDictCursor's per-row dict construction has real
-    # overhead that scales with row count -- measured ~2.5x slower than a
-    # plain cursor at this function's typical candidate-set size (~2,000
-    # rows), closely matching the ~40ms _pg_tier2_shadow_ms seen live on
-    # 2026-09-08 (see postgres_phase_e_cursor_investigation_2026-09-08 in
-    # project memory for the local benchmark). Using cur.description instead
-    # of a hardcoded column-index list means this can't silently desync if
-    # the SELECT's column list is ever edited. Output shape/values are
-    # unchanged -- only the DB-access mechanics differ.
-    items = []
-    with _pg_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT sku, name, brand, category, subcategory, condition, "
-                "condition_note, price, list_price, price_drop, price_drop_since, "
-                "store, location, url, image_id, is_vintage, date_listed, first_seen "
-                f"FROM items WHERE {where_sql}", params)
-            col = {d.name: i for i, d in enumerate(cur.description)}
-            for r in cur:
-                price_raw = float(r[col["price"]] or 0)
-                name = r[col["name"]] or ""
-                brand = r[col["brand"]] or ""
-                date_raw = r[col["date_listed"]] or ""
-                items.append({
-                    "id":               r[col["sku"]],
-                    "name":             name,
-                    "brand":            brand,
-                    "name_lower":       name.lower(),
-                    "brand_lower":      brand.lower(),
-                    "price":            f"${price_raw:,.2f}" if price_raw else "",
-                    "price_raw":        price_raw,
-                    "list_price_raw":   float(r[col["list_price"]] or 0),
-                    "price_drop":       float(r[col["price_drop"]] or 0),
-                    "price_drop_since": r[col["price_drop_since"]] or "",
-                    "store":            r[col["store"]] or "",
-                    "location":         r[col["location"]] or "",
-                    "url":              r[col["url"]] or "",
-                    "category":         r[col["category"]] or "",
-                    "subcategory":      r[col["subcategory"]] or "",
-                    "condition":        r[col["condition"]] or "",
-                    "date":             _fmt_date(date_raw),
-                    "date_raw":         date_raw,
-                    "first_seen":       r[col["first_seen"]] or "",
-                    "image_id":         r[col["image_id"]] or "",
-                    "is_vintage":       bool(r[col["is_vintage"]]),
-                    "condition_note":   r[col["condition_note"]] or "",
-                })
-    return items
-
-# ── Phase F step 4a: unified Postgres browse path (v2.16.38, shadow only) ─────
+# ── Unified Postgres browse path (Phase F step 4; sole path since v2.16.44) ───
 # POSTGRES_PHASE_F_DESIGN.md §7 step 4. ONE function serving every
 # /api/browse shape — Tier 1's no-search case AND Tier 2's want-list/filter_q
 # case — entirely in SQL: availability + store + scan-gate + _apply_base's
 # filters + filter_q (via the Stage 2 tsquery translator) + contextual facet
-# counts + NEW/want tiering + sort + paginate. Structurally it's
-# _pg_tier1_browse() (live since Phase D, already proven against production)
-# with the two things Tier 1 couldn't do bolted in:
+# counts + NEW/want tiering + sort + paginate. Structurally it's the old
+# Phase D Tier 1 SQL path with the two things Tier 1 couldn't do bolted in:
 #   1. filter_q  -> one more WHERE predicate (_tsquery_filter_q), part of the
 #      _apply_base scope exactly like the Python path (so it narrows facets/
 #      totals but NOT total_unfiltered/new_count).
@@ -5133,10 +4647,9 @@ def _pg_tier2_narrow_items(*, store_set, search_all, user_last_scan) -> list:
 #      default sort, (c) new_want_count, (d) each returned item's kwMatch flag.
 #      Each of those uses it in the matching SQL position below.
 #
-# LIVE for every request since v2.16.40 (step 4b): _browse_compute's
-# engine="auto" calls this first and only falls back to the legacy Tier 1/
-# Tier 2/Python path for an ineligible request or an exception. 4c deletes
-# that legacy path (and Tier 1/Tier 2 with it) after burn-in.
+# LIVE for every request since v2.16.40 (step 4b, with a legacy fallback);
+# the ONLY browse path since v2.16.44 (step 4c deleted the legacy Tier 1 /
+# Tier 2 / Python path and the 4a comparison tooling).
 #
 # Performance shape of kw_match — the reason this isn't just
 # " OR ".join(_tsquery_want_list_entry(kw) for kw in keywords):
@@ -5159,12 +4672,11 @@ def _pg_tier2_narrow_items(*, store_set, search_all, user_last_scan) -> list:
 #     and for the page's own kwMatch flags via a separate tiny query over
 #     just that page's SKUs.
 #
-# Want-list entries honored are exactly the ones the Python matcher kept
-# after its per-type DoS caps (_kw_accepted in _browse_compute), not the raw
-# list. Any entry or filter_q with no pure-SQL translation
+# Want-list entries honored are exactly the ones that survive the per-shape
+# DoS caps (_kw_accept_capped), not the raw list. Any entry or filter_q with no pure-SQL translation
 # (_TsqueryUnsupported — none left since v2.16.43 made every wildcard shape translatable)
 # makes the WHOLE request ineligible (_PgBrowseIneligible) rather than being
-# dropped or guessed — the caller keeps serving it from the Python path.
+# dropped or guessed — /api/browse answers it with a 400.
 
 # Matches a translated fragment that is exactly ONE `search_vector @@ <tsquery>`
 # predicate — the only shape safe to fold into the merged tsquery OR-tree.
@@ -5177,7 +4689,7 @@ _PG_KW_MERGEABLE_RE = re.compile(
 def _pg_name_params(frag, params, prefix, out):
     """Rewrite a translator fragment's positional %s placeholders as uniquely
     named %(prefixN)s ones, adding the values to `out`. _pg_browse builds all
-    its other SQL with named params (like _pg_tier1_browse), and psycopg2
+    its other SQL with named params, and psycopg2
     can't mix positional and named in one statement. Translator fragments
     never contain a literal '%' (ILIKE patterns are passed as parameter
     VALUES, not spliced), so every '%s' is a placeholder."""
@@ -5210,30 +4722,6 @@ def _pg_kw_expr(kw_entries, out_params):
     return ("(" + " OR ".join(parts) + ")") if parts else None
 
 
-def _pg_match_skus(*, store_set, search_all, user_last_scan, kw_entries=None, fq=None):
-    """Comparison tooling only: the full set of in-scope (available + store +
-    scan-gate) SKUs matching the want list (kw_entries) or the filter_q (fq)
-    in SQL — the counterpart of _browse_compute's kw_skus_legacy /
-    fq_skus_legacy engines, used to explain diffs beyond page 1."""
-    tparams = {}
-    if kw_entries is not None:
-        pred = _pg_kw_expr(kw_entries, tparams) or "FALSE"
-    else:
-        _frag, _prm = _tsquery_filter_q(fq) if fq else (None, [])
-        pred = _pg_name_params(_frag, _prm, "_fq", tparams) if _frag is not None else "FALSE"
-    where = ["available", f"({pred})"]
-    if not search_all:
-        where.append("store = ANY(%(stores)s)")
-        tparams["stores"] = list(store_set) if store_set else []
-    if user_last_scan:
-        where.append("(first_seen = '' OR first_seen <= %(user_last_scan)s)")
-        tparams["user_last_scan"] = user_last_scan
-    with _pg_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(f"SELECT sku FROM items WHERE {' AND '.join(where)}", tparams)
-            return {r[0] for r in cur.fetchall()}
-
-
 def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
                f_brands, f_conds, f_cats, f_subs, f_watched, wl_ids,
                f_want_only, f_price_drop_only, f_vintage_only,
@@ -5241,7 +4729,8 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
                new_ids, fav_stores, page, per_page, count_only=False) -> dict:
     """Same JSON shape as api_browse()'s response, for ANY request, computed
     in Postgres. Raises _PgBrowseIneligible (untranslatable search) or any
-    DB error — the caller decides what to do (today: shadow compare only)."""
+    DB error — the caller decides what to do (/api/browse: 400/503;
+    /api/saved-search-counts: JSON fallback for that search until step 5)."""
     import psycopg2.extras as _pg_extras
 
     # ── Translate search terms FIRST, before touching the DB ───────────────
@@ -5291,7 +4780,7 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
         params["price_max"] = f_price_max
     base_where_sql = " AND ".join(where)
 
-    # ── Facet clauses (identical to _pg_tier1_browse) ─────────────────────
+    # ── Facet clauses (same as the old Phase D Tier 1 path) ────────────────
     def _facet_clause(col, values, key):
         if not values:
             return "TRUE"
@@ -5325,7 +4814,7 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
                 cur.execute(f"SELECT COUNT(*) FROM items WHERE {filtered_where_sql}", params)
                 return int(cur.fetchone()[0])
 
-    # ── ORDER BY (whitelisted columns only, same as Tier 1) ────────────────
+    # ── ORDER BY (whitelisted columns only — _PG_SORT_MAP) ─────────────────
     is_new_sql = "(sku = ANY(%(new_ids)s))"
     reverse = (sort_dir == "desc")
     order_parts = []
@@ -5344,7 +4833,7 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
         col, lower = _PG_SORT_MAP[sort_field]
         expr = f"LOWER({col})" if lower else col
         order_parts.append(f"{expr} {'DESC' if reverse else 'ASC'}")
-    order_parts.append("sku ASC")   # tiebreak — see _pg_tier1_browse
+    order_parts.append("sku ASC")   # deterministic tiebreak (Phase C finding, v2.16.21)
     order_sql = ", ".join(order_parts)
 
     new_want_sql = (f"COUNT(*) FILTER (WHERE {is_new_sql} AND {kw_bool})"
@@ -5473,81 +4962,149 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
 @app.route("/api/browse", methods=["POST"])
 @optional_user_context
 def api_browse():
-    """Return cached inventory for selected stores with server-side
-    pagination, sorting, and filtering.  Sends only one page at a time
-    so the browser never has to hold 80K items in memory.
+    """Return inventory for the selected stores with server-side pagination,
+    sorting, filtering, want-list matching and facet counts — one page at a
+    time, so the browser never holds the whole catalog.
 
-    (v2.16.38, Phase F step 4a) Thin route wrapper — the actual work lives in
-    _browse_compute(data, ...) so the new unified Postgres path (_pg_browse)
-    can be diffed against today's production path both per-request
-    (?pg_shadow=2, admin only — see _browse_shadow_compare) and in bulk
-    (/api/pg-browse-diff-check, which replays real accounts' want lists and
-    saved searches through both). (v2.16.40, step 4b) Real requests now run
-    engine="auto": the unified SQL path first, legacy path as a per-request
-    fallback — see _browse_compute."""
+    (v2.16.44, Phase F step 4c) Served ONLY by the unified Postgres path
+    (_pg_browse, via _browse_compute). The legacy Tier 1 / Tier 2 / Python
+    matcher path it used to fall back to, and the step 4a comparison tooling,
+    are gone — see HANDOFF.md v2.16.44. There is no fallback any more: a
+    database error is reported to the client as a 503 with an `error` field
+    (static/gc.js shows a "couldn't load" message) and counted in
+    _PG_BROWSE_ERRORS. `?pg_shadow=1` (admin only) still attaches timing and
+    those counters to the admin's own response for debugging."""
     data = request.json or {}
-    pg_shadow = request.args.get("pg_shadow") or ""
-    is_admin = _is_admin() if pg_shadow else False
+    pg_diag = (request.args.get("pg_shadow") == "1") and _is_admin()
     logged_in = bool(session.get("user_id"))
-    if pg_shadow == "2" and is_admin:
-        return jsonify(_browse_shadow_compare(data, logged_in=logged_in))
-    pg_diag = (pg_shadow == "1" and is_admin)
-    resp = _browse_compute(data, logged_in=logged_in, pg_diag=pg_diag)
+    try:
+        try:
+            resp = _browse_compute(data, logged_in=logged_in, pg_diag=pg_diag)
+        except Exception as e:
+            if not _pg_is_conn_error(e):
+                raise
+            # A dead pooled connection (e.g. after a Postgres restart). The
+            # step 4b fallback used to hide these; now retry ONCE with
+            # connection validation on (browse is read-only, so a retry is
+            # always safe). Counted so it shows up in ?pg_shadow=1.
+            _pg_browse_error_note("retried", e)
+            _tok = _PG_VALIDATE_CONN.set(True)
+            try:
+                resp = _browse_compute(data, logged_in=logged_in, pg_diag=pg_diag)
+            finally:
+                _PG_VALIDATE_CONN.reset(_tok)
+    except _PgBrowseIneligible as e:
+        # Only reachable if a search term has no SQL translation — none exist
+        # since v2.16.43, but the translator keeps _TsqueryUnsupported as its
+        # contract for any future syntax, so answer it cleanly, not as a 500.
+        _pg_browse_error_note("unsupported", e)
+        return jsonify({"items": [], "error": "That search uses syntax we can't run. "
+                                              "Try simplifying it."}), 400
+    except Exception as e:
+        _pg_browse_error_note("error", e)
+        print(f"[pg] browse failed: {type(e).__name__}: {e}")
+        return jsonify({"items": [], "error": "Couldn't load inventory right now. "
+                                              "Please try again in a moment."}), 503
     if pg_diag:
         resp = dict(resp)
-        resp["_pg_browse_fallbacks"] = _PG_BROWSE_FALLBACKS
+        resp["_pg_browse_errors"] = _PG_BROWSE_ERRORS
     return jsonify(resp)
 
 
-# (v2.16.40) Per-process counters for "auto" requests that fell back to the
-# legacy path — the burn-in signal for step 4c. Exposed to admins via
-# ?pg_shadow=1 (`_pg_browse_fallbacks`) and GET /api/pg-browse-diff-check.
-_PG_BROWSE_FALLBACKS = {"ineligible": 0, "error": 0, "since": None, "last": {},
-                        "reasons": {"ineligible": {}, "error": {}}}
-# (v2.16.43) Distinct reasons tallied per kind (was: only the most recent one
-# kept), capped so a flood of unique messages can't grow memory unbounded.
-_PG_BROWSE_FALLBACK_REASON_CAP = 50
+# Per-process counters for /api/browse requests that failed (v2.16.40 started
+# these as fallback counters for the step 4b burn-in; since 4c there is no
+# fallback, so they now count failures: `error` = answered 503, `unsupported`
+# = answered 400, `retried` = hit a dead pooled connection and was retried
+# once — a retry that then succeeded is counted ONLY here). Reset on every deploy/restart.
+# Admin-visible via ?pg_shadow=1 -> `_pg_browse_errors`.
+_PG_BROWSE_ERRORS = {"unsupported": 0, "error": 0, "retried": 0, "since": None, "last": {},
+                     "reasons": {"unsupported": {}, "error": {}, "retried": {}}}
+# Distinct reasons tallied per kind, capped so a flood of unique messages
+# can't grow memory unbounded (v2.16.43).
+_PG_BROWSE_ERROR_REASON_CAP = 50
 
 
-def _pg_browse_fallback_note(kind, exc):
-    if _PG_BROWSE_FALLBACKS["since"] is None:
-        _PG_BROWSE_FALLBACKS["since"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    _PG_BROWSE_FALLBACKS[kind] += 1
+def _pg_browse_error_note(kind, exc):
+    if _PG_BROWSE_ERRORS["since"] is None:
+        _PG_BROWSE_ERRORS["since"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    _PG_BROWSE_ERRORS[kind] += 1
     reason = f"{type(exc).__name__}: {str(exc)[:200]}"
-    _PG_BROWSE_FALLBACKS["last"][kind] = {
+    _PG_BROWSE_ERRORS["last"][kind] = {
         "at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "reason": reason}
-    tally = _PG_BROWSE_FALLBACKS["reasons"][kind]
-    if reason in tally or len(tally) < _PG_BROWSE_FALLBACK_REASON_CAP:
+    tally = _PG_BROWSE_ERRORS["reasons"][kind]
+    if reason in tally or len(tally) < _PG_BROWSE_ERROR_REASON_CAP:
         tally[reason] = tally.get(reason, 0) + 1
     else:
         tally["(other)"] = tally.get("(other)", 0) + 1
 
 
 class _PgBrowseIneligible(Exception):
-    """engine="pg" was asked for a request _pg_browse() deliberately doesn't
-    serve (an unrecognized sort_field, or a want-list entry / filter_q with no
-    pure-SQL translation — _TsqueryUnsupported). Not an error: the production
-    path handles these exactly as it does today. Shadow compare / the batch
-    diff check count these separately from real mismatches."""
+    """_pg_browse() was asked for a search it has no SQL translation for
+    (_TsqueryUnsupported from the translator — none left since v2.16.43).
+    /api/browse answers it with a 400; /api/saved-search-counts falls back to
+    its JSON count for that one search (until step 5 removes that too)."""
 
 
-def _browse_compute(data, *, logged_in, pg_diag=False, engine="auto"):
-    """Body of /api/browse, returning the response dict instead of a Flask
-    response. Engines:
-      - "auto" (every real request, v2.16.40 = Phase F step 4b CUTOVER): the
-        unified SQL path (_pg_browse) first; if it's ineligible
-        (_PgBrowseIneligible) or raises anything, that one request falls
-        through to the legacy path below, exactly as if 4b never happened.
-      - "legacy": the pre-4b routing only (Tier 1 SQL / Tier 2 narrowing /
-        Python matcher) — what the comparison tooling diffs against.
-      - "pg": _pg_browse only, RAISING instead of falling back, so a
-        comparison caller can tell ineligible from a real DB/SQL error.
-      - "kw_skus_legacy"/"fq_skus_legacy"/"kw_skus_pg"/"fq_skus_pg": full
-        match sets for the diff check's explain step (tooling only).
-    The legacy path and the non-auto engines are temporary: 4c deletes them
-    once 4b has burned in. pg_diag replaces the old inline
-    `?pg_shadow=1 and _is_admin()` check (the caller decides)."""
+# ── Want-list DoS caps (v2.13.1 / v2.14.4 / v2.16.0, kept through 4c) ────────
+# Want lists are matched on the public /api/browse endpoint, so the number of
+# entries of each costly shape is capped. The caps were designed around the
+# old Python matcher's costs, but _pg_browse honors exactly the same accepted
+# set (v2.16.38) so moving to SQL changed no user's results — kept as-is in 4c
+# for the same reason. Routing mirrors the old matcher's bucketing one-for-one:
+#   ';' / leading-'-' bool entries  -> _BOOL cap (or the exotic cap if they
+#                                      contain '*', the old v2.13.1 boundary)
+#   plain single word                -> uncapped (beyond the overall list cap)
+#   wildcard / "quoted"              -> _EXOTIC cap
+#   comma-AND                        -> _AND cap
+#   any other phrase                 -> _PHRASE cap
+# Entries over a cap are dropped, exactly as before.
+_PHRASE_KW_CAP = 300
+_EXOTIC_KW_CAP = 30
+_AND_KW_CAP    = 200
+_BOOL_KW_CAP   = 50
+
+
+def _kw_accept_capped(keywords):
+    """The want-list entries (raw strings, original spelling) that survive the
+    per-shape caps above, in order. Pure function of the list."""
+    phrase_n = exotic_n = and_n = bool_n = 0
+    accepted = []
+    for kw in keywords:
+        base = kw.lstrip('=').strip()      # '=' = legacy strict marker
+        if not base:
+            continue
+        # v2.16.3: expand 'prefix : b1; b2' BEFORE routing (see _expand_colon_prefix).
+        base = _expand_colon_prefix(base, join=', ')
+        if (';' in base or '-' in base) and _wl_bool_compile(base) is not None:
+            if '*' in base:
+                if exotic_n < _EXOTIC_KW_CAP:
+                    accepted.append(kw)
+                    exotic_n += 1
+            elif bool_n < _BOOL_KW_CAP:
+                accepted.append(kw)
+                bool_n += 1
+        elif _SIMPLE_KW_RE.match(base):
+            accepted.append(kw)
+        elif '*' in base or (base.startswith('"') and base.endswith('"') and len(base) > 2):
+            if exotic_n < _EXOTIC_KW_CAP:
+                accepted.append(kw)
+                exotic_n += 1
+        elif ',' in base:
+            if and_n < _AND_KW_CAP and any(p.strip() for p in base.split(',')):
+                accepted.append(kw)
+                and_n += 1
+        else:
+            if phrase_n < _PHRASE_KW_CAP:
+                accepted.append(kw)
+                phrase_n += 1
+    return accepted
+
+
+def _browse_compute(data, *, logged_in, pg_diag=False):
+    """Body of /api/browse: parse/clamp the request, apply the want-list caps,
+    and run _pg_browse. Raises _PgBrowseIneligible (untranslatable search) or
+    any DB error — api_browse() turns those into error responses."""
     stores = data.get("stores", [])
     search_all = bool(data.get("all_stores"))
     if not stores and not search_all:
@@ -5557,18 +5114,22 @@ def _browse_compute(data, *, logged_in, pg_diag=False, engine="auto"):
     page     = max(int(data.get("page", 1)), 1)
     per_page = min(max(int(data.get("per_page", 50)), 10), 200)
 
-    # Sort params  (defaults: date descending = newest first)
+    # Sort params (defaults: date descending = newest first). sort_field is
+    # user-controlled: anything outside the SQL whitelist (the UI only sends
+    # whitelisted columns — static/gc.js _SORT_COLS) gets the default sort
+    # rather than an error. It is never interpolated into SQL either way.
     sort_field = data.get("sort_field", "date")
+    if sort_field not in _PG_SORTABLE:
+        sort_field = "date"
     sort_dir   = data.get("sort_dir", "desc")
+    user_sorted = bool(data.get("user_sorted"))
     fav_stores = set(data.get("fav_stores", []))
 
-    # Per-user filtering: only show items first_seen ≤ this user's last scan time
+    # Per-user filtering: only show items first_seen <= this user's last scan time
     user_last_scan = (data.get("user_last_scan") or "").strip()
 
-    # Filter params — all dropdowns are multi-select arrays
-    # Cap query length: filter_q compiles to regex (incl. '*' → '.*') that runs over
-    # every cached item. An unbounded query with many wildcards is an unauthenticated
-    # CPU DoS over the ~92K-item cache, so clamp it to a sane length.
+    # Filter params — all dropdowns are multi-select arrays. filter_q is
+    # clamped (v2.13.0 DoS cap, kept) before translation.
     fq       = (data.get("filter_q") or "").lower().strip()[:200]
     f_brands = data.get("filter_brands") or []
     f_conds  = data.get("filter_conditions") or []
@@ -5583,39 +5144,14 @@ def _browse_compute(data, *, logged_in, pg_diag=False, engine="auto"):
         except (TypeError, ValueError): return None
     f_price_min = _to_float(data.get("filter_price_min"))
     f_price_max = _to_float(data.get("filter_price_max"))
-    force_fav_sort = bool(data.get("force_fav_sort"))
-    # (moved up from the sort block below, v2.16.20 — Tier 1 shadow read path
-    # needs this before the sort block runs; reading it here changes nothing
-    # for the legacy JSON path, it's just an earlier data.get() call)
-    user_sorted = bool(data.get("user_sorted"))
 
-    # ── Postgres Tier 1 read path (Phase D cutover, v2.16.22) ───────────────
-    # As of Phase D this is no longer admin/flag-gated — every eligible
-    # request (no want-list keywords, no filter_q free text, a whitelisted
-    # sort_field — see _pg_tier1_eligible below) is served from Postgres,
-    # for every caller. ?pg_shadow=1 survives only as a debugging aid: it no
-    # longer decides whether Postgres runs, it just asks for the
-    # `_pg_shadow`/`_pg_shadow_ms` diagnostic fields to be added to an
-    # admin's own response (see the gate further down). See
-    # POSTGRES_MIGRATION_PLAN.md §3/§7 Phase D.
-    _pg_shadow_requested = pg_diag
-
-    _load_cat_cache()
-    # Watchlist and keywords now come from the client (localStorage)
-    wl_ids     = set(data.get("watchlist_ids", []))
-    keywords   = data.get("keywords", [])
-    # Want-list keywords are matched against every cached item (see _kw_match below).
-    # An unbounded list is a CPU-DoS over the ~92K-item cache, but the old flat
-    # keywords[:50] silently dropped matches for real power users — guitar want
-    # lists of 70-220+ terms are common. Guard in two steps:
-    #   1. Dedupe case-insensitively (cheap; kills redundant regexes from re-adds) and
-    #      clamp each term to 100 chars.
-    #   2. Cap by accountability: logged-in users own large, cross-device-synced want
-    #      lists and are account-rate-limitable, so they get generous headroom;
-    #      anonymous callers are the real DoS vector (their list is localStorage-only),
-    #      so they stay tighter.
-    # The matcher below keeps plain single-word terms ~free regardless of count, so the
-    # cap mainly bounds the rarer phrase/wildcard terms.
+    # Watchlist and want list come from the client.
+    wl_ids   = set(data.get("watchlist_ids", []))
+    keywords = data.get("keywords", [])
+    # Want-list size guard: dedupe case-insensitively, clamp each entry to 100
+    # chars, then cap the list by accountability — logged-in users (large,
+    # synced lists, rate-limitable) get 750, anonymous callers 250. Then the
+    # per-shape caps (_kw_accept_capped).
     if isinstance(keywords, list):
         _seen = set()
         _dedup = []
@@ -5625,933 +5161,29 @@ def _browse_compute(data, *, logged_in, pg_diag=False, engine="auto"):
             if kl and kl not in _seen:
                 _seen.add(kl)
                 _dedup.append(ks)
-        _kw_cap = 750 if logged_in else 250
-        keywords = _dedup[:_kw_cap]
+        keywords = _dedup[:(750 if logged_in else 250)]
     else:
         keywords = []
-    new_ids    = set(data.get("new_ids", []))
-    store_set  = set(stores) if not search_all else None
+    kw_accepted = _kw_accept_capped(keywords)
+    new_ids   = set(data.get("new_ids", []))
+    store_set = set(stores) if not search_all else None
 
-    # ── Unified query matching (shared by keyword list and filter_q) ─────────
-    import re as _re
-
-    # Query helpers (_compile_query, _matches_all, _matches_any, _kw_or_pattern,
-    # _SIMPLE_KW_RE, _KW_SPLIT_RE, _wl_bool_compile, _compile_fq_clauses,
-    # _expand_colon_prefix) are module-level since v2.16.0 — shared with
-    # /api/saved-search-counts so the two endpoints can't drift. See "Shared
-    # query-matching helpers".
-
-    # ── Want-list keyword matcher (fast path) ────────────────────────────────
-    # Matching each keyword as its own \bword\b regex is O(items × keywords); at ~92K
-    # items a 200-term want list cost seconds per browse (the cause of the >50-term
-    # "missing matches" bug — the old fix just truncated the list). Bucket instead:
-    #   • plain single word (^\w+$)  -> lowercased SET, tested via token membership once
-    #     per item — O(items), independent of how many such keywords there are.
-    #   • phrase / quoted / wildcard -> folded into ONE alternation regex, searched once
-    #     per item instead of once per keyword.
-    #   • comma-AND ("a, b")         -> rare; kept on the per-keyword term-list path.
-    # '=' is the legacy strict marker (whole-word is the default now), stripped first.
-    #
-    # Cost is NOT uniform across term types, so the DoS guard is per-type, not a flat
-    # cap (a flat cap on "complex" terms would drop real multi-word want-list entries
-    # like "Big Muff" / "OD-1" once a user had >N of them — re-introducing the >50-term
-    # bug this whole rewrite exists to fix). Benchmarked over the full ~92K cache:
-    #   • plain single word (^\w+$)  -> lowercased SET, token-membership once per item.
-    #     O(items) regardless of count. Stays at the generous _kw_cap (750/250).
-    #   • ordinary phrase / hyphenated ("Big Muff", "OD-1") -> exact \b...\b regex, but
-    #     gated by a cheap SOUND pre-filter: all of the phrase's word-tokens must be
-    #     present in the item before the regex runs. Since few items contain every word
-    #     of a given phrase, the regex almost never fires → ~free for real lists
-    #     (a realistic 220-term list of 160 words + 60 phrases benches ~0.35s). Given a
-    #     generous cap (300) purely as a backstop; real want lists are far below it.
-    #   • wildcard (*) / quoted-exact -> the genuinely expensive paths ('.*' can't be
-    #     pre-filtered; quoted-exact is a raw substring). Folded into one alternation and
-    #     capped HARD at 30 — advanced syntax a real want list uses a handful of, but 250
-    #     wildcards alone cost ~8s/browse, GIL-held, on the public unbounded /api/browse
-    #     (unauthenticated CPU-DoS). (v2.13.1)
-    #   • comma-AND ("a, b") -> a whole-word subterm matches iff its token is present, so
-    #     it takes the SAME cheap required-tokens pre-filter as phrases and gets its own
-    #     generous cap — no longer starved by the wildcard/quoted cap, which silently
-    #     dropped comma terms once a want list had >30 combined exotic terms. (v2.14.4)
-    _PHRASE_KW_CAP = 300
-    _EXOTIC_KW_CAP = 30    # wildcard (*) + quoted-exact only — the expensive alternation
-    _AND_KW_CAP    = 200   # comma-AND — cheap once sound-prefiltered, so its own cap
-    _BOOL_KW_CAP   = 50    # v2.16.0 ';'/'-' entries — benched ~0.8s worst-adversarial
-                           # at 50 over the full cache, in line with the v2.13.1 budget
-    _phrase_n = 0
-    _exotic_n = 0
-    _and_n    = 0
-    _bool_n   = 0
-    _kw_word_set = set()
-    _kw_phrases  = []   # (compiled \b...\b regex, set-of-required-word-tokens) — pre-filtered
-    _kw_or_pats  = []   # wildcard + quoted-exact patterns -> one alternation (capped)
-    _kw_and      = []   # comma-AND: (term-list, set-of-required-plain-word-tokens) — pre-filtered
-    _kw_bool     = []   # v2.16.0 OR/NOT entries: list of (pos, neg, req) clause lists
-    # (v2.16.38) Raw entries that actually made it into one of the buckets
-    # above — i.e. survived the per-type caps below. _pg_browse() translates
-    # exactly this list, so the Postgres path honors the same DoS caps (and
-    # drops the same over-cap entries) as the Python matcher, rather than
-    # translating the full uncapped list and silently matching more.
-    _kw_accepted = []
-    for _kw in keywords:
-        _base = _kw.lstrip('=').strip()
-        if not _base:
-            continue
-        # v2.16.3: expand 'prefix : b1; b2; ...' BEFORE any routing decision, so a
-        # colon-prefix entry with a single branch and no dash (e.g. 'Mesa: Angel')
-        # correctly falls through to the plain comma-AND path below instead of the
-        # dead literal-string branch it'd hit if expansion ran after routing.
-        _base = _expand_colon_prefix(_base, join=', ')
-        # v2.16.0 OR/NOT syntax — must be checked FIRST: an entry like 'OD*, -combo'
-        # or 'foo*; bar' contains '*' and would otherwise be misrouted to the exotic
-        # branch and lose its operators. _wl_bool_compile returns None for every
-        # legacy entry (no ';' and no leading-dash part), so old lists are untouched.
-        _wl_clauses = _wl_bool_compile(_base) if (';' in _base or '-' in _base) else None
-        if _wl_clauses is not None:
-            if '*' in _base:
-                # Wildcards can't be pre-filtered — charge them to the tight exotic
-                # budget so the bool path can't smuggle 100 wildcard scans past the
-                # 30-cap (the v2.13.1 DoS boundary).
-                if _exotic_n < _EXOTIC_KW_CAP:
-                    _kw_bool.append(_wl_clauses)
-                    _kw_accepted.append(_kw)
-                    _exotic_n += 1
-            elif _bool_n < _BOOL_KW_CAP:
-                _kw_bool.append(_wl_clauses)
-                _kw_accepted.append(_kw)
-                _bool_n += 1
-        elif _SIMPLE_KW_RE.match(_base):
-            _kw_word_set.add(_base.lower())
-            _kw_accepted.append(_kw)
-        elif '*' in _base or (_base.startswith('"') and _base.endswith('"') and len(_base) > 2):
-            if _exotic_n < _EXOTIC_KW_CAP:
-                _p = _kw_or_pattern(_base)
-                if _p:
-                    _kw_or_pats.append(_p)
-                    _kw_accepted.append(_kw)
-                    _exotic_n += 1
-        elif ',' in _base:
-            if _and_n < _AND_KW_CAP:
-                _t = _compile_query(_base)
-                if _t:
-                    # Required tokens = words of the plain (non-wildcard/quoted) subterms;
-                    # all must be present before the per-term regexes run (cheap gate).
-                    _req = set()
-                    for _part in _base.split(','):
-                        _pp = _part.strip().lower()
-                        if _pp and '*' not in _pp and not (_pp.startswith('"') and _pp.endswith('"') and len(_pp) > 2):
-                            _req |= set(_KW_SPLIT_RE.split(_pp)) - {''}
-                    _kw_and.append((_t, _req))
-                    _kw_accepted.append(_kw)
-                    _and_n += 1
-        else:
-            # Ordinary phrase or punctuated single term -> exact whole-word match, but
-            # cheap to skip via the required-tokens subset test below.
-            if _phrase_n < _PHRASE_KW_CAP:
-                _words = set(_KW_SPLIT_RE.split(_base.lower())) - {''}
-                _kw_phrases.append((_re.compile(r'\b' + _re.escape(_base) + r'\b', _re.IGNORECASE), _words))
-                _kw_accepted.append(_kw)
-                _phrase_n += 1
-    _kw_combo = _re.compile('|'.join(_kw_or_pats), _re.IGNORECASE) if _kw_or_pats else None
-    _has_kw = bool(_kw_word_set or _kw_phrases or _kw_combo or _kw_and or _kw_bool)
-
-    def _kw_match(name_l, brand_l):
-        text = name_l + " " + brand_l
-        _toks = set(_KW_SPLIT_RE.split(text)) if (_kw_word_set or _kw_phrases or _kw_and or _kw_bool) else None
-        if _kw_word_set and not _kw_word_set.isdisjoint(_toks):
-            return True
-        if _kw_phrases:
-            for _rx, _words in _kw_phrases:
-                # Sound pre-filter: a whole-word phrase can only match if every one of
-                # its word-tokens is present; the regex confirms order/adjacency/exact
-                # separators, so this stays behavior-identical to the per-keyword path.
-                if _words <= _toks and _rx.search(text):
-                    return True
-        if _kw_combo is not None and _kw_combo.search(text):
-            return True
-        if _kw_and:
-            # Same sound pre-filter as phrases: all plain-word subterm tokens must be
-            # present before running the per-term regexes (behavior-identical, just cheap).
-            for _terms, _req in _kw_and:
-                if _req <= _toks and _matches_all(text, _terms):
-                    return True
-        if _kw_bool:
-            # v2.16.0 OR/NOT entries: entry matches if ANY of its clauses does —
-            # all positives present (required-tokens pre-filtered) and no negative.
-            for _clauses in _kw_bool:
-                for _pos, _neg, _req in _clauses:
-                    if _req <= _toks and _matches_all(text, _pos) and not (_neg and _matches_any(text, _neg)):
-                        return True
-        return False
-
-    # Check if any cache entries have store field
-    # ── Phase F step 4b: unified SQL path — THE CUTOVER (v2.16.40) ────────
-    # engine="auto" (every real request) tries _pg_browse first. Proven before
-    # cutover by /api/pg-browse-diff-check against every real account (v2.16.39:
-    # 485 scenarios, 0 plumbing mismatches; remaining differences all
-    # accepted search-wording classes — see HANDOFF.md v2.16.39/v2.16.40).
-    # Runs BEFORE the JSON-based has_store_data check below on purpose: the
-    # SQL path doesn't depend on the JSON catalog at all.
-    #
-    # Rollback lever, same shape as Phase D/E: an ineligible request
-    # (_PgBrowseIneligible — an untranslatable search term or unknown sort
-    # column) or ANY exception falls through to the legacy path below for
-    # that one request. Reverting the whole cutover is changing the default
-    # engine back to "legacy" in api_browse(), not a data operation.
-    if engine in ("kw_skus_pg", "fq_skus_pg"):
-        return _pg_match_skus(store_set=store_set, search_all=search_all,
-                              user_last_scan=user_last_scan,
-                              kw_entries=_kw_accepted if engine == "kw_skus_pg" else None,
-                              fq=fq if engine == "fq_skus_pg" else None)
-    if engine in ("auto", "pg"):
-        try:
-            if _PG_POOL is None:
-                # Postgres not configured/unreachable at boot (e.g. a local run
-                # with no DATABASE_URL): counted, not logged per request.
-                raise _PgBrowseIneligible("Postgres pool not available")
-            if sort_field not in _PG_TIER1_SORTABLE:
-                raise _PgBrowseIneligible(f"sort_field {sort_field!r} not SQL-sortable")
-            _pgb_t0 = time.time()
-            _pgb = _pg_browse(
-                store_set=store_set, search_all=search_all,
-                user_last_scan=user_last_scan, kw_entries=_kw_accepted, fq=fq,
-                f_brands=f_brands, f_conds=f_conds, f_cats=f_cats, f_subs=f_subs,
-                f_watched=f_watched, wl_ids=wl_ids, f_want_only=f_want_only,
-                f_price_drop_only=f_price_drop_only, f_vintage_only=f_vintage_only,
-                f_price_min=f_price_min, f_price_max=f_price_max,
-                sort_field=sort_field, sort_dir=sort_dir, user_sorted=user_sorted,
-                new_ids=new_ids, fav_stores=fav_stores, page=page, per_page=per_page,
-            )
-            if _pg_shadow_requested:
-                _pgb["_pg_browse"] = True
-                _pgb["_pg_browse_ms"] = round((time.time() - _pgb_t0) * 1000, 1)
-            return _pgb
-        except _PgBrowseIneligible as e:
-            if engine == "pg":
-                raise
-            _pg_browse_fallback_note("ineligible", e)
-        except Exception as e:
-            if engine == "pg":
-                raise
-            _pg_browse_fallback_note("error", e)
-            print(f"[pg] unified browse failed, falling back to legacy path: "
-                  f"{type(e).__name__}: {e}")
-
-    # ── Legacy path (engine "legacy", or an "auto" fallback) — deleted in 4c ──
-    has_store_data = any(v.get("store") for v in _cat_cache.values())
-    if not has_store_data:
-        return {"items": [], "no_store_data": True,
-                        "message": "Run 'Check for New Items' once to populate store data."}
-
-
-    # ── Postgres Tier 1 read path — THE CUTOVER (Phase D, v2.16.22) ────────
-    # Every request that qualifies as Tier 1 (no want-list keywords, no
-    # filter_q free text, a whitelisted sort_field — see _pg_tier1_eligible)
-    # is now served from Postgres, for every caller — admin or not, flag or
-    # not. Tier 2 (keyword/filter_q requests) is unaffected: it still falls
-    # straight through to the unmodified legacy JSON path below, exactly as
-    # in Phase C.
-    #
-    # The try/except fallback below is the rollback lever (plan §7 Phase D):
-    # JSON dual-write never stopped, so any Postgres/SQL error — a bad query,
-    # a connection blip, the pool exhausted — degrades that one request to
-    # the legacy path automatically rather than failing it. Reverting the
-    # whole cutover, if ever needed, is putting `_is_admin()` back in front
-    # of this condition, not a data-recovery operation.
-    if (_PG_POOL is not None and engine in ("auto", "legacy")
-            and _pg_tier1_eligible(fq, _has_kw, sort_field)):
-        try:
-            _pg_t0 = time.time()
-            _pg_result = _pg_tier1_browse(
-                store_set=store_set, search_all=search_all,
-                user_last_scan=user_last_scan,
-                f_brands=f_brands, f_conds=f_conds, f_cats=f_cats, f_subs=f_subs,
-                f_watched=f_watched, wl_ids=wl_ids, f_want_only=f_want_only,
-                f_price_drop_only=f_price_drop_only, f_vintage_only=f_vintage_only,
-                f_price_min=f_price_min, f_price_max=f_price_max,
-                sort_field=sort_field, sort_dir=sort_dir, user_sorted=user_sorted,
-                new_ids=new_ids, fav_stores=fav_stores, page=page, per_page=per_page,
-            )
-            # ?pg_shadow=1 no longer gates whether this branch runs at all
-            # (see the comment at _pg_shadow_requested's assignment above) —
-            # it only controls whether the diagnostic timing fields get
-            # attached, and only for an admin's own request, so a real user
-            # passing the flag can't pull internal timing into their response.
-            if _pg_shadow_requested:
-                _pg_result["_pg_shadow"] = True
-                _pg_result["_pg_shadow_ms"] = round((time.time() - _pg_t0) * 1000, 1)
-            return _pg_result
-        except Exception as e:
-            # Never let a Postgres/SQL bug affect a real response — every
-            # caller falls back to the legacy path below exactly as if
-            # Postgres had never been attempted.
-            print(f"[pg] tier1 browse failed, falling back to JSON path: "
-                  f"{type(e).__name__}: {e}")
-
-    # ── Postgres Tier 2 candidate narrowing — THE CUTOVER (Phase E, v2.16.26) ──
-    # As of this cutover, every Tier-2-eligible request (want-list keywords or
-    # filter_q free text active, and a store subset or user_last_scan actually
-    # narrowing something — see _pg_tier2_eligible/_pg_tier2_would_narrow) is
-    # served from Postgres, for every caller — admin or not, flag or not.
-    # ?pg_shadow=1 no longer gates whether this branch runs at all; it only
-    # controls whether the diagnostic timing fields get attached below, and
-    # only for an admin's own request (same posture as Tier 1's _pg_shadow/
-    # _pg_shadow_ms). See postgres_phase_e_v2.16.25_live_timing_2026-09-08.md
-    # in project memory for the latency numbers behind this decision.
-    _pg_tier2_shadow_source = None
-    _pg_tier2_shadow_ms = None
-    _pg_tier2_shadow_count = None
-    # (v2.16.24) Only bother narrowing when a narrowing predicate actually
-    # applies. _pg_tier2_narrow_items's WHERE clause is availability +
-    # (optionally) store subset + (optionally) user_last_scan gating — if
-    # search_all is True AND there's no user_last_scan, neither optional
-    # clause fires, so the query is just "SELECT ... WHERE available",
-    # i.e. a full-catalog fetch over the network (110K+ rows). That's
-    # strictly worse than the already in-memory, already-memoized
-    # _build_base_item_list() it would replace: live timing found it ~2.5x
-    # SLOWER for exactly this shape (all-stores + keyword, no other filter)
-    # despite byte-identical output. So skip the Postgres round-trip
-    # whenever it can't narrow anything, and fall straight through to the
-    # unchanged in-memory path below, exactly as if shadow mode weren't on.
-    _pg_tier2_would_narrow = (not search_all) or bool(user_last_scan)
-    # The try/except fallback below is now the real rollback lever (same
-    # pattern as Phase D): any Postgres/SQL error degrades that one request
-    # to the legacy full-cache path automatically. Reverting the whole
-    # cutover, if ever needed, is putting `_is_admin()` back in front of
-    # this condition, not a data-recovery operation.
-    if (_PG_POOL is not None
-            and _pg_tier2_eligible(fq, _has_kw) and _pg_tier2_would_narrow):
-        try:
-            _pg_t2_t0 = time.time()
-            _pg_tier2_shadow_source = _pg_tier2_narrow_items(
-                store_set=store_set, search_all=search_all,
-                user_last_scan=user_last_scan,
-            )
-            _pg_tier2_shadow_ms = round((time.time() - _pg_t2_t0) * 1000, 1)
-            _pg_tier2_shadow_count = len(_pg_tier2_shadow_source)
-        except Exception as e:
-            # Same tolerance as Tier 1's fallback: never let a Postgres/SQL
-            # bug affect a real response — fall through to the full cache.
-            print(f"[pg] tier2 narrow failed, falling back to full cache: "
-                  f"{type(e).__name__}: {e}")
-            _pg_tier2_shadow_source = None
-
-    # ── Build full item list for selected stores (lightweight dicts) ──────
-    # E2 (v2.16.4): the expensive per-item projection (price/date formatting,
-    # name/brand lowercasing) now happens ONCE per cache generation in
-    # _build_base_item_list(), memoized by cache mtime — see that function's
-    # docstring. This pass is just the genuinely per-request part: store
-    # selection, per-user scan-date gating, and the per-user annotations
-    # (watched/isNew/kwMatch/isFav) that can't be cached across users.
-    #
-    # (Phase E, v2.16.23) When Tier 2 shadow-narrowing above succeeded, this
-    # iterates that smaller Postgres-sourced list instead of the full
-    # memoized cache. Every check inside this loop (store_set/user_last_scan)
-    # is left completely unchanged and just gets redundantly re-applied on
-    # what's already a subset (harmless, and cheap — see
-    # _pg_tier2_narrow_items's docstring for why the subset already satisfies
-    # both), so this is a pure data-source swap, not a logic change.
-    all_items = []
-    for b in (_pg_tier2_shadow_source if _pg_tier2_shadow_source is not None else _build_base_item_list()):
-        if store_set is not None and b["store"] not in store_set:
-            continue
-        # Per-user browse gating: hide items first seen after this user's last scan.
-        # Ensures each device only sees inventory that existed when IT scanned —
-        # items added to cache by another device's newer scan stay hidden here.
-        if user_last_scan:
-            first_seen = b["first_seen"]
-            if first_seen and first_seen > user_last_scan:
-                continue
-        sku   = b["id"]
-        store = b["store"]
-        kw_hit = _kw_match(b["name_lower"], b["brand_lower"]) if _has_kw else False
-        all_items.append({
-            "id":               sku,
-            "name":             b["name"],
-            "brand":            b["brand"],
-            "price":            b["price"],
-            "price_raw":        b["price_raw"],
-            "list_price_raw":   b["list_price_raw"],
-            "price_drop":       b["price_drop"],
-            "price_drop_since": b["price_drop_since"],
-            "store":            store,
-            "location":         b["location"],
-            "url":              b["url"],
-            "category":         b["category"],
-            "subcategory":      b["subcategory"],
-            "condition":        b["condition"],
-            "date":             b["date"],
-            "date_raw":         b["date_raw"],
-            "image_id":         b["image_id"],
-            "is_vintage":       b["is_vintage"],
-            "condition_note":   b["condition_note"],
-            "watched":          sku in wl_ids,
-            "isNew":            sku in new_ids,
-            "kwMatch":          kw_hit,
-            "isFav":            store in fav_stores if fav_stores else False,
-        })
-
-    # (v2.16.38+ comparison tooling) Full-scope match sets for the batch diff
-    # check's explain step — never reached by a real request.
-    if engine == "kw_skus_legacy":
-        return {i["id"] for i in all_items if i["kwMatch"]}
-    if engine == "fq_skus_legacy":
-        _fqc = _compile_fq_clauses(fq) if fq else None
-        return {i["id"] for i in all_items if _fqc and _fq_text_match(
-            ((i["name"] or "") + " " + (i["brand"] or "")).lower(), _fqc)}
-
-    total_unfiltered = len(all_items)
-    new_count_unfiltered = sum(1 for i in all_items if i.get("isNew"))
-
-    # ── Contextual facet counts ───────────────────────────────────────────
-    # Step 1: apply non-facet filters (text search, want list, price drops, watched)
-    def _apply_base(items):
-        r = items
-        if fq:
-            # v2.16.0: ';' splits OR clauses; within a clause space-separated tokens
-            # are AND'd (old behavior, byte-identical when no ';' or '-' present) and
-            # a leading '-' negates a token. Token budget stays 12 TOTAL across all
-            # clauses + ≤4 clauses — same unauthenticated-DoS ceiling as v2.13.0.
-            fq_clauses = _compile_fq_clauses(fq)
-            r = [i for i in r if fq_clauses and _fq_text_match(
-                ((i["name"] or "") + " " + (i["brand"] or "")).lower(), fq_clauses)]
-        if f_want_only:       r = [i for i in r if i["kwMatch"]]
-        if f_price_drop_only: r = [i for i in r if i.get("price_drop", 0) > 0]
-        if f_vintage_only:    r = [i for i in r if i.get("is_vintage")]
-        if f_watched:         r = [i for i in r if i["watched"]]
-        if f_price_min is not None:
-            r = [i for i in r if (i.get("price_raw") or 0) >= f_price_min]
-        if f_price_max is not None:
-            r = [i for i in r if (i.get("price_raw") or 0) <= f_price_max]
-        return r
-
-    base_items = _apply_base(all_items)
-
-    # Brandless items are stored with brand == "". Surface them under the synthetic
-    # NO_BRAND_LABEL facet entry so they become filterable — otherwise they're
-    # unreachable, since the facet builder skips empties and the filter is membership.
-    def _brand_ok(b, bs):
-        return (b in bs) if b else (NO_BRAND_LABEL in bs)
-
-    # Step 2: for each facet, count items passing all OTHER facet filters.
-    # (v2.16.12) Single linear pass over base_items computing all four facets'
-    # counts together, instead of 4 separate calls each doing its own O(N)
-    # list-comprehension filter + loop. Measured via cProfile against the real
-    # ~92K-item cache: the old 4-pass version was ~187ms cumulative per
-    # /api/browse call — the single biggest per-request cost on this endpoint,
-    # well above the memoized base-list build (E2, v2.16.4). Semantics are
-    # unchanged: each facet's count still reflects all OTHER active facet
-    # filters, just computed together instead of via 4 separate filtered
-    # sub-lists.
-    _bset, _cset, _catset, _subset = set(f_brands), set(f_conds), set(f_cats), set(f_subs)
-    brand_ctx, cond_ctx, cat_ctx, sub_ctx = {}, {}, {}, {}
-    for i in base_items:
-        _brand, _cond, _cat, _sub = i["brand"], i["condition"], i["category"], i["subcategory"]
-        _brand_pass = (not _bset) or _brand_ok(_brand, _bset)
-        _cond_pass  = (not _cset) or (_cond in _cset)
-        _cat_pass   = (not _catset) or (_cat in _catset)
-        _sub_pass   = (not _subset) or (_sub in _subset)
-        if _cond_pass and _cat_pass and _sub_pass:
-            v = _brand or NO_BRAND_LABEL
-            brand_ctx[v] = brand_ctx.get(v, 0) + 1
-        if _brand_pass and _cat_pass and _sub_pass and _cond:
-            cond_ctx[_cond] = cond_ctx.get(_cond, 0) + 1
-        if _brand_pass and _cond_pass and _sub_pass and _cat:
-            cat_ctx[_cat] = cat_ctx.get(_cat, 0) + 1
-        if _brand_pass and _cond_pass and _cat_pass and _sub:
-            sub_ctx[_sub] = sub_ctx.get(_sub, 0) + 1
-    _cond_order = {"Excellent": 0, "Great": 1, "Good": 2, "Fair": 3, "Poor": 4}
-
-    # Always include currently-selected values so users can deselect them
-    for b in f_brands:
-        if b not in brand_ctx: brand_ctx[b] = 0
-    for c in f_conds:
-        if c not in cond_ctx: cond_ctx[c] = 0
-    for c in f_cats:
-        if c not in cat_ctx: cat_ctx[c] = 0
-    for s in f_subs:
-        if s not in sub_ctx: sub_ctx[s] = 0
-
-    # ── Apply filters ─────────────────────────────────────────────────────
-    filtered = base_items
-    if f_brands:
-        bs = set(f_brands); filtered = [i for i in filtered if _brand_ok(i["brand"], bs)]
-    if f_conds:
-        cs = set(f_conds); filtered = [i for i in filtered if i["condition"] in cs]
-    if f_cats:
-        cs = set(f_cats); filtered = [i for i in filtered if i["category"] in cs]
-    if f_subs:
-        ss = set(f_subs); filtered = [i for i in filtered if i["subcategory"] in ss]
-
-    # ── Sort ──────────────────────────────────────────────────────────────
-    # NEW items float to top ONLY on default sort (no explicit column click)
-    # When user explicitly clicks a sort column, sort purely by that column
-    reverse = (sort_dir == "desc")
-    # user_sorted is read earlier now (v2.16.20, see the Tier 1 shadow block above)
-
-    # (v2.16.20) Deterministic tiebreak: pre-sort by sku ascending before the
-    # primary sort below. list.sort() is stable, so this becomes the tiebreak
-    # for equal-key items in every branch below, regardless of the requested
-    # direction — Python's reverse=True preserves stable tie order rather than
-    # reversing it, so a plain (primary, sku) tuple key would have reversed
-    # the tiebreak too on a "desc" request; this two-pass approach keeps the
-    # tiebreak always-ascending-by-sku no matter which way the primary sort
-    # runs. Previously ties fell back to whatever order `filtered` already
-    # had — i.e. _cat_cache's arbitrary historical insertion order, which
-    # Postgres has no equivalent of and can't reproduce. Made explicit here
-    # and matched exactly by the new Tier 1 SQL path's own trailing
-    # "ORDER BY ..., sku ASC" (see _pg_tier1_browse) — found via the Phase C
-    # A/B diff harness (several "sort X" cases returned entirely different,
-    # though equally-valid-per-key, item orders on tied values).
-    filtered.sort(key=lambda x: x["id"])
-
-    if sort_field == "price":
-        filtered.sort(key=lambda x: x.get("price_raw") or 0, reverse=reverse)
-    elif sort_field == "date":
-        filtered.sort(key=lambda x: x.get("date_raw") or "", reverse=reverse)
-    elif sort_field == "price_drop_since":
-        filtered.sort(key=lambda x: x.get("price_drop_since") or "", reverse=reverse)
-    elif sort_field == "condition":
-        # Quality ranking (v2.10.18), not alphabetical: best → worst when ascending
-        # (Excellent→Great→Good→Fair→Poor), reverse on descending. Alphabetical
-        # order had no meaning for users (and put Poor near the top because 'P' > 'G').
-        # First click on the column = 'asc' (see JS line ~8389: non-date fields default
-        # to +1 on first click), so users see Excellent-first by default.
-        # Unknown/blank conditions sort to the end either way.
-        _unknown_rank = 99 if not reverse else -1
-        filtered.sort(
-            key=lambda x: _cond_order.get(x.get("condition") or "", _unknown_rank),
-            reverse=reverse,
-        )
-    else:
-        filtered.sort(key=lambda x: (x.get(sort_field) or "").lower(), reverse=reverse)
-
-    # Only apply NEW-on-top tier for the default (non-user-clicked) sort
-    # Three tiers: new+want-list match → new only → everything else.
-    # (v2.16.12) A single linear partition instead of a second full O(N log N)
-    # sort — `filtered` is already correctly ordered by the primary sort above,
-    # and both list.sort() and this partition are stable, so concatenating the
-    # three tiers in original relative order is equivalent to re-sorting by
-    # priority, just O(N) instead of O(N log N) on top of the first sort.
-    # Measured (cProfile, real ~92K-item cache): the two full-list sorts
-    # combined cost ~100ms/call on the common no-filter browse call.
-    if not user_sorted:
-        _new_want, _new_only, _rest = [], [], []
-        for x in filtered:
-            if x.get("isNew"):
-                (_new_want if x.get("kwMatch") else _new_only).append(x)
-            else:
-                _rest.append(x)
-        filtered = _new_want + _new_only + _rest
-
-    total_filtered = len(filtered)
-    total_pages    = max(1, -(-total_filtered // per_page))  # ceil division
-    page           = min(page, total_pages)
-    start          = (page - 1) * per_page
-    page_items     = filtered[start:start + per_page]
-
-    # Count items that are both want-list matches AND new (for the status notification)
-    new_want_count = sum(1 for i in filtered if i.get("isNew") and i.get("kwMatch"))
-    # Unique stores in filtered result set
-    store_count = len(set(i.get("store", "") for i in filtered if i.get("store")))
-
-    _resp = {
-        "items":            page_items,
-        "page":             page,
-        "per_page":         per_page,
-        "total_count":      total_filtered,
-        "total_unfiltered": total_unfiltered,
-        "total_pages":      total_pages,
-        "store_count":      store_count,
-        "new_count":        new_count_unfiltered,
-        "new_want_count":   new_want_count,
-        "no_store_data":    False,
-        # Contextual facet counts — each facet reflects all OTHER active filters
-        # (v2.16.20) Secondary alphabetical tiebreak on brand name: two brands
-        # with the same count used to fall back to dict-insertion order, which
-        # is really "SKU order" — an accidental, unspecified tiebreak nobody
-        # relied on, and one the Postgres Tier 1 path can't cheaply reproduce
-        # (SQL aggregation doesn't preserve row order). Made deterministic and
-        # identical in both paths instead of trying to replicate the old
-        # incidental order in SQL — found via the Phase C A/B diff harness.
-        "brands":        [{"name": b, "count": c} for b, c in sorted(brand_ctx.items(), key=lambda x: (-x[1], x[0]))],
-        "conditions":    [{"name": c, "count": n} for c, n in sorted(cond_ctx.items(), key=lambda x: _cond_order.get(x[0], 5))],
-        "categories":    [{"name": c, "count": n} for c, n in sorted(cat_ctx.items())],
-        "subcategories": [{"name": s, "count": n} for s, n in sorted(sub_ctx.items())],
-    }
-    # (Phase E, v2.16.23) Tier 2 shadow-mode diagnostics — admin-gated
-    # independently of routing, same posture as Tier 1's _pg_shadow/
-    # _pg_shadow_ms (see the comment at _pg_shadow_requested's assignment):
-    # a non-admin passing ?pg_shadow=1 gets nothing extra, so shadow-mode
-    # internals never leak to a real caller even before the eventual cutover.
-    if _pg_shadow_requested and _pg_tier2_shadow_count is not None:
-        _resp["_pg_tier2_shadow"] = True
-        _resp["_pg_tier2_shadow_ms"] = _pg_tier2_shadow_ms
-        _resp["_pg_tier2_shadow_candidate_count"] = _pg_tier2_shadow_count
-    return _resp
-
-# ── Phase F step 4a: comparison tooling (v2.16.38, admin only) ──────────────
-# Temporary — same lifecycle as v2.16.33's /api/tsquery-diff-check: exists to
-# prove _pg_browse() against today's production path on real data, then gets
-# deleted once step 4b's cutover is live and confirmed (step 4c).
-
-_BROWSE_DIFF_SCALARS = ("page", "per_page", "total_count", "total_unfiltered",
-                        "total_pages", "store_count", "new_count",
-                        "new_want_count", "no_store_data")
-_BROWSE_DIFF_FACETS = ("brands", "conditions", "categories", "subcategories")
-_BROWSE_DIFF_SAMPLE = 5
-
-
-def _browse_diff(cur, pg):
-    """Structural diff of two /api/browse response dicts. Returns {"match":
-    True} or a compact summary of exactly what differs. Item comparison is
-    positional (order is part of the contract — the page IS a sorted slice)
-    plus per-field for SKUs present in both."""
-    out = {}
-    scal = {k: [cur.get(k), pg.get(k)] for k in _BROWSE_DIFF_SCALARS
-            if cur.get(k) != pg.get(k)}
-    if scal:
-        out["scalars"] = scal
-    fac = {}
-    for k in _BROWSE_DIFF_FACETS:
-        a = {d["name"]: d["count"] for d in cur.get(k) or []}
-        b = {d["name"]: d["count"] for d in pg.get(k) or []}
-        if a != b:
-            bad = sorted(n for n in set(a) | set(b) if a.get(n) != b.get(n))
-            fac[k] = {"n_diff": len(bad),
-                      "sample": [[n, a.get(n), b.get(n)] for n in bad[:_BROWSE_DIFF_SAMPLE]]}
-        elif [d["name"] for d in cur.get(k) or []] != [d["name"] for d in pg.get(k) or []]:
-            fac[k] = {"order_only": True}
-    if fac:
-        out["facets"] = fac
-    ai = cur.get("items") or []
-    bi = pg.get("items") or []
-    aid = [i["id"] for i in ai]
-    bid = [i["id"] for i in bi]
-    if aid != bid:
-        first = next((n for n, (x, y) in enumerate(zip(aid, bid)) if x != y),
-                     min(len(aid), len(bid)))
-        out["items_order"] = {
-            "first_diff_index": first,
-            "only_legacy": [x for x in aid if x not in set(bid)][:_BROWSE_DIFF_SAMPLE],
-            "only_pg":      [x for x in bid if x not in set(aid)][:_BROWSE_DIFF_SAMPLE],
-            "n_only_legacy": len(set(aid) - set(bid)),
-            "n_only_pg":      len(set(bid) - set(aid)),
-        }
-    bmap = {i["id"]: i for i in bi}
-    fields = {}
-    for i in ai:
-        j = bmap.get(i["id"])
-        if j is None:
-            continue
-        for f in set(i) | set(j):
-            if i.get(f) != j.get(f):
-                ent = fields.setdefault(f, {"n": 0, "sample": []})
-                ent["n"] += 1
-                if len(ent["sample"]) < 3:
-                    ent["sample"].append([i["id"], i.get(f), j.get(f)])
-    if fields:
-        out["item_fields"] = fields
-    out["match"] = not out
-    return out
-
-
-def _browse_run_both(data, *, logged_in):
-    """Run the request through engine="legacy" and engine="pg". Returns
-    (legacy_response, report)."""
-    t0 = time.time()
-    cur = _browse_compute(data, logged_in=logged_in, engine="legacy")
-    cur_ms = round((time.time() - t0) * 1000, 1)
-    report = {"legacy_ms": cur_ms}
-    t1 = time.time()
-    try:
-        pg = _browse_compute(data, logged_in=logged_in, engine="pg")
-        report["pg_ms"] = round((time.time() - t1) * 1000, 1)
-        report["status"] = "ok"
-        report["diff"] = _browse_diff(cur, pg)
-    except _PgBrowseIneligible as e:
-        report["status"] = "ineligible"
-        report["reason"] = str(e)[:200]
-    except Exception as e:
-        report["status"] = "error"
-        report["reason"] = f"{type(e).__name__}: {str(e)[:300]}"
-    return cur, report
-
-
-def _browse_shadow_compare(data, *, logged_in):
-    """?pg_shadow=2 (admin only, gated by api_browse): serve the normal
-    production response, with a `_pg_browse_shadow` report attached saying
-    whether _pg_browse() would have returned the identical thing."""
-    cur, report = _browse_run_both(data, logged_in=logged_in)
-    cur = dict(cur)
-    cur["_pg_browse_shadow"] = report
-    return cur
-
-
-def _py_kw_entry_match(kw, text_lower):
-    """Does ONE want-list entry match (Python semantics)? Mirrors the routing
-    in _browse_compute's matcher-build loop minus the caps/bucketing — used
-    only to explain a kwMatch mismatch in the batch diff report."""
-    base = kw.lstrip('=').strip()
-    if not base:
-        return False
-    base = _expand_colon_prefix(base, join=', ')
-    cl = _wl_bool_compile(base) if (';' in base or '-' in base) else None
-    toks = set(_KW_SPLIT_RE.split(text_lower))
-    if cl is not None:
-        return any(_matches_all(text_lower, p) and not (n and _matches_any(text_lower, n))
-                   for p, n, _r in cl)
-    if _SIMPLE_KW_RE.match(base):
-        return base.lower() in toks
-    if '*' in base or (base.startswith('"') and base.endswith('"') and len(base) > 2):
-        return bool(re.search(_kw_or_pattern(base), text_lower, re.IGNORECASE))
-    if ',' in base:
-        t = _compile_query(base)
-        return bool(t) and _matches_all(text_lower, t)
-    return bool(re.search(r'\b' + re.escape(base) + r'\b', text_lower, re.IGNORECASE))
-
-
-def _explain_kw_mismatch(kw_entries, skus):
-    """For SKUs whose kwMatch differs between engines: which entries match
-    each in Python vs in SQL. Text-only (entry strings + item name)."""
-    out = []
-    if not skus:
-        return out
-    with _pg_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT sku, name, brand FROM items WHERE sku = ANY(%s)", (list(skus),))
-            rows = cur.fetchall()
-            for sku, name, brand in rows:
-                text = ((name or "") + " " + (brand or "")).lower()
-                py = [k for k in kw_entries if _py_kw_entry_match(k, text)]
-                sq = []
-                for k in kw_entries:
-                    try:
-                        frag, prm = _tsquery_want_list_entry(k)
-                    except _TsqueryUnsupported:
-                        continue
-                    if frag is None:
-                        continue
-                    cur.execute(f"SELECT COALESCE(({frag}), FALSE) FROM items WHERE sku = %s",
-                                list(prm) + [sku])
-                    r = cur.fetchone()
-                    if r and r[0]:
-                        sq.append(k)
-                out.append({"item": f"{name} | {brand}",
-                            "python_only": [k for k in py if k not in sq][:5],
-                            "sql_only":    [k for k in sq if k not in py][:5]})
-    return out
-
-
-def _explain_browse_mismatch(body):
-    """(v2.16.39) Explain a mismatched scenario by diffing the FULL in-scope
-    match sets of each search component between engines — not just the page-1
-    items the response diff can see. Want list: which SKUs match only in
-    Python / only in SQL, and for up to 5 of them which entries are
-    responsible (_explain_kw_mismatch). filter_q: counts plus a few item
-    names on each side. If neither component differs, the mismatch is in the
-    non-search plumbing (facets/sort/filters) — the report says so
-    explicitly, since that's the class that would be a real 4b blocker."""
-    out = {}
-    plumbing = True
-    if body.get("keywords"):
-        py = _browse_compute(body, logged_in=True, engine="kw_skus_legacy")
-        sq = _browse_compute(body, logged_in=True, engine="kw_skus_pg")
-        if isinstance(py, set) and isinstance(sq, set) and py != sq:
-            plumbing = False
-            only_py, only_sq = sorted(py - sq), sorted(sq - py)
-            out["kw_set"] = {"n_python": len(py), "n_sql": len(sq),
-                             "n_only_python": len(only_py), "n_only_sql": len(only_sq),
-                             "explain": _explain_kw_mismatch(
-                                 body.get("keywords") or [], (only_py[:3] + only_sq[:3]))}
-    if body.get("filter_q"):
-        py = _browse_compute(body, logged_in=True, engine="fq_skus_legacy")
-        sq = _browse_compute(body, logged_in=True, engine="fq_skus_pg")
-        if isinstance(py, set) and isinstance(sq, set) and py != sq:
-            plumbing = False
-            only_py, only_sq = sorted(py - sq), sorted(sq - py)
-            names = {}
-            ids = only_py[:3] + only_sq[:3]
-            if ids:
-                with _pg_conn() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("SELECT sku, name, brand FROM items WHERE sku = ANY(%s)", (ids,))
-                        names = {r[0]: f"{r[1]} | {r[2]}" for r in cur.fetchall()}
-            out["fq_set"] = {"n_python": len(py), "n_sql": len(sq),
-                             "only_python": [names.get(x, x) for x in only_py[:3]],
-                             "only_sql": [names.get(x, x) for x in only_sq[:3]],
-                             "n_only_python": len(only_py), "n_only_sql": len(only_sq)}
-    out["plumbing_suspect"] = plumbing
-    return out
-
-
-_PG_BROWSE_DIFF_LOCK = threading.Lock()
-_PG_BROWSE_DIFF_STATE: dict = {}
-_PG_BROWSE_DIFF_SAMPLE_CAP = 25
-
-
-def _pg_browse_diff_scenarios(max_accounts=None):
-    """Realistic /api/browse request bodies rebuilt from every account's real
-    synced state in gc_users.db — no user id or email carried along."""
-    with _user_db() as conn:
-        rows = conn.execute(
-            "SELECT keywords, favorites, watchlist, new_ids, last_run, saved_searches "
-            "FROM user_data").fetchall()
-    def _j(v, d):
-        try:
-            x = json.loads(v or "")
-            return x if isinstance(x, type(d)) else d
-        except Exception:
-            return d
-    scen = []
-    n_acct = 0
-    for row in rows:
-        kws  = [str(k) for k in _j(row["keywords"], []) if str(k).strip()]
-        favs = [str(f) for f in _j(row["favorites"], [])]
-        wl   = list(_j(row["watchlist"], {}).keys())
-        new  = [str(x) for x in _j(row["new_ids"], [])]
-        ss   = _j(row["saved_searches"], [])
-        if not kws and not ss:
-            continue
-        if max_accounts and n_acct >= max_accounts:
-            break
-        n_acct += 1
-        common = {"page": 1, "per_page": 50, "sort_field": "date", "sort_dir": "desc",
-                  "user_sorted": False, "fav_stores": favs, "keywords": kws,
-                  "watchlist_ids": wl, "new_ids": new,
-                  "user_last_scan": row["last_run"] or ""}
-        if kws:
-            scen.append(("all_stores_default", {**common, "all_stores": True}))
-            scen.append(("want_list_only", {**common, "all_stores": True,
-                                            "filter_want_list_only": True}))
-            scen.append(("all_stores_price_asc_p2", {**common, "all_stores": True, "page": 2,
-                                                     "sort_field": "price", "sort_dir": "asc",
-                                                     "user_sorted": True}))
-            if favs:
-                scen.append(("favorites_default", {**common, "stores": favs}))
-        for s in ss[:20]:
-            if not isinstance(s, dict):
-                continue
-            f = s.get("filters") or {}
-            stores = [str(x) for x in (s.get("stores") or [])]
-            body = {**common, **{k: v for k, v in f.items() if k.startswith("filter_") or k == "vintage_only"}}
-            if stores:
-                body["stores"] = stores
-            else:
-                body["all_stores"] = True
-            scen.append(("saved_search", body))
-    return scen, n_acct
-
-
-def _pg_browse_diff_check(max_accounts=None, pause=0.05):
-    _load_cat_cache()
-    t0 = time.time()
-    scen, n_acct = _pg_browse_diff_scenarios(max_accounts)
-    by_kind, samples = {}, []
-    cur_ms_tot = pg_ms_tot = 0.0
-    for n, (kind, body) in enumerate(scen):
-        _PG_BROWSE_DIFF_STATE["progress"] = f"{n}/{len(scen)}"
-        k = by_kind.setdefault(kind, {"checked": 0, "match": 0, "mismatch": 0,
-                                      "ineligible": 0, "error": 0,
-                                      "mismatch_search_semantics": 0,
-                                      "mismatch_plumbing_suspect": 0})
-        k["checked"] += 1
-        try:
-            _cur, rep = _browse_run_both(body, logged_in=True)
-        except Exception as e:
-            rep = {"status": "error", "reason": f"legacy engine: {type(e).__name__}: {e}"}
-        st = rep["status"]
-        if st == "ok":
-            cur_ms_tot += rep["legacy_ms"]; pg_ms_tot += rep["pg_ms"]
-            if rep["diff"]["match"]:
-                k["match"] += 1
-                st = None
-            else:
-                k["mismatch"] += 1
-                st = "mismatch"
-        else:
-            k[st] += 1
-        explain = None
-        if st == "mismatch":
-            # Explain EVERY mismatch (not just sampled ones) so the per-kind
-            # search-semantics vs plumbing-suspect split covers the whole run.
-            try:
-                explain = _explain_browse_mismatch(body)
-            except Exception as e:
-                explain = {"explain_error": f"{type(e).__name__}: {e}", "plumbing_suspect": True}
-            k["mismatch_plumbing_suspect" if explain.get("plumbing_suspect")
-              else "mismatch_search_semantics"] += 1
-        if st and len(samples) < _PG_BROWSE_DIFF_SAMPLE_CAP:
-            smp = {"kind": kind, **{x: rep.get(x) for x in ("status", "reason", "diff")}}
-            if body.get("filter_q"):
-                smp["filter_q"] = body["filter_q"]
-            if explain:
-                smp.update(explain)
-            samples.append(smp)
-        if pause:
-            time.sleep(pause)   # yield the GIL to real request threads (1 worker)
-    ok_n = sum(v["match"] + v["mismatch"] for v in by_kind.values())
-    return {
-        "checked_at":      datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "elapsed_seconds": round(time.time() - t0, 1),
-        "accounts":        n_acct,
-        "scenarios":       len(scen),
-        "by_kind":         by_kind,
-        "avg_legacy_ms":   round(cur_ms_tot / ok_n, 1) if ok_n else None,
-        "avg_pg_ms":       round(pg_ms_tot / ok_n, 1) if ok_n else None,
-        "samples":         samples,
-    }
-
-
-@app.route("/api/pg-browse-diff-check", methods=["POST"])
-@optional_user_context
-def api_pg_browse_diff_check_start():
-    """Admin-only. Replays every account's real want list / favorites /
-    saved searches through both /api/browse engines (see
-    _pg_browse_diff_scenarios) on a background thread with its own lock —
-    never the scan _lock. Optional JSON body {"max_accounts": N}. Poll GET
-    for status/results."""
-    denied = _require_admin_api()
-    if denied:
-        return denied
     if _PG_POOL is None:
-        return jsonify({"error": "Postgres pool not available"}), 503
-    if not _PG_BROWSE_DIFF_LOCK.acquire(blocking=False):
-        return jsonify({"error": "A run is already in progress."}), 409
-    body = request.get_json(silent=True) or {}
-    try:
-        max_accounts = int(body.get("max_accounts") or 0) or None
-    except (TypeError, ValueError):
-        max_accounts = None
-
-    def _run():
-        try:
-            _PG_BROWSE_DIFF_STATE.clear()
-            _PG_BROWSE_DIFF_STATE["status"] = "running"
-            _PG_BROWSE_DIFF_STATE["started_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-            result = _pg_browse_diff_check(max_accounts=max_accounts)
-            _PG_BROWSE_DIFF_STATE["status"] = "done"
-            _PG_BROWSE_DIFF_STATE["result"] = result
-        except Exception as e:
-            _PG_BROWSE_DIFF_STATE["status"] = "error"
-            _PG_BROWSE_DIFF_STATE["error"] = f"{type(e).__name__}: {e}"
-            print(f"[pg] browse diff check failed: {type(e).__name__}: {e}")
-        finally:
-            try: _PG_BROWSE_DIFF_LOCK.release()
-            except RuntimeError: pass
-
-    threading.Thread(target=_run, daemon=True).start()
-    return jsonify({"status": "started"})
-
-
-@app.route("/api/pg-browse-diff-check")
-@optional_user_context
-def api_pg_browse_diff_check_poll():
-    denied = _require_admin_api()
-    if denied:
-        return denied
-    return jsonify({**_PG_BROWSE_DIFF_STATE, "fallbacks": _PG_BROWSE_FALLBACKS})
-
+        raise RuntimeError("Postgres pool not available")
+    _t0 = time.time()
+    resp = _pg_browse(
+        store_set=store_set, search_all=search_all,
+        user_last_scan=user_last_scan, kw_entries=kw_accepted, fq=fq,
+        f_brands=f_brands, f_conds=f_conds, f_cats=f_cats, f_subs=f_subs,
+        f_watched=f_watched, wl_ids=wl_ids, f_want_only=f_want_only,
+        f_price_drop_only=f_price_drop_only, f_vintage_only=f_vintage_only,
+        f_price_min=f_price_min, f_price_max=f_price_max,
+        sort_field=sort_field, sort_dir=sort_dir, user_sorted=user_sorted,
+        new_ids=new_ids, fav_stores=fav_stores, page=page, per_page=per_page,
+    )
+    if pg_diag:
+        resp["_pg_browse_ms"] = round((time.time() - _t0) * 1000, 1)
+    return resp
 
 
 # (Dead legacy global-file endpoints removed in v2.14.5 — /api/watchlist GET+POST,
@@ -8768,7 +7400,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.43"
+APP_VERSION = "2.16.44"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

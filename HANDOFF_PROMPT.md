@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-24 · Version: v2.16.43 (all wildcard shapes served by the SQL browse path + fallback reasons tallied; v2.16.42 saved-search counts on Postgres; Phase F step 4b CUTOVER live since v2.16.40 — see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-09-25 · Version: v2.16.44 (Phase F step 4c: /api/browse is SQL-only — legacy Tier 1/Tier 2/Python path and 4a tooling deleted; v2.16.43 all wildcards in SQL — see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -37,7 +37,7 @@ Use this at the start of a new session to bring Claude up to speed instantly.
 
 **Sticky table headers**: `border-collapse:separate; border-spacing:0` on `table`. `th{position:sticky; top:var(--tbl-hdr-top,88px)}`. CSS variable set by `_applyFrozenHeaderOffset()` in JS after each render and on resize.
 
-**Server-side browse**: `POST /api/browse` — reads `gc_category_cache.json`, applies all filters in `_apply_base()`, returns 50 items/page. Space-separated search terms are AND'd.
+**Server-side browse**: `POST /api/browse` → `_browse_compute()` (request parsing + want-list caps via `_kw_accept_capped`) → `_pg_browse()` — every filter, want-list/search-box match (tsquery translator + trigram ILIKE), facet count, sort and page computed in Postgres (sole path since v2.16.44; no JSON fallback — DB errors return 503 `{error}`, one retry on a dead pooled connection). Space-separated search terms are AND'd.
 
 **NEW detection**: anchor-based per-user. `threshold = _norm_anchor` (user's "top of table" high-water mark). Anchor only advances when browsing fully unfiltered (`!hasFilters && !_globalSearchActive`). Persisted server-side in `user_data.last_anchor`.
 
@@ -88,7 +88,17 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.43 — every wildcard shape in SQL (2026-09-24)
+## Current State: v2.16.44 — Phase F step 4c: SQL-only browse (2026-09-25)
+
+Burn-in clean (0 fallbacks since v2.16.43), so 4c deleted the legacy `/api/browse` path (Tier 1,
+Tier 2, the Python `_kw_match` matcher, `_build_base_item_list`) and all 4a comparison tooling
+(`?pg_shadow=2`, `/api/pg-browse-diff-check`) — ~1,600 lines. Want-list DoS caps kept identical in
+`_kw_accept_capped`. No fallback now: DB error → 503 `{error}` (gc.js shows "Couldn't Load
+Inventory"), untranslatable search → 400, unknown sort_field → date. New: one retry with connection
+validation on a dead pooled connection (after a Postgres restart). Counters: `?pg_shadow=1` →
+`_pg_browse_errors`. JSON catalog still loaded elsewhere until step 5. Full detail: HANDOFF.md v2.16.44.
+
+## Previous: v2.16.43 — every wildcard shape in SQL (2026-09-24)
 
 4b burn-in check found `error: 0` but `ineligible: 119` in ~17h, last reason `'*50s*'` (leading
 wildcard) — served correctly by the legacy fallback, but 4c deletes that path. `_tsquery_compile_term`

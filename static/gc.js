@@ -1532,6 +1532,17 @@ async function _fetchBrowsePage(page) {
     });
     const d = await r.json();
     if (mySeq !== _browseSeq) return;  // superseded by a newer request — don't render
+    if (d.error) {
+      // v2.16.44: /api/browse has no server-side fallback any more (Phase F 4c) —
+      // a DB hiccup comes back as a 503 {error}. Say so instead of "No Items Found".
+      document.getElementById('res-panel').style.display = 'block';
+      document.getElementById('res-title').textContent = "Couldn't Load Inventory";
+      document.getElementById('res-badge').textContent = '';
+      const _errBody = document.getElementById('res-body');
+      _errBody.innerHTML = '<div class="no-res"></div>';
+      _errBody.firstChild.textContent = d.error;
+      return;
+    }
     if (d.no_store_data) {
       document.getElementById('res-panel').style.display = 'block';
       document.getElementById('res-title').textContent = 'No Browse Data Yet';

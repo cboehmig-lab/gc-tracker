@@ -1,3 +1,23 @@
+# Next Session Prompt — v2.16.44 built (Phase F step 4c): push, verify, then step 5
+
+**Update 2026-09-25**: 4b burn-in clean (live counters on v2.16.43: `error 0, ineligible 0`, no
+fallback ever recorded since deploy). v2.16.44 = **step 4c**, built + locally verified, NOT yet
+pushed: `/api/browse` is SQL-only; legacy Tier 1/Tier 2/Python matcher path, `_build_base_item_list`,
+and all 4a tooling deleted (`/api/pg-browse-diff-check` is gone — counters now at
+`POST /api/browse?pg_shadow=1` → `_pg_browse_errors`). DB error → 503 + "Couldn't Load Inventory"
+message; one retry on a dead pooled connection. See HANDOFF.md v2.16.44.
+1. Chuck pushes (`cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, commit, push).
+2. Confirm deploy log clean + footer v2.16.44; spot-check plain browse, Want List, search box,
+   a saved search, a `*50s*` search; `/api/pg-browse-diff-check` should 404.
+3. After a day: in the browser console on the site (admin),
+   `await (await fetch('/api/browse?pg_shadow=1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({all_stores:true})})).json()`
+   → `_pg_browse_errors` (expect `error` 0; a few `retried` after a Postgres restart are fine).
+4. Then **step 5**: retire the JSON catalog (scan writes → Postgres primary, `/api/saved-search-counts`
+   JSON fallback, `/api/state` totals, scan NEW detection, everything that calls `_load_cat_cache`;
+   short write-only JSON backup burn-in, then gone). Then Phase G.
+
+---
+
 # Next Session Prompt — v2.16.43 built (all wildcards in SQL): push, burn in, then 4c
 
 **Update 2026-09-24**: burn-in check of the v2.16.40 cutover (counters since 2026-09-23T22:51Z):

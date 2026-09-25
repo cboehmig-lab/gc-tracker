@@ -1,5 +1,87 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-24 · Current version: v2.16.43 (every wildcard shape now served by the SQL browse path + fallback reasons tallied; v2.16.42 saved-search counts on Postgres; Phase F step 4b cutover live since v2.16.40) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-25 · Current version: v2.16.44 (Phase F step 4c: legacy browse path + 4a tooling deleted, SQL is the only /api/browse path; v2.16.43 all wildcards in SQL; v2.16.40 step 4b cutover) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.44 — 2026-09-25: Phase F step 4c — legacy browse path deleted, SQL is the only path
+
+**Why**: burn-in of 4b + v2.16.43 was clean. Checked live on 2026-09-25 (v2.16.43 footer confirmed):
+`GET /api/pg-browse-diff-check` → `fallbacks: {error: 0, ineligible: 0, since: null}` — `since` is only
+set on the first fallback, so zero fallbacks of any kind since the v2.16.43 deploy (caveat: the
+counters are in-process, so a Railway restart would have reset them). Chuck approved 4c.
+
+### 1. Deleted (−1,605 lines of `gc_tracker_app.py`)
+- The whole legacy half of `_browse_compute`: the JSON `has_store_data` check, Phase D Tier 1 gate,
+  Phase E Tier 2 narrowing, the per-request item loop, the Python `_kw_match` matcher + its bucket
+  compilation, `_apply_base`, Python facet counts / sort / tiering / pagination.
+- `_pg_tier1_eligible`, `_pg_tier1_browse`, `_pg_tier2_eligible`, `_pg_tier2_narrow_items`.
+- `_build_base_item_list` + `_base_item_list`/`_base_item_list_mtime` (the v2.16.4 memo of the JSON
+  catalog for browse — nothing else used it). NB: the JSON catalog itself (`_cat_cache`) is still
+  loaded by other routes until step 5, so this alone isn't the memory win yet.
+- `_kw_or_pattern` (only the Python matcher used it).
+- All 4a comparison tooling: `?pg_shadow=2` / `_browse_shadow_compare`, `_browse_diff`,
+  `_browse_run_both`, `_py_kw_entry_match`, `_explain_kw_mismatch`, `_explain_browse_mismatch`,
+  `_pg_browse_diff_scenarios`, `_pg_browse_diff_check`, `_PG_BROWSE_DIFF_*`, both
+  `/api/pg-browse-diff-check` routes (now 404), `_pg_match_skus`, and `_browse_compute`'s `engine`
+  parameter (`legacy`/`pg`/`kw_skus_*`/`fq_skus_*`).
+- `_PG_TIER1_SORTABLE` renamed `_PG_SORTABLE`. Stale Tier 1/Tier 2 comments rewritten.
+
+### 2. What `/api/browse` is now
+`api_browse()` → `_browse_compute(data, logged_in, pg_diag)` → `_pg_browse(...)`. `_browse_compute`
+keeps exactly the old request parsing/clamping (page, per_page 10-200, filter_q[:200], price floats,
+want-list dedupe + 750/250 list cap). The per-shape want-list DoS caps moved out of the deleted
+Python-matcher loop into a new pure function **`_kw_accept_capped(keywords)`** with module-level
+`_PHRASE_KW_CAP=300 / _EXOTIC_KW_CAP=30 / _AND_KW_CAP=200 / _BOOL_KW_CAP=50` — same routing, same
+order, same accepted set (it still calls `_expand_colon_prefix` and `_wl_bool_compile` to route, and
+the "comma entry with at least one non-empty part" test replaces `bool(_compile_query(base))`, which
+is equivalent). Unused `force_fav_sort` read removed (nothing ever used it, frontend never sends it).
+
+Behavior changes, all deliberate:
+- **Unknown `sort_field`** → default `date` sort (was: ineligible → legacy fallback, which in the
+  sandbox/no-JSON case returned `no_store_data`). The UI only sends whitelisted columns.
+- **No fallback**: a DB error returns **503** `{"items": [], "error": "Couldn't load inventory right
+  now…"}`; an untranslatable search (`_PgBrowseIneligible` from `_TsqueryUnsupported` — nothing
+  raises it since v2.16.43) returns **400** `{"items": [], "error": "That search uses syntax we can't
+  run…"}`. No Postgres pool → 503. `static/gc.js` `_browseServer` now shows a "Couldn't Load
+  Inventory" panel with that message (textContent, not innerHTML) instead of "No Items Found".
+- **Dead-connection retry (new)**: testing the no-fallback path showed that after a Postgres restart
+  the first request(s) draw dead pooled connections ("SSL connection has been closed unexpectedly") —
+  before 4c the legacy fallback silently hid this. `api_browse` now retries ONCE on
+  `psycopg2.OperationalError`/`InterfaceError` (`_pg_is_conn_error`) with a request-scoped
+  `_PG_VALIDATE_CONN` contextvar set, which makes `_pg_conn()` ping each connection with `SELECT 1`
+  and replace dead ones (up to maxconn+1 tries). Normal requests never ping. Real SQL errors are not
+  retried. `_pg_conn()`'s error path also no longer lets a failing `rollback()` on a dead connection
+  mask the original exception.
+- Counters renamed `_PG_BROWSE_FALLBACKS` → **`_PG_BROWSE_ERRORS`** `{error, unsupported, retried,
+  since, last, reasons}`; admin-only via `POST /api/browse?pg_shadow=1` → `_pg_browse_errors` (plus
+  `_pg_browse_ms`). `error` = answered 503, `unsupported` = answered 400, `retried` = dead connection
+  retried (a retry that succeeded counts only here). Resets on restart.
+
+Kept on purpose until step 5: `/api/saved-search-counts`' per-search JSON fallback and the helpers
+it needs (`_compile_fq_clauses`, `_fq_text_match`, `_matches_all`, `_matches_any`, `_compile_query`),
+plus `_load_cat_cache` and everything else that reads the JSON catalog.
+
+### 3. Verified locally (sandbox Postgres 16, real `pg_schema.sql`, 40K synthetic rows)
+- 260-request randomized corpus (stores/all-stores, every sort field + `bogus` + missing, asc/desc,
+  user_sorted, pages incl. 999, per_page 5-1000, facets, want-only, watched, vintage, price-drop,
+  price min/max incl. junk, scan gate, new_ids, logged-in vs anonymous, filter_q incl. `*50s*`,
+  `mesa: angel; blues`, `-`, 300-char, want lists incl. every shape AND lists over each cap: 46
+  wildcards, 61 bool, 211 comma, 311 phrases, 302 plain) run through v2.16.43 and v2.16.44 via
+  Flask's test client against the same DB, capturing the exact `kw_entries`/`fq`/`sort_field` handed
+  to `_pg_browse`. **243/260 byte-identical responses + identical accepted want-list sets; the 17
+  diffs are all `sort_field: "bogus"`** (v2.16.43 fell back to legacy, v2.16.44 sorts by date) —
+  expected. `/api/saved-search-counts` for 50 searches identical.
+- Error paths: no pool → 503; forced `_TsqueryUnsupported` → 400; Postgres stopped → 503, then 200
+  once restarted; Postgres restarted with idle pooled connections → 4/4 requests 200 (1 retry
+  counted); injected SQL syntax error → 503 with no retry; `/api/pg-browse-diff-check` GET/POST → 404;
+  `?pg_shadow=2` now just a normal response.
+- `py_compile` + `node --check` clean; pyflakes shows no new warnings.
+
+### Next
+Push, confirm the footer shows v2.16.44 and the deploy log is clean (no schema change), spot-check
+plain browse / Want List / search box / a saved search / a `*50s*` search, and check `?pg_shadow=1`
+→ `_pg_browse_errors` after a day. Rollback = `git revert` this commit. Then **step 5** (retire the
+JSON catalog).
 
 ---
 
