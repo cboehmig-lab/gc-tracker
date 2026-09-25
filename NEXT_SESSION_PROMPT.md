@@ -82,6 +82,15 @@ Starts after Phase F is finished (4c + step 5). Chuck's idea; scope not locked y
 5. **Page load + feel**: size of static/gc.js, image lazy-loading/sizing, cache headers, keeping old
    results visible while the next page loads, prefetching the next page, search-box debounce.
 6. **User-facing improvements**: collect ideas from Chuck / user feedback (e.g. Discord).
+7. **Search-box autocomplete** (Chuck, 2026-09-25): typing `stra` shows a dropdown of real inventory
+   words ("Stratocaster (1,240)", "Strat"…). Design sketched: (a) `search_terms(term, count)` table
+   built from `ts_stat` over `search_vector` (available items), rebuilt at the end of each scan
+   (hook `_pg_sync_scan`), btree/`text_pattern_ops` index for prefix lookup; (b) `GET /api/suggest?q=`
+   → top ~8 by count, >= 2 chars, completes only the LAST word of the query, rate-limited;
+   (c) gc.js dropdown under `#res-search` — ~150ms debounce + abort stale requests, up/down/Enter/Esc,
+   click/tap, `position:fixed` like `#ss-dropdown`, mobile sheet support. Est. one session
+   (~50-80 lines Python, ~150-200 JS/CSS). Optional later: brand+model phrase suggestions,
+   pg_trgm typo tolerance, store-scoped suggestions. Independent of step 5.
 
 **Update 2026-09-23 (later)**: v2.16.39 PUSHED and LIVE. Full production diff check (123 accounts,
 485 scenarios, ~11 min): 463 exact, 16 search-semantics mismatches, **0 plumbing suspects**, 6
