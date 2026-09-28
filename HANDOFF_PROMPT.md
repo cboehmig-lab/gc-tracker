@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-28 · Version: v2.16.46 (Phase F step 5a: /api/state, store pages, admin pages, saved-search counts read Postgres — JSON catalog now only used by the scan path; see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-09-28 · Version: v2.16.47 (Phase F step 5b-i: every scan also computes its prior state from Postgres in SHADOW and diffs it vs the JSON path; temporary /api/pg-precheck-5b; no user-visible change — see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,7 +88,21 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.46 — Phase F step 5a: JSON reads moved to Postgres (2026-09-28)
+## Current State: v2.16.47 — Phase F step 5b-i: scan prior-state shadow (2026-09-28)
+
+No user-visible change. The scan's per-item merge moved verbatim into `_merge_scan_item()`. Each
+`_run` now ALSO loads the prior state of every SKU it saw from Postgres (`_ScanShadow` /
+`_pg_scan_prior_fetch`, read-only, retry on a dead connection), merges with the same function, and
+diffs the would-be Postgres rows and the would-be sold set against the JSON path → `[pg-shadow]` log
+line + `_PG_SCAN_SHADOW` counters (admin: `POST /api/browse?pg_shadow=1` → `_pg_scan_shadow`).
+Temporary admin `POST/GET /api/pg-precheck-5b` (delete in 5c): every watchlist/new_ids SKU in
+gc_users.db must exist in Postgres (zero tolerance) + all-20-column JSON-vs-PG parity + legacy
+watchlist-file/dead-tool facts. Next: 5b-ii (v2.16.48) = scan reads prior from Postgres and writes it
+synchronously before "done" (retry, visible failure), JSON = write-only backup; delete
+`gc_watchlist.json` upkeep, `_fill_gaps`, `_populate_store_data` (Chuck approved). Full detail +
+the `_cat_cache` scan-path map: HANDOFF.md v2.16.47.
+
+## Previous: v2.16.46 — Phase F step 5a: JSON reads moved to Postgres (2026-09-28)
 
 `/api/state` totals (60s cache), `/store/<slug>` SEO pages (600s TTL cache, stale-on-error),
 `/admin/users` watchlist counts, `/admin/listing-patterns` and `/api/saved-search-counts` (JSON

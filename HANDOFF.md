@@ -1,5 +1,97 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-28 · Current version: v2.16.46 (Phase F step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-28 · Current version: v2.16.47 (Phase F step 5b-i: scan prior-state shadow from Postgres + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.47 — 2026-09-28: Phase F step 5b-i — scan prior-state SHADOW from Postgres + pre-cutover check (no user-visible change)
+
+**Why**: 5b makes the scan write path Postgres-primary. Chuck approved splitting it: **5b-i** (this)
+computes every scan's prior state from Postgres *in shadow* next to the JSON path and diffs them,
+plus a zero-tolerance pre-check; **5b-ii** (v2.16.48) cuts over. Chuck also approved (for 5b-ii):
+deleting the legacy global `gc_watchlist.json` upkeep in `_run` and deleting the dead admin tools
+`_fill_gaps` / `_populate_store_data` (+ `/api/fill-gaps`, `/api/populate-store-data`).
+
+Live before starting (v2.16.46): footer OK, `_pg_browse_errors` all 0, `/api/pg-parity-check` clean
+(503,060 JSON = 503,060 PG, 0 missing/extra/mismatch) — but that check only compares
+available/price/date_listed, not the columns the scan will read as prior state.
+
+### Map of `_cat_cache` in the scan path (investigation result)
+- **`_run` merge loop** — reads prior record per SKU: fallbacks when Algolia sends an empty value
+  (category, subcategory, condition, brand, location, date_listed, image_id, is_vintage,
+  condition_note) + carry-forward (`has_price_drop` → decides `price_drop_since` new vs preserved,
+  `price_drop_since`, `first_seen`). Writes the full merged record.
+- **Sold-marking** — walks ALL ~503K entries; flips `available=False` for SKUs not seen, within scope
+  (nationwide only if complete; store scans only for fully-scanned stores). `_pg_sync_scan` repeats
+  it in SQL.
+- **Legacy global `gc_watchlist.json`** — sold flags + field refresh; read only by export/import/reset.
+  Per-user watchlists (gc_users.db) never touch it. → delete in 5b-ii.
+- **`_save_cat_cache`** — full JSON dump.
+- **`_pg_sync_scan`** — reads `_cat_cache`; runs in a BACKGROUND thread after "done", so a client's
+  post-scan `/api/browse` can read PG before the write lands, and it can overlap the next scan. 5b-ii
+  makes it synchronous.
+- **`fmt()`** (SSE items, scans ≤1000 products) and **NEW detection** read the just-merged record
+  (date_listed / price_drop_since / image_id / condition_note). NEW detection itself uses NO prior
+  catalog state — it's `user last_anchor` vs `date_listed`. `first_seen` matters for browse
+  (`first_seen = '' OR first_seen <= user_last_scan`).
+- **`_fill_gaps` / `_populate_store_data`** — read+write `_cat_cache` ONLY (never reach Postgres);
+  no UI caller (gc.js `populateStoreData(){}` stub; nothing calls fill-gaps). Dead.
+
+### What changed
+1. **`_merge_scan_item(p, cached, run_time)`** — the merge loop body moved verbatim into a function.
+   `_run` calls it; the shadow calls the same function with a Postgres-built prior, so any shadow
+   diff is a DATA difference, never a logic difference.
+2. **`_ScanShadow`** (begin/observe/finish) + **`_pg_scan_prior_fetch()`**: before the merge loop,
+   one read-only pooled transaction (via `_pg_read`, retry on dead conn) loads prior state for every
+   SKU this run saw (temp table `_shadow_seen` + join, cols `_PG_PRIOR_COLS`) and the SKUs Postgres
+   WOULD mark sold under the identical scope. Per item it merges from that prior (chaining through
+   its own earlier result for a duplicate SKU, like the JSON path) and compares `_pg_row_for()` of
+   both results (exactly what gets upserted) column by column; after sold-marking it compares the
+   sold sets (the JSON loop now collects `_json_sold`; no behavior change). Also counts SKUs with a
+   prior in JSON but not PG and vice versa.
+3. Shadow waits (≤60s) for a still-running previous `_pg_sync_scan` thread (`_PG_SYNC_THREAD`)
+   before reading, and counts `waited_for_sync` — evidence for making the write synchronous.
+4. Output: `[pg-shadow] …` log line per scan; counters `_PG_SCAN_SHADOW` (scans, clean, errors,
+   waited_for_sync, cumulative field_diffs, sold_only_json/pg, prior_missing_in_pg/json, `recent`
+   = last 20 scan summaries with up to 5 samples per column) in **`POST /api/browse?pg_shadow=1` →
+   `_pg_scan_shadow`**. Every shadow error is swallowed + counted; it can't affect the scan.
+5. **TEMPORARY `POST/GET /api/pg-precheck-5b`** (admin; delete in 5c). POST starts a background
+   thread (own lock, NOT the scan lock), GET polls. Reports: (a) `user_skus` — every watchlist and
+   new_ids SKU in gc_users.db vs Postgres `items` (missing counts + sample with user ids and whether
+   the SKU is in JSON; PASS = 0 missing); (b) `column_parity` — every JSON record through
+   `_pg_row_for` vs the Postgres row, ALL 20 columns, streamed via a named cursor (itersize 5000),
+   numeric tolerance 0.005; (c) `legacy_watchlist_file` exists/bytes/entries, `dead_tools` candidate
+   counts; `scan_running_at_start/end` (a concurrent scan can cause transient diffs); top-level PASS.
+
+### Verified locally (sandbox Postgres 16, scan simulator with mocked Algolia fetch/scrape)
+- **Refactor is byte-identical**: 6-scan scenario (baseline; store scan with new items/drops/sold;
+  nationwide with new, drops, un-drops, sold, reappearing SKUs, Algolia-blank fields falling back to
+  prior; nationwide with a page error → no sold-marking; store scan with one incomplete store;
+  nationwide with a duplicate SKU across pages) run through v2.16.46 and v2.16.47: SSE done messages,
+  JSON catalog and Postgres table identical after every step. Shadow: 6/6 clean.
+- **Shadow catches real divergence**: corrupted Postgres between scans (first_seen changed, carried
+  drop flag cleared, rows deleted, sold rows set available, category wrong) → reported exactly:
+  first_seen 5 (3 changed + 2 deleted rows), price_drop_since 2, category 2, sold_only_pg 3,
+  prior_missing_in_pg 2.
+- **Back-to-back scans**: second scan started while the first's sync thread was running →
+  `waited_for_sync=True`, clean.
+- **Postgres down**: shadow `errors+1` with the reason, scan completes normally (JSON written,
+  dual-write skipped as before). After restart, `_pg_read` retry recovers dead pooled connections;
+  shadow then correctly reports the 5 items the failed dual-write never wrote (prior_missing_in_pg 5,
+  first_seen 5) — the exact divergence 5b-ii eliminates.
+- **Pre-check**: 401 unauth, 409 if running; detects ghost watchlist/new_ids SKUs, unparseable
+  user rows, a changed image_id, a changed price, a missing row, an extra row.
+- **Scale**: 120K-item nationwide scan, shadow adds ~1.6s (prior fetch ~1.0s + compare); transient
+  memory for the prior map ~100MB, freed in `finish()`.
+- `py_compile` + `node --check` clean; pyflakes no new warnings. gc.js unchanged.
+
+### Next
+Push → footer v2.16.47 → run `POST /api/pg-precheck-5b`, poll GET (expect `PASS: true`; any
+missing SKU = stop and investigate) → let a few real scans happen (a nationwide + some store scans)
+→ read `_pg_scan_shadow` (expect `clean == scans`, or only explained diffs) → **5b-ii (v2.16.48)**:
+scan reads prior from Postgres, synchronous `_pg_write_scan` (upsert + sold `UPDATE … RETURNING`, 3
+attempts) before "done", failure → error to user + no JSON write + anchor not advanced, JSON backup
+mirrors PG's decisions; delete gc_watchlist.json upkeep, `_fill_gaps`, `_populate_store_data`.
+Intended 5b-ii semantics: a PG `first_seen=''` stays `''` (JSON gave a missing key `run_time`).
 
 ---
 

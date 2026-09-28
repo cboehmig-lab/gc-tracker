@@ -1,4 +1,44 @@
-# Next Session Prompt — v2.16.46 built (Phase F step 5a): push, verify, then 5b
+# Next Session Prompt — v2.16.47 built (Phase F step 5b-i shadow): push, pre-check, watch shadow, then 5b-ii
+
+**Update 2026-09-28 (5b session)**: v2.16.47 built + locally verified, NOT yet pushed. No user-visible
+change: every scan also computes its prior state from Postgres in shadow and diffs it against the JSON
+path; plus a temporary pre-cutover check endpoint. See HANDOFF.md v2.16.47 (includes the full map of
+`_cat_cache` in the scan path). Chuck approved: the 5b-i/5b-ii split, deleting the legacy
+`gc_watchlist.json` upkeep, and deleting `_fill_gaps` / `_populate_store_data` in 5b-ii.
+
+1. Push: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+   `git add gc_tracker_app.py HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit, `git push origin main`.
+2. Footer v2.16.47; deploy log clean (no schema change).
+3. Pre-check (browser console on the site, admin):
+   `await (await fetch('/api/pg-precheck-5b',{method:'POST'})).json()` then poll
+   `await (await fetch('/api/pg-precheck-5b')).json()` until `status` is `done`.
+   Need `result.user_skus.PASS` true (0 missing watchlist/new_ids SKUs — zero tolerance; if not,
+   investigate each sample before anything else) and `result.column_parity.PASS` true (or only diffs
+   explained by a scan that ran during the check — see `scan_running_at_start/end`; re-run if so).
+   Note `legacy_watchlist_file` and `dead_tools` for the 5b-ii deletions.
+4. After a few real scans (ideally one nationwide + several store scans):
+   `(await (await fetch('/api/browse?pg_shadow=1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({all_stores:true})})).json())._pg_scan_shadow`
+   Expect `clean == scans`, `errors` 0. Look at `recent[*].samples` for any diff; `waited_for_sync`
+   counts scans that started while the previous background Postgres write was still running.
+5. Then **5b-ii (v2.16.48)**: `_run` merges from Postgres prior (`_pg_scan_prior_fetch`), writes via a
+   synchronous `_pg_write_scan` (upsert + sold `UPDATE … RETURNING sku`, one transaction, 3 attempts)
+   BEFORE "done"; on failure: done-with-error, no JSON write, user anchor/last_run not advanced,
+   `_pg_scan_writes` counters + `[pg] SCAN WRITE FAILED` log; JSON backup = merged rows + returned sold
+   SKUs applied to `_cat_cache`, then saved (nothing reads it). Delete the shadow, `gc_watchlist.json`
+   upkeep in `_run`, `_fill_gaps`/`/api/fill-gaps`, `_populate_store_data`/`/api/populate-store-data`,
+   `populateStoreData` stub in gc.js. Test locally with the scan simulator approach (mock
+   fetch_page/parse_products/scrape_store; see HANDOFF.md v2.16.47). Then burn-in, then 5c (v2.17.0).
+
+---
+
+# Next Session Prompt — v2.16.46 LIVE (Phase F step 5a done): next is 5b
+
+**Update 2026-09-28 (later)**: v2.16.46 pushed + live-verified — store pages match browse totals
+(Austin 526 / Emeryville 396 / Danvers 772, ~90ms), `/api/state` equals Postgres available count
+(114,548; it lags up to 60s after a scan by design), saved-search counts, `/admin/users` (0.3s) and
+`/admin/listing-patterns` (2.3s — reads every row's date; admin-only) all fine; 0 browse errors.
+Step 3 below (5b) is next.
+
 
 **Update 2026-09-28**: weekend burn-in clean (v2.16.45 `_pg_browse_errors` all 0). Step 5 split into
 5a / 5b / 5c (Chuck approved). **v2.16.46 = 5a**, built + locally verified, NOT yet pushed: every
