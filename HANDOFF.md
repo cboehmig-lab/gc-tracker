@@ -1,5 +1,80 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-28 · Current version: v2.16.47 (Phase F step 5b-i: scan prior-state shadow from Postgres + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-28 · Current version: v2.16.48 (Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.48 — 2026-09-28: Phase F step 5b-ii — CUTOVER: scan write path is Postgres-primary, JSON is a write-only backup
+
+**Why**: second half of 5b. Gate results on live v2.16.47 (2026-09-28):
+- `/api/pg-precheck-5b`: **column parity PASS on all 20 columns** (503,119 JSON = 503,119 PG, 0 missing /
+  extra / differing values). **new_ids PASS** (209,571 distinct SKUs, 70 users, 0 missing).
+  Watchlists: 18 of 3,602 distinct SKUs (users 4, 13, 2) missing from Postgres — but ALSO absent from the
+  JSON catalog (`missing_but_in_json: 0`), so not a Postgres gap and unaffected by this cutover. **[Chuck:
+  "treat it as passing"]**. Origin unknown (recent real GC ids — shown once, never persisted, or dropped
+  later); the pre-check now includes each missing entry's name/store/date_added to investigate.
+  Legacy `gc_watchlist.json` exists on the volume (1,084 bytes, 2 entries) — leftover; left in place.
+  Also seen (not new, not blocking — Phase G cleanup candidate): 11,080 catalog items with an empty
+  `store`, 12 missing category/condition.
+- Shadow: first 2 real scans (both nationwide, 114,499 items) **clean** — 0 field diffs, sold sets equal,
+  prior fetch ~2.1s on Railway, no `waited_for_sync`.
+
+### What changed (`_run`)
+- After fetching: sold-marking scope decided (`sold_scope`: None when stopped / incomplete nationwide,
+  `"nationwide"`, or the list of fully-scanned stores) — same v2.16.11 rules as before.
+- Under the new `_PG_SCAN_DB_LOCK` (serializes scans' DB phase — /api/stop's 5s watchdog can release the
+  scan `_lock` while a stopped scan is still writing; 180s timeout → failed scan):
+  1. **`_pg_scan_prior_fetch(skus)`** — prior state (`_PG_PRIOR_COLS`) for every found SKU; temp table +
+     join; `_pg_read` retry on a dead pooled connection.
+  2. Merge each product with **`_merge_scan_item`** (unchanged logic; duplicate SKU chains through the
+     run's own earlier result, as the JSON path did) into a local `merged` dict.
+  3. **`_pg_write_scan(merged, ids_this_run, sold_scope)`** — ONE transaction: upsert all rows, then
+     `UPDATE items SET available=false … RETURNING sku` for the sold scope. Connection errors retry the whole
+     (idempotent) transaction up to 3 attempts (2s/5s backoff, pooled-connection validation, "database
+     hiccup — retrying…" progress line); any other error, or the last attempt's, fails the scan.
+- Runs **synchronously before "done"** (was a background thread after "done"): a client's post-scan
+  `/api/browse` now always sees this scan's rows, and `/api/state`'s 60s count cache is invalidated.
+- **Failure = visible failed scan**: `done` with `error` ("The scan finished but its results couldn't be
+  saved…"), nothing written (Postgres transaction rolled back, no JSON backup write, `gc_last_scan.txt`
+  untouched, user's `last_anchor`/`last_run` NOT advanced — the next scan redoes it), `[pg] SCAN WRITE
+  FAILED (<stage>)` log, counters. Stages: config / lock / prior read / write.
+- **JSON backup**: after the commit, `_cat_cache.update(merged)` + `available=False` for the SKUs Postgres
+  returned as sold, then `_save_cat_cache()`. Nothing reads it for scan decisions. `fmt()` (SSE items) and
+  NEW detection read `merged`.
+- Counters **`_PG_SCAN_WRITES`** {ok, failed, retried, since, last_ok_at, last_ms, last_rows, last_sold,
+  last_error, last_error_at} — admin `POST /api/browse?pg_shadow=1` → `_pg_scan_writes` (replaces
+  `_pg_scan_shadow`). Log line per scan: `[pg] scan saved: N rows, M marked sold, Xms`.
+- Semantics note: a Postgres `first_seen=''` stays `''` (JSON gave a missing key `run_time`); `''` means
+  "always visible" in browse, so this never hides an item.
+
+### Deleted
+`_pg_sync_scan`, the v2.16.47 shadow (`_ScanShadow`, `_PG_SCAN_SHADOW`, `_PG_SYNC_THREAD`), the legacy global
+`gc_watchlist.json` upkeep in `_run` + `load_watchlist`/`save_watchlist` (export/import/reset still list the
+file path — 5c), `_fill_gaps` + `/api/fill-gaps`, `_populate_store_data` + `/api/populate-store-data` (both
+only ever wrote `_cat_cache`, no UI caller), gc.js `populateStoreData(){}` stub. ~320 lines net.
+`/api/pg-precheck-5b`, `/api/pg-parity-check`, backfill tooling stay until 5c.
+
+### Verified locally (sandbox Postgres 16, scan simulator with mocked Algolia fetch/scrape)
+- Same 6-scan scenario as v2.16.47 (new items, drop start/carry/end, sold, reappearing, blank-field
+  fallbacks, incomplete nationwide, incomplete store, duplicate SKU): v2.16.47 vs v2.16.48 **identical**
+  SSE done messages (incl. small-scan `items`), JSON catalog and Postgres table after every step.
+- Injected connection error on the upsert → retried, saved (`retried 1`).
+- Injected query error AFTER the upsert statement ran → scan fails with the error message; Postgres,
+  JSON file and `gc_last_scan.txt` byte-identical to before (rollback works); rerun saves normally and the
+  new items are still flagged NEW.
+- Postgres stopped → `failed (prior read)`, JSON + last-scan untouched; after restart (dead pooled
+  connections) next scan saves via the retry path.
+- PG `first_seen=''` preserved across a scan. Pre-check shows watchlist entry details. Deleted routes 404.
+- Scale: 120K-item nationwide DB phase ~11s locally (prior read + upsert + sold), now before "done"
+  (it used to run the same work in the background after "done"). Speeding it up is a Phase G idea.
+- `py_compile` + `node --check` clean; pyflakes no new warnings.
+
+### Push gate / next
+Push after the v2.16.47 shadow has also seen a few STORE scans and at least one scan that marked items
+sold, all clean. After deploy: footer v2.16.48; run a store scan and a nationwide scan (or wait for users);
+`_pg_scan_writes` → ok rising, failed 0; deploy log `[pg] scan saved:` lines; post-scan browse shows new
+items immediately; `/api/pg-parity-check` still 0 diffs (JSON backup mirrors PG). Burn in a few days, then
+**5c = v2.17.0**: stop JSON writes, delete `_cat_cache`/`_load_cat_cache`/`_save_cat_cache`, parity/backfill/
+pre-check tooling, rework `/api/reset` + import/export, measure Railway memory.
 
 ---
 

@@ -1,3 +1,26 @@
+# Next Session Prompt — v2.16.48 built (Phase F 5b-ii cutover): push after shadow sees store scans, then burn-in → 5c
+
+**Update 2026-09-28 (later)**: v2.16.47 pushed + live. Pre-check: column parity PASS (503,119 = 503,119, all
+20 columns), new_ids PASS; 18 watchlist SKUs missing from Postgres but ALSO missing from JSON → Chuck said
+treat as passing. Shadow: 2 real nationwide scans clean. **v2.16.48 (5b-ii cutover) built + locally
+verified, NOT yet pushed** — see HANDOFF.md v2.16.48.
+1. Before pushing: read the v2.16.47 shadow (`_pg_scan_shadow` via `POST /api/browse?pg_shadow=1`) — want a
+   few STORE scans and at least one scan with `sold_json > 0`, all `clean`. (Only 2 nationwide scans with
+   0 sold so far.)
+2. Push: `cd ~/Desktop/gc_tracker`, `rm -f .git/index.lock`,
+   `git add gc_tracker_app.py static/gc.js HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit, `git push origin main`.
+3. After deploy: footer v2.16.48; `_pg_scan_writes` (same `?pg_shadow=1` call) — `ok` rising with scans,
+   `failed` 0; Railway log `[pg] scan saved: …` per scan; nationwide scan "done" now arrives ~10-20s later
+   than before (the DB write moved before "done"); `/api/pg-parity-check` still 0 diffs; `/api/fill-gaps`
+   and `/api/populate-store-data` → 404. Optionally re-run `/api/pg-precheck-5b` to see the 18 missing
+   watchlist entries' name/store/date_added.
+4. Burn in a few days (`failed` stays 0), then **5c = v2.17.0**: stop JSON writes; delete `_cat_cache`,
+   `_load_cat_cache`, `_save_cat_cache`, `/api/pg-parity-check`, `/api/pg-full-backfill`, `/api/pg-precheck-5b`,
+   `migrate_cat_cache_to_pg.py`; rework `/api/reset` + `/api/export-data` / `/api/import-data`; measure
+   Railway memory (the ~500K-entry in-memory JSON dict goes away).
+
+---
+
 # Next Session Prompt — v2.16.47 built (Phase F step 5b-i shadow): push, pre-check, watch shadow, then 5b-ii
 
 **Update 2026-09-28 (5b session)**: v2.16.47 built + locally verified, NOT yet pushed. No user-visible

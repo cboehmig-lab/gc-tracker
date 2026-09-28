@@ -517,7 +517,7 @@ _init_pg_schema()
 
 # ── Postgres connection pool (Phase C, v2.16.20) ──────────────────────────────
 # The scan-triggered/admin-only Postgres paths above (_init_pg_schema,
-# _pg_sync_scan, _pg_full_backfill, _pg_parity_check) each open one ad-hoc
+# _pg_full_backfill, _pg_parity_check; formerly _pg_sync_scan) each open one ad-hoc
 # psycopg2.connect() per call — fine for rare, background-thread-triggered
 # work, but not for something hit on every /api/browse request once Phase D
 # cuts over. See POSTGRES_MIGRATION_PLAN.md §5. Sized for this app's
@@ -614,20 +614,21 @@ def _pg_read(fn):
             _PG_VALIDATE_CONN.reset(_tok)
 
 
-# ── Postgres dual-write (Phase B, v2.16.15) ───────────────────────────────────
-# Mirrors this scan's results into Postgres, best-effort, AFTER _cat_cache/JSON
-# have already been fully updated by the normal scan logic in _run() below —
-# this function only writes what the JSON path already decided; it is never a
-# second source of scan logic, and a failure here can never affect scan
-# completion, the JSON cache, or anything the user sees. Purpose: let Postgres
-# accumulate real production scan data (Phase B of POSTGRES_MIGRATION_PLAN.md)
-# so it can be diffed against the JSON-based system before anything ever reads
-# from it. Silently no-ops if DATABASE_URL isn't set or psycopg2 isn't
-# installed — same guard as _init_pg_schema().
+# ── Postgres scan write path (Phase F step 5b-ii, v2.16.48) ───────────────────
+# Postgres is the scan's source of truth. _run() reads each found SKU's prior
+# state from Postgres (_pg_scan_prior_fetch), merges with _merge_scan_item(),
+# then writes the merged rows AND the sold-marking in ONE transaction
+# (_pg_write_scan) BEFORE sending "done" — so a client's post-scan /api/browse
+# always sees this scan's results, and the next scan's prior read always sees
+# them too. A write failure is a failed scan (error to the user, nothing else
+# saved, the user's NEW anchor not advanced) — never silent. The JSON catalog
+# (_cat_cache / gc_category_cache.json) is still written afterwards as a
+# write-only backup that mirrors exactly what Postgres committed; nothing reads
+# it for scan decisions (5c deletes it).
 #
-# Runs in its own background thread (see the call site in _run()) so a slow
-# Postgres write never delays the scan's "done" SSE message — dual-write is
-# purely for building confidence, not something anything currently depends on.
+# History: Phase B (v2.16.15) added _pg_sync_scan, a best-effort background
+# mirror of the JSON path; v2.16.47 (5b-i) shadow-compared a Postgres-prior
+# merge against the JSON path on real scans (clean) before this cutover.
 _PG_UPSERT_COLS = ["sku", "name", "brand", "category", "subcategory", "condition",
                    "condition_note", "price", "list_price", "has_price_drop", "price_drop",
                    "price_drop_since", "store", "location", "url", "image_id", "is_vintage",
@@ -651,62 +652,13 @@ def _pg_row_for(sku: str, it: dict) -> tuple:
         it.get("available", True), it.get("date_listed", "") or "", it.get("first_seen", "") or "",
     )
 
-def _pg_sync_scan(ids_this_run: set, nationwide: bool, scan_incomplete: bool,
-                   incomplete_stores: set, stores_to_scan: list):
-    """Best-effort Postgres mirror of one scan. See module docstring above.
-    Reads _cat_cache (read-only) and the same run-scoped values _run() already
-    computed — never recomputes scan logic, only replays the JSON path's own
-    two effects: (1) upsert every item this run touched, (2) mark unavailable,
-    in Postgres, whatever the JSON sold-marking block just marked unavailable
-    in _cat_cache, under the IDENTICAL coverage-gap-safe condition and store
-    scope (v2.16.11) — see _run()'s own sold-marking block for that reasoning."""
-    if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL):
-        return
-    try:
-        conn = psycopg2.connect(PG_DATABASE_URL, connect_timeout=10)
-        try:
-            with conn.cursor() as cur:
-                if ids_this_run:
-                    rows = [_pg_row_for(sku, _cat_cache[sku]) for sku in ids_this_run if sku in _cat_cache]
-                    if rows:
-                        psycopg2.extras.execute_values(cur, _PG_UPSERT_SQL, rows, page_size=2000)
-                # Mirrors _run()'s "Mark sold items" block's exact condition and scope.
-                if not _stop_event.is_set() and (not nationwide or not scan_incomplete):
-                    cur.execute("CREATE TEMP TABLE _run_skus (sku TEXT PRIMARY KEY) ON COMMIT DROP")
-                    if ids_this_run:
-                        psycopg2.extras.execute_values(
-                            cur, "INSERT INTO _run_skus (sku) VALUES %s",
-                            [(s,) for s in ids_this_run], page_size=5000,
-                        )
-                    if nationwide:
-                        cur.execute("""
-                            UPDATE items SET available=false
-                            WHERE available
-                            AND NOT EXISTS (SELECT 1 FROM _run_skus WHERE _run_skus.sku = items.sku)
-                        """)
-                    else:
-                        scanned_store_set = list(set(stores_to_scan) - incomplete_stores)
-                        if scanned_store_set:
-                            cur.execute("""
-                                UPDATE items SET available=false
-                                WHERE available
-                                AND NOT EXISTS (SELECT 1 FROM _run_skus WHERE _run_skus.sku = items.sku)
-                                AND store = ANY(%s)
-                            """, (scanned_store_set,))
-            conn.commit()
-        finally:
-            conn.close()
-    except Exception as e:
-        # Never let a Postgres hiccup surface anywhere a user or the scan logic
-        # would see it — this is purely a background confidence-building mirror.
-        print(f"[pg] scan dual-write skipped: {type(e).__name__}: {e}")
 
-# ── Scan merge (v2.16.47, Phase F step 5b-i) ──────────────────────────────────
-# The per-item merge _run() has always done inline, pulled out verbatim so the
-# JSON path and the Postgres-prior shadow path (below) run the SAME code: any
-# difference the shadow reports is a data difference in the prior state, never
-# a logic difference. `cached` is the prior record for this SKU ({} if unseen);
-# only .get() is used on it, so a dict built from a Postgres row works too.
+# The per-item merge (moved verbatim out of _run() in v2.16.47). `cached` is the
+# prior record for this SKU ({} if never seen); only .get() is used on it, so a
+# dict built from a Postgres row (_PG_PRIOR_COLS) works. Note: Postgres can't
+# tell a missing first_seen/price_drop_since from '' — a prior row with '' keeps
+# '' (the JSON path gave a missing key run_time). '' first_seen means "always
+# visible" in browse, so this never hides an item.
 def _merge_scan_item(p: dict, cached: dict, run_time: str) -> dict:
     cat       = p.get("category") or cached.get("category", "")
     subcat    = p.get("subcategory") or cached.get("subcategory", "")
@@ -753,194 +705,113 @@ def _merge_scan_item(p: dict, cached: dict, run_time: str) -> dict:
     }
 
 
-# ── Scan shadow: prior state from Postgres (v2.16.47, Phase F step 5b-i) ──────
-# SHADOW ONLY — nothing here changes what a scan writes or what a user sees.
-# Each _run() also reads the prior state of the SKUs it found from Postgres
-# (the state 5b-ii will merge from instead of _cat_cache), merges each item
-# with the same _merge_scan_item(), and compares the would-be Postgres row
-# (_pg_row_for — exactly what gets upserted) against the row the JSON path
-# produced. It also computes which SKUs Postgres WOULD mark sold under the same
-# scope rules and compares that set with what the JSON sold-marking loop
-# flipped. Results: `[pg-shadow]` log line per scan + _PG_SCAN_SHADOW counters
-# (admin: POST /api/browse?pg_shadow=1 -> `_pg_scan_shadow`). Any failure is
-# swallowed and counted — a shadow problem can never affect a scan.
-#
-# The previous scan's _pg_sync_scan runs in a background thread after its
-# "done" message, so a scan started right after another could read Postgres
-# before the previous write landed. The shadow waits (up to 60s) for that
-# thread first and counts how often it had to — that number is evidence for
-# 5b-ii making the write synchronous.
 _PG_PRIOR_COLS = ["category", "subcategory", "condition", "brand", "location",
                   "has_price_drop", "price_drop_since", "date_listed", "image_id",
                   "is_vintage", "condition_note", "first_seen"]
-_PG_SYNC_THREAD = None      # the most recent _pg_sync_scan thread (see _run)
-_PG_SCAN_SHADOW = {"scans": 0, "clean": 0, "errors": 0, "waited_for_sync": 0,
-                   "since": None, "last_error": "",
-                   "field_diffs": {}, "sold_only_json": 0, "sold_only_pg": 0,
-                   "prior_missing_in_pg": 0, "prior_missing_in_json": 0,
-                   "recent": []}
-_PG_SCAN_SHADOW_SAMPLE_CAP = 5
-_PG_SCAN_SHADOW_RECENT_CAP = 20
+
+# Serializes the prior-read → merge → write section of scans. The scan _lock
+# normally does this, but /api/stop's 5s force-unlock watchdog can release
+# _lock while a stopped scan is still writing; without this a new scan could
+# read prior state before that write commits.
+_PG_SCAN_DB_LOCK = threading.Lock()
+_PG_SCAN_DB_LOCK_TIMEOUT = 180
+
+_PG_SCAN_WRITE_ATTEMPTS = 3
+_PG_SCAN_WRITE_BACKOFF = (2, 5)   # seconds before attempts 2 and 3
+# Per-process counters (reset on deploy). Admin: POST /api/browse?pg_shadow=1
+# -> `_pg_scan_writes`. `failed` = scans that reported an error to the user
+# because Postgres couldn't be read or written; `retried` = attempts repeated
+# after a connection error (a retry that then succeeded counts only here).
+_PG_SCAN_WRITES = {"ok": 0, "failed": 0, "retried": 0, "since": None,
+                   "last_ok_at": None, "last_ms": None, "last_rows": 0, "last_sold": 0,
+                   "last_error": "", "last_error_at": None}
 
 
-def _pg_scan_prior_fetch(skus, run_ids, sold_scope):
-    """One read-only transaction: prior state for `skus`, plus the SKUs Postgres
-    would mark sold. sold_scope is None (sold-marking skipped), "nationwide",
-    or a list of fully-scanned store names. Returns (prior {sku: tuple in
-    _PG_PRIOR_COLS order}, would_be_sold set)."""
+def _pg_scan_note(kind, **kw):
+    st = _PG_SCAN_WRITES
+    if st["since"] is None:
+        st["since"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    st[kind] += 1
+    st.update(kw)
+
+
+def _pg_scan_prior_fetch(skus):
+    """Prior state for `skus` from Postgres: {sku: tuple in _PG_PRIOR_COLS order}.
+    One read-only pooled transaction (temp table + join), retried once on a
+    dead pooled connection via _pg_read. Raises on failure."""
+    if not skus:
+        return {}
     def _q():
         with _pg_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute("CREATE TEMP TABLE _shadow_seen (sku TEXT PRIMARY KEY) ON COMMIT DROP")
-                if run_ids:
-                    psycopg2.extras.execute_values(
-                        cur, "INSERT INTO _shadow_seen (sku) VALUES %s ON CONFLICT DO NOTHING",
-                        [(s,) for s in run_ids], page_size=5000)
-                prior = {}
-                if skus:
-                    cur.execute(
-                        f"SELECT i.sku, {', '.join('i.' + c for c in _PG_PRIOR_COLS)} "
-                        f"FROM items i JOIN _shadow_seen s ON s.sku = i.sku")
-                    for r in cur.fetchall():
-                        prior[r[0]] = r[1:]
-                sold = set()
-                if sold_scope == "nationwide":
-                    cur.execute("SELECT sku FROM items i WHERE available AND NOT EXISTS "
-                                "(SELECT 1 FROM _shadow_seen s WHERE s.sku = i.sku)")
-                    sold = {r[0] for r in cur.fetchall()}
-                elif sold_scope:
-                    cur.execute("SELECT sku FROM items i WHERE available AND store = ANY(%s) "
-                                "AND NOT EXISTS (SELECT 1 FROM _shadow_seen s WHERE s.sku = i.sku)",
-                                (list(sold_scope),))
-                    sold = {r[0] for r in cur.fetchall()}
-                return prior, sold
+                cur.execute("CREATE TEMP TABLE _prior_skus (sku TEXT PRIMARY KEY) ON COMMIT DROP")
+                psycopg2.extras.execute_values(
+                    cur, "INSERT INTO _prior_skus (sku) VALUES %s ON CONFLICT DO NOTHING",
+                    [(s,) for s in skus], page_size=5000)
+                cur.execute(
+                    f"SELECT i.sku, {', '.join('i.' + c for c in _PG_PRIOR_COLS)} "
+                    f"FROM items i JOIN _prior_skus s ON s.sku = i.sku")
+                return {r[0]: r[1:] for r in cur.fetchall()}
     return _pg_read(_q)
 
 
-class _ScanShadow:
-    """Per-scan shadow state. begin() before the merge loop, observe() per item
-    inside it (after the JSON merge for that item), finish() after the JSON
-    sold-marking. Every method swallows its own errors."""
-
-    def __init__(self):
-        self.ok = False
-        self.err = ""
-        self.t0 = time.time()
-        self.prior = {}
-        self.pg_sold = set()
-        self.merged_rows = {}    # sku -> _pg_row_for tuple, for duplicate chaining
-        self.field_diffs = {}    # col -> count
-        self.samples = {}        # col -> [ {sku, json, pg} ]
-        self.items = 0
-        self.missing_in_pg = 0   # JSON had a prior record, Postgres had none
-        self.missing_in_json = 0 # Postgres had a prior row, JSON had none
-        self.waited = False
-        self.fetch_ms = 0
-
-    def begin(self, all_products, run_ids, sold_scope):
-        if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL and _PG_POOL is not None):
-            self.err = "postgres not configured"
-            return
+def _pg_write_scan(merged: dict, run_ids: set, sold_scope, send=None) -> set:
+    """Write one scan to Postgres in ONE transaction: upsert every merged row,
+    then (if sold_scope is not None) mark unavailable every available item in
+    scope that this run didn't see, returning those SKUs. sold_scope: None
+    (no sold-marking: stopped / incomplete nationwide scan), "nationwide", or a
+    list of fully-scanned store names (empty list = nothing to mark).
+    Idempotent, so a connection error retries the whole transaction (up to
+    _PG_SCAN_WRITE_ATTEMPTS, validating pooled connections on retry); any
+    other error, or the last attempt's, raises."""
+    rows = [_pg_row_for(sku, rec) for sku, rec in merged.items()]
+    exclude = set(run_ids) | set(merged)
+    last_exc = None
+    for attempt in range(_PG_SCAN_WRITE_ATTEMPTS):
+        _tok = _PG_VALIDATE_CONN.set(attempt > 0)
         try:
-            th = _PG_SYNC_THREAD
-            if th is not None and th.is_alive():
-                self.waited = True
-                th.join(timeout=60)
-            t = time.time()
-            skus = {p["id"] for p in all_products}
-            self.prior, self.pg_sold = _pg_scan_prior_fetch(skus, set(run_ids) | skus, sold_scope)
-            self.fetch_ms = int((time.time() - t) * 1000)
-            self.ok = True
+            with _pg_conn() as conn:
+                with conn.cursor() as cur:
+                    if rows:
+                        psycopg2.extras.execute_values(cur, _PG_UPSERT_SQL, rows, page_size=2000)
+                    sold = set()
+                    if sold_scope == "nationwide" or sold_scope:
+                        cur.execute("CREATE TEMP TABLE _run_skus (sku TEXT PRIMARY KEY) ON COMMIT DROP")
+                        if exclude:
+                            psycopg2.extras.execute_values(
+                                cur, "INSERT INTO _run_skus (sku) VALUES %s",
+                                [(s,) for s in exclude], page_size=5000)
+                        if sold_scope == "nationwide":
+                            cur.execute("""
+                                UPDATE items SET available=false
+                                WHERE available
+                                AND NOT EXISTS (SELECT 1 FROM _run_skus WHERE _run_skus.sku = items.sku)
+                                RETURNING sku
+                            """)
+                        else:
+                            cur.execute("""
+                                UPDATE items SET available=false
+                                WHERE available
+                                AND NOT EXISTS (SELECT 1 FROM _run_skus WHERE _run_skus.sku = items.sku)
+                                AND store = ANY(%s)
+                                RETURNING sku
+                            """, (list(sold_scope),))
+                        sold = {r[0] for r in cur.fetchall()}
+            return sold
         except Exception as e:
-            self.err = f"begin: {type(e).__name__}: {e}"
-            self.ok = False
-
-    def observe(self, p, json_prior_existed, json_rec, run_time):
-        if not self.ok:
-            return
-        try:
-            sku = p["id"]
-            self.items += 1
-            if sku in self.merged_rows:
-                prior = dict(zip(_PG_UPSERT_COLS, self.merged_rows[sku]))
-            elif sku in self.prior:
-                prior = dict(zip(_PG_PRIOR_COLS, self.prior[sku]))
-            else:
-                prior = {}
-            if sku not in self.merged_rows:
-                if json_prior_existed and sku not in self.prior:
-                    self.missing_in_pg += 1
-                elif not json_prior_existed and sku in self.prior:
-                    self.missing_in_json += 1
-            pg_row = _pg_row_for(sku, _merge_scan_item(p, prior, run_time))
-            self.merged_rows[sku] = pg_row
-            js_row = _pg_row_for(sku, json_rec)
-            if pg_row != js_row:
-                for i, col in enumerate(_PG_UPSERT_COLS):
-                    if pg_row[i] != js_row[i]:
-                        self.field_diffs[col] = self.field_diffs.get(col, 0) + 1
-                        smp = self.samples.setdefault(col, [])
-                        if len(smp) < _PG_SCAN_SHADOW_SAMPLE_CAP:
-                            smp.append({"sku": sku, "json": js_row[i], "pg": pg_row[i]})
-        except Exception as e:
-            self.err = self.err or f"observe: {type(e).__name__}: {e}"
-
-    def finish(self, sold_marking_ran, json_sold, label):
-        try:
-            st = _PG_SCAN_SHADOW
-            if st["since"] is None:
-                st["since"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-            st["scans"] += 1
-            if self.waited:
-                st["waited_for_sync"] += 1
-            if not self.ok or self.err:
-                st["errors"] += 1
-                st["last_error"] = (self.err or "not run")[:300]
-                print(f"[pg-shadow] {label}: shadow not usable — {self.err}")
-                summary = {"at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                           "label": label, "error": (self.err or "not run")[:300]}
-            else:
-                pg_sold = self.pg_sold if sold_marking_ran else set()
-                only_json = json_sold - pg_sold
-                only_pg = pg_sold - json_sold
-                for col, n in self.field_diffs.items():
-                    st["field_diffs"][col] = st["field_diffs"].get(col, 0) + n
-                st["sold_only_json"] += len(only_json)
-                st["sold_only_pg"] += len(only_pg)
-                st["prior_missing_in_pg"] += self.missing_in_pg
-                st["prior_missing_in_json"] += self.missing_in_json
-                clean = (not self.field_diffs and not only_json and not only_pg
-                         and not self.missing_in_pg and not self.missing_in_json)
-                if clean:
-                    st["clean"] += 1
-                summary = {
-                    "at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "label": label, "clean": clean, "items": self.items,
-                    "field_diffs": dict(self.field_diffs), "samples": self.samples,
-                    "sold_marking_ran": sold_marking_ran,
-                    "sold_json": len(json_sold), "sold_pg": len(pg_sold),
-                    "sold_only_json": sorted(only_json)[:_PG_SCAN_SHADOW_SAMPLE_CAP],
-                    "sold_only_pg": sorted(only_pg)[:_PG_SCAN_SHADOW_SAMPLE_CAP],
-                    "sold_only_json_n": len(only_json), "sold_only_pg_n": len(only_pg),
-                    "prior_rows": len(self.prior),
-                    "prior_missing_in_pg": self.missing_in_pg,
-                    "prior_missing_in_json": self.missing_in_json,
-                    "waited_for_sync": self.waited, "fetch_ms": self.fetch_ms,
-                }
-                print(f"[pg-shadow] {label}: {self.items} items, clean={clean}, "
-                      f"field_diffs={dict(self.field_diffs)}, sold json/pg={len(json_sold)}/{len(pg_sold)} "
-                      f"(only_json {len(only_json)}, only_pg {len(only_pg)}), "
-                      f"prior missing pg/json={self.missing_in_pg}/{self.missing_in_json}, "
-                      f"fetch {self.fetch_ms}ms, waited_for_sync={self.waited}")
-            st["recent"].insert(0, summary)
-            del st["recent"][_PG_SCAN_SHADOW_RECENT_CAP:]
-        except Exception as e:
-            print(f"[pg-shadow] finish failed: {type(e).__name__}: {e}")
+            last_exc = e
+            if not _pg_is_conn_error(e) or attempt == _PG_SCAN_WRITE_ATTEMPTS - 1:
+                raise
+            _pg_scan_note("retried", last_error=f"{type(e).__name__}: {e}"[:300],
+                          last_error_at=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+            print(f"[pg] scan write attempt {attempt + 1} failed ({type(e).__name__}: {e}) — retrying")
+            if send:
+                send({"type": "progress", "msg": "  database hiccup while saving — retrying…"})
+            time.sleep(_PG_SCAN_WRITE_BACKOFF[min(attempt, len(_PG_SCAN_WRITE_BACKOFF) - 1)])
         finally:
-            # Free the per-scan maps now rather than when _run() returns.
-            self.prior = {}
-            self.merged_rows = {}
-            self.pg_sold = set()
+            _PG_VALIDATE_CONN.reset(_tok)
+    raise last_exc  # unreachable
+
 
 # ── Postgres full backfill (Phase A fix, v2.16.18) ────────────────────────────
 # One-time, admin-triggered corrective re-sync of the Postgres `items` table
@@ -961,10 +832,10 @@ class _ScanShadow:
 # changes, treat it as a separate investigation, not something this backfill
 # should silently paper over.
 #
-# Reuses the exact _PG_UPSERT_SQL / _pg_row_for already used by _pg_sync_scan —
+# Reuses the exact _PG_UPSERT_SQL / _pg_row_for also used by _pg_write_scan —
 # same upsert shape, just applied to the full cache instead of one scan's
 # ids_this_run. Runs in a background thread via the same _lock/_q pattern as
-# _validate_stores / _fill_gaps, so the ~440K-row write — measured at ~15K
+# _validate_stores, so the ~440K-row write — measured at ~15K
 # rows/sec against a local scratch Postgres (436,240 synthetic rows in ~25-29s,
 # including 180K seeded-stale rows needing correction); real timing against
 # Railway's network/DB will vary — never blocks the request or risks a proxy
@@ -1479,20 +1350,6 @@ def get_store_info() -> dict:
 # (load_favorites/save_favorites and load_keywords/save_keywords removed in v2.14.5
 #  along with their dead API routes — 2026-07 audit E3. The FAVORITES_FILE /
 #  KEYWORDS_FILE constants stay: admin export/import/reset reference the paths.)
-
-def load_watchlist() -> dict:
-    """Returns {sku: {name, price, store, url, condition, category, date_added, sold}}"""
-    if WATCHLIST_FILE.exists():
-        try:
-            return json.loads(WATCHLIST_FILE.read_text())
-        except Exception:
-            pass
-    return {}
-
-
-def save_watchlist(wl: dict):
-    WATCHLIST_FILE.write_text(json.dumps(wl, indent=2))
-
 
 # ── GC scraping ───────────────────────────────────────────────────────────────
 
@@ -5234,7 +5091,7 @@ def api_browse():
     if pg_diag:
         resp = dict(resp)
         resp["_pg_browse_errors"] = _PG_BROWSE_ERRORS
-        resp["_pg_scan_shadow"] = _PG_SCAN_SHADOW   # v2.16.47, Phase F 5b-i
+        resp["_pg_scan_writes"] = _PG_SCAN_WRITES   # v2.16.48, Phase F 5b-ii
     return jsonify(resp)
 
 
@@ -5416,9 +5273,9 @@ def _browse_compute(data, *, logged_in, pg_diag=False):
 # (Dead legacy global-file endpoints removed in v2.14.5 — /api/watchlist GET+POST,
 # /api/watchlist/items, /api/keywords GET+POST. Per-user watch/want lists live in
 # SQLite via /api/sync; no frontend called any of these (grepped all static/*.js).
-# Login-gated since v2.12.32, deleted per 2026-07 audit E3. load_watchlist/
-# save_watchlist helpers stay — the scan loop still updates the legacy global
-# watchlist file's sold flags.)
+# Login-gated since v2.12.32, deleted per 2026-07 audit E3. The load_watchlist/
+# save_watchlist helpers and the scan's upkeep of the legacy global
+# gc_watchlist.json were deleted in v2.16.48 — nothing read that file.)
 
 
 # (v2.16.46) /api/state runs on every page load; the available-item count only
@@ -6064,94 +5921,6 @@ def api_stop():
     threading.Thread(target=_force_unlock, daemon=True).start()
     return jsonify({"status": "stopping"})
 
-@app.route("/api/populate-store-data", methods=["POST"])
-@optional_user_context
-def api_populate_store_data():
-    """One-time migration: scan stores to tag cache entries with their store name."""
-    denied = _require_admin_api()
-    if denied:
-        return denied
-    if not _lock.acquire(blocking=False):
-        return jsonify({"error": "A run is already in progress."}), 409
-    _stop_event.clear()
-    while not _q.empty():
-        try: _q.get_nowait()
-        except queue.Empty: break
-    data = request.json or {}
-    stores = data.get("stores", [])  # empty = all stores
-    t = threading.Thread(target=_populate_store_data, args=(stores,), daemon=True)
-    t.start()
-    return jsonify({"status": "started"})
-
-
-def _populate_store_data(selected_stores: list = None):
-    """Fetch pages of each store and tag cache entries with their store name."""
-    def send(msg): _q.put(msg)
-    try:
-        _load_cat_cache()
-        stores = selected_stores if selected_stores else get_store_list()
-        total  = len(stores)
-        updated = 0
-        label = f"{total} selected store(s)" if selected_stores else f"all {total} stores"
-        send({"type": "progress", "msg": f"Tagging cache entries for {label}…"})
-        send({"type": "progress", "msg": "You can stop at any time — progress is saved as it goes."})
-
-        for i, store in enumerate(stores, 1):
-            if _stop_event.is_set():
-                send({"type": "progress", "msg": "⏹ Stopped."})
-                break
-            if i % 20 == 1:
-                send({"type": "progress", "msg": f"  [{i}/{total}] {store}…"})
-            try:
-                page = 1
-                while page <= 50:
-                    data = fetch_page(store, page)
-                    products = parse_products(data, store)
-                    if not products:
-                        break
-                    for p in products:
-                        sku = p["id"]
-                        if sku in _cat_cache and not _cat_cache[sku].get("store"):
-                            _cat_cache[sku]["store"] = store
-                            _cat_cache[sku]["name"]  = _cat_cache[sku].get("name") or p.get("name","")
-                            _cat_cache[sku]["url"]   = _cat_cache[sku].get("url")  or p.get("url","")
-                            _cat_cache[sku]["price"] = _cat_cache[sku].get("price") or p.get("price",0)
-                            _cat_cache[sku]["brand"] = _cat_cache[sku].get("brand") or p.get("brand","")
-                            _cat_cache[sku]["location"] = _cat_cache[sku].get("location") or p.get("location","")
-                            _cat_cache[sku]["category"] = _cat_cache[sku].get("category") or p.get("category","")
-                            _cat_cache[sku]["subcategory"] = _cat_cache[sku].get("subcategory") or p.get("subcategory","")
-                            _cat_cache[sku]["date_listed"] = _cat_cache[sku].get("date_listed") or p.get("date_listed","")
-                            updated += 1
-                    if len(products) < PAGE_SIZE:
-                        break
-                    page += 1
-                    _sleep(1.0, 0.5)
-            except Exception:
-                pass
-            _sleep(1.5, 0.8)
-
-        _save_cat_cache()
-        send({"type": "progress", "msg": f"\n✓ Done — {updated} cache entries tagged with store names."})
-        send({"type": "done", "baseline": False, "stopped": _stop_event.is_set(),
-              "scanned": total, "new_count": 0, "new_items": [], "all_items": [],
-              "gap_fill": True, "fixed": updated})
-    except Exception as e:
-        # Don't leak exception text over the (public) SSE stream — log it server-side.
-        # (2026-07 audit / round-2 deferred L3)
-        print(f"[scan] operation failed: {type(e).__name__}: {e}")
-        send({"type": "done", "error": "Operation failed — see server logs.", "scanned": 0, "new_count": 0, "new_items": []})
-    finally:
-        # Guard against the /api/stop 5s force-unlock watchdog already having
-        # released this lock if this thread's winddown ran long (RuntimeError:
-        # release unlocked lock) — same pattern as admin_clear_lock/_force_unlock.
-        # Harmless either way: the lock ends up unlocked regardless. (v2.16.27)
-        try:
-            _lock.release()
-        except RuntimeError:
-            pass
-
-
-
 @app.route("/api/pg-parity-check")
 @optional_user_context
 def api_pg_parity_check():
@@ -6197,6 +5966,7 @@ def _precheck_5b_user_skus():
     finally:
         conn.close()
     wl_refs, nid_refs = {}, {}     # sku -> [user_id, ...]
+    wl_meta = {}                  # sku -> first watchlist entry's name/store/date_added
     info = {"user_rows": len(rows), "users_with_watchlist": 0, "users_with_new_ids": 0,
             "users_pending_deletion": 0, "parse_errors": 0}
     for r in rows:
@@ -6213,6 +5983,10 @@ def _precheck_5b_user_skus():
             nids, info["parse_errors"] = [], info["parse_errors"] + 1
         if isinstance(wl, dict):
             wl_skus = list(wl.keys())
+            for k, v in wl.items():   # v2.16.48: keep entry details for the missing-SKU sample
+                if isinstance(v, dict) and str(k) not in wl_meta:
+                    wl_meta[str(k)] = {f: str(v.get(f, ""))[:80]
+                                       for f in ("name", "store", "location", "date_added")}
         elif isinstance(wl, list):
             wl_skus = [(x.get("id") or x.get("sku")) if isinstance(x, dict) else x for x in wl]
         else:
@@ -6227,7 +6001,7 @@ def _precheck_5b_user_skus():
             wl_refs.setdefault(s, []).append(uid)
         for s in nid_skus:
             nid_refs.setdefault(s, []).append(uid)
-    return wl_refs, nid_refs, info
+    return wl_refs, nid_refs, info, wl_meta
 
 
 def _precheck_5b_run():
@@ -6239,7 +6013,7 @@ def _precheck_5b_run():
         result = {"scan_running_at_start": _lock.locked()}
 
         # (a) user SKUs vs Postgres
-        wl_refs, nid_refs, uinfo = _precheck_5b_user_skus()
+        wl_refs, nid_refs, uinfo, wl_meta = _precheck_5b_user_skus()
         all_skus = sorted(set(wl_refs) | set(nid_refs))
         found = {}
         def _q_users():
@@ -6257,7 +6031,7 @@ def _precheck_5b_run():
         sample = []
         for s in miss_wl[:_PRECHECK_SAMPLE_CAP]:
             sample.append({"sku": s, "list": "watchlist", "user_ids": wl_refs[s][:5],
-                           "in_json": s in _cat_cache})
+                           "in_json": s in _cat_cache, "entry": wl_meta.get(s, {})})
         for s in miss_nid[:max(0, _PRECHECK_SAMPLE_CAP - len(sample))]:
             sample.append({"sku": s, "list": "new_ids", "user_ids": nid_refs[s][:5],
                            "in_json": s in _cat_cache})
@@ -6457,28 +6231,6 @@ def api_build_store_coords():
     threading.Thread(target=_run, daemon=True).start()
     return jsonify({"status": "started"})
 
-@app.route("/api/fill-gaps", methods=["POST"])
-@optional_user_context
-def api_fill_gaps():
-    """Re-scrape listing pages for selected stores to fill missing condition/category data."""
-    denied = _require_admin_api()
-    if denied:
-        return denied
-    if not _lock.acquire(blocking=False):
-        return jsonify({"error": "A run is already in progress."}), 409
-    _stop_event.clear()
-    while not _q.empty():
-        try: _q.get_nowait()
-        except queue.Empty: break
-    data = request.json or {}
-    stores = data.get("stores", [])
-    if not stores:
-        _lock.release()
-        return jsonify({"error": "No stores selected."}), 400
-    t = threading.Thread(target=_fill_gaps, args=(stores,), daemon=True)
-    t.start()
-    return jsonify({"status": "started"})
-
 @app.route("/api/progress")
 @optional_user_context
 def api_progress():
@@ -6613,84 +6365,6 @@ def _validate_stores():
             _lock.release()
         except RuntimeError:
             pass
-
-
-def _fill_gaps(selected_stores: list[str]):
-    """Fetch individual product pages for items missing category or condition data."""
-    def send(msg): _q.put(msg)
-    try:
-        _load_cat_cache()
-
-        # Find cache entries that need fixing — missing category OR empty condition
-        gaps = {
-            sku: data for sku, data in _cat_cache.items()
-            if data.get("url")
-            and (not data.get("category") or not data.get("condition"))
-        }
-
-        total = len(gaps)
-        if total == 0:
-            send({"type": "progress", "msg": "No gaps found — all items already have category and condition data."})
-            send({"type": "done", "baseline": False, "stopped": False,
-                  "scanned": 0, "new_count": 0, "new_items": [], "all_items": [],
-                  "gap_fill": True, "fixed": 0})
-            return
-
-        send({"type": "progress", "msg": f"Found {total} items with missing data. Fetching product pages in parallel…"})
-        send({"type": "progress", "msg": f"(You can stop at any time.)"})
-
-        fixed = 0
-        gap_list = list(gaps.items())
-
-        def _fetch_gap(item):
-            sku, data = item
-            url  = data.get("url", "")
-            name = data.get("name", "")
-            try:
-                _sleep(0.3, 0.2)  # 0.1–0.5s jitter
-                cat, subcat, condition = fetch_page_data(url, name)
-                return sku, cat, subcat, condition
-            except Exception:
-                return sku, "", "", ""
-
-        with ThreadPoolExecutor(max_workers=5) as pool:
-            futures = {pool.submit(_fetch_gap, item): item for item in gap_list}
-            for future in as_completed(futures):
-                if _stop_event.is_set():
-                    send({"type": "progress", "msg": "⏹ Stopped by user."})
-                    break
-                sku, cat, subcat, condition = future.result()
-                data = gaps[sku]
-                _cat_cache[sku].update({
-                    "category":          cat or data.get("category", ""),
-                    "subcategory":       subcat or data.get("subcategory", ""),
-                    "condition":         condition or data.get("condition", ""),
-                    "condition_fetched": True,
-                })
-                fixed += 1
-                if fixed % 10 == 0:
-                    send({"type": "progress", "msg": f"  …{fixed}/{total} items updated"})
-
-        _save_cat_cache()
-        send({"type": "progress", "msg": f"\n✓ Done — {fixed} item(s) updated. Re-run your stores to see the refreshed data."})
-        send({"type": "done", "baseline": False, "stopped": _stop_event.is_set(),
-              "scanned": fixed, "new_count": 0, "new_items": [], "all_items": [],
-              "gap_fill": True, "fixed": fixed})
-    except Exception as e:
-        # Don't leak exception text over the (public) SSE stream — log it server-side.
-        # (2026-07 audit / round-2 deferred L3)
-        print(f"[scan] operation failed: {type(e).__name__}: {e}")
-        send({"type": "done", "error": "Operation failed — see server logs.", "scanned": 0, "new_count": 0, "new_items": []})
-    finally:
-        # Guard against the /api/stop 5s force-unlock watchdog already having
-        # released this lock if this thread's winddown ran long (RuntimeError:
-        # release unlocked lock) — same pattern as admin_clear_lock/_force_unlock.
-        # Harmless either way: the lock ends up unlocked regardless. (v2.16.27)
-        try:
-            _lock.release()
-        except RuntimeError:
-            pass
-
 
 
 def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_last_run: str = "", run_time: str = "", device_last_anchor: str = "", user_id: int | None = None):
@@ -6861,35 +6535,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         # introduced in v2.10.11, fixed in v2.10.18.)
         anchor_date = device_last_anchor or ""
 
-        # ── Phase F 5b-i shadow: prior state from Postgres (v2.16.47) ───────────
-        # Read-only; never changes what this scan writes. See _ScanShadow.
-        # Sold scope mirrors the "Mark sold items" block below exactly.
-        if nationwide:
-            _shadow_sold_scope = "nationwide" if not scan_incomplete else None
-        else:
-            _shadow_sold_scope = sorted(set(stores_to_scan) - incomplete_stores)
-        _shadow = _ScanShadow()
-        _shadow.begin(all_products, ids_this_run, _shadow_sold_scope)
-
-        # ── Apply data from Algolia API to products, tracking price drops ────────
-        # Categories, condition, brand all come from the API now — no page scraping needed.
-        # The per-item merge lives in _merge_scan_item() since v2.16.47 (same code,
-        # moved so the Postgres-prior shadow runs identical logic).
-        for p in all_products:
-            sku    = p["id"]
-            cached = _cat_cache.get(sku, {})
-            rec    = _merge_scan_item(p, cached, run_time)
-            _cat_cache[sku] = rec
-            _shadow.observe(p, bool(cached), rec, run_time)
-            p["category"]    = rec["category"]
-            p["subcategory"] = rec["subcategory"]
-            p["condition"]   = rec["condition"]
-            p["brand"]       = rec["brand"]
-            p["location"]    = rec["location"]
-            p["price_drop"]  = rec["price_drop"]
-            p["list_price"]  = rec["list_price"]
-
-        # ── Mark sold items (not found in this scan) ────────────────────────────
+        # ── Sold-marking scope ─────────────────────────────────────────────────
         # Only mark items sold for stores/coverage we're confident we saw a
         # COMPLETE picture of this run — a store whose fetch errored, timed out,
         # or got abandoned mid-scan (incomplete_stores) is not evidence its items
@@ -6897,63 +6543,94 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         # completeness isn't per-store — if page 1 failed, a page stalled, or the
         # scan was stopped early, we don't know which SKUs we missed, so skip
         # sold-marking entirely rather than risk wiping out items still in stock.
-        # (v2.16.11 — see scrape_store()'s `complete` flag.)
-        _json_sold = set()        # v2.16.47: collected for the shadow compare only
-        _sold_marking_ran = False
-        if not _stop_event.is_set() and (not nationwide or not scan_incomplete):
-            _sold_marking_ran = True
-            scanned_store_set = set(stores_to_scan) - incomplete_stores
-            wl = load_watchlist()
-            wl_changed = False
-            for sku, cached in _cat_cache.items():
-                if sku in ids_this_run:
-                    continue
-                # Nationwide scan: any item not found is gone
-                # Store scan: only mark items from stores we completely scanned
-                if nationwide or cached.get("store") in scanned_store_set:
-                    if cached.get("available", True):
-                        cached["available"] = False
-                        _json_sold.add(sku)
-                        if sku in wl:
-                            wl[sku]["sold"] = True
-                            wl_changed = True
-            if wl_changed:
-                save_watchlist(wl)
-        _shadow.finish(_sold_marking_ran, _json_sold,
-                       "nationwide" if nationwide else f"{len(stores_to_scan)} store(s)")
-        del _shadow
+        # (v2.16.11 — see scrape_store()'s `complete` flag.) Applied in SQL by
+        # _pg_write_scan since v2.16.48.
+        if _stop_event.is_set() or (nationwide and scan_incomplete):
+            sold_scope = None
+        elif nationwide:
+            sold_scope = "nationwide"
+        else:
+            sold_scope = sorted(set(stores_to_scan) - incomplete_stores)
 
-        # ── Update watchlist with latest data ─────────────────────────────────
-        wl = load_watchlist()
-        changed = False
-        for sku, item in wl.items():
-            if sku in _cat_cache and not wl[sku].get("sold"):
-                cached = _cat_cache[sku]
-                wl[sku].update({
-                    "price":      cached.get("price", item.get("price")),
-                    "condition":  cached.get("condition", item.get("condition", "")),
-                    "brand":      cached.get("brand", item.get("brand", "")),
-                    "location":   cached.get("location", item.get("location", "")),
-                    "category":   cached.get("category", item.get("category", "")),
-                    "subcategory":cached.get("subcategory", item.get("subcategory", "")),
-                    "date_listed":cached.get("date_listed", item.get("date_listed", "")),
-                })
-                changed = True
-        if changed:
-            save_watchlist(wl)
+        # ── Postgres: prior state → merge → write (Phase F 5b-ii, v2.16.48) ────
+        # Postgres is the source of truth. Read every found SKU's prior state,
+        # merge (_merge_scan_item — price-drop carry-forward, first_seen, fallbacks
+        # for fields Algolia sent blank), then upsert + sold-mark in ONE
+        # transaction BEFORE "done". Any failure fails the scan visibly: nothing
+        # is written (not even the JSON backup) and the user's NEW anchor /
+        # last_run are not advanced, so the next scan simply redoes this one.
+        def _save_failed(stage, exc):
+            msg = f"{stage}: {type(exc).__name__}: {exc}"[:300]
+            _pg_scan_note("failed", last_error=msg,
+                          last_error_at=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+            print(f"[pg] SCAN WRITE FAILED ({stage}) — scan not saved: {type(exc).__name__}: {exc}")
+            send({"type": "done",
+                  "error": "The scan finished but its results couldn't be saved (database "
+                           "unavailable). Nothing was changed — please try again in a few minutes.",
+                  "scanned": 0, "new_count": 0, "new_items": []})
+
+        if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL and _PG_POOL is not None):
+            _save_failed("config", RuntimeError("Postgres not configured"))
+            return
+        send({"type": "progress", "msg": f"  Saving {len(all_products):,} items…"})
+        _t_db = time.time()
+        if not _PG_SCAN_DB_LOCK.acquire(timeout=_PG_SCAN_DB_LOCK_TIMEOUT):
+            _save_failed("lock", TimeoutError("previous scan's database write still running"))
+            return
+        try:
+            try:
+                prior = _pg_scan_prior_fetch({p["id"] for p in all_products})
+            except Exception as e:
+                _save_failed("prior read", e)
+                return
+            # Categories, condition, brand all come from the API — the prior
+            # row only fills blanks and carries price_drop_since / first_seen.
+            merged = {}
+            for p in all_products:
+                sku = p["id"]
+                if sku in merged:            # duplicate SKU in one run: chain, like the JSON path did
+                    cached = merged[sku]
+                elif sku in prior:
+                    cached = dict(zip(_PG_PRIOR_COLS, prior[sku]))
+                else:
+                    cached = {}
+                rec = _merge_scan_item(p, cached, run_time)
+                merged[sku] = rec
+                p["category"]    = rec["category"]
+                p["subcategory"] = rec["subcategory"]
+                p["condition"]   = rec["condition"]
+                p["brand"]       = rec["brand"]
+                p["location"]    = rec["location"]
+                p["price_drop"]  = rec["price_drop"]
+                p["list_price"]  = rec["list_price"]
+            del prior
+            try:
+                sold = _pg_write_scan(merged, ids_this_run, sold_scope, send)
+            except Exception as e:
+                _save_failed("write", e)
+                return
+        finally:
+            _PG_SCAN_DB_LOCK.release()
+        _db_ms = int((time.time() - _t_db) * 1000)
+        _pg_scan_note("ok", last_ok_at=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                      last_ms=_db_ms, last_rows=len(merged), last_sold=len(sold))
+        _PG_AVAILABLE_COUNT["ts"] = 0   # /api/state: recount now, not up to 60s later
+        print(f"[pg] scan saved: {len(merged):,} rows, {len(sold):,} marked sold, {_db_ms}ms")
 
         send({"type":"progress","msg":f"  {len(all_products):,} products scanned."})
-        _save_cat_cache()
-        # Phase B dual-write (v2.16.15): mirror this scan into Postgres in the
-        # background -- never blocks the scan's own completion. See
-        # _pg_sync_scan()'s docstring and POSTGRES_MIGRATION_PLAN.md.
-        global _PG_SYNC_THREAD
-        _PG_SYNC_THREAD = threading.Thread(
-            target=_pg_sync_scan,
-            args=(set(ids_this_run), nationwide, scan_incomplete, set(incomplete_stores), list(stores_to_scan)),
-            daemon=True,
-        )
-        _PG_SYNC_THREAD.start()
+
+        # ── JSON backup (write-only; 5c deletes it) ────────────────────────────
+        # Mirrors exactly what Postgres just committed — nothing reads this for
+        # scan decisions any more.
+        try:
+            _cat_cache.update(merged)
+            for sku in sold:
+                rec = _cat_cache.get(sku)
+                if rec is not None:
+                    rec["available"] = False
+            _save_cat_cache()
+        except Exception as e:
+            print(f"[scan] JSON backup write failed (non-fatal): {type(e).__name__}: {e}")
         # Read global last-scan time (fallback when device has no history)
         last_scan_file = DATA_DIR / "gc_last_scan.txt"
         global_prev_scan = last_scan_file.read_text().strip() if last_scan_file.exists() else ""
@@ -6965,7 +6642,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         last_scan_file.write_text(run_time)
 
         def fmt(p):
-            date_src = p.get("date_listed") or _cat_cache.get(p["id"], {}).get("date_listed", "")
+            date_src = p.get("date_listed") or merged.get(p["id"], {}).get("date_listed", "")
             lp = p.get("list_price") or 0
             return {
                 "id":               p["id"],
@@ -6975,7 +6652,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                 "price_raw":        p.get("price") or 0,
                 "list_price_raw":   lp,
                 "price_drop":       p.get("price_drop", 0),
-                "price_drop_since": _cat_cache.get(p["id"], {}).get("price_drop_since", ""),
+                "price_drop_since": merged.get(p["id"], {}).get("price_drop_since", ""),
                 "store":            p["store"],
                 "location":         p.get("location") or p.get("store", ""),
                 "url":              p["url"],
@@ -6984,8 +6661,8 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                 "condition":        p.get("condition", ""),
                 "date":             _fmt_date(date_src),
                 "date_raw":         date_src,
-                "image_id":         p.get("image_id") or _cat_cache.get(p["id"], {}).get("image_id", ""),
-                "condition_note":   p.get("condition_note") or _cat_cache.get(p["id"], {}).get("condition_note", ""),
+                "image_id":         p.get("image_id") or merged.get(p["id"], {}).get("image_id", ""),
+                "condition_note":   p.get("condition_note") or merged.get(p["id"], {}).get("condition_note", ""),
             }
 
         # ── Per-device new-item detection ─────────────────────────────────────
@@ -7018,7 +6695,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         new_ids_list = []
         if not baseline and threshold:
             for p in all_products:
-                item_date = p.get("date_listed") or _cat_cache.get(p["id"], {}).get("date_listed", "")
+                item_date = p.get("date_listed") or merged.get(p["id"], {}).get("date_listed", "")
                 if item_date and _norm_item_date(item_date) > threshold:
                     new_ids_list.append(p["id"])
 
@@ -7845,7 +7522,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.47"
+APP_VERSION = "2.16.48"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

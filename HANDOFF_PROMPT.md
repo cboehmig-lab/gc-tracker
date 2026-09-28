@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-28 · Version: v2.16.47 (Phase F step 5b-i: every scan also computes its prior state from Postgres in SHADOW and diffs it vs the JSON path; temporary /api/pg-precheck-5b; no user-visible change — see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-09-28 · Version: v2.16.48 (Phase F step 5b-ii: scans read prior state from and write to Postgres synchronously before "done"; JSON catalog is a write-only backup — see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,7 +88,18 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.47 — Phase F step 5b-i: scan prior-state shadow (2026-09-28)
+## Current State: v2.16.48 — Phase F step 5b-ii: scan write path Postgres-primary (2026-09-28)
+
+`_run` reads prior state for every found SKU from Postgres (`_pg_scan_prior_fetch`), merges with
+`_merge_scan_item`, and writes upsert + sold-marking in ONE transaction (`_pg_write_scan`, 3 attempts on
+connection errors) BEFORE sending "done", under `_PG_SCAN_DB_LOCK`. Failure → done-with-error, nothing
+written, user anchor not advanced, `_pg_scan_writes` counters (admin `?pg_shadow=1`). JSON catalog is still
+written afterwards as a backup that mirrors what Postgres committed; nothing reads it for scan decisions
+(only the startup load, export/import/reset, and parity/backfill/pre-check tooling — all go in 5c = v2.17.0).
+Deleted: `_pg_sync_scan`, the 5b-i shadow, legacy `gc_watchlist.json` upkeep, `_fill_gaps`,
+`_populate_store_data` and their routes. Full detail: HANDOFF.md v2.16.48.
+
+## Previous: v2.16.47 — Phase F step 5b-i: scan prior-state shadow (2026-09-28)
 
 No user-visible change. The scan's per-item merge moved verbatim into `_merge_scan_item()`. Each
 `_run` now ALSO loads the prior state of every SKU it saw from Postgres (`_ScanShadow` /

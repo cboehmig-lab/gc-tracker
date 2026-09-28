@@ -3932,10 +3932,6 @@ function filterResults() {
   renderTable();
 }
 
-// ── Populate store data (one-time migration) ──────────────────────────────────
-// populateStoreData is admin-only
-function populateStoreData() {}
-
 // validateStores / startValidate are admin-only — use /admin/validate-stores
 function cancelValidate() {}
 function startValidate() {}
