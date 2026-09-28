@@ -1,4 +1,14 @@
-# Next Session Prompt — v2.16.48 built (Phase F 5b-ii cutover): push after shadow sees store scans, then burn-in → 5c
+# Next Session Prompt — v2.16.48 LIVE (Phase F 5b-ii cutover): burn-in, then 5c (v2.17.0)
+
+**Update 2026-09-28 (latest)**: v2.16.48 PUSHED + LIVE (footer confirmed). First 2 real scans after deploy
+(both nationwide) saved via the new path: `_pg_scan_writes` ok 2 / failed 0 / retried 0, DB phase ~11.2s,
+114,453 rows. `/api/fill-gaps` → 404. `/api/pg-parity-check`: 503,199 = 503,199, 0 diffs (JSON backup
+mirrors PG). `/api/pg-precheck-5b` again: 20-column parity PASS, new_ids 0 missing; the 18 missing watchlist
+SKUs were all added 2026-03-21 → 2026-04-16 (pedals etc., users 4/13/2) — i.e. before the catalog's
+late-April snapshot/restore era, long gone from both JSON and PG; harmless. Still to observe during burn-in:
+a store scan and a scan that marks items sold (`last_sold` > 0) — check `_pg_scan_writes` + parity again
+in a day or two, then 5c (v2.17.0).
+
 
 **Update 2026-09-28 (later)**: v2.16.47 pushed + live. Pre-check: column parity PASS (503,119 = 503,119, all
 20 columns), new_ids PASS; 18 watchlist SKUs missing from Postgres but ALSO missing from JSON → Chuck said

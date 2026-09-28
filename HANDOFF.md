@@ -68,7 +68,17 @@ only ever wrote `_cat_cache`, no UI caller), gc.js `populateStoreData(){}` stub.
   (it used to run the same work in the background after "done"). Speeding it up is a Phase G idea.
 - `py_compile` + `node --check` clean; pyflakes no new warnings.
 
-### Push gate / next
+### Live verification (2026-09-28)
+v2.16.48 PUSHED + LIVE (footer confirmed). First 2 real scans after deploy
+(both nationwide) saved via the new path: `_pg_scan_writes` ok 2 / failed 0 / retried 0, DB phase ~11.2s,
+114,453 rows. `/api/fill-gaps` → 404. `/api/pg-parity-check`: 503,199 = 503,199, 0 diffs (JSON backup
+mirrors PG). `/api/pg-precheck-5b` again: 20-column parity PASS, new_ids 0 missing; the 18 missing watchlist
+SKUs were all added 2026-03-21 → 2026-04-16 (pedals etc., users 4/13/2) — i.e. before the catalog's
+late-April snapshot/restore era, long gone from both JSON and PG; harmless. Still to observe during burn-in:
+a store scan and a scan that marks items sold (`last_sold` > 0) — check `_pg_scan_writes` + parity again
+in a day or two, then 5c (v2.17.0).
+
+### Push gate / next (as planned before push)
 Push after the v2.16.47 shadow has also seen a few STORE scans and at least one scan that marked items
 sold, all clean. After deploy: footer v2.16.48; run a store scan and a nationwide scan (or wait for users);
 `_pg_scan_writes` → ok rising, failed 0; deploy log `[pg] scan saved:` lines; post-scan browse shows new
