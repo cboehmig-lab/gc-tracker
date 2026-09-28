@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-25 · Version: v2.16.45 (search box prefix-matches last word; v2.16.44 Phase F step 4c: /api/browse is SQL-only — see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-09-28 · Version: v2.16.46 (Phase F step 5a: /api/state, store pages, admin pages, saved-search counts read Postgres — JSON catalog now only used by the scan path; see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,7 +88,16 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.45 — search box prefix match (2026-09-25)
+## Current State: v2.16.46 — Phase F step 5a: JSON reads moved to Postgres (2026-09-28)
+
+`/api/state` totals (60s cache), `/store/<slug>` SEO pages (600s TTL cache, stale-on-error),
+`/admin/users` watchlist counts, `/admin/listing-patterns` and `/api/saved-search-counts` (JSON
+fallback removed; `null` per failed search) now read Postgres via `_pg_read()` (one retry on a dead
+connection). Dead Python filter_q matcher deleted. The JSON catalog is now only used by the scan
+path + admin backup/import/export tools — next is 5b (scan writes Postgres-primary), then 5c
+(delete JSON). Full detail: HANDOFF.md v2.16.46.
+
+## Previous: v2.16.45 — search box prefix match (2026-09-25)
 
 Search box / saved searches: a positive plain term's last word now also matches the start of a
 longer word (`sm81` finds "SM81LC", `ds-1` finds "DS-1X"); negated terms, quoted terms, wildcards and

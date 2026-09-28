@@ -597,6 +597,23 @@ def _pg_is_conn_error(exc):
     import psycopg2 as _pg2
     return isinstance(exc, (_pg2.OperationalError, _pg2.InterfaceError))
 
+def _pg_read(fn):
+    """Run a read-only Postgres callable, retrying ONCE with connection
+    validation if it failed on a dead pooled connection (same policy as
+    /api/browse since v2.16.44 — see _pg_conn / _pg_is_conn_error). Real
+    query errors propagate unchanged. (v2.16.46, Phase F step 5a)"""
+    try:
+        return fn()
+    except Exception as e:
+        if not _pg_is_conn_error(e):
+            raise
+        _tok = _PG_VALIDATE_CONN.set(True)
+        try:
+            return fn()
+        finally:
+            _PG_VALIDATE_CONN.reset(_tok)
+
+
 # ── Postgres dual-write (Phase B, v2.16.15) ───────────────────────────────────
 # Mirrors this scan's results into Postgres, best-effort, AFTER _cat_cache/JSON
 # have already been fully updated by the normal scan logic in _run() below —
@@ -2989,18 +3006,39 @@ def admin_users():
         ).fetchall()]
 
         # Count watchlist/keyword items per user
-        # Cross-reference watchlist against live catalog so sold/gone items don't inflate the count
-        _load_cat_cache()
+        # Cross-reference watchlist against the catalog so SKUs we've never seen
+        # don't inflate the count. (v2.16.46, Phase F 5a) Catalog = Postgres
+        # items (every SKU ever synced, available or not — same set the JSON
+        # catalog held); one query for all users' SKUs.
+        _rows = {}
         for u in users:
-            row = conn.execute(
+            _rows[u["id"]] = conn.execute(
                 "SELECT watchlist, keywords, favorites FROM user_data WHERE user_id=?",
                 (u["id"],)
             ).fetchone()
+        _wl_by_user = {}
+        for _uid, row in _rows.items():
+            try:
+                _wl_by_user[_uid] = list(json.loads(row["watchlist"] or "{}")) if row else []
+            except Exception:
+                _wl_by_user[_uid] = None
+        _all_wl = sorted({s for v in _wl_by_user.values() if v for s in v})
+        _known = set()
+        if _all_wl:
+            def _q():
+                with _pg_conn() as pconn:
+                    with pconn.cursor() as cur:
+                        cur.execute("SELECT sku FROM items WHERE sku = ANY(%s)", (_all_wl,))
+                        return {r[0] for r in cur.fetchall()}
+            try:
+                _known = _pg_read(_q)
+            except Exception as e:
+                print(f"[pg] admin users watchlist lookup failed: {type(e).__name__}: {e}")
+        for u in users:
+            row = _rows[u["id"]]
             if row:
-                try:
-                    _wl = json.loads(row["watchlist"] or "{}")
-                    u["wl_count"] = sum(1 for sku in _wl if sku in _cat_cache)
-                except: u["wl_count"] = 0
+                _wl = _wl_by_user.get(u["id"])
+                u["wl_count"] = sum(1 for sku in _wl if sku in _known) if _wl is not None else 0
                 try: u["kw_count"]  = len(json.loads(row["keywords"]  or "[]"))
                 except: u["kw_count"] = 0
                 try: u["fav_count"] = len(json.loads(row["favorites"] or "[]"))
@@ -3171,12 +3209,23 @@ def admin_listing_patterns():
     if denied:
         return denied
 
-    _load_cat_cache()
     from collections import Counter
 
+    # (v2.16.46, Phase F 5a) Every catalog row (available or not — same set the
+    # JSON catalog held), from Postgres.
+    def _q():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT date_listed FROM items")
+                return [r[0] or "" for r in cur.fetchall()]
+    try:
+        _all_dates = _pg_read(_q)
+    except Exception as e:
+        return Response(f"Postgres unavailable: {type(e).__name__}", status=503,
+                        content_type="text/plain")
+
     dates, hours, minutes, exact_times, items_no_date = [], [], [], [], 0
-    for sku, item in _cat_cache.items():
-        dl = item.get("date_listed", "")
+    for dl in _all_dates:
         if not dl:
             items_no_date += 1
             continue
@@ -3329,11 +3378,14 @@ def index():
 # Server-rendered, zero-JS pages so Google has a city-specific URL/title/snippet
 # to rank for "guitar center <city> inventory" queries (the homepage was ranking
 # page-1 for these with ~zero CTR because it shows a generic title). Purely
-# additive — the main app is untouched. Unauthenticated route over the 92K cache,
-# so pages are memoized per store keyed by cache mtime (same discipline as
-# /api/browse: no per-request full-cache pass beyond the first hit after a scan).
+# additive — the main app is untouched. (v2.16.46, Phase F 5a) Data comes from
+# Postgres (two small indexed queries per store); rendered pages are memoized
+# per store for _STORE_PAGE_TTL seconds — the old key was the JSON file's
+# mtime, which step 5 retires. Unauthenticated route, so the TTL also bounds
+# how often a crawler can make us hit the DB.
 
-_STORE_PAGE_CACHE: dict = {}   # slug -> (cat_cache_mtime, html)
+_STORE_PAGE_CACHE: dict = {}   # slug -> (rendered_at_epoch, html)
+_STORE_PAGE_TTL = 600          # seconds; scans land every ~few hours
 
 def _store_slug(name: str) -> str:
     s = re.sub(r'[^a-z0-9]+', '-', (name or '').lower())
@@ -3347,16 +3399,30 @@ def _store_slug_map() -> dict:
         stores = []
     return {_store_slug(s): s for s in stores if s}
 
+def _pg_store_page_data(store_name: str):
+    """(count, {category: n}, newest 50 items) for one store's available
+    inventory, from Postgres. Items are dicts with the keys the page uses."""
+    def _q():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COALESCE(NULLIF(category, ''), 'Other'), COUNT(*) FROM items "
+                    "WHERE available AND store = %s GROUP BY 1 ORDER BY 2 DESC, 1",
+                    (store_name,))
+                cats = {c: int(n) for c, n in cur.fetchall()}
+                cur.execute(
+                    "SELECT name, brand, price, condition, date_listed, url FROM items "
+                    "WHERE available AND store = %s ORDER BY date_listed DESC, sku ASC LIMIT 50",
+                    (store_name,))
+                items = [{"name": r[0], "brand": r[1], "price": float(r[2] or 0),
+                          "condition": r[3], "date_listed": r[4], "url": r[5]}
+                         for r in cur.fetchall()]
+        return sum(cats.values()), cats, items
+    return _pg_read(_q)
+
+
 def _render_store_page(store_name: str, slug: str) -> str:
-    _load_cat_cache()
-    items = [v for _, v in list(_cat_cache.items())
-             if v.get("store") == store_name and v.get("available", True)]
-    items.sort(key=lambda i: i.get("date_listed") or "", reverse=True)
-    count = len(items)
-    cat_counts: dict = {}
-    for i in items:
-        c = i.get("category") or "Other"
-        cat_counts[c] = cat_counts.get(c, 0) + 1
+    count, cat_counts, items = _pg_store_page_data(store_name)
     esc = _html.escape
     city = esc(store_name)
     title = f"Guitar Center {city} Used Gear — Live Inventory ({count} items)"
@@ -3449,15 +3515,18 @@ def store_page(slug):
     name = _store_slug_map().get(slug)
     if not name:
         return "Not found", 404
-    try:
-        mtime = CAT_CACHE_FILE.stat().st_mtime
-    except OSError:
-        mtime = 0.0
+    now = time.time()
     hit = _STORE_PAGE_CACHE.get(slug)
-    if hit and hit[0] == mtime:
+    if hit and now - hit[0] < _STORE_PAGE_TTL:
         return hit[1]
-    html_out = _render_store_page(name, slug)
-    _STORE_PAGE_CACHE[slug] = (mtime, html_out)
+    try:
+        html_out = _render_store_page(name, slug)
+    except Exception as e:
+        print(f"[pg] store page {slug!r} failed: {type(e).__name__}: {e}")
+        if hit:
+            return hit[1]   # stale beats an error page for a crawler
+        return "Store inventory is temporarily unavailable — please try again shortly.", 503
+    _STORE_PAGE_CACHE[slug] = (now, html_out)
     return html_out
 
 @app.route("/cl")
@@ -3982,62 +4051,12 @@ def _compile_query(query_str, fuzzy=False):
             terms.append(('word', re.compile(r'\b' + re.escape(part) + r'\b', re.IGNORECASE)))
     return terms
 
-def _matches_all(text_lower, terms):
-    for mode, val in terms:
-        if mode in ('exact', 'contains'):
-            if val not in text_lower:
-                return False
-        else:
-            if not val.search(text_lower):
-                return False
-    return bool(terms)
-
-def _matches_any(text_lower, terms):
-    """True if ANY term matches — used for the negation lists."""
-    for mode, val in terms:
-        if mode in ('exact', 'contains'):
-            if val in text_lower:
-                return True
-        elif val.search(text_lower):
-            return True
-    return False
-
-# search-box (filter_q) clause compiler: ';' OR-clauses of space-separated tokens,
-# '-tok' negated. Shared 12-token budget across all clauses, ≤4 clauses — same
-# unauthenticated-DoS budget as the old single-clause path (v2.13.0 cap).
+# search-box (filter_q) tokenizer: ';' OR-clauses of space-separated tokens,
+# quoted phrases kept whole, '-tok' negated. Used by _tsquery_filter_q, which
+# keeps the old Python compiler's 12-token / 4-clause DoS budget. (The Python
+# filter_q matcher itself — _compile_fq_clauses/_fq_text_match/_matches_all/
+# _matches_any — was deleted in v2.16.46 once nothing called it.)
 _FQ_TOKEN_RE = re.compile(r'-?"[^"]+"|\S+')
-
-def _compile_fq_clauses(fq, fuzzy=False, max_tokens=12, max_clauses=4):
-    fq = _expand_colon_prefix(fq, join=' ')  # v2.16.3 — see _expand_colon_prefix
-    clauses = []
-    budget = max_tokens
-    for cl in fq.split(';'):
-        cl = cl.strip()
-        if not cl or budget <= 0:
-            continue
-        toks = _FQ_TOKEN_RE.findall(cl)[:budget]
-        budget -= len(toks)
-        pos, neg = [], []
-        for tok in toks:
-            if len(tok) > 1 and tok[0] == '-':
-                neg.extend(_compile_query(tok[1:], fuzzy=fuzzy))
-            else:
-                pos.extend(_compile_query(tok, fuzzy=fuzzy))
-        if pos or neg:
-            clauses.append((pos, neg))
-        if len(clauses) >= max_clauses:
-            break
-    return clauses
-
-def _fq_text_match(text_lower, clauses):
-    """True if ANY clause matches: all positives present, no negative present."""
-    for pos, neg in clauses:
-        if pos and not _matches_all(text_lower, pos):
-            continue
-        if neg and _matches_any(text_lower, neg):
-            continue
-        return True
-    return False
 
 def _wl_bool_compile(base):
     """Compile a want-list entry that uses the v2.16.0 ';' (OR) / '-' (NOT)
@@ -4078,10 +4097,10 @@ def _wl_bool_compile(base):
 # POSTGRES_PHASE_F_DESIGN.md §7 step 2. Since v2.16.40 (step 4b) this is THE
 # search implementation for /api/browse (via _pg_browse), and since v2.16.44
 # (step 4c) the only one — the Python matcher it was diffed against is gone
-# from browse. _compile_fq_clauses/_fq_text_match above survive only for
-# /api/saved-search-counts' JSON fallback, which step 5 deletes;
-# _wl_bool_compile/_compile_query/_expand_colon_prefix are still used by the
-# translator itself and by _kw_accept_capped.
+# from browse (and, since v2.16.46, from saved-search counts too — the
+# Python filter_q matcher was deleted). _wl_bool_compile/_compile_query/
+# _expand_colon_prefix are still used by the translator itself and by
+# _kw_accept_capped (routing only; nothing matches with their regexes).
 #
 # Mirrors the ABOVE functions' own parsing/routing decisions one for one
 # (same comma=AND, ';'=OR, leading '-'=NOT, same gate for when the OR/NOT
@@ -4440,9 +4459,8 @@ def _tsquery_filter_q(fq, max_tokens=12, max_clauses=4):
 @app.route("/api/saved-search-counts", methods=["POST"])
 def api_saved_search_counts():
     """Return match counts for each saved search in a single batch call."""
-    # Require a logged-in session — this endpoint loads the full 92K-item cache
-    # and filters it for each search entry, so an unbounded unauthenticated
-    # request would be a trivial CPU DoS.
+    # Logged-in only: each search is a COUNT over the catalog, so an unbounded
+    # unauthenticated request would be a cheap DoS.
     if not session.get("user_id"):
         return jsonify({"error": "Not logged in."}), 401
     data     = request.json or {}
@@ -4452,25 +4470,25 @@ def api_saved_search_counts():
     # Hard cap so even authenticated users can't send thousands of searches.
     searches = searches[:50]
 
-    # v2.16.42: count in Postgres with _pg_browse(count_only=True) — the exact
+    # v2.16.42: counted in Postgres with _pg_browse(count_only=True) — the exact
     # WHERE /api/browse uses (available-only, per-user scan gate, vintage /
-    # watched toggles). The JSON count below counted UNAVAILABLE items too, so
-    # badges ran ~5x high (e.g. 96,645 for a search that returns 19,812). The
-    # JSON path is kept only as a per-search fallback (no pool / untranslatable
-    # filter_q) until Phase F step 5 deletes it.
+    # watched toggles), so a badge equals what applying the search shows.
+    # (v2.16.46, Phase F 5a) The per-search JSON fallback is gone: a search
+    # that can't be counted (DB error, untranslatable filter_q) comes back as
+    # null and static/gc.js leaves that badge blank.
     user_last_scan = (data.get("user_last_scan") or "").strip()
     wl_ids = set(data.get("watchlist_ids") or [])
     def _f(v):
         try: return float(v) if v is not None and v != '' else None
         except (TypeError, ValueError): return None
-    pg_counts = []
+    counts = []
     for search in searches:
         n = None
         if _PG_POOL is not None:
-            try:
-                stores = list(search.get("stores") or [])
-                f = search.get("filters") or {}
-                n = _pg_browse(
+            stores = list(search.get("stores") or [])
+            f = search.get("filters") or {}
+            def _q(stores=stores, f=f):
+                return _pg_browse(
                     store_set=set(stores), search_all=not stores,
                     user_last_scan=user_last_scan, kw_entries=[],
                     fq=(f.get("filter_q") or "").lower().strip()[:200],
@@ -4482,69 +4500,14 @@ def api_saved_search_counts():
                     f_price_min=_f(f.get("filter_price_min")), f_price_max=_f(f.get("filter_price_max")),
                     sort_field="date", sort_dir="desc", user_sorted=True,
                     new_ids=set(), fav_stores=set(), page=1, per_page=1, count_only=True)
+            try:
+                n = _pg_read(_q)
             except _PgBrowseIneligible:
                 n = None
             except Exception as e:
-                print(f"[pg] saved-search count failed, using JSON fallback: {type(e).__name__}: {e}")
+                print(f"[pg] saved-search count failed: {type(e).__name__}: {e}")
                 n = None
-        pg_counts.append(n)
-    if all(n is not None for n in pg_counts):
-        return jsonify({"counts": pg_counts})
-    # Use the mtime-memoized in-memory cache (v2.13.0) instead of re-reading and
-    # re-parsing the 51MB file from disk on every call (~400ms, GIL-held — it stalled
-    # every other request thread). Same read-only snapshot idiom as /api/browse.
-    # (2026-07 audit E1)
-    _load_cat_cache()
-    all_items = [v for _, v in list(_cat_cache.items())]
-    if not all_items:
-        return jsonify({"counts": [0] * len(searches)})
-
-    counts = []
-    for _si, search in enumerate(searches):
-        if pg_counts[_si] is not None:
-            counts.append(pg_counts[_si])
-            continue
-        stores   = set(search.get("stores") or [])
-        f        = search.get("filters") or {}
-        fq       = (f.get("filter_q") or "").lower().strip()[:200]   # clamp len, parity with /api/browse (v2.13.0)
-        f_brands = set(f.get("filter_brands") or [])
-        f_conds  = set(f.get("filter_conditions") or [])
-        f_cats   = set(f.get("filter_categories") or [])
-        f_subs   = set(f.get("filter_subcategories") or [])
-        f_pdrop  = bool(f.get("filter_price_drop_only"))
-
-        items = [i for i in all_items if i.get("store") in stores] if stores else list(all_items)
-        items = [i for i in items if i.get("available", True)]   # v2.16.42: parity with browse
-
-        if fq:
-            # v2.16.0: use the SAME shared clause compiler + the SAME name+brand text
-            # as /api/browse's _apply_base, so a saved search's count equals what
-            # applying it actually returns. (The old inline copy here had drifted:
-            # it searched 6 fields where browse searches name+brand, making counts
-            # wrong.) v2.16.29: filter_strict/"fuzzy" mode removed — real usage was
-            # zero across every saved search in production (see
-            # POSTGRES_PHASE_F_DESIGN.md §3) and the UI toggle for it had already
-            # been orphaned from the HTML since the v2.10.x era. Whole-word is now
-            # unconditionally the only mode.
-            fq_clauses = _compile_fq_clauses(fq)
-            items = [i for i in items if fq_clauses and _fq_text_match(
-                ((i.get("name") or "") + " " + (i.get("brand") or "")).lower(), fq_clauses)]
-
-        if f_brands: items = [i for i in items if (i.get("brand") in f_brands) or (not i.get("brand") and NO_BRAND_LABEL in f_brands)]
-        if f_conds:  items = [i for i in items if i.get("condition") in f_conds]
-        if f_cats:   items = [i for i in items if i.get("category") in f_cats]
-        if f_subs:   items = [i for i in items if i.get("subcategory") in f_subs]
-        if f_pdrop:  items = [i for i in items if (i.get("price_drop") or 0) > 0]
-        def _sc_float(v):
-            try: return float(v) if v is not None and v != '' else None
-            except (TypeError, ValueError): return None
-        sc_pmin = _sc_float(f.get("filter_price_min"))
-        sc_pmax = _sc_float(f.get("filter_price_max"))
-        if sc_pmin is not None: items = [i for i in items if (i.get("price_raw") or 0) >= sc_pmin]
-        if sc_pmax is not None: items = [i for i in items if (i.get("price_raw") or 0) <= sc_pmax]
-
-        counts.append(len(items))
-
+        counts.append(n)
     return jsonify({"counts": counts})
 
 
@@ -5216,17 +5179,43 @@ def _browse_compute(data, *, logged_in, pg_diag=False):
 # watchlist file's sold flags.)
 
 
+# (v2.16.46) /api/state runs on every page load; the available-item count only
+# changes when a scan syncs, so cache it briefly rather than COUNT(*) each time.
+_PG_AVAILABLE_COUNT = {"ts": 0.0, "n": None}
+_PG_AVAILABLE_COUNT_TTL = 60  # seconds
+
+
+def _pg_available_count():
+    now = time.time()
+    if _PG_AVAILABLE_COUNT["n"] is not None and now - _PG_AVAILABLE_COUNT["ts"] < _PG_AVAILABLE_COUNT_TTL:
+        return _PG_AVAILABLE_COUNT["n"]
+    def _q():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM items WHERE available")
+                return int(cur.fetchone()[0])
+    try:
+        n = _pg_read(_q)
+    except Exception as e:
+        print(f"[pg] /api/state count failed: {type(e).__name__}: {e}")
+        return _PG_AVAILABLE_COUNT["n"]   # last known value (None if never loaded)
+    _PG_AVAILABLE_COUNT.update(ts=now, n=n)
+    return n
+
+
 @app.route("/api/state")
 @optional_user_context
 def api_state():
-    _load_cat_cache()
-    total_items = sum(1 for v in _cat_cache.values() if v.get("available", True))
+    # (v2.16.46, Phase F step 5a) Count from Postgres instead of scanning the
+    # in-memory JSON catalog. None if Postgres is unreachable (the page shows
+    # 0 — gc.js does `s.total_items || 0`), never a crash.
+    total_items = _pg_available_count()
     last_scan_file = DATA_DIR / "gc_last_scan.txt"
     last_scan = last_scan_file.read_text().strip() if last_scan_file.exists() else None
     return jsonify({
         "total_items":  total_items,
         "excel_exists": OUTPUT_FILE.exists(),
-        "is_first_run": total_items == 0,
+        "is_first_run": total_items == 0,   # None (DB down) is not a first run
         "last_scan":    last_scan,
     })
 
@@ -7422,7 +7411,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.45"
+APP_VERSION = "2.16.46"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

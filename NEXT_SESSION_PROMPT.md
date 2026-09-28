@@ -1,3 +1,24 @@
+# Next Session Prompt — v2.16.46 built (Phase F step 5a): push, verify, then 5b
+
+**Update 2026-09-28**: weekend burn-in clean (v2.16.45 `_pg_browse_errors` all 0). Step 5 split into
+5a / 5b / 5c (Chuck approved). **v2.16.46 = 5a**, built + locally verified, NOT yet pushed: every
+read-only user of the JSON catalog now reads Postgres (`/api/state`, store pages, admin users,
+listing patterns, saved-search counts). See HANDOFF.md v2.16.46.
+1. Push (`cd ~/Desktop/gc_tracker`, `rm -f .git/index.lock`, add gc_tracker_app.py static/gc.js
+   HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md, commit, push).
+2. Live checks: footer v2.16.46; `/api/state` total_items == `/api/browse` (all_stores) total_unfiltered;
+   `/store/austin` title count == Austin browse total; saved-search badges fill; `/admin/users` and
+   `/admin/listing-patterns` load.
+3. **5b** (own session): scan write path Postgres-primary. `_run`/`_fill_gaps`/`_populate_store_data`
+   read prior state (NEW detection, price drops, first_seen, sold flags) from Postgres instead of
+   `_cat_cache`; `_pg_sync_scan` becomes a required synchronous write with retry + failure surfacing;
+   JSON still written as a write-only backup. Pre-cutover check: every SKU in real users' watchlists
+   and new_ids exists in Postgres (zero tolerance). Then burn-in, then **5c**: stop JSON writes,
+   delete `_cat_cache`/`_load_cat_cache`/`_save_cat_cache`, `/api/pg-parity-check`, backfill tooling,
+   rework `/api/reset` + import/export, and measure Railway memory.
+
+---
+
 # Next Session Prompt — v2.16.45 built (search-box prefix match): push, verify, then counters + step 5
 
 **Update 2026-09-25 (latest)**: v2.16.45 built + locally verified, NOT yet pushed — the search box's

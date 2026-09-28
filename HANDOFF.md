@@ -1,5 +1,69 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-25 · Current version: v2.16.45 (search box prefix-matches the last word; v2.16.44 Phase F step 4c: SQL-only /api/browse; v2.16.43 all wildcards in SQL) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-28 · Current version: v2.16.46 (Phase F step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.46 — 2026-09-28: Phase F step 5a — remaining JSON catalog READS moved to Postgres
+
+**Why**: step 5 retires the JSON catalog (`gc_category_cache.json` / `_cat_cache`). Chuck approved
+splitting it: **5a** (this) moves every read-only user of the JSON catalog to Postgres; **5b** makes
+the scan write path Postgres-primary (JSON kept as a write-only backup); **5c** stops writing JSON
+and deletes `_cat_cache` + backfill/parity tooling after a burn-in. Weekend burn-in of v2.16.45
+before starting: `_pg_browse_errors` all 0.
+
+Pre-check on live data (2026-09-28, still v2.16.45): `/api/state` total from JSON = **114,535** =
+Postgres available count (`/api/browse` `total_unfiltered`); `/store/austin` title (JSON) says 526
+items = Postgres browse for Austin 526.
+
+### What moved
+- **`/api/state` `total_items`** → `_pg_available_count()`: `SELECT COUNT(*) FROM items WHERE available`,
+  cached 60s (`_PG_AVAILABLE_COUNT`, `_PG_AVAILABLE_COUNT_TTL`) since every page load hits it. If
+  Postgres is down it returns the last known count (None before the first success; gc.js does
+  `s.total_items || 0`). This route no longer calls `_load_cat_cache()`.
+- **Store SEO pages `/store/<slug>`** → `_pg_store_page_data()`: two indexed queries per store
+  (category counts with ''→"Other"; newest 50 available items ORDER BY date_listed DESC, sku).
+  `_render_store_page` otherwise unchanged. Page cache (`_STORE_PAGE_CACHE`) is now a 600s TTL
+  (`_STORE_PAGE_TTL`) instead of keyed on the JSON file's mtime (which 5c retires). On a DB error:
+  serve the stale cached page if there is one, else 503 text.
+- **`/admin/users` watchlist counts** → one `SELECT sku FROM items WHERE sku = ANY(...)` for every
+  user's watchlist SKUs (was: `sku in _cat_cache`). Same semantics — Postgres holds every SKU ever
+  synced, available or not, like the JSON did. DB down → counts show 0, page still renders.
+- **`/admin/listing-patterns`** → `SELECT date_listed FROM items` (all rows, same set as JSON). DB
+  down → 503 text.
+- **`/api/saved-search-counts`**: JSON per-search fallback deleted. A search that can't be counted
+  returns `null` in `counts`; gc.js leaves that badge blank (it used to throw on `null.toLocaleString()`
+  and stop filling later badges).
+- New helper **`_pg_read(fn)`**: runs a read-only Postgres callable, retrying once with connection
+  validation on a dead pooled connection (same policy /api/browse got in v2.16.44). Used by all of
+  the above.
+- **Deleted** (no callers left): the Python filter_q matcher `_compile_fq_clauses`, `_fq_text_match`,
+  `_matches_all`, `_matches_any`. `_FQ_TOKEN_RE` stays (used by `_tsquery_filter_q`).
+  `_compile_query`/`_wl_bool_compile`/`_expand_colon_prefix` stay (translator + `_kw_accept_capped`
+  routing).
+
+### Still on JSON (by design, for 5b/5c)
+Scan path (`_run`, `_fill_gaps`, `_populate_store_data`, `_pg_sync_scan`'s input), `_save_cat_cache`,
+startup `_load_cat_cache()`, `/api/reset`, `/api/import-data`, `/api/export-data` (reads the file from
+disk, not memory), `admin_pg_backfill`/`_pg_full_backfill`/`_pg_parity_check`.
+
+### Verified locally (sandbox Postgres 16, 40K synthetic rows written to BOTH Postgres and a JSON
+catalog file, v2.16.45 vs v2.16.46 via Flask test client)
+- `/api/state` identical; saved-search counts identical; `/admin/listing-patterns` HTML identical.
+- `/admin/users`: all watchlist/keyword/favorite counts identical (5 users with real + unknown SKUs
+  + a user with no data row); only the random CSRF tokens differ.
+- All 30 store pages: titles (item counts), category lists and meta identical; the 50-row tables
+  are identical except the ORDER of rows sharing the oldest shown date_listed (synthetic data has
+  day-precision dates; Postgres breaks ties by sku, Python by dict order) — 0 differences outside
+  that tied boundary date.
+- Failure paths with Postgres stopped: `/api/state` → last known count; warm store page → stale
+  200; cold store page → 503; listing patterns → 503; admin users → 200 with 0 counts; saved-search
+  → `[null]`. After Postgres restart (dead pooled connections) → all 200 via the retry.
+- `py_compile` + `node --check` clean; pyflakes no new warnings.
+
+### Next
+Push, confirm footer v2.16.46 + clean deploy log, then on live: `/api/state` total_items equals
+`/api/browse` total_unfiltered; `/store/austin` title count equals an Austin browse; saved-search
+badges fill in. Then **5b** (scan write path Postgres-primary) in its own session.
 
 ---
 

@@ -2328,6 +2328,7 @@ async function _fetchSavedSearchCounts() {
       const ss  = searches[i];
       const el  = document.getElementById('ss-cnt-' + ss.id);
       if (!el) return;
+      if (n == null) return;  // v2.16.46: server couldn't count this one — leave the badge blank
       el.textContent = n.toLocaleString();
       el.classList.toggle('loaded', true);
     });
