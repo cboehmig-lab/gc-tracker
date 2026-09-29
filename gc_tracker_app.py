@@ -782,6 +782,18 @@ _PG_SCAN_WRITES = {"ok": 0, "failed": 0, "retried": 0, "since": None,
                    "last_error": "", "last_error_at": None}
 
 
+# Nationwide scan coverage (v2.16.51). A nationwide scan must account for
+# Algolia's own nbHits (within this tolerance, < one 240-hit page — covers items
+# listed/sold during the ~40s scan) or it's treated as incomplete: no sold-marking,
+# NEW anchor not advanced. Suspect pages (empty, short, unparsed hits, or adding
+# no new items) are re-fetched first, one at a time. Admin: POST
+# /api/browse?pg_shadow=1 -> `_scan_coverage` (last scan's detail + recent 20).
+_NATIONWIDE_COVERAGE_TOLERANCE = 120
+_NATIONWIDE_PAGE_RETRY_ROUNDS = 2
+_NATIONWIDE_PAGE_RETRY_MAX = 40
+_SCAN_COVERAGE = {"last": None, "recent": []}
+
+
 def _pg_scan_note(kind, **kw):
     st = _PG_SCAN_WRITES
     if st["since"] is None:
@@ -5183,6 +5195,7 @@ def api_browse():
         resp = dict(resp)
         resp["_pg_browse_errors"] = _PG_BROWSE_ERRORS
         resp["_pg_scan_writes"] = _PG_SCAN_WRITES   # v2.16.48, Phase F 5b-ii
+        resp["_scan_coverage"] = _SCAN_COVERAGE     # v2.16.51
     return jsonify(resp)
 
 
@@ -6486,6 +6499,39 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             # ── Nationwide: query ALL used inventory via parallel page fetches ────
             PARALLEL_WORKERS = 15  # concurrent API requests
             send({"type":"progress","msg":"Fetching all used inventory nationwide via API…"})
+            # v2.16.51: coverage accounting. Live 2026-09-29 every nationwide scan
+            # came back 1,200-1,440 unique items (exactly 5-6 whole pages of 240)
+            # short of Algolia's own nbHits, with no error — and sold-marking then
+            # marked those items sold, so a different ~1.3K flickered sold/available
+            # on every scan. Per page we now record raw hits / parsed / new-unique,
+            # retry suspect pages, and if we still can't account for nbHits the scan
+            # is treated as incomplete (no sold-marking, anchor not advanced) —
+            # the same rule a failed page already triggers. See _SCAN_COVERAGE.
+            cov = {"at": run_time, "nb_hits": 0, "nb_pages": 0, "raw_hits": 0,
+                   "empty_pages": [], "short_pages": [], "parse_loss_pages": [],
+                   "no_new_pages": [], "retried_pages": 0, "recovered": 0,
+                   "unique": 0, "missing": 0, "complete": None}
+            page_stats = {}   # pg -> (raw, parsed, new)
+
+            def _raw_hits(d):
+                try:
+                    return len((d.get("results") or [{}])[0].get("hits") or [])
+                except Exception:
+                    return 0
+
+            def _absorb(pg, d):
+                """Add one page's products; record its stats. Returns #new unique."""
+                products = parse_products(d, None)
+                new = 0
+                for p in products:
+                    if p["id"] not in ids_this_run:
+                        all_products.append(p)
+                        ids_this_run.add(p["id"])
+                        new += 1
+                prev = page_stats.get(pg)
+                page_stats[pg] = (_raw_hits(d), len(products), new + (prev[2] if prev else 0))
+                return new
+
             # First fetch page 1 to learn total pages
             try:
                 data1 = fetch_page(None, 1)
@@ -6495,17 +6541,14 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             if not data1:
                 scan_incomplete = True
             if data1:
-                products1 = parse_products(data1, None)
-                for p in products1:
-                    if p["id"] not in ids_this_run:
-                        all_products.append(p)
-                        ids_this_run.add(p["id"])
+                _absorb(1, data1)
                 try:
                     nb_pages = data1.get("results", [{}])[0].get("nbPages", 1)
                     nb_hits  = data1.get("results", [{}])[0].get("nbHits", 0)
                     send({"type":"progress","msg":f"  {nb_hits:,} items across {nb_pages} pages — fetching {PARALLEL_WORKERS} pages at a time…"})
                 except Exception:
-                    nb_pages = 1
+                    nb_pages, nb_hits = 1, 0
+                cov["nb_hits"], cov["nb_pages"] = nb_hits, nb_pages
                 # Fetch remaining pages in parallel batches
                 remaining = list(range(2, min(nb_pages + 1, 1001)))
                 def _fetch_one_page(pg):
@@ -6537,11 +6580,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                                     continue
                                 if data is None:
                                     continue
-                                products = parse_products(data, None)
-                                for p in products:
-                                    if p["id"] not in ids_this_run:
-                                        all_products.append(p)
-                                        ids_this_run.add(p["id"])
+                                _absorb(pg, data)
                         except _FutureTimeoutError:
                             stuck = [futures[f] for f in futures if not f.done()]
                             scan_incomplete = True
@@ -6554,6 +6593,68 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                     # Progress update after each batch
                     pages_done = min(batch_idx + 1, nb_pages)
                     send({"type":"progress","msg":f"  page {pages_done}/{nb_pages}… ({len(all_products):,} items so far)"})
+
+                # ── Coverage check + retry of suspect pages (v2.16.51) ──────────
+                def _suspects():
+                    full = min(240, nb_hits)   # hitsPerPage (see fetch_page)
+                    out = []
+                    for pg in range(1, min(nb_pages, 1000) + 1):
+                        st = page_stats.get(pg)
+                        if st is None:
+                            continue   # errored/stopped page — already makes the scan incomplete
+                        raw, parsed, new = st
+                        is_last = (pg == nb_pages)
+                        if raw == 0 or (not is_last and raw < full) or parsed < raw or new == 0:
+                            out.append(pg)
+                    return out
+                def _missing():
+                    return max(0, nb_hits - len(ids_this_run))
+                if not _stop_event.is_set() and not scan_incomplete and _missing() > _NATIONWIDE_COVERAGE_TOLERANCE:
+                    for attempt in range(_NATIONWIDE_PAGE_RETRY_ROUNDS):
+                        sus = _suspects()
+                        if not sus or _stop_event.is_set() or _missing() <= _NATIONWIDE_COVERAGE_TOLERANCE:
+                            break
+                        send({"type":"progress","msg":f"  {_missing():,} items unaccounted for — re-checking {len(sus)} page(s) (round {attempt + 1})…"})
+                        gained = 0
+                        for pg in sus[:_NATIONWIDE_PAGE_RETRY_MAX]:
+                            if _stop_event.is_set():
+                                break
+                            _sleep(0.3, 0.2)
+                            pg_, d, err = _fetch_one_page(pg)
+                            cov["retried_pages"] += 1
+                            if err or d is None:
+                                continue
+                            gained += _absorb(pg, d)
+                        cov["recovered"] += gained
+                        if gained == 0:
+                            break
+                # Record what we saw (the suspects after retries).
+                for pg, (raw, parsed, new) in sorted(page_stats.items()):
+                    cov["raw_hits"] += raw
+                    if raw == 0:
+                        cov["empty_pages"].append(pg)
+                    elif pg != nb_pages and raw < min(240, nb_hits):
+                        cov["short_pages"].append(pg)
+                    if parsed < raw:
+                        cov["parse_loss_pages"].append(pg)
+                    if new == 0:
+                        cov["no_new_pages"].append(pg)
+                for k in ("empty_pages", "short_pages", "parse_loss_pages", "no_new_pages"):
+                    cov[k] = cov[k][:50]
+                cov["unique"] = len(ids_this_run)
+                cov["missing"] = _missing()
+                if not scan_incomplete and not _stop_event.is_set() and cov["missing"] > _NATIONWIDE_COVERAGE_TOLERANCE:
+                    scan_incomplete = True
+                    send({"type":"progress","msg":f"  ⚠ {cov['missing']:,} of {nb_hits:,} items never came back from the API — treating this scan as incomplete (nothing marked sold)."})
+                cov["complete"] = not scan_incomplete and not _stop_event.is_set()
+                print(f"[scan] nationwide coverage: nbHits {nb_hits}, pages {nb_pages}, raw hits {cov['raw_hits']}, "
+                      f"unique {cov['unique']}, missing {cov['missing']}, empty {cov['empty_pages'][:10]}, "
+                      f"short {cov['short_pages'][:10]}, parse-loss {cov['parse_loss_pages'][:10]}, "
+                      f"no-new {cov['no_new_pages'][:10]}, retried {cov['retried_pages']}, recovered {cov['recovered']}, "
+                      f"complete {cov['complete']}")
+                _SCAN_COVERAGE["last"] = cov
+                _SCAN_COVERAGE["recent"].insert(0, {k: cov[k] for k in ("at", "nb_hits", "unique", "missing", "retried_pages", "recovered", "complete")})
+                del _SCAN_COVERAGE["recent"][20:]
                 if _stop_event.is_set():
                     send({"type":"progress","msg":"⏹ Stopped by user."})
                     scan_incomplete = True
@@ -7630,7 +7731,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.50"
+APP_VERSION = "2.16.51"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-29 · Version: v2.16.50 (scan fills a missing store from the item's location, items.store_inferred; scans read/write Postgres, only new/changed rows; JSON = write-only backup — see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-09-29 · Version: v2.16.51 (nationwide scans retry suspect pages and skip sold-marking unless they account for Algolia nbHits; see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,7 +88,15 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.50 — missing stores filled from location (2026-09-29)
+## Current State: v2.16.51 — nationwide scan coverage guard (2026-09-29)
+
+Live finding: every nationwide scan got 1,200-1,440 fewer unique items than Algolia's nbHits (whole pages,
+no error) and marked them sold → ~1.3K items flickered sold/available per scan. v2.16.51 tracks per-page
+stats, retries suspect pages, and treats a still-short scan as incomplete (no sold-marking, anchor held).
+`_scan_coverage` in admin `?pg_shadow=1`. Also: v2.16.50's fill was a no-op live (Algolia sends no location
+for those items either). Full detail: HANDOFF.md v2.16.51.
+
+## Previous: v2.16.50 — missing stores filled from location (2026-09-29)
 
 Nationwide Algolia results sometimes have an empty `stores` array but a known `storeName`/location; those were
 saved with store='' and never showed in store-filtered browse (105 for sale live, 74 with a location).

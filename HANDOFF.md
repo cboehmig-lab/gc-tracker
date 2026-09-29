@@ -1,5 +1,54 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-28 · Current version: v2.16.50 (store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-28 · Current version: v2.16.51 (nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.51 — 2026-09-29: nationwide scans must account for Algolia's nbHits before marking anything sold
+
+**Why (found while verifying v2.16.50 live, 2026-09-29)**:
+- v2.16.50's store fill did nothing live: after two nationwide scans, 105 available storeless items, 0
+  `store_inferred`, no `[scan] filled missing store` log line. Algolia now sends neither `stores` nor
+  `storeName` for those items (the stored location came from an earlier scan, kept by the merge fallback),
+  so GC no longer ties them to a store — nationwide-only is correct. v2.16.50 stays (harmless; handles the
+  location-but-no-stores case if it occurs).
+- Much bigger: **every nationwide scan received 1,200–1,440 fewer unique items than Algolia's own nbHits —
+  exactly 5–6 whole 240-hit pages — with no error**, and sold-marking then marked those items sold. A
+  different batch each scan, so ~1.3K real items flickered sold/available on every scan (the live available
+  count jumping 112.7K / 114.4K / 115.8K). Evidence: my watched scan 16:08 CDT "115,809 items across 483
+  pages" → "Fetched 114,609" → "1,440 new/changed, 1,200 sold"; deploy log 16:06 "114,369 found, 0
+  new/changed, 1,440 marked sold", 16:07 (another user) "114,369 found, 1,440 new/changed, 1,440 marked
+  sold". Pre-existing (same fetch loop since long before Phase F); NEW flags unaffected (date-based).
+- Cause not yet known: some pages come back empty or duplicating another page's content (whole-page losses;
+  parse errors would lose partial pages). The dedup + no-error path made the scan look complete.
+
+### What changed (`_run`, nationwide branch)
+1. Per-page stats: raw hits (`results[0].hits`), parsed products, new unique IDs (`_absorb`).
+2. If unique < nbHits − `_NATIONWIDE_COVERAGE_TOLERANCE` (120, i.e. < half a page — covers items
+   listed/sold during the ~40s scan): re-fetch suspect pages (empty, short non-last, parse loss, or 0 new
+   items) one at a time with a small jitter, up to `_NATIONWIDE_PAGE_RETRY_ROUNDS` (2) rounds /
+   `_NATIONWIDE_PAGE_RETRY_MAX` (40) pages per round, stopping when a round gains nothing.
+3. Still short → **`scan_incomplete = True`**: nothing marked sold, NEW anchor not advanced (the existing
+   v2.16.11 rule for failed pages), progress line "⚠ N of M items never came back from the API — treating this
+   scan as incomplete (nothing marked sold)." Store scans unchanged.
+4. Diagnostics: `[scan] nationwide coverage: nbHits…, raw hits…, unique…, missing…, empty […], short […],
+   parse-loss […], no-new […], retried…, recovered…, complete…` log line per nationwide scan;
+   `_SCAN_COVERAGE` (last scan's full detail + recent 20) in admin `POST /api/browse?pg_shadow=1` →
+   `_scan_coverage`.
+
+### Verified locally (scan simulator)
+- Normal 6-scan scenario: v2.16.50 vs v2.16.51 identical JSON + Postgres after every step and identical done
+  messages (except one store-scan step's SSE `items` subset, which depends on thread completion order in both
+  versions — pre-existing nondeterminism).
+- 3 pages empty once → retried 3, recovered 750, complete, the real sold items marked sold.
+- 2 pages persistently duplicating other pages → missing 500, incomplete, 0 marked sold.
+- 1 page empty through retries → missing 250, incomplete, 0 marked sold. Clean scan afterwards → complete,
+  sold-marking resumes.
+
+### Next
+Push. After a couple of nationwide scans read `_scan_coverage.last`: which pages are empty / no-new /
+short, whether retries recover them. If retries recover → done (flicker gone, sold-marking correct). If they
+persist → scans stay "incomplete" (no false sold-marking; real sales then only get marked by store scans)
+and the fix is on the fetch side (e.g. fewer parallel requests, or partitioned queries so each stays small).
 
 ---
 

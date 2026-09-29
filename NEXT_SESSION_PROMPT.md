@@ -1,3 +1,18 @@
+# Next Session Prompt — v2.16.51 built (nationwide scan coverage guard): push + read coverage, then burn-in → 5c
+
+**Update 2026-09-29 (latest)**: v2.16.50 live but a no-op (Algolia gives those 105 items no store AND no
+location). Found instead: nationwide scans silently miss 5-6 whole pages (1,200-1,440 items) and mark them
+sold → flicker. v2.16.51 (built + locally verified, NOT pushed) retries suspect pages and refuses to
+sold-mark unless unique ≈ nbHits. See HANDOFF.md v2.16.51.
+1. Push: `cd ~/Desktop/gc_tracker`, `rm -f .git/index.lock`,
+   `git add gc_tracker_app.py HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit, `git push origin main`.
+2. After 1-2 nationwide scans: `(await (await fetch('/api/browse?pg_shadow=1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({all_stores:true})})).json())._scan_coverage`
+   → which pages were empty/no-new/short, retried/recovered, complete? Decide the fetch-side fix if pages
+   stay missing. Deploy log line: `[scan] nationwide coverage: …`.
+3. Then burn-in → 5c (v2.17.0).
+
+---
+
 # Next Session Prompt — v2.16.50 built (missing stores from location): push + verify, then burn-in → 5c (v2.17.0)
 
 **Update 2026-09-29 (later)**: investigated the storeless items (Chuck's pick, via Railway's Postgres Data tab in
