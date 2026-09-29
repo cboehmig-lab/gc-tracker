@@ -1,5 +1,52 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-28 · Current version: v2.16.48 (Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-28 · Current version: v2.16.49 (scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.49 — 2026-09-29: scan "Saving…" step only writes new/changed rows; JSON backup moved after "done"
+
+**Why**: Chuck noticed the "Saving items…" step of a nationwide scan (added before "done" in v2.16.48) takes
+a long time. Live v2.16.48 counters: ~11.2s DB phase per nationwide scan. Cause: every scan upserted EVERY
+found item (~114K), each a full row rewrite + GIN `search_vector` + trigram index update + a dead tuple for
+autovacuum — even though almost all rows are identical to what's stored. (The old background dual-write did
+the same work, just invisibly after "done".) Second, smaller cost: the ~500K-entry JSON backup dump ran
+before "done".
+
+### What changed
+1. **`_PG_PRIOR_COLS` = every upsert column except sku** (was 12 merge-relevant columns), so the prior read
+   returns the whole stored row. `_merge_scan_item` is unchanged (it only `.get()`s what it needs).
+2. **`_pg_row_unchanged(row, prior)`**: compares the would-be upsert tuple (`_pg_row_for`) with the stored
+   row, all 19 non-sku columns — numeric (price/list_price/price_drop, NUMERIC(10,2)) at cent precision
+   (new value rounded to 2 dp), booleans by truth value, text exactly. In `_run`, only rows that are new or
+   differ go to `_pg_write_scan`. Since the compare covers every column the upsert sets (and search_vector is
+   generated from name/brand), skipping a row is exactly equivalent to rewriting identical values. A
+   reappearing item differs on `available` so it's written. Rounding edge (e.g. a float that Python and
+   Postgres round differently) only ever errs toward writing.
+3. **`_pg_write_scan(rows, run_ids, sold_scope, send)`** now takes the changed rows; sold-marking still
+   excludes EVERY SKU the run saw (`ids_this_run | merged`), changed or not.
+4. **JSON backup → background thread after "done"** (`_json_backup_apply`, thread name `json-backup`,
+   serialized by `_JSON_BACKUP_LOCK` so back-to-back scans never dump while another updates). Still mirrors
+   exactly what Postgres committed (merged rows + returned sold SKUs); failures are logged only.
+5. Visibility: progress lines "Saving changes for N items…" then "X new/changed, Y sold."; log line
+   `[pg] scan saved: N found, X new/changed written, Y marked sold — read Ams, write Bms, total Cms`;
+   `_pg_scan_writes` gains `last_changed`, `last_read_ms`, `last_write_ms`.
+
+### Verified locally (sandbox Postgres 16, scan simulator)
+- 6-scan scenario: v2.16.48 vs v2.16.49 **identical** SSE done messages, JSON catalog and Postgres table
+  (every column) after every step. Rows written per scan: 3,000 (baseline), 24, 70, 10, 3, 5.
+- Faults: connection error on the upsert → retried + saved; query error after the upsert → whole
+  transaction rolled back (Postgres, JSON file, gc_last_scan.txt unchanged), rerun saves; PG down → failed
+  scan, nothing written; after restart the retry path recovers; PG `first_seen=''` preserved.
+- Scale (120K items; 2nd nationwide scan with 500 new + 300 sold): DB phase **11.1s → 3.6s** (read 1.6s,
+  write 0.9s — mostly the 120K-SKU temp table for sold-marking, the rest merge + compare); whole scan
+  12.8s → 5.7s locally. Expected on Railway: roughly 11s → ~4-5s (prior read was ~2.1s there with 12 cols).
+- `py_compile` + `node --check` clean; pyflakes no new warnings. gc.js unchanged.
+
+### Next
+Push; after a nationwide scan read `_pg_scan_writes` (`last_changed` should be hundreds/low thousands,
+`last_ms` well under v2.16.48's ~11s) and the `[pg] scan saved:` log line; `/api/pg-parity-check` still 0
+diffs (the backup is now written a few seconds after "done" — run it after that). Then continue the 5b
+burn-in → 5c (v2.17.0).
 
 ---
 

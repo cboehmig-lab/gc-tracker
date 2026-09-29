@@ -381,6 +381,26 @@ def _save_cat_cache():
     except Exception:
         pass
 
+# Serializes the scan's post-"done" JSON backup (v2.16.49): two back-to-back
+# scans' backup threads must not mutate / dump _cat_cache at the same time
+# (json.dumps over a dict that another thread is updating raises).
+_JSON_BACKUP_LOCK = threading.Lock()
+
+def _json_backup_apply(merged: dict, sold: set):
+    """Apply one committed scan to the in-memory JSON catalog and write it to
+    disk. Background thread; failures are logged, never surfaced (Postgres is
+    the source of truth — Phase F 5c deletes this backup)."""
+    try:
+        with _JSON_BACKUP_LOCK:
+            _cat_cache.update(merged)
+            for sku in sold:
+                rec = _cat_cache.get(sku)
+                if rec is not None:
+                    rec["available"] = False
+            _save_cat_cache()
+    except Exception as e:
+        print(f"[scan] JSON backup write failed (non-fatal): {type(e).__name__}: {e}")
+
 # ── Postgres catalog store (Phase A, v2.16.14) ────────────────────────────────
 # Migration target for the flat-JSON _cat_cache above (~92K items, ~53MB) — see
 # POSTGRES_MIGRATION_PLAN.md for the full plan and rationale. This phase ONLY
@@ -705,9 +725,36 @@ def _merge_scan_item(p: dict, cached: dict, run_time: str) -> dict:
     }
 
 
-_PG_PRIOR_COLS = ["category", "subcategory", "condition", "brand", "location",
-                  "has_price_drop", "price_drop_since", "date_listed", "image_id",
-                  "is_vintage", "condition_note", "first_seen"]
+# Prior state = the whole stored row (every upsert column except sku). The merge
+# only uses some of them; all of them are needed to tell whether a found item
+# changed at all (v2.16.49 — unchanged rows are not rewritten, see
+# _pg_row_unchanged).
+_PG_PRIOR_COLS = _PG_UPSERT_COLS[1:]
+_PG_NUMERIC_COLS = {"price", "list_price", "price_drop"}   # NUMERIC(10,2) in Postgres
+_PG_BOOL_COLS = {"has_price_drop", "is_vintage", "available"}
+
+
+def _pg_row_unchanged(row: tuple, prior: tuple) -> bool:
+    """True if `row` (a _pg_row_for tuple, sku first) would store exactly what
+    `prior` (the stored row in _PG_PRIOR_COLS order) already holds, so the
+    upsert can be skipped. Numeric columns compare at cent precision (the
+    column is NUMERIC(10,2), so e.g. 199.999 is stored as 200.00 and a later
+    scan sending 199.999 again counts as unchanged); booleans by truth value;
+    everything else exactly. (v2.16.49)"""
+    for i, col in enumerate(_PG_PRIOR_COLS, start=1):
+        a, b = row[i], prior[i - 1]
+        if col in _PG_NUMERIC_COLS:
+            try:
+                if abs(round(float(a or 0), 2) - float(b or 0)) > 0.001:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        elif col in _PG_BOOL_COLS:
+            if bool(a) != bool(b):
+                return False
+        elif (a or "") != (b or ""):
+            return False
+    return True
 
 # Serializes the prior-read → merge → write section of scans. The scan _lock
 # normally does this, but /api/stop's 5s force-unlock watchdog can release
@@ -724,6 +771,7 @@ _PG_SCAN_WRITE_BACKOFF = (2, 5)   # seconds before attempts 2 and 3
 # after a connection error (a retry that then succeeded counts only here).
 _PG_SCAN_WRITES = {"ok": 0, "failed": 0, "retried": 0, "since": None,
                    "last_ok_at": None, "last_ms": None, "last_rows": 0, "last_sold": 0,
+                   "last_changed": 0, "last_read_ms": None, "last_write_ms": None,
                    "last_error": "", "last_error_at": None}
 
 
@@ -755,17 +803,17 @@ def _pg_scan_prior_fetch(skus):
     return _pg_read(_q)
 
 
-def _pg_write_scan(merged: dict, run_ids: set, sold_scope, send=None) -> set:
-    """Write one scan to Postgres in ONE transaction: upsert every merged row,
-    then (if sold_scope is not None) mark unavailable every available item in
+def _pg_write_scan(rows: list, run_ids: set, sold_scope, send=None) -> set:
+    """Write one scan to Postgres in ONE transaction: upsert `rows` (the
+    _pg_row_for tuples that are new or changed — v2.16.49; unchanged rows are
+    skipped by the caller), then (if sold_scope is not None) mark unavailable every available item in
     scope that this run didn't see, returning those SKUs. sold_scope: None
     (no sold-marking: stopped / incomplete nationwide scan), "nationwide", or a
     list of fully-scanned store names (empty list = nothing to mark).
     Idempotent, so a connection error retries the whole transaction (up to
     _PG_SCAN_WRITE_ATTEMPTS, validating pooled connections on retry); any
     other error, or the last attempt's, raises."""
-    rows = [_pg_row_for(sku, rec) for sku, rec in merged.items()]
-    exclude = set(run_ids) | set(merged)
+    exclude = set(run_ids)   # every SKU this run saw (changed or not) — never marked sold
     last_exc = None
     for attempt in range(_PG_SCAN_WRITE_ATTEMPTS):
         _tok = _PG_VALIDATE_CONN.set(attempt > 0)
@@ -6572,7 +6620,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL and _PG_POOL is not None):
             _save_failed("config", RuntimeError("Postgres not configured"))
             return
-        send({"type": "progress", "msg": f"  Saving {len(all_products):,} items…"})
+        send({"type": "progress", "msg": f"  Saving changes for {len(all_products):,} items…"})
         _t_db = time.time()
         if not _PG_SCAN_DB_LOCK.acquire(timeout=_PG_SCAN_DB_LOCK_TIMEOUT):
             _save_failed("lock", TimeoutError("previous scan's database write still running"))
@@ -6583,6 +6631,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             except Exception as e:
                 _save_failed("prior read", e)
                 return
+            _read_ms = int((time.time() - _t_db) * 1000)
             # Categories, condition, brand all come from the API — the prior
             # row only fills blanks and carries price_drop_since / first_seen.
             merged = {}
@@ -6603,34 +6652,37 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                 p["location"]    = rec["location"]
                 p["price_drop"]  = rec["price_drop"]
                 p["list_price"]  = rec["list_price"]
+            # Only new or changed rows are written (v2.16.49). Most of a scan's
+            # items are identical to what's stored; rewriting them all cost a
+            # full row + GIN/trigram index update each (~11s per nationwide scan).
+            changed_rows = []
+            for sku, rec in merged.items():
+                row = _pg_row_for(sku, rec)
+                pr = prior.get(sku)
+                if pr is None or not _pg_row_unchanged(row, pr):
+                    changed_rows.append(row)
             del prior
+            _t_write = time.time()
             try:
-                sold = _pg_write_scan(merged, ids_this_run, sold_scope, send)
+                sold = _pg_write_scan(changed_rows, ids_this_run | set(merged), sold_scope, send)
             except Exception as e:
                 _save_failed("write", e)
                 return
+            _write_ms = int((time.time() - _t_write) * 1000)
         finally:
             _PG_SCAN_DB_LOCK.release()
         _db_ms = int((time.time() - _t_db) * 1000)
         _pg_scan_note("ok", last_ok_at=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                      last_ms=_db_ms, last_rows=len(merged), last_sold=len(sold))
+                      last_ms=_db_ms, last_rows=len(merged), last_sold=len(sold),
+                      last_changed=len(changed_rows), last_read_ms=_read_ms,
+                      last_write_ms=_write_ms)
         _PG_AVAILABLE_COUNT["ts"] = 0   # /api/state: recount now, not up to 60s later
-        print(f"[pg] scan saved: {len(merged):,} rows, {len(sold):,} marked sold, {_db_ms}ms")
+        print(f"[pg] scan saved: {len(merged):,} found, {len(changed_rows):,} new/changed written, "
+              f"{len(sold):,} marked sold — read {_read_ms}ms, write {_write_ms}ms, total {_db_ms}ms")
+        send({"type": "progress", "msg": f"  {len(changed_rows):,} new/changed, {len(sold):,} sold."})
 
         send({"type":"progress","msg":f"  {len(all_products):,} products scanned."})
 
-        # ── JSON backup (write-only; 5c deletes it) ────────────────────────────
-        # Mirrors exactly what Postgres just committed — nothing reads this for
-        # scan decisions any more.
-        try:
-            _cat_cache.update(merged)
-            for sku in sold:
-                rec = _cat_cache.get(sku)
-                if rec is not None:
-                    rec["available"] = False
-            _save_cat_cache()
-        except Exception as e:
-            print(f"[scan] JSON backup write failed (non-fatal): {type(e).__name__}: {e}")
         # Read global last-scan time (fallback when device has no history)
         last_scan_file = DATA_DIR / "gc_last_scan.txt"
         global_prev_scan = last_scan_file.read_text().strip() if last_scan_file.exists() else ""
@@ -6761,6 +6813,12 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             "items":       items_for_sse,
             "use_browse":  large_scan,
         })
+        # ── JSON backup (write-only; 5c deletes it) ────────────────────────────
+        # Mirrors exactly what Postgres just committed; nothing reads it for scan
+        # decisions. Since v2.16.49 it's written in a background thread AFTER
+        # "done" (dumping ~500K entries took seconds the user was waiting on).
+        threading.Thread(target=_json_backup_apply, args=(merged, sold),
+                         daemon=True, name="json-backup").start()
     except Exception as e:
         send({"type":"done","error":str(e),"scanned":0,"new_count":0,"new_items":[]})
     finally:
@@ -7522,7 +7580,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.48"
+APP_VERSION = "2.16.49"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

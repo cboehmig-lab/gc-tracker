@@ -1,3 +1,17 @@
+# Next Session Prompt — v2.16.49 built (faster scan save): push + verify, continue burn-in, then 5c (v2.17.0)
+
+**Update 2026-09-29**: Chuck: the "Saving items…" step was slow (~11s on nationwide scans). v2.16.49 (built +
+locally verified, NOT yet pushed) writes only new/changed rows and moves the JSON backup after "done". See
+HANDOFF.md v2.16.49.
+1. Push: `cd ~/Desktop/gc_tracker`, `rm -f .git/index.lock`,
+   `git add gc_tracker_app.py HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit, `git push origin main`.
+2. After a nationwide scan: `_pg_scan_writes` (POST /api/browse?pg_shadow=1) → `last_changed` small,
+   `last_ms` / `last_read_ms` / `last_write_ms` well under ~11s, `failed` 0; `/api/pg-parity-check` 0 diffs
+   (run it a few seconds after the scan — the JSON backup now lands after "done").
+3. Continue the 5b burn-in (a store scan + a scan with `last_sold` > 0), then 5c (v2.17.0) — prompt below.
+
+---
+
 # Next Session Prompt — v2.16.48 LIVE (Phase F 5b-ii cutover): burn-in, then 5c (v2.17.0)
 
 **Update 2026-09-28 (latest)**: v2.16.48 PUSHED + LIVE (footer confirmed). First 2 real scans after deploy

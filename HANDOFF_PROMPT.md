@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-28 · Version: v2.16.48 (Phase F step 5b-ii: scans read prior state from and write to Postgres synchronously before "done"; JSON catalog is a write-only backup — see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-09-29 · Version: v2.16.49 (scans read prior state from + write only new/changed rows to Postgres before "done"; JSON catalog = write-only backup written after "done" — see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,7 +88,15 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.48 — Phase F step 5b-ii: scan write path Postgres-primary (2026-09-28)
+## Current State: v2.16.49 — scan save only writes new/changed rows (2026-09-29)
+
+The scan's prior read now returns the whole stored row; `_pg_row_unchanged` skips rows identical to what's
+stored, so `_pg_write_scan` upserts only new/changed rows (hundreds, not ~114K). JSON backup is written in a
+background thread after "done" (`_json_backup_apply`, `_JSON_BACKUP_LOCK`). `_pg_scan_writes` gains
+last_changed / last_read_ms / last_write_ms. Locally a 120K nationwide scan's DB phase went 11.1s → 3.6s.
+Full detail: HANDOFF.md v2.16.49.
+
+## Previous: v2.16.48 — Phase F step 5b-ii: scan write path Postgres-primary (2026-09-28)
 
 `_run` reads prior state for every found SKU from Postgres (`_pg_scan_prior_fetch`), merges with
 `_merge_scan_item`, and writes upsert + sold-marking in ONE transaction (`_pg_write_scan`, 3 attempts on
