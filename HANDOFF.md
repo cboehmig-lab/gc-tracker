@@ -44,6 +44,15 @@
 - 1 page empty through retries → missing 250, incomplete, 0 marked sold. Clean scan afterwards → complete,
   sold-marking resumes.
 
+### Live verification
+**Live verification (2026-09-29, 16:45 CDT)**: v2.16.51 live. Scan 1 (nationwide): nbHits 115,580 / 482
+pages; 480 items (2 pages) unaccounted for after the parallel pass → 2 pages re-fetched → recovered 480 →
+unique 115,580 = nbHits, complete; "3,600 new/changed, 0 sold" (the items earlier scans had falsely marked sold
+came back). Scan 2 a minute later: complete on the first pass, no retries, 0 new/changed, 0 sold — stable.
+Save phase ~4.8-5.9s. So the lost pages are transient (a single re-fetch returns them); the guard + retry fixes
+the flicker. The post-retry stats overwrite the first-pass page stats, so we don't yet know whether those pages
+came back empty or duplicated — not needed for the fix.
+
 ### Next
 Push. After a couple of nationwide scans read `_scan_coverage.last`: which pages are empty / no-new /
 short, whether retries recover them. If retries recover → done (flicker gone, sold-marking correct). If they
