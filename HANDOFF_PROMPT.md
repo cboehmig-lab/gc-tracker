@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-29 · Version: v2.16.49 (scans read prior state from + write only new/changed rows to Postgres before "done"; JSON catalog = write-only backup written after "done" — see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-09-29 · Version: v2.16.50 (scan fills a missing store from the item's location, items.store_inferred; scans read/write Postgres, only new/changed rows; JSON = write-only backup — see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,7 +88,15 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.49 — scan save only writes new/changed rows (2026-09-29)
+## Current State: v2.16.50 — missing stores filled from location (2026-09-29)
+
+Nationwide Algolia results sometimes have an empty `stores` array but a known `storeName`/location; those were
+saved with store='' and never showed in store-filtered browse (105 for sale live, 74 with a location).
+`_fill_missing_stores` assigns the location's usual store (learned from the same scan) and marks
+`items.store_inferred` (new column); store-scan sold-marking skips inferred rows because store-scoped Algolia
+queries can't return them. Full detail: HANDOFF.md v2.16.50.
+
+## Previous: v2.16.49 — scan save only writes new/changed rows (2026-09-29)
 
 The scan's prior read now returns the whole stored row; `_pg_row_unchanged` skips rows identical to what's
 stored, so `_pg_write_scan` upserts only new/changed rows (hundreds, not ~114K). JSON backup is written in a

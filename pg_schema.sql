@@ -47,6 +47,14 @@ CREATE INDEX IF NOT EXISTS idx_items_subcategory ON items (subcategory) WHERE av
 CREATE INDEX IF NOT EXISTS idx_items_date_listed ON items (date_listed DESC) WHERE available;
 CREATE INDEX IF NOT EXISTS idx_items_price       ON items (price)       WHERE available;
 
+-- v2.16.50: TRUE when `store` was filled in by the scan from the item's location because
+-- Algolia returned an empty `stores` array (_fill_missing_stores). A store-scoped scan queries
+-- Algolia with facetFilters stores:<name>, which never returns such items, so store scans
+-- must not mark them sold (they'd flap sold/available between store and nationwide scans) —
+-- the store-scan sold-marking UPDATE excludes store_inferred rows; nationwide scans still
+-- mark them normally. Constant default: ADD COLUMN is a catalog-only change (no rewrite).
+ALTER TABLE items ADD COLUMN IF NOT EXISTS store_inferred BOOLEAN NOT NULL DEFAULT FALSE;
+
 -- Phase F (2026-09-22, POSTGRES_PHASE_F_DESIGN.md §7 stage 1): a generated tsvector column
 -- backing Postgres full-text search, replacing the Python regex `_compile_query`/`_kw_match`
 -- matcher (which searches `name_l + " " + brand_l` — see _kw_match() in gc_tracker_app.py).

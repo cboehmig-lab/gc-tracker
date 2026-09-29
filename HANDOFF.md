@@ -1,5 +1,57 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-28 · Current version: v2.16.49 (scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-28 · Current version: v2.16.50 (store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.16.50 — 2026-09-29: items with no store listed get their store from their location
+
+**Why**: Chuck picked "the 11,080 items with no store name" (spotted by the 5b pre-check) to look into.
+Read-only SQL in Railway's Postgres Data tab (via Chuck's Chrome, 2026-09-29):
+| store='' | available | sold/history |
+|---|---|---|
+| location known ("Manhattan, NY") | **74** (65 locations) | 10,635 |
+| no location either | **31** | 388 |
+Only 105 are for sale, and some were first_seen TODAY — current scans still create them. Cause
+(`parse_products`): `store = store_name or hit["stores"][0]`; on a nationwide scan Algolia sometimes returns
+an empty `stores` array while `storeName` (our `location`) is still set → store=''. Store-filtered browse
+(`store = ANY(...)`) never shows those items; only nationwide/search does. Location→store is reliable:
+59 of the 65 locations map to exactly one store across the catalog; the other 5 have one dominant store plus
+stray mismatches (e.g. "Sioux Falls, SD → Dallas", transfers). The 31 with no location at all are most likely
+online/warehouse inventory → nationwide-only is correct; left alone. Historical sold rows left alone.
+
+### What changed
+1. **`_fill_missing_stores(products)`**, called in `_run` right after fetching: learns location → most common
+   store from THIS scan's own products that have both (a nationwide scan covers every location; ties break
+   alphabetically), and fills `store` for products with an empty store and a known location. Progress line
+   "N item(s) had no store listed — assigned from their location." + `[scan] filled missing store…` log.
+   Store scans are unaffected (their `store` is always the requested store).
+2. **New column `items.store_inferred BOOLEAN NOT NULL DEFAULT FALSE`** (pg_schema.sql, `ADD COLUMN IF NOT
+   EXISTS`, constant default → catalog-only change, no table rewrite; runs at startup like the rest of the
+   schema). Needed because a store-scoped scan queries Algolia with `facetFilters stores:<name>`, which never
+   returns these items — without the flag every store scan of that store would mark them sold and the next
+   nationwide scan would bring them back (flapping; found in local testing before shipping). The store-scan
+   sold-marking UPDATE now has `AND NOT store_inferred`; nationwide sold-marking is unchanged, so they still
+   get marked sold when they really sell.
+3. `store_inferred` added to `_PG_UPSERT_COLS` / `_pg_row_for` / `_PG_BOOL_COLS`, and set by `_merge_scan_item`
+   from the product every scan — so it clears by itself if Algolia lists the store again. Existing rows default
+   FALSE, and a scan's compare sees FALSE == FALSE, so no mass rewrite. The one-off `migrate_cat_cache_to_pg.py`
+   was not updated (predates it, deleted in 5c; Postgres default covers it).
+
+### Verified locally (sandbox Postgres 16, scan simulator)
+- 6-scan scenario with no storeless items: v2.16.49 vs v2.16.50 identical SSE done messages, JSON (ignoring the
+  new key) and all 20 original Postgres columns; `store_inferred` all FALSE.
+- Storeless scenario: 4 "Austin, TX" items with empty store + 2 stray "Austin, TX"-located Dallas items + 2 with
+  no location + 1 new storeless "Miami, TX" item → nationwide scan fills 5 (Austin ×4, Miami ×1; majority beat
+  the Dallas strays), the 2 location-less stay ''. Following Austin store scan: **0 marked sold** (v2.16.49
+  logic marked the 4 sold = the flapping bug). Then a nationwide scan where one inferred item sold and another
+  got its store listed again → the first marked sold, the second's `store_inferred` cleared.
+- Schema upgrade on an existing v2.16.49 database: column added at startup, 0 rows flagged, prior read returns
+  20 columns. Faults (retry / rollback / PG-down) unchanged. `py_compile` + `node --check` clean.
+
+### Next
+Push (gc_tracker_app.py + pg_schema.sql). After the first nationwide scan: in Railway's Postgres Data tab,
+`SELECT COUNT(*) FROM items WHERE available AND store=''` should drop from 105 to ~31, and
+`SELECT COUNT(*) FROM items WHERE store_inferred` ≈ 74; deploy log shows `[scan] filled missing store for N…`.
 
 ---
 

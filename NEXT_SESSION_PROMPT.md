@@ -1,3 +1,17 @@
+# Next Session Prompt — v2.16.50 built (missing stores from location): push + verify, then burn-in → 5c (v2.17.0)
+
+**Update 2026-09-29 (later)**: investigated the storeless items (Chuck's pick, via Railway's Postgres Data tab in
+Chuck's Chrome): 105 for sale, 74 with a location. v2.16.50 (built + locally verified, NOT yet pushed) fills the
+store from the location + new `items.store_inferred` column so store scans don't flap them. See HANDOFF.md v2.16.50.
+1. Push: `cd ~/Desktop/gc_tracker`, `rm -f .git/index.lock`,
+   `git add gc_tracker_app.py pg_schema.sql HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit, `git push origin main`.
+2. After deploy + one nationwide scan: `SELECT COUNT(*) FROM items WHERE available AND store=''` → ~31 (was 105);
+   `SELECT COUNT(*) FROM items WHERE store_inferred` → ~74; `_pg_scan_writes.failed` 0; parity check 0 diffs.
+3. Then the 5b burn-in → 5c (v2.17.0) as below. Tip: Railway checks work best through Claude in Chrome (Chuck's
+   logged-in Chrome); the built-in browser pane doesn't keep the Railway login.
+
+---
+
 # Next Session Prompt — v2.16.49 LIVE (faster scan save): burn-in, then 5c (v2.17.0)
 
 **Update 2026-09-29 (latest)**: v2.16.49 LIVE (deploy was delayed ~25 min by a Railway API incident — "slow or

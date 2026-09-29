@@ -652,8 +652,10 @@ def _pg_read(fn):
 _PG_UPSERT_COLS = ["sku", "name", "brand", "category", "subcategory", "condition",
                    "condition_note", "price", "list_price", "has_price_drop", "price_drop",
                    "price_drop_since", "store", "location", "url", "image_id", "is_vintage",
-                   "available", "date_listed", "first_seen"]
+                   "available", "date_listed", "first_seen", "store_inferred"]
 # Keep in sync with migrate_cat_cache_to_pg.py's COLS if the schema ever changes.
+# (store_inferred added v2.16.50; the one-off migrate script predates it and is
+# deleted in Phase F 5c — Postgres fills the column's default for its rows.)
 _PG_UPSERT_SQL = (
     f"INSERT INTO items ({', '.join(_PG_UPSERT_COLS)}) VALUES %s "
     f"ON CONFLICT (sku) DO UPDATE SET "
@@ -670,6 +672,7 @@ def _pg_row_for(sku: str, it: dict) -> tuple:
         it.get("location", "") or it.get("store", "") or "", it.get("url", "") or "",
         it.get("image_id", "") or "", bool(it.get("is_vintage", False)),
         it.get("available", True), it.get("date_listed", "") or "", it.get("first_seen", "") or "",
+        bool(it.get("store_inferred", False)),
     )
 
 
@@ -722,6 +725,10 @@ def _merge_scan_item(p: dict, cached: dict, run_time: str) -> dict:
         "condition_note":    p.get("condition_note") or cached.get("condition_note", ""),
         # first_seen: when our system first encountered this item
         "first_seen":        cached.get("first_seen", run_time),
+        # v2.16.50: store came from the location, not Algolia's stores array
+        # (see _fill_missing_stores). Recomputed every scan, so it clears by
+        # itself once Algolia lists the store again.
+        "store_inferred":    bool(p.get("store_inferred", False)),
     }
 
 
@@ -731,7 +738,7 @@ def _merge_scan_item(p: dict, cached: dict, run_time: str) -> dict:
 # _pg_row_unchanged).
 _PG_PRIOR_COLS = _PG_UPSERT_COLS[1:]
 _PG_NUMERIC_COLS = {"price", "list_price", "price_drop"}   # NUMERIC(10,2) in Postgres
-_PG_BOOL_COLS = {"has_price_drop", "is_vintage", "available"}
+_PG_BOOL_COLS = {"has_price_drop", "is_vintage", "available", "store_inferred"}
 
 
 def _pg_row_unchanged(row: tuple, prior: tuple) -> bool:
@@ -842,6 +849,7 @@ def _pg_write_scan(rows: list, run_ids: set, sold_scope, send=None) -> set:
                                 WHERE available
                                 AND NOT EXISTS (SELECT 1 FROM _run_skus WHERE _run_skus.sku = items.sku)
                                 AND store = ANY(%s)
+                                AND NOT store_inferred
                                 RETURNING sku
                             """, (list(sold_scope),))
                         sold = {r[0] for r in cur.fetchall()}
@@ -1569,6 +1577,41 @@ def _extract_condition_note(long_description: str) -> str:
     note = long_description[m.end():].strip()
     note = re.sub(r'\s+', ' ', note)
     return note[:300]  # sound cap — these are short staff notes, not essays
+
+def _fill_missing_stores(products: list) -> int:
+    """(v2.16.50) Algolia sometimes returns a used item whose `stores` array is
+    empty while `storeName` ("Austin, TX", our `location`) is still set. Those
+    items were saved with store='' — invisible to every store-filtered browse,
+    only reachable nationwide (live 2026-09-29: 74 available items across 65
+    locations, still being created by current scans). Fill `store` from the
+    location's usual store, learned from THIS scan's own products that have
+    both fields (a nationwide scan covers every location). Most common store
+    wins; ties break alphabetically so the result is deterministic. Items with
+    no location at all (online/warehouse inventory — 31 live) stay storeless
+    and nationwide-only. Filled items get store_inferred=True: a store-scoped
+    Algolia query (facetFilters stores:<name>) never returns them, so store
+    scans skip them when marking sold (see _pg_write_scan); nationwide scans
+    still mark them sold normally. Mutates `products`; returns how many were
+    filled."""
+    from collections import Counter
+    by_loc = {}
+    for p in products:
+        st, loc = p.get("store") or "", p.get("location") or ""
+        if st and loc:
+            by_loc.setdefault(loc, Counter())[st] += 1
+    if not by_loc:
+        return 0
+    best = {loc: min(c.items(), key=lambda kv: (-kv[1], kv[0]))[0] for loc, c in by_loc.items()}
+    filled = 0
+    for p in products:
+        if not p.get("store"):
+            st = best.get(p.get("location") or "")
+            if st:
+                p["store"] = st
+                p["store_inferred"] = True
+                filled += 1
+    return filled
+
 
 def parse_products(data, store_name: str = None) -> list[dict]:
     """Parse products from Algolia API response. store_name can be None for all-stores queries."""
@@ -6565,6 +6608,13 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
 
         # (cache-ID snapshot removed — NEW detection now uses startDate timestamps)
 
+        # Items Algolia returned with an empty stores array but a known location
+        # get their store filled in (v2.16.50, see _fill_missing_stores).
+        _filled = _fill_missing_stores(all_products)
+        if _filled:
+            send({"type":"progress","msg":f"  {_filled:,} item(s) had no store listed — assigned from their location."})
+            print(f"[scan] filled missing store for {_filled} item(s) from location")
+
         # ── Anchor date for NEW detection (per-user, v2.10.18) ───────────────────
         # The anchor represents "the max date_listed of items this user was exposed
         # to at their last scan." Anything with date_listed > anchor is genuinely new
@@ -7580,7 +7630,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.49"
+APP_VERSION = "2.16.50"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
