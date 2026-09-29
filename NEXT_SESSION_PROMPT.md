@@ -1,4 +1,13 @@
-# Next Session Prompt — v2.16.49 built (faster scan save): push + verify, continue burn-in, then 5c (v2.17.0)
+# Next Session Prompt — v2.16.49 LIVE (faster scan save): burn-in, then 5c (v2.17.0)
+
+**Update 2026-09-29 (latest)**: v2.16.49 LIVE (deploy was delayed ~25 min by a Railway API incident — "slow or
+stuck deployments" — not by anything in the app). Since deploy (15:49Z): `_pg_scan_writes` ok 23 / failed 0 /
+retried 0. Last nationwide scan: 114,373 found, **0 new/changed written**, 0 sold — read 2.29s, write 0.69s,
+**total 4.37s (was 9.4-11.2s on v2.16.48)**. The write's 0.69s with 0 rows is the 114K-SKU temp table used
+by sold-marking (possible later micro-optimization). `/api/pg-parity-check` 505,284 = 505,284, 0 diffs (the
+after-"done" JSON backup keeps up). v2.16.48 burn-in before this: 113 scans, 0 failures. Next: a couple more
+days of burn-in, then 5c (v2.17.0).
+
 
 **Update 2026-09-29**: Chuck: the "Saving items…" step was slow (~11s on nationwide scans). v2.16.49 (built +
 locally verified, NOT yet pushed) writes only new/changed rows and moves the JSON backup after "done". See
