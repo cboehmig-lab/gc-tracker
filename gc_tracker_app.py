@@ -11,6 +11,7 @@ import hmac
 import json, os, re, sys, time, threading, queue, webbrowser, random, sqlite3
 import gc as _gc, ctypes as _ctypes
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as _FutureTimeoutError
+from concurrent.futures import wait as _futures_wait, FIRST_COMPLETED as _FIRST_COMPLETED
 from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
@@ -730,6 +731,72 @@ def _pg_scan_note(kind, **kw):
     st.update(kw)
 
 
+# (v2.17.3, Phase G S3) Every writer of the items table bumps this BEFORE it
+# writes (under _PG_SCAN_DB_LOCK). A scan's prior-state prefetch records the
+# generation when it starts; if the number differs when the scan is ready to
+# merge, something wrote in between and the prefetch is discarded.
+_PG_CATALOG_GEN = [0]
+_PG_CATALOG_GEN_LOCK = threading.Lock()
+
+
+def _pg_catalog_gen_bump():
+    with _PG_CATALOG_GEN_LOCK:
+        _PG_CATALOG_GEN[0] += 1
+
+
+def _pg_scan_prior_prefetch(stores=None):
+    """(v2.17.3) Prior state of every AVAILABLE item (in `stores` if given), read
+    while the scan is still fetching from Algolia: {sku: tuple in _PG_PRIOR_COLS
+    order} — the same row shape _pg_scan_prior_fetch returns. The scan later
+    reads only the found SKUs missing from this (new or reappearing items)."""
+    def _q():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                sql = (f"SELECT sku, {', '.join(_PG_PRIOR_COLS)} FROM items WHERE available")
+                if stores is not None:
+                    cur.execute(sql + " AND store = ANY(%s)", (list(stores),))
+                else:
+                    cur.execute(sql)
+                return {r[0]: r[1:] for r in cur.fetchall()}
+    return _pg_read(_q)
+
+
+class _PriorPrefetch:
+    """Runs _pg_scan_prior_prefetch in a background thread. result() returns
+    the dict, or None if it failed, timed out, or the catalog was written
+    after it started (generation changed) — the caller then does the normal
+    full read. Measurement: .ms (read time), .note (why it wasn't used)."""
+    def __init__(self, stores=None):
+        with _PG_CATALOG_GEN_LOCK:
+            self.gen = _PG_CATALOG_GEN[0]
+        self.data, self.ms, self.note = None, None, ""
+        self._t = threading.Thread(target=self._go, args=(stores,), daemon=True)
+        self._t.start()
+
+    def _go(self, stores):
+        t0 = time.time()
+        try:
+            self.data = _pg_scan_prior_prefetch(stores)
+        except Exception as e:
+            self.note = f"prefetch failed: {type(e).__name__}: {e}"[:200]
+        self.ms = int((time.time() - t0) * 1000)
+
+    def result(self, timeout=60):
+        """Call while holding _PG_SCAN_DB_LOCK (so no writer can slip in after the check)."""
+        self._t.join(timeout)
+        if self._t.is_alive():
+            self.note = "prefetch still running"
+            return None
+        if self.data is None:
+            return None
+        with _PG_CATALOG_GEN_LOCK:
+            if _PG_CATALOG_GEN[0] != self.gen:
+                self.note = "catalog written since prefetch started"
+                self.data = None
+                return None
+        return self.data
+
+
 def _pg_scan_prior_fetch(skus):
     """Prior state for `skus` from Postgres: {sku: tuple in _PG_PRIOR_COLS order}.
     One read-only pooled transaction (temp table + join), retried once on a
@@ -762,6 +829,7 @@ def _pg_write_scan(rows: list, run_ids: set, sold_scope, send=None) -> set:
     other error, or the last attempt's, raises."""
     exclude = set(run_ids)   # every SKU this run saw (changed or not) — never marked sold
     last_exc = None
+    _pg_catalog_gen_bump()   # v2.17.3: invalidates any prior-state prefetch in flight
     for attempt in range(_PG_SCAN_WRITE_ATTEMPTS):
         _tok = _PG_VALIDATE_CONN.set(attempt > 0)
         try:
@@ -1225,10 +1293,26 @@ ALGOLIA_HEADERS = {
     "Content-Type":             "application/json",
 }
 
-def fetch_page(store_name: str = None, page: int = 1, _stats: list | None = None) -> dict:
+# (v2.17.3, Phase G S2) Every hit attribute parse_products() reads. A "lean"
+# request asks Algolia for only these — no facet counts, no highlight/snippet
+# blocks, no extra response fields. Live v2.17.1 pages were 630 KB each (295 MB
+# per nationwide scan) with everything requested. If parse_products ever reads
+# a new attribute it MUST be added here — the nationwide scan's page-1 check
+# (full vs lean, parsed results must match) falls back to full pages if not.
+_SCAN_HIT_ATTRS = [
+    "objectID", "displayName", "name", "price", "listPrice", "longDescription",
+    "priceDrop", "seoUrl", "brand", "condition", "categories", "categoriesSlug",
+    "startDate", "creationDate", "storeName", "stores", "imageId", "premiumGear",
+]
+
+
+def fetch_page(store_name: str = None, page: int = 1, _stats: list | None = None,
+               lean: bool = False) -> dict:
     """Fetch one page of used inventory via Algolia API.
     If store_name is provided, filters to that store.
-    If store_name is None, fetches ALL used inventory nationwide."""
+    If store_name is None, fetches ALL used inventory nationwide.
+    lean=True (v2.17.3): request only _SCAN_HIT_ATTRS and no facets — same
+    hits, same order (same filters / ruleContexts), much smaller response."""
     import time as _time
     ts = int(_time.time())
     facet_filters = [
@@ -1250,6 +1334,14 @@ def fetch_page(store_name: str = None, page: int = 1, _stats: list | None = None
         "ruleContexts":  ["used-page", "primary_itemtype", "extension_itemtype"],
         "attributesToRetrieve": ["*"],
     }]}
+    if lean:
+        req = payload["requests"][0]
+        req.pop("facets", None)
+        req.pop("maxValuesPerFacet", None)
+        req["attributesToRetrieve"] = list(_SCAN_HIT_ATTRS)
+        req["attributesToHighlight"] = []
+        req["attributesToSnippet"] = []
+        req["responseFields"] = ["hits", "nbHits", "nbPages", "page"]
     _t0 = time.perf_counter()
     r = _http.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=20)
     r.raise_for_status()
@@ -1261,6 +1353,37 @@ def fetch_page(store_name: str = None, page: int = 1, _stats: list | None = None
 
 
 # ── New Deals helpers ──────────────────────────────────────────────────────────
+def _lean_page1_ok(full_data, lean_box) -> tuple[bool, str]:
+    """(v2.17.3) Decide whether this nationwide scan may use lean pages: page 1
+    fetched both ways must report the same nbHits/nbPages and parse to identical
+    items for every SKU present in both (a few SKUs may differ if a listing
+    changed between the two requests — at least 90% must overlap). Any doubt →
+    (False, reason) and the scan uses full pages exactly as before."""
+    try:
+        if not full_data:
+            return False, "no full page 1"
+        if "err" in lean_box or "d" not in lean_box:
+            return False, "lean page 1 failed: " + lean_box.get("err", "timeout")
+        rf = (full_data.get("results") or [{}])[0]
+        rl = (lean_box["d"].get("results") or [{}])[0]
+        if (rf.get("nbHits"), rf.get("nbPages")) != (rl.get("nbHits"), rl.get("nbPages")):
+            return False, f"nbHits/nbPages differ ({rf.get('nbHits')}/{rf.get('nbPages')} vs {rl.get('nbHits')}/{rl.get('nbPages')})"
+        pf = {p["id"]: p for p in parse_products(full_data, None)}
+        pl = {p["id"]: p for p in parse_products(lean_box["d"], None)}
+        if not pf:
+            return False, "full page 1 parsed to 0 items"
+        common = pf.keys() & pl.keys()
+        if len(common) < 0.9 * len(pf):
+            return False, f"only {len(common)} of {len(pf)} page-1 items in both"
+        for sku in common:
+            if pf[sku] != pl[sku]:
+                diff = sorted(k for k in set(pf[sku]) | set(pl[sku]) if pf[sku].get(k) != pl[sku].get(k))
+                return False, f"parsed item {sku} differs in {diff[:6]}"
+        return True, f"page 1 identical ({len(common)} items)"
+    except Exception as e:
+        return False, f"check failed: {type(e).__name__}: {e}"[:200]
+
+
 _new_deals_cache: dict | None = None
 
 _SOFTWARE_KEYWORDS = {
@@ -5604,6 +5727,7 @@ def api_import_data():
             if not _PG_SCAN_DB_LOCK.acquire(timeout=_PG_SCAN_DB_LOCK_TIMEOUT):
                 return jsonify({"error": "A scan is still saving — try again shortly."}), 409
             try:
+                _pg_catalog_gen_bump()   # v2.17.3: invalidates any prior-state prefetch
                 rows = [_pg_row_for(str(sku), rec) for sku, rec in cat.items()
                         if sku and isinstance(rec, dict)]
                 with _pg_conn() as conn:
@@ -6321,6 +6445,13 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         nationwide = baseline or len(stores_to_scan) == 0
         label = "nationwide scan" if nationwide else f"{len(stores_to_scan)} store(s)"
         send({"type":"progress","msg":f"Starting {label}…"})
+        # v2.17.3 (Phase G S3): read the stored rows while Algolia is fetched.
+        _prefetch = None
+        if _PSYCOPG2_AVAILABLE and PG_DATABASE_URL and _PG_POOL is not None:
+            try:
+                _prefetch = _PriorPrefetch(None if nationwide else stores_to_scan)
+            except Exception as _e:
+                print(f"[pg] prior prefetch not started: {type(_e).__name__}: {_e}")
 
         all_products, ids_this_run = [], set()
         # Track scan coverage gaps so we never let a run that MISSED some stores'
@@ -6348,7 +6479,8 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                    "unique": 0, "missing": 0, "complete": None}
             page_stats = {}   # pg -> (raw, parsed, new)
             # Phase G timing (v2.17.1): where the fetch phase's time goes.
-            _ft = {"req": [], "absorb_ms": 0.0, "batches": [], "t0": time.perf_counter()}
+            _ft = {"req": [], "absorb_ms": 0.0, "t0": time.perf_counter()}
+            use_lean = False
 
             def _raw_hits(d):
                 try:
@@ -6369,12 +6501,26 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                 page_stats[pg] = (_raw_hits(d), len(products), new + (prev[2] if prev else 0))
                 return new
 
-            # First fetch page 1 to learn total pages
+            # First fetch page 1 to learn total pages. (v2.17.3) Page 1 is also
+            # fetched "lean" at the same time; the rest of the scan uses lean
+            # pages only if both parse to the same items (see _lean_page1_ok).
+            _lean_box = {}
+            def _lean1():
+                try:
+                    _lean_box["d"] = fetch_page(None, 1, lean=True)
+                except Exception as _e:
+                    _lean_box["err"] = f"{type(_e).__name__}: {_e}"[:200]
+            _lean_t = threading.Thread(target=_lean1, daemon=True)
+            _lean_t.start()
             try:
                 data1 = fetch_page(None, 1, _ft["req"])
             except Exception as e:
                 send({"type":"progress","msg":f"  API error on page 1: {e}"})
                 data1 = None
+            _lean_t.join(25)
+            use_lean, _ft["lean_note"] = _lean_page1_ok(data1, _lean_box)
+            if not use_lean:
+                print(f"[scan] lean pages NOT used this scan: {_ft['lean_note']}")
             if not data1:
                 scan_incomplete = True
             if data1:
@@ -6392,48 +6538,49 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                     if _stop_event.is_set():
                         return pg, None, None
                     try:
-                        d = fetch_page(None, pg, _ft["req"])
+                        d = fetch_page(None, pg, _ft["req"], lean=use_lean)
                         return pg, d, None
                     except Exception as exc:
                         return pg, None, exc
-                # Hard wall-clock ceiling per batch — a normal Algolia page fetch
-                # completes in well under a second, so this is purely a safety net
-                # against a connection that stalls past requests' own timeout=
-                # (v2.16.10, see STORE_SCAN_TIMEOUT below for the matching store-scan fix).
-                PAGE_BATCH_TIMEOUT = 90
-                batch_idx = 0
-                while batch_idx < len(remaining) and not _stop_event.is_set():
-                    batch = remaining[batch_idx:batch_idx + PARALLEL_WORKERS]
-                    batch_idx += len(batch)
-                    pool = ThreadPoolExecutor(max_workers=PARALLEL_WORKERS)
-                    _tb = time.perf_counter()
-                    try:
-                        futures = {pool.submit(_fetch_one_page, pg): pg for pg in batch}
-                        try:
-                            for fut in as_completed(futures, timeout=PAGE_BATCH_TIMEOUT):
-                                pg, data, err = fut.result()
-                                if err:
-                                    send({"type":"progress","msg":f"  API error on page {pg}: {err}"})
-                                    scan_incomplete = True
-                                    continue
-                                if data is None:
-                                    continue
+                # (v2.17.3, Phase G S2) One pool, PARALLEL_WORKERS pages in flight at
+                # all times: the next page starts as soon as any page finishes. It used
+                # to fetch lock-step batches of 15 where each batch waited for its
+                # slowest page (live v2.17.1: batch p50 722 ms vs page p50 486 ms).
+                # Stall guard (v2.16.10's per-batch ceiling, same 90 s): if NO page
+                # completes for PAGE_STALL_TIMEOUT, the unfinished pages are skipped
+                # and the scan is incomplete (no sold-marking) — a stuck connection
+                # past requests' own timeout= can't hang the scan.
+                PAGE_STALL_TIMEOUT = 90
+                pool = ThreadPoolExecutor(max_workers=PARALLEL_WORKERS)
+                pending = {pool.submit(_fetch_one_page, pg): pg for pg in remaining}
+                done_n = 1   # page 1
+                try:
+                    while pending:
+                        done, _ = _futures_wait(list(pending), timeout=PAGE_STALL_TIMEOUT,
+                                                return_when=_FIRST_COMPLETED)
+                        if not done:
+                            stuck = sorted(pending.values())
+                            scan_incomplete = True
+                            send({"type":"progress","msg":f"  ⚠ {len(stuck)} page(s) {stuck[:20]} stalled past {PAGE_STALL_TIMEOUT}s — skipping, continuing scan."})
+                            break
+                        for fut in done:
+                            pending.pop(fut, None)
+                            pg, data, err = fut.result()
+                            done_n += 1
+                            if err:
+                                send({"type":"progress","msg":f"  API error on page {pg}: {err}"})
+                                scan_incomplete = True
+                            elif data is not None:
                                 _ta = time.perf_counter()
                                 _absorb(pg, data)
                                 _ft["absorb_ms"] += (time.perf_counter() - _ta) * 1000.0
-                        except _FutureTimeoutError:
-                            stuck = [futures[f] for f in futures if not f.done()]
-                            scan_incomplete = True
-                            send({"type":"progress","msg":f"  ⚠ page(s) {stuck} stalled past {PAGE_BATCH_TIMEOUT}s — skipping, continuing scan."})
-                    finally:
-                        # wait=False: never block here on a genuinely stuck worker thread —
-                        # that's the exact hang this fix exists to prevent. The thread is
-                        # abandoned and will finish or die on its own without holding up the scan.
-                        pool.shutdown(wait=False)
-                    # Progress update after each batch
-                    _ft["batches"].append((time.perf_counter() - _tb) * 1000.0)
-                    pages_done = min(batch_idx + 1, nb_pages)
-                    send({"type":"progress","msg":f"  page {pages_done}/{nb_pages}… ({len(all_products):,} items so far)"})
+                            if done_n % PARALLEL_WORKERS == 0 or not pending:
+                                send({"type":"progress","msg":f"  page {min(done_n, nb_pages)}/{nb_pages}… ({len(all_products):,} items so far)"})
+                finally:
+                    # wait=False: never block on a genuinely stuck worker thread (the
+                    # hang v2.16.10 fixed); cancel_futures drops pages not yet started
+                    # (after a stall, or once a stop has made the rest return at once).
+                    pool.shutdown(wait=False, cancel_futures=True)
 
                 # ── Coverage check + retry of suspect pages (v2.16.51) ──────────
                 def _suspects():
@@ -6499,13 +6646,14 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                     _pct = lambda v, p: round(v[min(len(v) - 1, int(p / 100.0 * (len(v) - 1)))]) if v else None
                     _kb = sum(x[1] for x in _ft["req"]) / 1024.0
                     _dec = sum(x[2] for x in _ft["req"])
-                    _bt = _ft["batches"]
                     _fetch_s = (time.perf_counter() - _ft["t0"])
-                    _fs = {"pages": len(_rq), "batches": len(_bt), "wall_s": round(_fetch_s, 1),
+                    _fs = {"mode": "lean" if use_lean else "full", "workers": PARALLEL_WORKERS,
+                           "pages": len(_rq), "wall_s": round(_fetch_s, 1),
                            "req_ms_p50": _pct(_rq, 50), "req_ms_p90": _pct(_rq, 90), "req_ms_max": _pct(_rq, 100),
                            "kb_per_page": round(_kb / max(1, len(_rq)), 1), "mb_total": round(_kb / 1024.0, 1),
-                           "json_decode_s": round(_dec / 1000.0, 2), "parse_s": round(_ft["absorb_ms"] / 1000.0, 2),
-                           "batch_ms_p50": _pct(sorted(_bt), 50), "batch_ms_max": _pct(sorted(_bt), 100)}
+                           "json_decode_s": round(_dec / 1000.0, 2), "parse_s": round(_ft["absorb_ms"] / 1000.0, 2)}
+                    if not use_lean:
+                        _fs["lean_note"] = _ft.get("lean_note", "")
                     cov["fetch_timing"] = _fs
                     print("[timing] scan fetch: " + ", ".join(f"{k} {v}" for k, v in _fs.items()))
                 except Exception as _e:
@@ -6635,7 +6783,19 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             return
         try:
             try:
-                prior = _pg_scan_prior_fetch({p["id"] for p in all_products})
+                _found = {p["id"] for p in all_products}
+                prior = _prefetch.result() if _prefetch is not None else None
+                if prior is not None:
+                    # v2.17.3: only new / reappearing SKUs still need reading.
+                    _missing_skus = _found - prior.keys()
+                    _pre_n = len(prior)
+                    prior.update(_pg_scan_prior_fetch(_missing_skus))
+                    _read_note = (f"prefetched {_pre_n:,} in {_prefetch.ms}ms during fetch, "
+                                  f"+{len(_missing_skus):,} read now")
+                else:
+                    prior = _pg_scan_prior_fetch(_found)
+                    _read_note = "full read" + (f" ({_prefetch.note})" if _prefetch is not None and _prefetch.note else "")
+                _prefetch = None
             except Exception as e:
                 _save_failed("prior read", e)
                 return
@@ -6687,7 +6847,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                       last_write_ms=_write_ms)
         _PG_AVAILABLE_COUNT["ts"] = 0   # /api/state: recount now, not up to 60s later
         print(f"[pg] scan saved: {len(merged):,} found, {len(changed_rows):,} new/changed written, "
-              f"{len(sold):,} marked sold — read {_read_ms}ms, write {_write_ms}ms, total {_db_ms}ms")
+              f"{len(sold):,} marked sold — read {_read_ms}ms ({_read_note}), write {_write_ms}ms, total {_db_ms}ms")
         send({"type": "progress", "msg": f"  {len(changed_rows):,} new/changed, {len(sold):,} sold."})
 
         send({"type":"progress","msg":f"  {len(all_products):,} products scanned."})
@@ -7594,7 +7754,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.17.2"
+APP_VERSION = "2.17.3"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

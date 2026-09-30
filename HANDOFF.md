@@ -1,5 +1,66 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-30 · Current version: v2.17.2 (desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-30 · Current version: v2.17.3 (Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.17.3 — 2026-09-30: Phase G S2 + S3 — faster nationwide scans (smaller pages, continuous fetch, prior read during fetch)
+
+**Why**: the scan is the longest wait on the site (Chuck). Baseline on live v2.17.1: total 29.3 s = fetch 24.7 s
++ save 4.5 s; 479 pages, request p50 486 ms, **630 KB per page (295 MB per scan)**, JSON decode 3.0 s, parse
+1.2 s, lock-step batches of 15 with batch p50 722 ms vs page p50 486 ms; save's prior read 2.25 s. Chuck
+approved all three speedups (S1 two-phase scan comes later, after its design questions).
+
+**S2a — lean Algolia pages** (`fetch_page(..., lean=True)`, nationwide scans only): request only
+`_SCAN_HIT_ATTRS` (the 18 hit attributes parse_products reads: objectID, displayName, name, price, listPrice,
+longDescription, priceDrop, seoUrl, brand, condition, categories, categoriesSlug, startDate, creationDate,
+storeName, stores, imageId, premiumGear), no `facets` / `maxValuesPerFacet`, `attributesToHighlight: []`,
+`attributesToSnippet: []`, `responseFields: [hits, nbHits, nbPages, page]`. Same filters, ruleContexts,
+hitsPerPage and page → same hits in the same order. **Safety check every scan** (`_lean_page1_ok`): page 1 is
+fetched full (as before, for nbHits/nbPages) AND lean at the same time; lean is used for pages 2+ only if
+nbHits/nbPages match and every SKU present in both parses to an identical dict (≥ 90% overlap allowed for
+listings changing between the two requests). Otherwise the scan uses full pages exactly as before and logs
+`[scan] lean pages NOT used this scan: <reason>`. **If parse_products ever reads a new hit attribute, add it
+to `_SCAN_HIT_ATTRS`** (the check would otherwise silently keep every scan on full pages — watch for that log
+line). Store scans (`scrape_store`) and the other fetch_page callers are unchanged (full pages).
+
+**S2b — continuous fetch pool**: pages 2..N go into ONE `ThreadPoolExecutor(PARALLEL_WORKERS=15)` up front, so
+15 are always in flight and the next page starts as soon as any finishes (was: lock-step batches, each
+waiting for its slowest page, new executor per batch). Stall guard kept with the same 90 s: if NO page
+completes for `PAGE_STALL_TIMEOUT`, unfinished pages are skipped, the scan is incomplete (no sold-marking)
+and the pool is shut down with `wait=False, cancel_futures=True`. Stop: unstarted pages return at once
+(`_fetch_one_page` checks `_stop_event`). Progress message every 15 pages. Coverage accounting / suspect-page
+retry (v2.16.51) unchanged (retries also use lean pages when the scan does). Note the 2026-09-29 "stopped after
+316 pages = 21 batches" reasoning no longer maps to batches.
+
+**S3 — prior state read during the fetch**: `_PriorPrefetch` starts at the top of `_run` (if Postgres is
+configured) and runs `_pg_scan_prior_prefetch()` — `SELECT sku, <_PG_PRIOR_COLS> FROM items WHERE available`
+(`AND store = ANY(stores)` for store scans) — in a background thread while Algolia is fetched. In the save
+phase, under `_PG_SCAN_DB_LOCK`, `result()` returns it only if the **catalog write generation**
+(`_PG_CATALOG_GEN`, bumped by `_pg_catalog_gen_bump()` at the start of every `_pg_write_scan` and of
+`/api/import-data`'s upsert — the only writers of `items`) is unchanged since the prefetch started; then only
+found SKUs missing from it (new or reappearing items) are read with the old `_pg_scan_prior_fetch`. Otherwise
+(prefetch failed / still running after 60 s / catalog written meanwhile) it does the old full read. The
+`[pg] scan saved` line now says which: `read Xms (prefetched N in Yms during fetch, +M read now)` or
+`read Xms (full read (<why>))`. Memory: the prefetch holds every available row (~115K) during the fetch —
+about the same as the old read, which held the found rows (~115K) after it; locally 130K rows ≈ 280 MB RSS
+peak either way, read in 1.1 s vs 2.2 s for the old temp-table join.
+
+**Timing line** now: `[timing] scan fetch: mode lean|full, workers 15, pages, wall_s, req_ms_p50/p90/max,
+kb_per_page, mb_total, json_decode_s, parse_s` (+ `lean_note` when full). Batch stats removed.
+
+**Local verification** (sandbox Postgres 16, mocked Algolia returning full pages with extra junk attributes +
+facets, or trimmed pages when asked lean; each scenario run on v2.17.2 AND v2.17.3 from the same DB snapshot,
+final `items` table md5 compared): normal 2 nationwide scans (20,000 items, then 300 sold / 200 price drops /
+150 new) — identical; lean page-1 mismatch injected → both scans fell back to full, identical; nationwide then
+STORE scan (Austin) — identical, store prefetch used (+49 read now); catalog write injected mid-fetch → "full
+read (catalog written since prefetch started)", identical. Stall (page 40 hangs past a 3 s test timeout) →
+skipped, scan incomplete, 0 sold; Stop after page 30 → ends in 0.7 s, 0 sold. Mock numbers: 990 → 140 KB per
+page. py_compile / node --check clean, pyflakes no undefined names.
+
+**After deploy, check**: `[timing] scan fetch: mode lean …` (NOT a `lean pages NOT used` line), kb_per_page
+far below 630, wall_s vs 24.6 s; `[pg] scan saved … (prefetched …)`, read well under 2.25 s; `[timing] scan
+done` total vs 29.3 s; coverage lines still `complete True`; no API errors / 429s from Algolia at the steadier
+request rate; Railway memory during scans.
 
 ---
 

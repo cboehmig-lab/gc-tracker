@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-30 · Version: v2.17.2 (desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-09-30 · Version: v2.17.3 (Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,7 +88,17 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.17.2 — desktop scan button renamed "Scan for New Listings" (2026-09-30)
+## Current State: v2.17.3 — Phase G S2+S3: faster nationwide scans (2026-09-30)
+
+Baseline 29.3 s per scan (24.7 fetch, 630 KB/page). v2.17.3: nationwide pages request only `_SCAN_HIT_ATTRS`
+(no facets/highlights) after a per-scan page-1 full-vs-lean parse check (falls back to full pages on any
+difference); pages fetched by one continuous 15-worker pool (90 s no-progress stall guard); prior state read
+from Postgres during the fetch (`_PriorPrefetch`, discarded if `_PG_CATALOG_GEN` changed). Results identical
+to v2.17.2 in every local scenario. See HANDOFF.md v2.17.3. Next: S1 (two-phase scan).
+
+---
+
+## Previous: v2.17.2 — desktop scan button renamed "Scan for New Listings" (2026-09-30)
 
 Text-only: desktop `#check-now-btn` + gc.js `_updateRelativeTime()` + the empty-results hint. Mobile bottom
 bar keeps "Scan For New". v2.17.1 (timing) is live. See HANDOFF.md v2.17.2.
