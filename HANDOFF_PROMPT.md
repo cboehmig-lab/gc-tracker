@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-29 · Version: v2.16.51 (nationwide scans retry suspect pages and skip sold-marking unless they account for Algolia nbHits; see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-09-30 · Version: v2.17.0 (Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,7 +88,18 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.16.51 — nationwide scan coverage guard (2026-09-29)
+## Current State: v2.17.0 — Phase F step 5c, JSON catalog retired (2026-09-30)
+
+Postgres `items` is now the ONLY catalog store. Deleted `_cat_cache` / `_load_cat_cache` / `_save_cat_cache`,
+the per-scan JSON backup, `/api/pg-parity-check`, `/api/pg-full-backfill` + `/admin/pg-backfill`,
+`/api/pg-precheck-5b`, and `migrate_cat_cache_to_pg.py`. `/api/reset` keeps the catalog (state files only);
+`/api/export-data` streams the catalog from Postgres (same bundle shape); `/api/import-data` upserts a bundle's
+catalog into Postgres (1 MB request cap unchanged — full-catalog restore = Railway Postgres backups).
+Local: scan scenario byte-identical to v2.16.51; module RSS with a 300 MB JSON present 850 → 84 MB. The stale
+gc_category_cache.json on the Railway volume is left alone. Open: one nationwide scan (2026-09-29 18:16 CDT)
+stopped ~316/481 pages with 0 retries — guard caught it; cause not yet investigated. Full detail: HANDOFF.md v2.17.0.
+
+## Previous: v2.16.51 — nationwide scan coverage guard (2026-09-29)
 
 Live finding: every nationwide scan got 1,200-1,440 fewer unique items than Algolia's nbHits (whole pages,
 no error) and marked them sold → ~1.3K items flickered sold/available per scan. v2.16.51 tracks per-page

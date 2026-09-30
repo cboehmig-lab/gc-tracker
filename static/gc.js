@@ -3940,7 +3940,7 @@ function startValidate() {}
 // ── Reset ─────────────────────────────────────────────────────────────────────
 async function resetData() {
   if (running) { appendLog('Stop the current run before resetting.', 'log-err'); return; }
-  if (!confirm('Reset all inventory data? This preserves your watchlist, want list, and favorites.')) return;
+  if (!confirm('Reset scan state? The item catalog, watchlist, want list, and favorites are kept.')) return;
   const r = await fetch('/api/reset', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},

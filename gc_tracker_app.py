@@ -61,7 +61,6 @@ STATE_FILE     = DATA_DIR / "gc_state.json"
 OUTPUT_FILE    = DATA_DIR / "gc_new_inventory.xlsx"
 STORES_CACHE   = DATA_DIR / "gc_stores_cache.json"
 FAVORITES_FILE = DATA_DIR / "gc_favorites.json"
-CAT_CACHE_FILE = DATA_DIR / "gc_category_cache.json"
 WATCHLIST_FILE   = DATA_DIR / "gc_watchlist.json"
 KEYWORDS_FILE    = DATA_DIR / "gc_keywords.json"
 STORE_COORDS_FILE    = DATA_DIR / "gc_store_coords.json"
@@ -334,86 +333,18 @@ def _rotate_ua():
     """Pick a random User-Agent for the next request."""
     _http.headers["User-Agent"] = random.choice(_USER_AGENTS)
 
-# ── Category cache ────────────────────────────────────────────────────────────
-_cat_cache: dict = {}
-_cat_cache_mtime = None   # mtime of the file at last parse; skip re-parse when unchanged
-
-def _load_cat_cache():
-    # The category cache is a ~50MB JSON of ~92K items. It used to be re-read and
-    # re-parsed from disk on EVERY call — and /api/browse calls it on every keystroke,
-    # filter, sort, and page flip. That parse is ~400ms and holds the GIL, so on the
-    # threaded dev server it serialized all request threads behind it. Memoize by file
-    # mtime: only re-parse when the file actually changed (i.e. after a scan saves).
-    # A stat() guard costs ~1µs. (v2.13.0)
-    global _cat_cache, _cat_cache_mtime
-    try:
-        mtime = CAT_CACHE_FILE.stat().st_mtime
-    except OSError:
-        # File missing (fresh deploy, or an admin reset deleted it) — leave whatever is
-        # in memory. Reset sets _cat_cache = {} itself, so this won't resurrect data.
-        return
-    if mtime == _cat_cache_mtime and _cat_cache:
-        return
-    try:
-        _cat_cache = json.loads(CAT_CACHE_FILE.read_text())
-        _cat_cache_mtime = mtime
-    except Exception:
-        # Corrupt/partial file (e.g. a crash during a non-atomic write on an older
-        # build). Do NOT blank the catalog for every user — keep the last good
-        # in-memory cache. If we have data, advance mtime so we stop re-reading the
-        # bad file on every browse; a later good write bumps mtime and we reload.
-        # If we have nothing yet, leave mtime unset so we keep retrying.
-        if not _cat_cache:
-            _cat_cache_mtime = None
-        else:
-            _cat_cache_mtime = mtime
-
-def _save_cat_cache():
-    # Atomic write: a crash/redeploy partway through writing the ~53MB file used to
-    # leave it truncated, after which json.loads raised and the in-memory catalog was
-    # reset to {} — an empty site for every user until the next full scan. Write to a
-    # temp file then os.replace() (atomic on POSIX) so readers only ever see a complete
-    # file.
-    try:
-        tmp = CAT_CACHE_FILE.parent / (CAT_CACHE_FILE.name + ".tmp")
-        tmp.write_text(json.dumps(_cat_cache))
-        os.replace(tmp, CAT_CACHE_FILE)
-    except Exception:
-        pass
-
-# Serializes the scan's post-"done" JSON backup (v2.16.49): two back-to-back
-# scans' backup threads must not mutate / dump _cat_cache at the same time
-# (json.dumps over a dict that another thread is updating raises).
-_JSON_BACKUP_LOCK = threading.Lock()
-
-def _json_backup_apply(merged: dict, sold: set):
-    """Apply one committed scan to the in-memory JSON catalog and write it to
-    disk. Background thread; failures are logged, never surfaced (Postgres is
-    the source of truth — Phase F 5c deletes this backup)."""
-    try:
-        with _JSON_BACKUP_LOCK:
-            _cat_cache.update(merged)
-            for sku in sold:
-                rec = _cat_cache.get(sku)
-                if rec is not None:
-                    rec["available"] = False
-            _save_cat_cache()
-    except Exception as e:
-        print(f"[scan] JSON backup write failed (non-fatal): {type(e).__name__}: {e}")
-
-# ── Postgres catalog store (Phase A, v2.16.14) ────────────────────────────────
-# Migration target for the flat-JSON _cat_cache above (~92K items, ~53MB) — see
-# POSTGRES_MIGRATION_PLAN.md for the full plan and rationale. This phase ONLY
-# creates the schema at startup; nothing on the request path reads from or
-# writes to Postgres yet, and _cat_cache / gc_category_cache.json remains the
-# sole source of truth. Guarded end-to-end so a missing DATABASE_URL (local
-# dev, or before the Railway variable reference is actually deployed), a
-# missing psycopg2 install, or an unreachable DB can never block app startup —
-# same defensive posture as _load_cat_cache() / _maybe_backup_users_db().
+# ── Postgres catalog store ────────────────────────────────────────────────────
+# The item catalog lives ONLY in the Postgres `items` table (every item ever
+# seen, available and sold — the sold history is kept on purpose). History:
+# Phase A (v2.16.14) created this schema as a migration target for the old
+# flat-JSON catalog (_cat_cache / gc_category_cache.json); Phases B-F moved
+# every read and write over; v2.17.0 (Phase F step 5c) deleted the JSON catalog.
+# See POSTGRES_MIGRATION_PLAN.md / POSTGRES_PHASE_F_DESIGN.md.
+# Schema setup is guarded end-to-end so a missing DATABASE_URL (local dev), a
+# missing psycopg2 install, or an unreachable DB never blocks app startup (the
+# site then answers 503 on catalog reads until Postgres is reachable).
 #
-# Schema lives in pg_schema.sql (repo root) rather than inline here so the
-# one-off backfill script (migrate_cat_cache_to_pg.py) can apply the exact
-# same DDL without duplicating it — see that script's docstring.
+# Schema lives in pg_schema.sql (repo root).
 PG_SCHEMA_FILE = SCRIPT_DIR / "pg_schema.sql"
 
 # pg_schema.sql splits on this marker (see that file's own comment above the marker for the
@@ -536,9 +467,8 @@ def _init_pg_schema():
 _init_pg_schema()
 
 # ── Postgres connection pool (Phase C, v2.16.20) ──────────────────────────────
-# The scan-triggered/admin-only Postgres paths above (_init_pg_schema,
-# _pg_full_backfill, _pg_parity_check; formerly _pg_sync_scan) each open one ad-hoc
-# psycopg2.connect() per call — fine for rare, background-thread-triggered
+# Rare admin/startup Postgres paths (_init_pg_schema, the admin data export)
+# open one ad-hoc psycopg2.connect() per call — fine for rare, background-thread-triggered
 # work, but not for something hit on every /api/browse request once Phase D
 # cuts over. See POSTGRES_MIGRATION_PLAN.md §5. Sized for this app's
 # `--workers=1 --worker-class=gthread --threads=8` Procfile: up to 8 concurrent
@@ -546,7 +476,7 @@ _init_pg_schema()
 # (which still open their own ad-hoc connections — not migrated to the pool,
 # since they're rare and not on any hot path; migrating them is a follow-up,
 # not required for Phase C). Created once at module load, torn down never
-# (lives for the process lifetime, same as _cat_cache).
+# (lives for the process lifetime).
 _PG_POOL = None
 if _PSYCOPG2_AVAILABLE and PG_DATABASE_URL:
     try:
@@ -641,21 +571,17 @@ def _pg_read(fn):
 # (_pg_write_scan) BEFORE sending "done" — so a client's post-scan /api/browse
 # always sees this scan's results, and the next scan's prior read always sees
 # them too. A write failure is a failed scan (error to the user, nothing else
-# saved, the user's NEW anchor not advanced) — never silent. The JSON catalog
-# (_cat_cache / gc_category_cache.json) is still written afterwards as a
-# write-only backup that mirrors exactly what Postgres committed; nothing reads
-# it for scan decisions (5c deletes it).
+# saved, the user's NEW anchor not advanced) — never silent.
 #
 # History: Phase B (v2.16.15) added _pg_sync_scan, a best-effort background
 # mirror of the JSON path; v2.16.47 (5b-i) shadow-compared a Postgres-prior
-# merge against the JSON path on real scans (clean) before this cutover.
+# merge against the JSON path on real scans (clean) before this cutover; until
+# v2.17.0 (5c) a write-only JSON backup was still written after each scan.
 _PG_UPSERT_COLS = ["sku", "name", "brand", "category", "subcategory", "condition",
                    "condition_note", "price", "list_price", "has_price_drop", "price_drop",
                    "price_drop_since", "store", "location", "url", "image_id", "is_vintage",
                    "available", "date_listed", "first_seen", "store_inferred"]
-# Keep in sync with migrate_cat_cache_to_pg.py's COLS if the schema ever changes.
-# (store_inferred added v2.16.50; the one-off migrate script predates it and is
-# deleted in Phase F 5c — Postgres fills the column's default for its rows.)
+# (store_inferred added v2.16.50.)
 _PG_UPSERT_SQL = (
     f"INSERT INTO items ({', '.join(_PG_UPSERT_COLS)}) VALUES %s "
     f"ON CONFLICT (sku) DO UPDATE SET "
@@ -880,161 +806,6 @@ def _pg_write_scan(rows: list, run_ids: set, sold_scope, send=None) -> set:
             _PG_VALIDATE_CONN.reset(_tok)
     raise last_exc  # unreachable
 
-
-# ── Postgres full backfill (Phase A fix, v2.16.18) ────────────────────────────
-# One-time, admin-triggered corrective re-sync of the Postgres `items` table
-# from the LIVE in-process _cat_cache. Fixes Phase A's original backfill
-# (migrate_cat_cache_to_pg.py, run against a stale local gc_category_cache.json
-# snapshot from 2026-04-29) — /api/pg-parity-check confirmed on 2026-09-02 that
-# Postgres was missing 255,886 of 436,325 live SKUs, plus stale field values on
-# the ~180K rows it did have. See POSTGRES_MIGRATION_PLAN.md for the full plan.
-#
-# Deliberately full-catalog, not active-only: Chuck decided 2026-09-02 to keep
-# _cat_cache's full sold/delisted history on purpose (future price-over-time /
-# average-used-price analytics), so this backfills every sku currently in
-# _cat_cache regardless of `available`, matching what the JSON has always had.
-#
-# Upsert-only — never deletes or marks-unavailable anything already in
-# Postgres that isn't in _cat_cache. The 2026-09-02 parity check found
-# extra_in_pg was already 0, so there's nothing to clean up; if that ever
-# changes, treat it as a separate investigation, not something this backfill
-# should silently paper over.
-#
-# Reuses the exact _PG_UPSERT_SQL / _pg_row_for also used by _pg_write_scan —
-# same upsert shape, just applied to the full cache instead of one scan's
-# ids_this_run. Runs in a background thread via the same _lock/_q pattern as
-# _validate_stores, so the ~440K-row write — measured at ~15K
-# rows/sec against a local scratch Postgres (436,240 synthetic rows in ~25-29s,
-# including 180K seeded-stale rows needing correction); real timing against
-# Railway's network/DB will vary — never blocks the request or risks a proxy
-# timeout. Commits per chunk, so an interrupted run (stop button, deploy,
-# crash) leaves whatever it finished already correct in Postgres; re-running
-# it is idempotent (verified in the scratch-Postgres test: an
-# interrupted-then-resumed run produces the same end state as one
-# uninterrupted run — see /tmp/pgtest/test_backfill.py from the session that
-# built this).
-def _pg_full_backfill():
-    """Full upsert of every _cat_cache item into Postgres. See module comment above."""
-    def send(msg): _q.put(msg)
-    total = 0
-    done = 0
-    try:
-        if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL):
-            send({"type": "progress", "msg": "Postgres not configured — aborting."})
-            return
-        _load_cat_cache()
-        skus = list(_cat_cache.keys())
-        total = len(skus)
-        send({"type": "progress", "msg": f"Starting full Postgres backfill from live _cat_cache: "
-                                          f"{total:,} items (all statuses — available and "
-                                          f"sold/delisted history both included)."})
-        CHUNK = 5000
-        conn = psycopg2.connect(PG_DATABASE_URL, connect_timeout=10)
-        conn.autocommit = False
-        t0 = time.time()
-        last_report = 0
-        try:
-            with conn.cursor() as cur:
-                for i in range(0, total, CHUNK):
-                    if _stop_event.is_set():
-                        send({"type": "progress",
-                              "msg": f"⏹ Stopped by user after {done:,}/{total:,} "
-                                     "(already-upserted rows remain correct; safe to re-run)."})
-                        break
-                    batch = skus[i:i + CHUNK]
-                    rows = [_pg_row_for(sku, _cat_cache[sku]) for sku in batch if sku in _cat_cache]
-                    if rows:
-                        psycopg2.extras.execute_values(cur, _PG_UPSERT_SQL, rows, page_size=2000)
-                        conn.commit()
-                    done += len(batch)
-                    if done - last_report >= 50000 or done == total:
-                        elapsed = time.time() - t0
-                        rate = done / elapsed if elapsed > 0 else 0
-                        send({"type": "progress",
-                              "msg": f"  upserted {done:,}/{total:,} "
-                                     f"({elapsed:.0f}s elapsed, ~{rate:,.0f} rows/sec)"})
-                        last_report = done
-        finally:
-            conn.close()
-        elapsed = time.time() - t0
-        send({"type": "progress",
-              "msg": f"\n✓ Full backfill done: {done:,} rows upserted in {elapsed:.0f}s. "
-                     f"Run /api/pg-parity-check next to confirm pg_total == json_total."})
-        send({"type": "done", "baseline": False, "stopped": _stop_event.is_set(),
-              "new_ids": [], "items": []})
-    except Exception as e:
-        # Don't leak exception text over the (public) SSE stream — log it server-side.
-        # (same posture as _validate_stores / 2026-07 audit L3)
-        print(f"[pg] full backfill failed after {done:,}/{total:,}: {type(e).__name__}: {e}")
-        send({"type": "done", "error": "Backfill failed — see server logs.",
-              "new_ids": [], "items": []})
-    finally:
-        # Guard against the /api/stop 5s force-unlock watchdog already having
-        # released this lock if this thread's winddown ran long (RuntimeError:
-        # release unlocked lock) — same pattern as admin_clear_lock/_force_unlock.
-        # Harmless either way: the lock ends up unlocked regardless. (v2.16.27)
-        try:
-            _lock.release()
-        except RuntimeError:
-            pass
-
-# ── Postgres parity check (Phase B verification, v2.16.16) ───────────────────
-# Admin-only, on-demand, read-only diagnostic: compares the live in-memory
-# _cat_cache (the JSON path's source of truth) against the live Postgres
-# `items` table, to check whether Phase B's dual-write has actually kept them
-# in sync across real production scans. Not on any user-facing path and
-# doesn't touch either data source — pure comparison. See
-# POSTGRES_MIGRATION_PLAN.md Phase C and NEXT_SESSION_PROMPT.md.
-#
-# Verified against a scratch Postgres before shipping: seeded deliberate
-# price/available/date_listed drift plus missing/extra rows on each side and
-# confirmed the diff catches exactly those and nothing else (a $0.01 price
-# rounding difference is intentionally NOT flagged); also timed at
-# production scale (~92K rows, synthetic) at well under 1s.
-def _pg_parity_check() -> dict:
-    _load_cat_cache()
-    conn = psycopg2.connect(PG_DATABASE_URL, connect_timeout=10)
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT sku, available, price, date_listed, store FROM items")
-            pg_rows = {
-                r[0]: {"available": r[1], "price": float(r[2]) if r[2] is not None else None,
-                       "date_listed": r[3], "store": r[4]}
-                for r in cur.fetchall()
-            }
-    finally:
-        conn.close()
-
-    json_skus = set(_cat_cache.keys())
-    pg_skus   = set(pg_rows.keys())
-    missing_in_pg = json_skus - pg_skus   # in JSON, never made it to Postgres
-    extra_in_pg   = pg_skus - json_skus   # in Postgres, not in JSON (shouldn't happen)
-
-    mismatches = []
-    for sku in json_skus & pg_skus:
-        j, p = _cat_cache[sku], pg_rows[sku]
-        diffs = {}
-        if bool(j.get("available", True)) != bool(p["available"]):
-            diffs["available"] = [j.get("available"), p["available"]]
-        jp = j.get("price")
-        if jp is not None and p["price"] is not None and abs(float(jp) - p["price"]) > 0.01:
-            diffs["price"] = [jp, p["price"]]
-        if (j.get("date_listed") or "") != (p["date_listed"] or ""):
-            diffs["date_listed"] = [j.get("date_listed"), p["date_listed"]]
-        if diffs:
-            mismatches.append({"sku": sku, "diffs": diffs})
-
-    return {
-        "json_total":             len(json_skus),
-        "pg_total":                len(pg_skus),
-        "missing_in_pg":           len(missing_in_pg),
-        "missing_in_pg_sample":    sorted(missing_in_pg)[:20],
-        "extra_in_pg":             len(extra_in_pg),
-        "extra_in_pg_sample":      sorted(extra_in_pg)[:20],
-        "field_mismatches":        len(mismatches),
-        "field_mismatches_sample": mismatches[:20],
-        "checked_at":              datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
 
 # ── Store list ────────────────────────────────────────────────────────────────
 
@@ -2967,7 +2738,6 @@ _ADMIN_NAV_LINKS = [
     ("/admin/listing-patterns", "📊 Listing Patterns"),
     ("/admin/build-coords",     "🗺 Build Coords"),
     ("/admin/validate-stores",  "✓ Validate Stores"),
-    ("/admin/pg-backfill",      "🗄 PG Backfill"),
 ]
 
 def _admin_nav(current: str) -> str:
@@ -3069,7 +2839,7 @@ def admin_devices():
 def _admin_task_page(title: str, api_path: str, description: str,
                      options_html: str = "", nav_current: str = "") -> str:
     """Shared HTML template for long-running admin task pages (build-coords,
-    validate-stores, pg-backfill).
+    validate-stores).
 
     CSP note (v2.16.19): this template used to have its Run/SSE-progress logic as an
     inline <script> with onclick="run()" baked directly into the returned HTML. CSP's
@@ -3151,27 +2921,6 @@ def admin_validate_stores():
                     "renames any whose slugs changed, then rebuilds the store list from GC live data. "
                     "Takes ~0.5s per store.",
         nav_current="/admin/validate-stores",
-    )
-    return Response(html, content_type="text/html")
-
-
-@app.route("/admin/pg-backfill")
-def admin_pg_backfill():
-    """Admin page to run the one-time full Postgres catalog backfill from the
-    live _cat_cache. Corrective fix for Phase A's stale-file backfill — see
-    POSTGRES_MIGRATION_PLAN.md. Upsert-only and idempotent, safe to re-run."""
-    denied = _require_admin()
-    if denied:
-        return denied
-    html = _admin_task_page(
-        title="Postgres Full Backfill",
-        api_path="/api/pg-full-backfill",
-        description="Upserts EVERY item currently in the live _cat_cache (available items "
-                    "plus sold/delisted history — both intentionally kept) into the Postgres "
-                    "items table, correcting the incomplete Phase A backfill. Upsert-only, "
-                    "never deletes. Takes a few minutes at full catalog scale (~440K items). "
-                    "Run /api/pg-parity-check afterward to confirm pg_total == json_total.",
-        nav_current="/admin/pg-backfill",
     )
     return Response(html, content_type="text/html")
 
@@ -3515,13 +3264,15 @@ def admin_listing_patterns():
 @app.route("/api/reset", methods=["POST"])
 @optional_user_context
 def api_reset():
-    """Delete inventory state and cache to start fresh.
-    Preserves favorites, watchlist, and want list."""
+    """Delete scan state files to start fresh. Preserves favorites, watchlist,
+    and want list. Since v2.17.0 the item catalog lives only in Postgres and
+    is NOT touched here — it holds the sold/delisted history Chuck keeps on
+    purpose, and wiping it would also erase every user's watchlist targets."""
     denied = _require_admin_api()
     if denied:
         return denied
     deleted = []
-    for f in [STATE_FILE, CAT_CACHE_FILE, OUTPUT_FILE,
+    for f in [STATE_FILE, OUTPUT_FILE,
               DATA_DIR / "gc_last_scan.txt",
               DATA_DIR / "gc_invalid_stores.json",
               DATA_DIR / "gc_condition_diag.json",
@@ -3529,9 +3280,8 @@ def api_reset():
         if f.exists():
             f.unlink()
             deleted.append(f.name)
-    global _cat_cache
-    _cat_cache = {}
-    return jsonify({"deleted": deleted, "status": "Reset complete. Ready for a fresh baseline."})
+    return jsonify({"deleted": deleted,
+                    "status": "Reset complete (item catalog kept). Ready for a fresh baseline."})
 
 @app.route("/api/clear-blocklist", methods=["POST"])
 @optional_user_context
@@ -5495,30 +5245,78 @@ def api_set_cookies():
 
 
 
+# Admin data export / import. Since v2.17.0 (Phase F 5c) the "cat_cache" part of
+# the bundle is built from / written to Postgres `items` — same bundle shape as
+# before (sku -> record dict with the old JSON catalog's keys), so an old export
+# still imports. The export streams the ~500K-row catalog straight from a
+# server-side cursor instead of building it in memory.
+_EXPORT_FILES = [
+    ("state",     STATE_FILE),
+    ("stores",    STORES_CACHE),
+    ("favorites", FAVORITES_FILE),
+    ("watchlist", WATCHLIST_FILE),
+    ("keywords",  KEYWORDS_FILE),
+]
+_IMPORT_CHUNK = 5000
+
+
+def _pg_record_from_row(row: tuple) -> dict:
+    """A Postgres `items` row (_PG_UPSERT_COLS order) as the old JSON catalog
+    record dict (everything but sku). NUMERIC columns become floats."""
+    rec = {}
+    for col, v in zip(_PG_UPSERT_COLS[1:], row[1:]):
+        if col in _PG_NUMERIC_COLS:
+            v = float(v) if v is not None else 0
+        rec[col] = v
+    return rec
+
+
+def _export_stream(parts: dict):
+    """Yield the export bundle as JSON text: the small file parts, then the
+    catalog streamed from Postgres. A mid-stream Postgres failure truncates
+    the download (the file won't parse) and is logged."""
+    yield "{"
+    for name, val in parts.items():
+        yield json.dumps(name) + ": " + json.dumps(val) + ", "
+    yield '"cat_cache": {'
+    n = 0
+    try:
+        conn = psycopg2.connect(PG_DATABASE_URL, connect_timeout=10)
+        try:
+            with conn.cursor(name="export_items") as cur:
+                cur.itersize = 5000
+                cur.execute(f"SELECT {', '.join(_PG_UPSERT_COLS)} FROM items ORDER BY sku")
+                for row in cur:
+                    yield ("," if n else "") + json.dumps(row[0]) + ": " + json.dumps(_pg_record_from_row(row))
+                    n += 1
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[export] catalog stream failed after {n:,} rows: {type(e).__name__}: {e}")
+        return
+    print(f"[export] data export streamed {n:,} catalog rows")
+    yield "}}"
+
+
 @app.route("/api/export-data")
 @optional_user_context
 def api_export_data():
-    """Export all data files as a JSON bundle for migration."""
+    """Export all data as a JSON bundle for migration (files + Postgres catalog)."""
     denied = _require_admin_api()
     if denied:
         return denied
-    bundle = {}
-    for name, path in [
-        ("state",     STATE_FILE),
-        ("cat_cache", CAT_CACHE_FILE),
-        ("stores",    STORES_CACHE),
-        ("favorites", FAVORITES_FILE),
-        ("watchlist", WATCHLIST_FILE),
-        ("keywords",  KEYWORDS_FILE),
-    ]:
+    if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL):
+        return jsonify({"error": "Postgres not configured"}), 503
+    parts = {}
+    for name, path in _EXPORT_FILES:
         if path.exists():
             try:
-                bundle[name] = json.loads(path.read_text())
+                parts[name] = json.loads(path.read_text())
             except Exception:
                 pass
     from flask import Response
     return Response(
-        json.dumps(bundle),
+        _export_stream(parts),
         mimetype="application/json",
         headers={"Content-Disposition": "attachment; filename=gc_data_export.json"}
     )
@@ -5527,27 +5325,54 @@ def api_export_data():
 @app.route("/api/import-data", methods=["POST"])
 @optional_user_context
 def api_import_data():
-    """Import a data bundle exported from another instance. Requires admin session."""
+    """Import a data bundle exported from another instance. Requires admin session.
+    The bundle's cat_cache is UPSERTED into Postgres (never deletes rows that
+    aren't in the bundle), in one transaction, while no scan is running."""
     denied = _require_admin_api()
     if denied:
         return denied
     bundle = request.json or {}
+    if not isinstance(bundle, dict):
+        return jsonify({"error": "Bundle must be a JSON object."}), 400
+    cat = bundle.get("cat_cache")
+    if cat is not None and not isinstance(cat, dict):
+        return jsonify({"error": "cat_cache must be an object of sku -> record."}), 400
+    upserted = 0
+    if cat:
+        if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL and _PG_POOL is not None):
+            return jsonify({"error": "Postgres not configured"}), 503
+        if not _lock.acquire(blocking=False):
+            return jsonify({"error": "A scan is running — try again when it's done."}), 409
+        try:
+            if not _PG_SCAN_DB_LOCK.acquire(timeout=_PG_SCAN_DB_LOCK_TIMEOUT):
+                return jsonify({"error": "A scan is still saving — try again shortly."}), 409
+            try:
+                rows = [_pg_row_for(str(sku), rec) for sku, rec in cat.items()
+                        if sku and isinstance(rec, dict)]
+                with _pg_conn() as conn:
+                    with conn.cursor() as cur:
+                        for i in range(0, len(rows), _IMPORT_CHUNK):
+                            psycopg2.extras.execute_values(
+                                cur, _PG_UPSERT_SQL, rows[i:i + _IMPORT_CHUNK], page_size=2000)
+                upserted = len(rows)
+            finally:
+                _PG_SCAN_DB_LOCK.release()
+        except Exception as e:
+            print(f"[import] catalog upsert failed: {type(e).__name__}: {e}")
+            return jsonify({"error": "Catalog import failed — nothing was written. See server logs."}), 500
+        finally:
+            try:
+                _lock.release()
+            except RuntimeError:
+                pass
+        _PG_AVAILABLE_COUNT["ts"] = 0
     written = []
-    mapping = {
-        "state":     STATE_FILE,
-        "cat_cache": CAT_CACHE_FILE,
-        "stores":    STORES_CACHE,
-        "favorites": FAVORITES_FILE,
-        "watchlist": WATCHLIST_FILE,
-        "keywords":  KEYWORDS_FILE,
-    }
-    for name, path in mapping.items():
+    for name, path in _EXPORT_FILES:
         if name in bundle:
             path.write_text(json.dumps(bundle[name]))
             written.append(name)
-    global _cat_cache
-    _cat_cache = {}
-    _load_cat_cache()
+    if cat:
+        written.append(f"cat_cache ({upserted:,} rows upserted into Postgres)")
     return jsonify({"imported": written, "status": "Import complete — reload the page."})
 
 
@@ -6025,254 +5850,6 @@ def api_stop():
     threading.Thread(target=_force_unlock, daemon=True).start()
     return jsonify({"status": "stopping"})
 
-@app.route("/api/pg-parity-check")
-@optional_user_context
-def api_pg_parity_check():
-    denied = _require_admin_api()
-    if denied:
-        return denied
-    if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL):
-        return jsonify({"error": "Postgres not configured"}), 503
-    try:
-        return jsonify(_pg_parity_check())
-    except Exception as e:
-        return jsonify({"error": f"{type(e).__name__}: {e}"}), 502
-
-
-# ── Phase F step 5b pre-cutover check (v2.16.47, TEMPORARY — delete in 5c) ────
-# Admin-only, read-only. Before the scan's write path moves to Postgres (5b-ii),
-# prove Postgres holds everything real users point at, and that every column
-# the scan will read as prior state matches the JSON catalog — the existing
-# /api/pg-parity-check only compares available/price/date_listed.
-#   (a) every SKU in every user's watchlist and new_ids (gc_users.db) exists in
-#       Postgres `items` — zero tolerance (Phase A's backfill once undercounted);
-#   (b) full-column parity: each JSON record run through _pg_row_for (exactly
-#       what the scan upserts) vs the live Postgres row, all 20 columns;
-#   (c) context for the 5b-ii deletions: does the legacy gc_watchlist.json
-#       exist, and how many items would _fill_gaps / _populate_store_data touch.
-# Runs in a background thread (a full pass streams ~500K Postgres rows); POST
-# starts it, GET polls. Uses its own lock, NOT the scan lock, so it never
-# blocks a scan — a scan running during the check can cause a few transient
-# column diffs, so the result records whether one was running.
-_PRECHECK_5B_LOCK = threading.Lock()
-_PRECHECK_5B_STATE = {"status": "idle"}
-_PRECHECK_SAMPLE_CAP = 50
-_PRECHECK_NUMERIC_COLS = {"price", "list_price", "price_drop"}
-
-
-def _precheck_5b_user_skus():
-    """Every watchlist / new_ids SKU per user from gc_users.db."""
-    conn = _user_db()
-    try:
-        rows = conn.execute(
-            "SELECT d.user_id, d.watchlist, d.new_ids, u.deleted_at "
-            "FROM user_data d LEFT JOIN users u ON u.id = d.user_id").fetchall()
-    finally:
-        conn.close()
-    wl_refs, nid_refs = {}, {}     # sku -> [user_id, ...]
-    wl_meta = {}                  # sku -> first watchlist entry's name/store/date_added
-    info = {"user_rows": len(rows), "users_with_watchlist": 0, "users_with_new_ids": 0,
-            "users_pending_deletion": 0, "parse_errors": 0}
-    for r in rows:
-        uid = r["user_id"]
-        if r["deleted_at"]:
-            info["users_pending_deletion"] += 1
-        try:
-            wl = json.loads(r["watchlist"] or "{}")
-        except Exception:
-            wl, info["parse_errors"] = {}, info["parse_errors"] + 1
-        try:
-            nids = json.loads(r["new_ids"] or "[]")
-        except Exception:
-            nids, info["parse_errors"] = [], info["parse_errors"] + 1
-        if isinstance(wl, dict):
-            wl_skus = list(wl.keys())
-            for k, v in wl.items():   # v2.16.48: keep entry details for the missing-SKU sample
-                if isinstance(v, dict) and str(k) not in wl_meta:
-                    wl_meta[str(k)] = {f: str(v.get(f, ""))[:80]
-                                       for f in ("name", "store", "location", "date_added")}
-        elif isinstance(wl, list):
-            wl_skus = [(x.get("id") or x.get("sku")) if isinstance(x, dict) else x for x in wl]
-        else:
-            wl_skus = []
-        wl_skus = [str(x) for x in wl_skus if x]
-        nid_skus = [str(x) for x in (nids if isinstance(nids, list) else []) if x]
-        if wl_skus:
-            info["users_with_watchlist"] += 1
-        if nid_skus:
-            info["users_with_new_ids"] += 1
-        for s in wl_skus:
-            wl_refs.setdefault(s, []).append(uid)
-        for s in nid_skus:
-            nid_refs.setdefault(s, []).append(uid)
-    return wl_refs, nid_refs, info, wl_meta
-
-
-def _precheck_5b_run():
-    st = _PRECHECK_5B_STATE
-    t0 = time.time()
-    try:
-        st.update(status="running", started=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                  phase="user skus", result=None, error=None)
-        result = {"scan_running_at_start": _lock.locked()}
-
-        # (a) user SKUs vs Postgres
-        wl_refs, nid_refs, uinfo, wl_meta = _precheck_5b_user_skus()
-        all_skus = sorted(set(wl_refs) | set(nid_refs))
-        found = {}
-        def _q_users():
-            with _pg_conn() as conn:
-                with conn.cursor() as cur:
-                    out = {}
-                    for i in range(0, len(all_skus), 5000):
-                        cur.execute("SELECT sku, available FROM items WHERE sku = ANY(%s)",
-                                    (all_skus[i:i + 5000],))
-                        out.update({r[0]: r[1] for r in cur.fetchall()})
-                    return out
-        found = _pg_read(_q_users) if all_skus else {}
-        miss_wl = sorted(s for s in wl_refs if s not in found)
-        miss_nid = sorted(s for s in nid_refs if s not in found)
-        sample = []
-        for s in miss_wl[:_PRECHECK_SAMPLE_CAP]:
-            sample.append({"sku": s, "list": "watchlist", "user_ids": wl_refs[s][:5],
-                           "in_json": s in _cat_cache, "entry": wl_meta.get(s, {})})
-        for s in miss_nid[:max(0, _PRECHECK_SAMPLE_CAP - len(sample))]:
-            sample.append({"sku": s, "list": "new_ids", "user_ids": nid_refs[s][:5],
-                           "in_json": s in _cat_cache})
-        result["user_skus"] = dict(uinfo, **{
-            "watchlist_refs": sum(len(v) for v in wl_refs.values()),
-            "watchlist_distinct": len(wl_refs),
-            "new_ids_refs": sum(len(v) for v in nid_refs.values()),
-            "new_ids_distinct": len(nid_refs),
-            "missing_in_pg_watchlist": len(miss_wl),
-            "missing_in_pg_new_ids": len(miss_nid),
-            "missing_in_pg_total_distinct": len(set(miss_wl) | set(miss_nid)),
-            "missing_sample": sample,
-            "missing_but_in_json": sum(1 for s in set(miss_wl) | set(miss_nid) if s in _cat_cache),
-            "watchlist_unavailable_in_pg": sum(1 for s in wl_refs if s in found and not found[s]),
-            "PASS": not miss_wl and not miss_nid,
-        })
-
-        # (b) full-column parity, streamed
-        st["phase"] = "column parity"
-        _load_cat_cache()
-        cols = _PG_UPSERT_COLS
-        diffs, samples = {}, {}
-        pg_seen = set()
-        extra_in_pg, extra_sample = 0, []
-        pg_rows = 0
-        conn = psycopg2.connect(PG_DATABASE_URL, connect_timeout=10)
-        try:
-            with conn.cursor(name="precheck_5b") as cur:
-                cur.itersize = 5000
-                cur.execute(f"SELECT {', '.join(cols)} FROM items")
-                n = 0
-                for row in cur:
-                    n += 1
-                    sku = row[0]
-                    pg_seen.add(sku)
-                    it = _cat_cache.get(sku)
-                    if it is None:
-                        extra_in_pg += 1
-                        if len(extra_sample) < 20:
-                            extra_sample.append(sku)
-                        continue
-                    js = _pg_row_for(sku, it)
-                    for i in range(1, len(cols)):
-                        a, b = js[i], row[i]
-                        c = cols[i]
-                        if c in _PRECHECK_NUMERIC_COLS:
-                            try:
-                                same = abs(float(a or 0) - float(b or 0)) <= 0.005
-                            except (TypeError, ValueError):
-                                same = False
-                        elif c in ("available", "has_price_drop", "is_vintage"):
-                            same = bool(a) == bool(b)
-                        else:
-                            same = (a or "") == (b or "")
-                        if not same:
-                            diffs[c] = diffs.get(c, 0) + 1
-                            sm = samples.setdefault(c, [])
-                            if len(sm) < 5:
-                                sm.append({"sku": sku, "json": str(a)[:120], "pg": str(b)[:120]})
-                    if n % 5000 == 0:
-                        time.sleep(0.01)   # let request threads have the GIL
-                pg_rows = n
-        finally:
-            conn.close()
-        json_keys = list(_cat_cache.keys())
-        missing = [s for s in json_keys if s not in pg_seen]
-        del pg_seen
-        result["column_parity"] = {
-            "json_total": len(json_keys), "pg_total": pg_rows,
-            "missing_in_pg": len(missing), "missing_in_pg_sample": sorted(missing)[:20],
-            "extra_in_pg": extra_in_pg, "extra_in_pg_sample": extra_sample,
-            "column_diffs": diffs, "column_diff_samples": samples,
-            "PASS": not missing and not extra_in_pg and not diffs,
-        }
-
-        # (c) context for the 5b-ii deletions
-        st["phase"] = "extras"
-        wl_file = {"exists": WATCHLIST_FILE.exists()}
-        if wl_file["exists"]:
-            try:
-                wl_file["bytes"] = WATCHLIST_FILE.stat().st_size
-                wl_file["entries"] = len(json.loads(WATCHLIST_FILE.read_text()) or {})
-            except Exception as e:
-                wl_file["read_error"] = f"{type(e).__name__}"
-        result["legacy_watchlist_file"] = wl_file
-        gaps = sum(1 for d in _cat_cache.values()
-                   if d.get("url") and (not d.get("category") or not d.get("condition")))
-        no_store = sum(1 for d in _cat_cache.values() if not d.get("store"))
-        result["dead_tools"] = {"fill_gaps_candidates_json": gaps,
-                                "populate_store_candidates_json": no_store}
-        result["scan_running_at_end"] = _lock.locked()
-        result["seconds"] = round(time.time() - t0, 1)
-        result["PASS"] = result["user_skus"]["PASS"] and result["column_parity"]["PASS"]
-        st.update(status="done", phase=None, result=result,
-                  finished=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
-    except Exception as e:
-        print(f"[pg] precheck-5b failed: {type(e).__name__}: {e}")
-        st.update(status="error", error=f"{type(e).__name__}: {e}"[:300],
-                  finished=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
-    finally:
-        _PRECHECK_5B_LOCK.release()
-
-
-@app.route("/api/pg-precheck-5b", methods=["GET", "POST"])
-@optional_user_context
-def api_pg_precheck_5b():
-    denied = _require_admin_api()
-    if denied:
-        return denied
-    if request.method == "GET":
-        return jsonify(_PRECHECK_5B_STATE)
-    if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL):
-        return jsonify({"error": "Postgres not configured"}), 503
-    if not _PRECHECK_5B_LOCK.acquire(blocking=False):
-        return jsonify({"error": "Already running", "state": _PRECHECK_5B_STATE}), 409
-    threading.Thread(target=_precheck_5b_run, daemon=True).start()
-    return jsonify({"status": "started"})
-
-
-@app.route("/api/pg-full-backfill", methods=["POST"])
-@optional_user_context
-def api_pg_full_backfill():
-    denied = _require_admin_api()
-    if denied:
-        return denied
-    if not (_PSYCOPG2_AVAILABLE and PG_DATABASE_URL):
-        return jsonify({"error": "Postgres not configured"}), 503
-    if not _lock.acquire(blocking=False):
-        return jsonify({"error": "A run is already in progress."}), 409
-    _stop_event.clear()
-    while not _q.empty():
-        try: _q.get_nowait()
-        except queue.Empty: break
-    t = threading.Thread(target=_pg_full_backfill, daemon=True)
-    t.start()
-    return jsonify({"status": "started"})
-
 @app.route("/api/validate-stores", methods=["POST"])
 @optional_user_context
 def api_validate_stores():
@@ -6726,7 +6303,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         # "0 new / reordered" bug).
         #
         # IMPORTANT: We use the *per-user* stored anchor (passed in as
-        # device_last_anchor), NOT max(date_listed in _cat_cache). _cat_cache is the
+        # device_last_anchor), NOT max(date_listed in the catalog). The catalog is the
         # global shared inventory written by EVERY user's scan, so reading it here
         # contaminates the anchor with other users' activity — if Alice scanned five
         # minutes ago, Bob's threshold would jump to Alice's freshest item and Bob
@@ -6756,7 +6333,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         # merge (_merge_scan_item — price-drop carry-forward, first_seen, fallbacks
         # for fields Algolia sent blank), then upsert + sold-mark in ONE
         # transaction BEFORE "done". Any failure fails the scan visibly: nothing
-        # is written (not even the JSON backup) and the user's NEW anchor /
+        # is written and the user's NEW anchor /
         # last_run are not advanced, so the next scan simply redoes this one.
         def _save_failed(stage, exc):
             msg = f"{stage}: {type(exc).__name__}: {exc}"[:300]
@@ -6925,8 +6502,8 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         # something we never actually saw. (v2.16.11)
         coverage_ok = not scan_incomplete and not incomplete_stores
         if all_products and coverage_ok:
-            # Use THIS scan's products only — not _cat_cache, which is global and
-            # shared across all users. Using _cat_cache re-introduces the contamination
+            # Use THIS scan's products only — not the catalog, which is global and
+            # shared across all users. Using the catalog re-introduces the contamination
             # bug: another user's scan populates it with fresher items, inflating this
             # user's anchor and causing 0-new on their next scan.
             # (v2.10.18 fixed the threshold for the current scan but not persistence.)
@@ -6964,12 +6541,6 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             "items":       items_for_sse,
             "use_browse":  large_scan,
         })
-        # ── JSON backup (write-only; 5c deletes it) ────────────────────────────
-        # Mirrors exactly what Postgres just committed; nothing reads it for scan
-        # decisions. Since v2.16.49 it's written in a background thread AFTER
-        # "done" (dumping ~500K entries took seconds the user was waiting on).
-        threading.Thread(target=_json_backup_apply, args=(merged, sold),
-                         daemon=True, name="json-backup").start()
     except Exception as e:
         send({"type":"done","error":str(e),"scanned":0,"new_count":0,"new_items":[]})
     finally:
@@ -7731,7 +7302,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.16.51"
+APP_VERSION = "2.17.0"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
@@ -7759,10 +7330,8 @@ NEWDEALS_TEMPLATE = _version_static(NEWDEALS_TEMPLATE)
 # gc_tracker_app.py`, dev server) or imported by a WSGI server like gunicorn
 # (`gunicorn gc_tracker_app:app`, v2.16.10) — gunicorn never runs the module as
 # __main__, so anything load-bearing has to live out here or it silently never
-# runs in production. _load_cat_cache() also self-heals via lazy-load calls
-# sprinkled through the route handlers, but _load_cookies() has no other call
-# site, so it MUST run here.
-_load_cat_cache()
+# runs in production. _load_cookies() has no other call site, so it MUST run
+# here.
 _load_cookies()
 if not STORES_CACHE.exists():
     print("Building store list…")

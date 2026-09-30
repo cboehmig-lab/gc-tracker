@@ -1,3 +1,29 @@
+# Next Session Prompt — v2.17.0 built (Phase F step 5c: JSON catalog retired): push + verify, then Phase G
+
+**Update 2026-09-30**: burn-in check on live v2.16.51 clean (74 scan saves / 0 failed; parity 507,520 = 507,520,
+0 diffs; 13 scans marked items sold via the Postgres write, up to 500; no store scan seen yet — all ~75 were
+nationwide). Chuck: "build 5c". **v2.17.0 built + locally verified, written to the Mac, NOT pushed.** Postgres is
+now the only catalog store — see HANDOFF.md v2.17.0 for what was deleted and reworked.
+1. Push: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+   `git rm migrate_cat_cache_to_pg.py`,
+   `git add gc_tracker_app.py static/gc.js pg_schema.sql HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`,
+   commit, `git push origin main`.
+2. After deploy: footer v2.17.0; deploy log clean; after a scan or two, `_pg_scan_writes` (POST
+   `/api/browse?pg_shadow=1`) `failed` 0 and Railway log `[pg] scan saved: …` per scan;
+   `/api/pg-parity-check`, `/api/pg-precheck-5b`, `/admin/pg-backfill` → 404; admin nav has no "PG Backfill";
+   Railway web → Metrics → memory after the restart vs the same hours on v2.16.51 (locally: 850 → 84 MB RSS
+   at startup with a 300 MB JSON file present).
+3. Still unconfirmed live: a STORE scan through the Postgres write (same code; tested locally). Watch for a
+   `[pg] scan saved` line with a small "found" count.
+4. Open investigation (not caused by 5c): the 2026-09-29 18:16 CDT nationwide scan got 75,840 of 115,423
+   (`missing 39583`, `retried 0`, no empty/short pages) — looks like it stopped after ~316 of 481 pages.
+   The coverage guard skipped sold-marking, so no data harm. Check how the parallel page loop can end early
+   without marking pages as suspect (batch wall-clock ceiling? stop event?) — `_run()` nationwide branch.
+5. Optional cleanup: delete the stale `gc_category_cache.json` on the Railway volume (nothing reads it).
+6. Then **Phase G** (below) — start with "measure first".
+
+---
+
 # Next Session Prompt — v2.16.51 LIVE (nationwide scan coverage guard works): burn-in → 5c (v2.17.0)
 
 **Live verification (2026-09-29, 16:45 CDT)**: v2.16.51 live. Scan 1 (nationwide): nbHits 115,580 / 482

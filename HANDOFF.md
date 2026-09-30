@@ -1,5 +1,77 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-28 · Current version: v2.16.51 (nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-30 · Current version: v2.17.0 (Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.17.0 — 2026-09-30: Phase F step 5c — JSON catalog retired, Postgres is the only catalog store
+
+**Why now**: burn-in check 2026-09-30 on live v2.16.51 (Chuck approved "build 5c"):
+`_pg_scan_writes` ok 74 / failed 0 / retried 0 since the v2.16.51 deploy; `/api/pg-parity-check` 507,520 =
+507,520, 0 missing / 0 extra / 0 field diffs; `_pg_browse_errors` 0. Railway deploy logs (`[pg] scan saved`)
+showed 13 scans that marked items sold (2 up to 500) — the sold path works on the Postgres-primary write.
+No STORE scan appeared in ~75 scans since the deploy (all nationwide) — the store path shares the same
+`_pg_write_scan` code and was covered locally (below). Coverage logs: 4 of ~75 nationwide scans were
+incomplete and correctly skipped sold-marking (17:18 264 missing; 18:02 240 missing after 74 re-fetches;
+**18:16 39,583 missing with 0 retries and no empty/short pages flagged — the scan seems to have stopped
+after ~316 of 481 pages; open investigation, not caused by this change**; 21:31 480 missing after 13 re-fetches).
+
+**Deleted** (~575 lines):
+- `_cat_cache`, `_cat_cache_mtime`, `_load_cat_cache()`, `_save_cat_cache()`, `CAT_CACHE_FILE`, the startup
+  `_load_cat_cache()` call.
+- The per-scan JSON backup: `_JSON_BACKUP_LOCK`, `_json_backup_apply()` and the `json-backup` thread started
+  after "done" in `_run()`.
+- `/api/pg-parity-check` + `_pg_parity_check()` (JSON vs Postgres diff — nothing left to compare).
+- `/api/pg-full-backfill` + `_pg_full_backfill()` + `/admin/pg-backfill` page and its admin-nav link.
+- `/api/pg-precheck-5b` + `_precheck_5b_user_skus` / `_precheck_5b_run` / `_PRECHECK_*` (temporary 5b tool).
+- `migrate_cat_cache_to_pg.py` (Phase A one-off backfill script).
+- Comments updated (Postgres store / pool / scan write path headers, pg_schema.sql header + marker notes).
+
+**Reworked**:
+- `/api/reset`: no longer deletes a catalog. It deletes the scan state files only (`gc_state.json`,
+  `gc_new_inventory.xlsx`, `gc_last_scan.txt`, invalid-stores / diag / debug files) and says "item catalog
+  kept". Deliberate: the Postgres catalog is the full sold/delisted history Chuck keeps on purpose (price
+  history analytics), and it's what every user's watchlist points at. There is intentionally no "truncate
+  items" button. gc.js `resetData()` confirm text updated to match. (Since v2.16.48 reset had already
+  stopped resetting anything real — it deleted the JSON file while Postgres kept everything.)
+- `/api/export-data`: same bundle shape as before (`state`, `stores`, `favorites`, `watchlist`, `keywords`,
+  `cat_cache` = sku → record dict with the old JSON catalog's keys). `cat_cache` now streams from Postgres
+  through a server-side cursor (`_export_stream`, 5,000 rows per fetch, `ORDER BY sku`) instead of being
+  built in memory. New helper `_pg_record_from_row()` (NUMERIC → float). Postgres unreachable → 503 up
+  front; a failure mid-stream truncates the download (won't parse) and logs `[export] catalog stream failed`.
+- `/api/import-data`: `cat_cache` is UPSERTED into Postgres with `_pg_row_for` + `_PG_UPSERT_SQL` in one
+  transaction (5,000-row chunks) — never deletes rows missing from the bundle. Refuses with 409 while a scan
+  holds `_lock` or can't get `_PG_SCAN_DB_LOCK`; any failure → 500 and nothing written; validates shapes
+  (400). Resets the `/api/state` count cache. Other bundle parts still written to their files.
+  **Note**: the app-wide `MAX_CONTENT_LENGTH` is 1 MB, so a full-catalog bundle (hundreds of MB) is rejected
+  with 413 — exactly as before (the old file-based import had the same cap, so full-catalog import never
+  worked in production). Real catalog backup/restore = Railway's Postgres backups. Import is for small bundles.
+
+**Not touched**: the leftover `gc_category_cache.json` on the Railway volume (last written by v2.16.51) is
+left in place as a frozen final snapshot; nothing reads or writes it. Delete it by hand later if the space
+matters. Rollback to v2.16.51 is safe: it reads nothing from JSON for decisions (it would just load that
+stale file at startup and resume writing the backup).
+
+**Local verification** (cloud sandbox, real Postgres 16):
+- `py_compile` / `node --check` clean; pyflakes: no undefined names; grep: no reference to any deleted name
+  in gc_tracker_app.py, gc.js or pg_schema.sql (only history comments).
+- Scan harness (real `_run` + real `parse_products`, mocked `fetch_page` returning Algolia-shaped pages):
+  5 scans — nationwide baseline 3,000 items; nationwide with 50 sold / 30 new / 20 price drops; STORE scan
+  (Austin) with 10 Austin items gone + 1 Dallas item gone (must not be sold by a store scan); nationwide with
+  2 pages empty on first fetch (retried + recovered) — the Dallas item now sold; nationwide with price drops
+  cleared + a sold item reappearing. v2.16.51 vs v2.17.0: identical done payloads (scanned / new_ids) and a
+  byte-identical Postgres `items` table after the run (3,030 rows, 60 sold); v2.17.0 wrote no
+  gc_category_cache.json and started no backup thread.
+- Export → TRUNCATE → import: identical table. The JSON catalog file written by the v2.16.51 run, imported
+  into an empty table on v2.17.0: identical to v2.16.51's own Postgres table (old exports stay importable).
+  Bad shapes 400; import during a scan 409 and nothing written; reset keeps every row; removed routes 404;
+  `/api/state` and `/api/browse` normal; export with Postgres unreachable → truncated, unparseable file.
+- Memory: importing the module with a synthetic 507,520-entry (299 MB) gc_category_cache.json present:
+  v2.16.51 RSS 850 MB, v2.17.0 84 MB. Production also skips the per-scan backup (update + ~300 MB dump).
+
+**After deploy**: footer v2.17.0; deploy log clean (no schema change); a couple of scans with
+`_pg_scan_writes.failed` 0; `/api/pg-parity-check`, `/api/pg-precheck-5b`, `/api/pg-full-backfill`,
+`/admin/pg-backfill` → 404; the admin nav no longer shows "PG Backfill"; Railway web-service Metrics → memory
+should sit far lower after the restart than on v2.16.51 (compare the same hours of the day).
 
 ---
 

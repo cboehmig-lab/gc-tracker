@@ -1,12 +1,12 @@
 -- GC Gear Tracker — Postgres catalog schema (Phase A of the flat-JSON -> Postgres
 -- migration, see POSTGRES_MIGRATION_PLAN.md). Applied by both gc_tracker_app.py's
--- _init_pg_schema() (at app startup, if DATABASE_URL is set) and
--- migrate_cat_cache_to_pg.py (the one-off backfill script) — keep this file as the
--- single source of truth for the DDL rather than duplicating it in either script.
+-- _init_pg_schema() (at app startup, if DATABASE_URL is set). (The one-off
+-- migrate_cat_cache_to_pg.py backfill script that also applied it was deleted in
+-- v2.17.0 along with the JSON catalog.)
 --
 -- date_listed / first_seen / price_drop_since are TEXT, not TIMESTAMPTZ, on purpose:
 -- they keep the exact same string values and lexicographic-comparison semantics
--- _cat_cache uses today (including the date-only-vs-full-ISO-timestamp handling in
+-- the old JSON catalog (_cat_cache) used (including the date-only-vs-full-ISO-timestamp handling in
 -- _norm_item_date()). Converting representation AND comparison semantics in the same
 -- pass as the storage engine risks a NEW-detection regression in code with a real bug
 -- history (v2.10.2, v2.12.2, v2.16.11) — see the migration plan §2 for the full
@@ -79,8 +79,7 @@ ALTER TABLE items ADD COLUMN IF NOT EXISTS store_inferred BOOLEAN NOT NULL DEFAU
 -- \W+ splitting (which already treats '/' as a separator, same as '-').
 --
 -- If this column already exists from before v2.16.36 with an OLDER expression (either the
--- original non-normalized one, or v2.16.35's hyphen-only one), _init_pg_schema() and
--- migrate_cat_cache_to_pg.py both migrate it (DROP + this ADD, which rebuilds it fresh) before
+-- original non-normalized one, or v2.16.35's hyphen-only one), _init_pg_schema() migrates it (DROP + this ADD, which rebuilds it fresh) before
 -- reaching this statement — see _pg_migrate_search_vector_if_stale() in gc_tracker_app.py, which
 -- detects staleness by checking for the '/' literal in the stored expression (present only once
 -- this v2.16.36 version has actually been applied).
@@ -111,9 +110,9 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- ==CONCURRENT-INDEXES==
 -- Everything below this marker CANNOT be executed as part of the same multi-statement blob as
 -- everything above: CREATE INDEX CONCURRENTLY is rejected outright by Postgres when it runs
--- inside a transaction block, and both callers of this file (_init_pg_schema() in
--- gc_tracker_app.py and migrate_cat_cache_to_pg.py) apply everything above this marker as one
--- cur.execute() call inside an explicit transaction (autocommit=False). Both callers split this
+-- inside a transaction block, and the caller of this file (_init_pg_schema() in
+-- gc_tracker_app.py) applies everything above this marker as one
+-- cur.execute() call inside an explicit transaction (autocommit=False). It splits this
 -- file on this exact marker string, then (v2.16.35) run EACH ';'-separated statement below it as
 -- its OWN cur.execute() call on a shared autocommit=True connection. Before v2.16.35 this section
 -- was limited to "exactly ONE statement", because sending SEVERAL statements in a single
