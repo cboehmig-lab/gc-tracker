@@ -32,6 +32,16 @@ final table as v2.17.3**. Guard: with the old filter simulated, the sweep logged
 listings. Edge-case suite (follow-up sweep, mid-sweep listing stays available, Stop, 429 → 0 sold, no-threshold →
 full) passes. py_compile / node --check clean.
 
+**Live verification (2026-09-30 14:35 CDT)**: v2.17.5 live, clean boot. `/api/quick-window-check?hours=48` →
+`nb_hits 1995 = db_count 1995`, page 1: 240 hits, all 240 with startDate 0, 240 parsed — Algolia honors the
+creationDate filter. `db_newest 2026-09-30T09:00:37Z` > Chuck's anchor (2026-09-29T09:12:47Z): listings from the
+v2.17.4 window went into the catalog via sweeps without being flagged NEW; since the anchor never advanced, the next
+v2.17.5 quick pass for each affected user flags them NEW (self-healing).
+**First real scan on v2.17.5 (Chuck, 19:36 UTC)**: quick pass **984 found in 774 ms** (fetch 591, save 70,
+finish 113) — Chuck saw 900+ NEW listings (the backlog since his 09-29 09:12Z anchor), "only took like a second".
+Background sweep: 116,523 found, complete, 23 sold, 8 changed, 20.4 s (fetch 18.2 s — 7 suspect pages re-fetched,
+1,680 items recovered by the v2.16.51 retry; save 2.2 s, prior read 65 ms).
+
 **After deploy**: run `/api/quick-window-check?hours=48` as admin (expect nb_hits > 0, close to db_count); then a
 scan: `[scan] nationwide quick coverage: nbHits …` should be > 0 whenever db_count for the window is; watch for
 `[sweep] WARNING`.

@@ -1,4 +1,10 @@
-# Next Session Prompt — v2.17.5 built (HOTFIX: quick-pass window + creationDate): push, verify with /api/quick-window-check
+# Next Session Prompt — v2.17.5 LIVE (quick-pass window fix verified: 1,995 = 1,995); confirm a real scan, then browse-side work
+
+**Live 2026-09-30 14:35 CDT**: `/api/quick-window-check?hours=48` → nb_hits 1995 = db_count 1995 (all startDate 0).
+First real scan 19:36Z: quick 984 found in 774 ms (Chuck saw 900+ NEW, "took like a second"); sweep complete in
+20.4 s, 23 sold. Still: grep Railway logs for `[sweep] WARNING` over the next day (should be none), then delete
+/api/quick-window-check. Commit the doc updates (HANDOFF.md / HANDOFF_PROMPT.md / NEXT_SESSION_PROMPT.md).
+
 
 **2026-09-30 (latest)**: v2.17.4 pushed + live (9b88647). Live logs: quick passes 0.2-0.4 s, sweeps ~14 s complete
 (115,301 found, 81 sold on the first), BUT every quick pass returned 0 hits — GC's recent listings have startDate 0
