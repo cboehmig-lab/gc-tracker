@@ -1,3 +1,19 @@
+# Next Session Prompt — v2.17.2 built (desktop button "Scan for New Listings"): push; v2.17.1 LIVE
+
+**Update 2026-09-30 (later)**: v2.17.1 pushed + live (ab639c4). Chuck asked for the desktop scan button to read
+"Scan for New Listings" (all gear is used) → v2.17.2, text only, NOT pushed. Push:
+`cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+`git add gc_tracker_app.py static/gc.js HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit, `git push origin main`.
+**Baseline scan on live v2.17.1 (12:25 CDT)**: `[timing] scan done: nationwide, 114,731 found, total 29,283ms
+(fetch 24,700, save 4,538, finish 44)`; `[timing] scan fetch: pages 479, batches 32, wall 24.6 s, req_ms p50 486 /
+p90 625 / max 1,222, **630 KB per page, 295 MB per scan**, json_decode 2.96 s, parse 1.23 s, batch_ms p50 722 / max
+1,241`. So each page is huge (attributesToRetrieve * + facets *), requests are ~0.5 s each, and each batch of 15
+waits ~0.24 s longer than a typical page for its slowest one. Save: read 2,252 ms, write 826 ms.
+Chuck also approved doing all three scan speedups: S2 + S3 next as v2.17.3 (after reading a baseline
+`[timing] scan fetch` line from v2.17.1), then S1 as its own version after Chuck answers its design questions.
+
+---
+
 # Next Session Prompt — v2.17.1 built (Phase G step 1: request timing): push, read the numbers, Chuck picks
 
 **2026-09-30 (Phase G session 1)**:

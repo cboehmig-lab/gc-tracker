@@ -7120,7 +7120,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
   <div class="right">
     <div class="status-bar">
-      <span id="s-last-wrap">Last checked for new gear: <b id="s-last">—</b> <button id="check-now-btn" style="padding:2px 10px;background:#c00;color:#fff;border:none;border-radius:4px;font-size:.72rem;font-weight:700;cursor:pointer;margin-left:4px;display:none">Scan For New</button> <button id="view-toggle-btn" class="view-toggle-btn" title="Switch card / list view"><span id="view-toggle-icon">⊞</span></button></span>
+      <span id="s-last-wrap">Last checked for new gear: <b id="s-last">—</b> <button id="check-now-btn" style="padding:2px 10px;background:#c00;color:#fff;border:none;border-radius:4px;font-size:.72rem;font-weight:700;cursor:pointer;margin-left:4px;display:none">Scan for New Listings</button> <button id="view-toggle-btn" class="view-toggle-btn" title="Switch card / list view"><span id="view-toggle-icon">⊞</span></button></span>
       <span>Items: <b id="s-known">—</b></span>
       <span>Stores: <b id="s-stores">—</b></span>
       <!-- global-search moved into filter sheet -->
@@ -7594,7 +7594,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.17.1"
+APP_VERSION = "2.17.2"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

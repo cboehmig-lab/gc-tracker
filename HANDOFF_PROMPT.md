@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-30 · Version: v2.17.1 (Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-09-30 · Version: v2.17.2 (desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,7 +88,14 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.17.1 — Phase G step 1: request timing, no behavior change (2026-09-30)
+## Current State: v2.17.2 — desktop scan button renamed "Scan for New Listings" (2026-09-30)
+
+Text-only: desktop `#check-now-btn` + gc.js `_updateRelativeTime()` + the empty-results hint. Mobile bottom
+bar keeps "Scan For New". v2.17.1 (timing) is live. See HANDOFF.md v2.17.2.
+
+---
+
+## Previous: v2.17.1 — Phase G step 1: request timing, no behavior change (2026-09-30)
 
 Phase G = make the site faster/better for users; step 1 is "measure first". v2.17.1 adds per-request timing
 only (responses byte-identical to v2.17.0): `Server-Timing` header on every response (browse split into

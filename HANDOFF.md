@@ -1,5 +1,21 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-30 · Current version: v2.17.1 (Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-30 · Current version: v2.17.2 (desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.17.2 — 2026-09-30: desktop scan button says "Scan for New Listings"
+
+Chuck: "Scan For New" always bugged him — everything on the site is used gear, so "New" read like new
+(unused) instruments. The desktop header button (`#check-now-btn`, HTML_TEMPLATE) and the text gc.js
+`_updateRelativeTime()` resets it to now say **"Scan for New Listings"**; the empty-results hint in
+`_fetchBrowsePage` ("…then click Scan for New Listings…") matches. Mobile is unchanged on purpose: that
+button is hidden on mobile (`#check-now-btn{display:none!important}` in gc.css), and the mobile bottom-bar
+label (`#mbb-check-label`, gc.js `_updateMobileBottomBar`) stays "Scan For New" (narrow bar). Text only —
+no ids/handlers touched. py_compile + node --check clean.
+
+v2.17.1 went live 2026-09-30 (Chuck pushed, commit ab639c4). First scan on it (12:25 CDT): total 29.3 s = fetch 24.7 s + save 4.5 s;
+479 pages in 32 batches, request p50 486 ms / p90 625 / max 1,222 ms, **630 KB per page = 295 MB per scan**,
+JSON decode 2.96 s + parse 1.23 s (both in the scan thread), batch p50 722 ms / max 1,241 ms.
 
 ---
 

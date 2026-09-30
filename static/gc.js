@@ -947,7 +947,7 @@ function _fmtDropDate(iso) {
 function _updateRelativeTime() {
   document.getElementById('s-last').textContent = _timeAgo(window._lastRunISO);
   const btn = document.getElementById('check-now-btn');
-  if (btn) btn.textContent = 'Scan For New';
+  if (btn) btn.textContent = 'Scan for New Listings';  // desktop button (hidden on mobile; mobile bar keeps 'Scan For New')
   clearInterval(_relTimeTimer);
   _relTimeTimer = setInterval(() => {
     document.getElementById('s-last').textContent = _timeAgo(window._lastRunISO);
@@ -1548,7 +1548,7 @@ async function _fetchBrowsePage(page) {
       document.getElementById('res-title').textContent = 'No Browse Data Yet';
       document.getElementById('res-badge').textContent = '';
       document.getElementById('res-body').innerHTML =
-        '<div class="no-res">Select stores on the left, then click <b>Scan For New</b> to scan for inventory.</div>';
+        '<div class="no-res">Select stores on the left, then click <b>Scan for New Listings</b> to scan for inventory.</div>';
       ['cond-dropdown','cat-dropdown','subcat-dropdown'].forEach(id => document.getElementById(id).style.display = 'none');
       return;
     }
