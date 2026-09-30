@@ -1,4 +1,25 @@
-# Next Session Prompt — v2.17.3 built (Phase G S2+S3: faster scans): push + compare against the 29.3 s baseline, then S1
+# Next Session Prompt — v2.17.4 built (Phase G S1: two-phase scan): push + verify live
+
+**2026-09-30 (latest)**: Chuck liked S1 and chose: sweep after each click; quiet + status line when it finishes.
+v2.17.4 built + locally verified (identical NEW ids / anchor / final catalog vs v2.17.3's full scan; browser test
+OK), written to the Mac, NOT pushed. See HANDOFF.md v2.17.4.
+1. Push: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+   `git add gc_tracker_app.py static/gc.js HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit, `git push origin main`.
+2. Live check after a scan: Railway logs `[timing] scan done: quick …` (total ~1-2 s), then `[timing] sweep done: …
+   complete True` (~12-15 s later), coverage lines complete; the site shows NEW items right away and the ✓ status
+   line after; `/api/sweep-status` JSON; Railway HTTP `/api/progress` durations (were ~15-30 s). Watch for
+   `SCAN WRITE FAILED` and `lean pages NOT used`.
+3. Then back to the browse-side list (skip facet recompute on page flips, trim brand payload, first-load waterfall).
+
+---
+
+# Next Session Prompt — v2.17.3 LIVE (scans 29.3 s → 14.5 s): next S1 (two-phase scan)
+
+**Live 2026-09-30 12:49 CDT**: v2.17.3 pushed + live. First scan: total 14.5 s (fetch 12.3, save 2.1) vs 29.3 s
+baseline; lean pages used (299 KB vs 630 KB/page), prefetch used (read 57 ms vs 2,252), coverage complete, 69 sold.
+Next: S1 — ask Chuck the three design questions (below, item 3) before building. Also re-check Railway memory over
+the day and that no `[scan] lean pages NOT used` lines appear.
+
 
 **2026-09-30 (later)**: v2.17.2 pushed (1fd5ca7). Chuck: "do it to it" → v2.17.3 = S2 (lean Algolia pages +
 continuous fetch pool) + S3 (prior read during the fetch), built + locally verified (identical results to v2.17.2

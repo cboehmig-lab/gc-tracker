@@ -1307,12 +1307,13 @@ _SCAN_HIT_ATTRS = [
 
 
 def fetch_page(store_name: str = None, page: int = 1, _stats: list | None = None,
-               lean: bool = False) -> dict:
+               lean: bool = False, since_ts: int | None = None) -> dict:
     """Fetch one page of used inventory via Algolia API.
     If store_name is provided, filters to that store.
     If store_name is None, fetches ALL used inventory nationwide.
     lean=True (v2.17.3): request only _SCAN_HIT_ATTRS and no facets — same
-    hits, same order (same filters / ruleContexts), much smaller response."""
+    hits, same order (same filters / ruleContexts), much smaller response.
+    since_ts (v2.17.4, quick pass): only items with startDate >= since_ts."""
     import time as _time
     ts = int(_time.time())
     facet_filters = [
@@ -1334,6 +1335,8 @@ def fetch_page(store_name: str = None, page: int = 1, _stats: list | None = None
         "ruleContexts":  ["used-page", "primary_itemtype", "extension_itemtype"],
         "attributesToRetrieve": ["*"],
     }]}
+    if since_ts is not None:
+        payload["requests"][0]["numericFilters"].append(f"startDate>={int(since_ts)}")
     if lean:
         req = payload["requests"][0]
         req.pop("facets", None)
@@ -2600,29 +2603,53 @@ def _track_device(response):
     _log_device(device_id)
     return response
 
+# (v2.17.4) Per-run message backlog, replayed to anyone who subscribes late. A
+# quick scan can finish in well under a second — before the browser's
+# EventSource has even connected to /api/progress — and messages sent before a
+# subscriber existed used to be lost (the client then never got "done").
+# Kept _RUN_BACKLOG_KEEP_SECS after the run starts; pruned on each new run
+# (which also drops the old runs' never-read first queues — a slow leak before).
+_RUN_BACKLOG: dict = {}                # run_id -> {"t": start time, "msgs": [...]}
+_RUN_BACKLOG_CAP = 400                 # progress lines kept per run ("done" always kept)
+_RUN_BACKLOG_KEEP_SECS = 900
+
+
 def _create_run_queue() -> tuple[str, queue.Queue]:
     """Start a new run: create a fan-out entry and return (run_id, first_subscriber_queue)."""
     global _current_run_id
     run_id = _uuid.uuid4().hex[:12]
     q = queue.Queue()
+    now = time.time()
     with _run_queues_lock:
+        for old in [r for r, b in _RUN_BACKLOG.items() if now - b["t"] > _RUN_BACKLOG_KEEP_SECS]:
+            _RUN_BACKLOG.pop(old, None)
+            _run_queues.pop(old, None)
         _run_queues[run_id] = [q]
+        _RUN_BACKLOG[run_id] = {"t": now, "msgs": []}
         _current_run_id = run_id
     return run_id, q
 
 def _subscribe_to_run(run_id: str) -> queue.Queue | None:
-    """Join an in-progress run. Returns a new subscriber queue, or None if run is gone."""
+    """Join a run. Returns a new subscriber queue pre-filled with every message the
+    run has sent so far (v2.17.4), or None if the run is unknown / expired."""
     q = queue.Queue()
     with _run_queues_lock:
         if run_id not in _run_queues:
-            return None
+            if run_id not in _RUN_BACKLOG:
+                return None
+            _run_queues[run_id] = []      # finished and cleaned up, backlog still held
+        for m_ in _RUN_BACKLOG.get(run_id, {}).get("msgs", []):
+            q.put(m_)
         _run_queues[run_id].append(q)
     return q
 
 def _broadcast(run_id: str, msg):
-    """Send a message to all subscriber queues for a run."""
+    """Send a message to all subscriber queues for a run (and its backlog)."""
     with _run_queues_lock:
         subscribers = list(_run_queues.get(run_id, []))
+        b = _RUN_BACKLOG.get(run_id)
+        if b is not None and (len(b["msgs"]) < _RUN_BACKLOG_CAP or msg.get("type") == "done"):
+            b["msgs"].append(msg)
     for q in subscribers:
         q.put(msg)
 
@@ -5556,7 +5583,10 @@ def api_state():
 @optional_user_context
 def api_run():
     global _current_run_time
-    if not _lock.acquire(blocking=False):
+    # (v2.17.4) A quick pass holds _lock for only a few seconds, so wait briefly
+    # and run this user's own pass (their own NEW threshold) instead of joining
+    # someone else's; a long full/baseline scan still gets joined as before.
+    if not _lock.acquire(timeout=8):
         # A scan is already running — subscribe this client to it instead of rejecting
         joined_id = _current_run_id
         joined_time = _current_run_time
@@ -5597,9 +5627,13 @@ def api_run():
     while not _q.empty():
         try: _q.get_nowait()
         except queue.Empty: break
+    # v2.17.4 (Phase G S1): a nationwide click is a quick pass + background sweep;
+    # _run falls back to "full" itself if there's no usable NEW threshold.
+    scan_mode = "quick" if (not baseline and not selected) else "full"
     t = threading.Thread(
         target=_run,
         args=(selected, baseline, run_id, device_last_run, run_time_now, device_last_anchor, user_id),
+        kwargs={"mode": scan_mode},
         daemon=True,
     )
     t.start()
@@ -6429,11 +6463,117 @@ def _validate_stores():
             pass
 
 
-def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_last_run: str = "", run_time: str = "", device_last_anchor: str = "", user_id: int | None = None):
+# ── Two-phase scan (v2.17.4, Phase G S1) ──────────────────────────────────────
+# "Scan for New Listings" used to fetch every used item nationwide (~480 Algolia
+# pages, ~15-29 s) before showing anything. NEW detection only compares each
+# item's date_listed (= Algolia startDate) with the user's threshold, so a QUICK
+# pass that asks Algolia only for items with startDate >= threshold finds exactly
+# the same NEW items (and the same new anchor = max date_listed) in a page or
+# few. The quick pass saves them and sends "done"; then a background SWEEP (the
+# old full nationwide pass, minus the per-user NEW / anchor work) does the
+# sold-marking and price updates. Chuck's choices (2026-09-30): the sweep runs
+# after each Scan click (one at a time — a click during a sweep doesn't start
+# another), and when it finishes the table is NOT redrawn; a status line says
+# what changed and the next page flip / filter shows it.
+_SWEEP_LOCK = threading.Lock()          # held for the whole sweep
+_SWEEP_STATE_LOCK = threading.Lock()    # guards _SWEEP_STATE
+_SWEEP_STOP = threading.Event()         # never set by users (their Stop is _stop_event)
+_SWEEP_STATE = {"running": False, "started_at": None, "finished_at": None,
+                "result": None, "quick_seen": set(), "runs": 0, "again": False}
+_QUICK_SLACK_SECS = 3600   # window starts an hour before the threshold
+
+
+def _quick_since_ts(threshold: str):
+    """Epoch seconds for the quick-pass window start, from a NEW threshold string
+    (an item date like "2026-09-30T15:04:05Z", a date-only "2026-09-30", or a
+    wall-clock last-run time). Date-only → start of that day (the NEW check treats
+    it as end of day, so this is a superset). None if unparseable → full scan."""
+    t = (threshold or "").strip()
+    if not t:
+        return None
+    try:
+        if len(t) == 10:
+            dt = datetime.strptime(t, "%Y-%m-%d")
+        else:
+            dt = datetime.strptime(t[:19], "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return None
+    import calendar as _cal
+    return int(_cal.timegm(dt.timetuple())) - _QUICK_SLACK_SECS
+
+
+def _start_sweep() -> str:
+    """Start the background sweep unless one is already running. Returns
+    "started" or "running" (sent to the client in the quick pass's done). A click
+    during a sweep queues ONE follow-up sweep (that sweep fetched its pages before
+    the click), so every click is covered by a sweep that starts after it; the
+    client keeps showing "Checking…" until the follow-up finishes."""
+    if not _SWEEP_LOCK.acquire(blocking=False):
+        with _SWEEP_STATE_LOCK:
+            if _SWEEP_STATE["running"]:
+                _SWEEP_STATE["again"] = True
+        return "running"
+    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _SWEEP_STATE_LOCK:
+        _SWEEP_STATE.update(running=True, started_at=now, finished_at=None, result=None,
+                            quick_seen=set())
+        _SWEEP_STATE["runs"] += 1
+    def _go():
+        try:
+            rt = now
+            while True:
+                _run([], False, run_id="", run_time=rt, mode="sweep")
+                with _SWEEP_STATE_LOCK:
+                    if not _SWEEP_STATE["again"]:
+                        break
+                    rt = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                    _SWEEP_STATE.update(again=False, started_at=rt, result=None, quick_seen=set())
+                    _SWEEP_STATE["runs"] += 1
+                print("[sweep] a scan arrived during the sweep — running one follow-up sweep")
+        except Exception as e:   # _run records its own errors; belt and braces
+            print(f"[sweep] crashed: {type(e).__name__}: {e}")
+        finally:
+            with _SWEEP_STATE_LOCK:
+                _SWEEP_STATE.update(running=False, quick_seen=set(), again=False,
+                                    finished_at=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+                if _SWEEP_STATE["result"] is None:
+                    _SWEEP_STATE["result"] = {"complete": False, "error": "sweep ended without a result"}
+            _SWEEP_LOCK.release()
+    try:
+        threading.Thread(target=_go, daemon=True).start()
+    except Exception:
+        with _SWEEP_STATE_LOCK:
+            _SWEEP_STATE["running"] = False
+        _SWEEP_LOCK.release()
+        raise
+    return "started"
+
+
+@app.route("/api/sweep-status")
+def api_sweep_status():
+    """Public, tiny: is the background sold/price sweep running, and what did the
+    last one find. static/gc.js polls it after a quick scan (v2.17.4)."""
+    with _SWEEP_STATE_LOCK:
+        st = {k: _SWEEP_STATE[k] for k in ("running", "started_at", "finished_at")}
+        st["result"] = dict(_SWEEP_STATE["result"]) if _SWEEP_STATE["result"] else None
+    return jsonify(st)
+
+
+def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_last_run: str = "", run_time: str = "", device_last_anchor: str = "", user_id: int | None = None,
+         mode: str = "full"):
+    """mode (v2.17.4, Phase G S1): "full" = the classic scan (baseline, store scans,
+    and any nationwide click with no NEW threshold); "quick" = nationwide pass over
+    only items listed since the user's NEW threshold — finds every NEW item, saves
+    them, sends "done", then starts the background sweep; "sweep" = the background
+    full nationwide pass for sold-marking / price changes (no user, no SSE, no
+    anchor/NEW work; its own stop event, so a user's Stop doesn't cancel it)."""
     def send(msg):
+        if mode == "sweep":
+            return                    # background: nobody is listening
         if run_id:
             _broadcast(run_id, msg)   # fan-out to all subscribers
         _q.put(msg)                   # also send to legacy queue for backwards compat
+    stop_ev = _SWEEP_STOP if mode == "sweep" else _stop_event
     _t_scan0 = time.time()            # Phase G timing (v2.17.1)
     try:
         # Use the run_time passed in from api_run (computed before thread start)
@@ -6443,11 +6583,29 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
 
         stores_to_scan = selected_stores if not baseline else []
         nationwide = baseline or len(stores_to_scan) == 0
-        label = "nationwide scan" if nationwide else f"{len(stores_to_scan)} store(s)"
+        # v2.17.4 (Phase G S1): quick pass window — everything listed since this
+        # user's NEW threshold (same precedence as the NEW check below: anchor,
+        # else last run, else the global last-scan time), minus an hour of slack.
+        _quick_since = None
+        if mode == "quick":
+            if not nationwide:
+                mode = "full"
+            else:
+                _qthr = device_last_anchor or device_last_run
+                if not _qthr:
+                    _lsf = DATA_DIR / "gc_last_scan.txt"
+                    _qthr = _lsf.read_text().strip() if _lsf.exists() else ""
+                _quick_since = _quick_since_ts(_qthr)
+                if _quick_since is None:
+                    mode = "full"
+        label = ("nationwide scan" if nationwide else f"{len(stores_to_scan)} store(s)")
+        if mode == "quick":
+            label = "check for new listings"
         send({"type":"progress","msg":f"Starting {label}…"})
         # v2.17.3 (Phase G S3): read the stored rows while Algolia is fetched.
+        # (v2.17.4) Not for the quick pass — it only needs its few found SKUs.
         _prefetch = None
-        if _PSYCOPG2_AVAILABLE and PG_DATABASE_URL and _PG_POOL is not None:
+        if mode != "quick" and _PSYCOPG2_AVAILABLE and PG_DATABASE_URL and _PG_POOL is not None:
             try:
                 _prefetch = _PriorPrefetch(None if nationwide else stores_to_scan)
             except Exception as _e:
@@ -6464,7 +6622,8 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         if nationwide:
             # ── Nationwide: query ALL used inventory via parallel page fetches ────
             PARALLEL_WORKERS = 15  # concurrent API requests
-            send({"type":"progress","msg":"Fetching all used inventory nationwide via API…"})
+            send({"type":"progress","msg":("Fetching listings added since your last scan…" if mode == "quick"
+                                           else "Fetching all used inventory nationwide via API…")})
             # v2.16.51: coverage accounting. Live 2026-09-29 every nationwide scan
             # came back 1,200-1,440 unique items (exactly 5-6 whole pages of 240)
             # short of Algolia's own nbHits, with no error — and sold-marking then
@@ -6507,13 +6666,13 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             _lean_box = {}
             def _lean1():
                 try:
-                    _lean_box["d"] = fetch_page(None, 1, lean=True)
+                    _lean_box["d"] = fetch_page(None, 1, lean=True, since_ts=_quick_since)
                 except Exception as _e:
                     _lean_box["err"] = f"{type(_e).__name__}: {_e}"[:200]
             _lean_t = threading.Thread(target=_lean1, daemon=True)
             _lean_t.start()
             try:
-                data1 = fetch_page(None, 1, _ft["req"])
+                data1 = fetch_page(None, 1, _ft["req"], since_ts=_quick_since)
             except Exception as e:
                 send({"type":"progress","msg":f"  API error on page 1: {e}"})
                 data1 = None
@@ -6528,17 +6687,18 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                 try:
                     nb_pages = data1.get("results", [{}])[0].get("nbPages", 1)
                     nb_hits  = data1.get("results", [{}])[0].get("nbHits", 0)
-                    send({"type":"progress","msg":f"  {nb_hits:,} items across {nb_pages} pages — fetching {PARALLEL_WORKERS} pages at a time…"})
+                    send({"type":"progress","msg":(f"  {nb_hits:,} recent listing(s) to check…" if mode == "quick" else
+                                                   f"  {nb_hits:,} items across {nb_pages} pages — fetching {PARALLEL_WORKERS} pages at a time…")})
                 except Exception:
                     nb_pages, nb_hits = 1, 0
                 cov["nb_hits"], cov["nb_pages"] = nb_hits, nb_pages
                 # Fetch remaining pages in parallel batches
                 remaining = list(range(2, min(nb_pages + 1, 1001)))
                 def _fetch_one_page(pg):
-                    if _stop_event.is_set():
+                    if stop_ev.is_set():
                         return pg, None, None
                     try:
-                        d = fetch_page(None, pg, _ft["req"], lean=use_lean)
+                        d = fetch_page(None, pg, _ft["req"], lean=use_lean, since_ts=_quick_since)
                         return pg, d, None
                     except Exception as exc:
                         return pg, None, exc
@@ -6597,15 +6757,15 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                     return out
                 def _missing():
                     return max(0, nb_hits - len(ids_this_run))
-                if not _stop_event.is_set() and not scan_incomplete and _missing() > _NATIONWIDE_COVERAGE_TOLERANCE:
+                if not stop_ev.is_set() and not scan_incomplete and _missing() > _NATIONWIDE_COVERAGE_TOLERANCE:
                     for attempt in range(_NATIONWIDE_PAGE_RETRY_ROUNDS):
                         sus = _suspects()
-                        if not sus or _stop_event.is_set() or _missing() <= _NATIONWIDE_COVERAGE_TOLERANCE:
+                        if not sus or stop_ev.is_set() or _missing() <= _NATIONWIDE_COVERAGE_TOLERANCE:
                             break
                         send({"type":"progress","msg":f"  {_missing():,} items unaccounted for — re-checking {len(sus)} page(s) (round {attempt + 1})…"})
                         gained = 0
                         for pg in sus[:_NATIONWIDE_PAGE_RETRY_MAX]:
-                            if _stop_event.is_set():
+                            if stop_ev.is_set():
                                 break
                             _sleep(0.3, 0.2)
                             pg_, d, err = _fetch_one_page(pg)
@@ -6631,11 +6791,12 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                     cov[k] = cov[k][:50]
                 cov["unique"] = len(ids_this_run)
                 cov["missing"] = _missing()
-                if not scan_incomplete and not _stop_event.is_set() and cov["missing"] > _NATIONWIDE_COVERAGE_TOLERANCE:
+                if not scan_incomplete and not stop_ev.is_set() and cov["missing"] > _NATIONWIDE_COVERAGE_TOLERANCE:
                     scan_incomplete = True
                     send({"type":"progress","msg":f"  ⚠ {cov['missing']:,} of {nb_hits:,} items never came back from the API — treating this scan as incomplete (nothing marked sold)."})
-                cov["complete"] = not scan_incomplete and not _stop_event.is_set()
-                print(f"[scan] nationwide coverage: nbHits {nb_hits}, pages {nb_pages}, raw hits {cov['raw_hits']}, "
+                cov["complete"] = not scan_incomplete and not stop_ev.is_set()
+                cov["mode"] = mode
+                print(f"[scan] nationwide{' quick' if mode == 'quick' else (' sweep' if mode == 'sweep' else '')} coverage: nbHits {nb_hits}, pages {nb_pages}, raw hits {cov['raw_hits']}, "
                       f"unique {cov['unique']}, missing {cov['missing']}, empty {cov['empty_pages'][:10]}, "
                       f"short {cov['short_pages'][:10]}, parse-loss {cov['parse_loss_pages'][:10]}, "
                       f"no-new {cov['no_new_pages'][:10]}, retried {cov['retried_pages']}, recovered {cov['recovered']}, "
@@ -6660,7 +6821,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                     print(f"[timing] scan fetch stats failed: {type(_e).__name__}: {_e}")
                 _SCAN_COVERAGE["recent"].insert(0, {k: cov[k] for k in ("at", "nb_hits", "unique", "missing", "retried_pages", "recovered", "complete")})
                 del _SCAN_COVERAGE["recent"][20:]
-                if _stop_event.is_set():
+                if stop_ev.is_set():
                     send({"type":"progress","msg":"⏹ Stopped by user."})
                     scan_incomplete = True
             send({"type":"progress","msg":f"  Fetched {len(all_products):,} items total."})
@@ -6680,10 +6841,10 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             completed = [0]
             lock = threading.Lock()
             def _scan_one_store(store):
-                if _stop_event.is_set():
+                if stop_ev.is_set():
                     return store, [], set(), False
                 _rotate_ua()
-                products, ids, complete = scrape_store(store, send, _stop_event)
+                products, ids, complete = scrape_store(store, send, stop_ev)
                 with lock:
                     completed[0] += 1
                     send({"type":"progress","msg":f"  [{completed[0]}/{len(stores_to_scan)}] {store} — {len(products)} items"})
@@ -6693,7 +6854,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                 futures = {pool.submit(_scan_one_store, s): s for s in stores_to_scan}
                 try:
                     for fut in as_completed(futures, timeout=STORE_SCAN_TIMEOUT):
-                        if _stop_event.is_set():
+                        if stop_ev.is_set():
                             send({"type":"progress","msg":"⏹ Stopped by user."})
                             scan_incomplete = True
                             break
@@ -6749,8 +6910,10 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         # sold-marking entirely rather than risk wiping out items still in stock.
         # (v2.16.11 — see scrape_store()'s `complete` flag.) Applied in SQL by
         # _pg_write_scan since v2.16.48.
-        if _stop_event.is_set() or (nationwide and scan_incomplete):
+        if stop_ev.is_set() or (nationwide and scan_incomplete):
             sold_scope = None
+        elif mode == "quick":
+            sold_scope = None     # v2.17.4: only saw recent listings — the sweep does sold-marking
         elif nationwide:
             sold_scope = "nationwide"
         else:
@@ -6767,7 +6930,10 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             msg = f"{stage}: {type(exc).__name__}: {exc}"[:300]
             _pg_scan_note("failed", last_error=msg,
                           last_error_at=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
-            print(f"[pg] SCAN WRITE FAILED ({stage}) — scan not saved: {type(exc).__name__}: {exc}")
+            print(f"[pg] SCAN WRITE FAILED ({stage}{', sweep' if mode == 'sweep' else ''}) — scan not saved: {type(exc).__name__}: {exc}")
+            if mode == "sweep":
+                with _SWEEP_STATE_LOCK:
+                    _SWEEP_STATE["result"] = {"complete": False, "error": f"save failed ({stage})"}
             send({"type": "done",
                   "error": "The scan finished but its results couldn't be saved (database "
                            "unavailable). Nothing was changed — please try again in a few minutes.",
@@ -6824,18 +6990,38 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             # items are identical to what's stored; rewriting them all cost a
             # full row + GIN/trigram index update each (~11s per nationwide scan).
             changed_rows = []
+            _price_drops = 0
+            _price_idx = _PG_PRIOR_COLS.index("price")
             for sku, rec in merged.items():
                 row = _pg_row_for(sku, rec)
                 pr = prior.get(sku)
                 if pr is None or not _pg_row_unchanged(row, pr):
                     changed_rows.append(row)
+                    try:
+                        if pr is not None and pr[_price_idx] is not None and rec.get("price") \
+                                and float(rec["price"]) < float(pr[_price_idx]):
+                            _price_drops += 1
+                    except (TypeError, ValueError):
+                        pass
             del prior
+            _run_ids = ids_this_run | set(merged)
+            if mode == "sweep":
+                # v2.17.4: never mark sold anything a quick pass saw listed while
+                # this sweep was running (it may have been listed after the sweep
+                # fetched that page). Read under _PG_SCAN_DB_LOCK — quick passes
+                # add to it under the same lock, before releasing it.
+                with _SWEEP_STATE_LOCK:
+                    _run_ids |= _SWEEP_STATE["quick_seen"]
             _t_write = time.time()
             try:
-                sold = _pg_write_scan(changed_rows, ids_this_run | set(merged), sold_scope, send)
+                sold = _pg_write_scan(changed_rows, _run_ids, sold_scope, send)
             except Exception as e:
                 _save_failed("write", e)
                 return
+            if mode == "quick":
+                with _SWEEP_STATE_LOCK:
+                    if _SWEEP_STATE["running"]:
+                        _SWEEP_STATE["quick_seen"] |= set(merged)
             _write_ms = int((time.time() - _t_write) * 1000)
         finally:
             _PG_SCAN_DB_LOCK.release()
@@ -6849,6 +7035,22 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         print(f"[pg] scan saved: {len(merged):,} found, {len(changed_rows):,} new/changed written, "
               f"{len(sold):,} marked sold — read {_read_ms}ms ({_read_note}), write {_write_ms}ms, total {_db_ms}ms")
         send({"type": "progress", "msg": f"  {len(changed_rows):,} new/changed, {len(sold):,} sold."})
+
+        if mode == "sweep":
+            # v2.17.4: background sweep — no user, no NEW / anchor work.
+            _t_done = time.time()
+            _res = {"complete": sold_scope is not None, "found": len(all_products),
+                    "sold": len(sold), "changed": len(changed_rows), "price_drops": _price_drops,
+                    "total_ms": int((_t_done - _t_scan0) * 1000), "error": ""}
+            with _SWEEP_STATE_LOCK:
+                _SWEEP_STATE["result"] = _res
+            _timing_note_scan(kind="sweep", found=len(all_products), stopped=False,
+                              total_ms=_res["total_ms"], fetch_ms=int((_t_db - _t_scan0) * 1000),
+                              save_ms=_db_ms, finish_ms=int((_t_done - _t_db_end) * 1000))
+            print(f"[timing] sweep done: {len(all_products):,} found, {len(sold):,} sold, "
+                  f"{_price_drops:,} price drops, {len(changed_rows):,} changed, complete {_res['complete']}, "
+                  f"total {_res['total_ms']}ms (fetch {int((_t_db - _t_scan0) * 1000)}ms, save {_db_ms}ms)")
+            return
 
         send({"type":"progress","msg":f"  {len(all_products):,} products scanned."})
 
@@ -6971,31 +7173,47 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         # For large scans, don't send full item lists via SSE — client will use server-side browse
         large_scan = len(all_products) > 1000
         items_for_sse = [] if large_scan else [fmt(p) for p in all_products[:500]]
+        _sweep = None
+        _scanned = len(all_products)
+        if mode == "quick":
+            # v2.17.4: the table always comes from server browse after a quick pass
+            # (it only fetched recent listings), and "N Items" shows the catalog size
+            # as a full scan would. Then the sold / price sweep runs in the background.
+            large_scan, items_for_sse = True, []
+            _scanned = _pg_available_count() or len(all_products)
+            _sweep = "skipped (stopped)" if stop_ev.is_set() else _start_sweep()
         # Phase G timing (v2.17.1): what the user waited on, start → "done".
         _t_done = time.time()
-        _timing_note_scan(kind="nationwide" if nationwide else f"{len(stores_to_scan)} store(s)",
-                          found=len(all_products), stopped=_stop_event.is_set(),
+        _timing_note_scan(kind=("quick" if mode == "quick" else "nationwide") if nationwide else f"{len(stores_to_scan)} store(s)",
+                          found=len(all_products), stopped=stop_ev.is_set(),
                           total_ms=int((_t_done - _t_scan0) * 1000),
                           fetch_ms=int((_t_db - _t_scan0) * 1000), save_ms=_db_ms,
                           finish_ms=int((_t_done - _t_db_end) * 1000))
-        print(f"[timing] scan done: {'nationwide' if nationwide else f'{len(stores_to_scan)} store(s)'}, "
+        print(f"[timing] scan done: {('quick' if mode == 'quick' else 'nationwide') if nationwide else f'{len(stores_to_scan)} store(s)'}, "
               f"{len(all_products):,} found, total {int((_t_done - _t_scan0) * 1000)}ms "
               f"(fetch {int((_t_db - _t_scan0) * 1000)}ms, save {_db_ms}ms, "
               f"finish {int((_t_done - _t_db_end) * 1000)}ms)")
         send({
             "type":        "done",
             "baseline":    baseline,
-            "stopped":     _stop_event.is_set(),
-            "scanned":     len(all_products),
+            "stopped":     stop_ev.is_set(),
+            "scanned":     _scanned,
             "new_ids":     new_ids_list,
+            "sweep":       _sweep,
             "scan_time":   run_time,
             "scan_anchor": new_anchor,
             "items":       items_for_sse,
             "use_browse":  large_scan,
         })
     except Exception as e:
+        if mode == "sweep":
+            print(f"[sweep] failed: {type(e).__name__}: {e}")
+            with _SWEEP_STATE_LOCK:
+                _SWEEP_STATE["result"] = {"complete": False, "error": f"{type(e).__name__}: {e}"[:200]}
         send({"type":"done","error":str(e),"scanned":0,"new_count":0,"new_items":[]})
     finally:
+        if mode == "sweep":
+            return            # the sweep never holds _lock (see _start_sweep)
         # Guard against the /api/stop 5s force-unlock watchdog already having
         # released this lock if this thread's winddown ran long (RuntimeError:
         # release unlocked lock) — same pattern as admin_clear_lock/_force_unlock.
@@ -7285,6 +7503,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <span>Stores: <b id="s-stores">—</b></span>
       <!-- global-search moved into filter sheet -->
       <span id="s-want-match" style="display:none;color:#4caf50;font-weight:600;font-size:.82rem;cursor:pointer" title="Click to view want list matches"></span>
+      <span id="s-sweep" style="display:none;color:#999;font-size:.78rem" title="After a scan finds your new listings, the rest of the catalog is checked for sold items and price drops in the background"></span>
     </div>
     <div id="log"><span class="log-dim">Ready</span></div>
     <div class="results" id="res-panel" style="display:none">
@@ -7754,7 +7973,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.17.3"
+APP_VERSION = "2.17.4"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

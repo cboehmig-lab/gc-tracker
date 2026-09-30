@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-30 · Version: v2.17.3 (Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-09-30 · Version: v2.17.4 (Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,13 +88,24 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.17.3 — Phase G S2+S3: faster nationwide scans (2026-09-30)
+## Current State: v2.17.4 — Phase G S1: two-phase scan (2026-09-30)
+
+A nationwide Scan click is now a QUICK pass (Algolia `startDate>=` the user's NEW threshold − 1 h → same NEW ids +
+anchor as a full scan, done in ~1-2 s, no sold-marking) followed by a background SWEEP (`_start_sweep`, the full
+pass: sold-marking + price changes; one at a time, a click during one queues one follow-up; quick-pass SKUs are
+protected from the sweep's sold-marking via `quick_seen`). Status line `#s-sweep` polls `/api/sweep-status`; table
+not redrawn (Chuck's choice). SSE backlog replays messages to late subscribers. Store/baseline scans unchanged.
+See HANDOFF.md v2.17.4.
+
+---
+
+## Previous: v2.17.3 — Phase G S2+S3: faster nationwide scans (2026-09-30)
 
 Baseline 29.3 s per scan (24.7 fetch, 630 KB/page). v2.17.3: nationwide pages request only `_SCAN_HIT_ATTRS`
 (no facets/highlights) after a per-scan page-1 full-vs-lean parse check (falls back to full pages on any
 difference); pages fetched by one continuous 15-worker pool (90 s no-progress stall guard); prior state read
 from Postgres during the fetch (`_PriorPrefetch`, discarded if `_PG_CATALOG_GEN` changed). Results identical
-to v2.17.2 in every local scenario. See HANDOFF.md v2.17.3. Next: S1 (two-phase scan).
+to v2.17.2 in every local scenario. **LIVE: first scan 14.5 s vs 29.3 s baseline** (fetch 12.3 s, save 2.1 s). See HANDOFF.md v2.17.3. Next: S1 (two-phase scan).
 
 ---
 

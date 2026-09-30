@@ -1,5 +1,74 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-30 · Current version: v2.17.3 (Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-30 · Current version: v2.17.4 (Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.17.4 — 2026-09-30: Phase G S1 — two-phase scan: NEW listings in ~1-2 s, sold/price sweep in the background
+
+**Why**: after v2.17.3 a scan still took ~14.5 s before showing anything. NEW detection only compares each item's
+`date_listed` (= Algolia `startDate`) with the user's threshold (anchor, else last run, else global last scan), and
+the new anchor is the max `date_listed` seen — so both only need the NEWEST listings, not all ~115K items.
+**Chuck's choices** (2026-09-30): the full sold/price sweep runs after each Scan click (not on a server timer); when
+it finishes the table is NOT redrawn — a status line says what changed and the next page flip / sort / filter shows it.
+My call (told Chuck): a click during a running sweep gets its own quick pass, and queues ONE follow-up sweep.
+
+**Flow** (`api_run` → `_run(..., mode=...)`):
+- A nationwide, non-baseline click runs `mode="quick"` (store scans and baseline stay `"full"`, unchanged). `_run`
+  falls back to `"full"` itself if there's no usable threshold (`_quick_since_ts` can't parse it / none exists —
+  e.g. a brand-new device with no global last-scan file).
+- **Quick pass**: same nationwide fetch code, but every request adds `numericFilters: startDate>=<since>` where
+  since = threshold − 1 h (`_QUICK_SLACK_SECS`; date-only thresholds → start of that day, a superset since the NEW
+  check treats them as end of day). Items without `startDate` were never returned anyway (`startDate<=now` is
+  already a filter). Coverage accounting / lean-page check / retries apply to the window exactly as to a full scan.
+  No prior-state prefetch (reads only its found SKUs). **No sold-marking** (`sold_scope = None`). NEW ids, anchor
+  (not advanced if incomplete), user `last_anchor`/`last_run`, `gc_last_scan.txt` — all as before. "done" payload:
+  `scanned` = Postgres available count (so "N Items" reads as before), `use_browse: true`, `items: []` (the table
+  always comes from server browse), plus new `sweep`: "started" | "running" | "skipped (stopped)" (None for full scans).
+- **Sweep** (`_start_sweep()` → thread → `_run([], False, mode="sweep")`): the old full nationwide pass (lean pages,
+  continuous pool, prefetch, coverage guard, sold-marking) minus all per-user work; `send()` is a no-op; its own
+  `_SWEEP_STOP` event so a user's Stop never cancels it; `_SWEEP_LOCK` (one at a time; it never holds `_lock`, so
+  quick passes run during a sweep). Result → `_SWEEP_STATE["result"]` {complete, found, sold, changed, price_drops
+  (rows whose price went down vs the prior row), total_ms, error}; log `[timing] sweep done: …`. A click during a
+  sweep sets `again`; the sweep thread then runs one follow-up sweep (log `[sweep] a scan arrived during the sweep
+  — running one follow-up sweep`), keeping `running` true throughout.
+- **Race guard for sold-marking**: a quick pass during a sweep may insert a listing the sweep's earlier page fetch
+  never saw. After its write (under `_PG_SCAN_DB_LOCK`) a quick pass adds its SKUs to `_SWEEP_STATE["quick_seen"]`;
+  the sweep's `_pg_write_scan` excludes them from sold-marking (read under the same lock). Reset per sweep.
+- `GET /api/sweep-status` (public, tiny): {running, started_at, finished_at, result}.
+- `api_run` now waits up to 8 s for `_lock` (a quick pass holds it ~1-2 s) so a second clicker runs their OWN quick
+  pass with their own threshold; only after 8 s (a long full/baseline scan) do they "join" as before.
+- **SSE backlog** (`_RUN_BACKLOG`): every broadcast message is kept per run (400 progress lines + always "done", 15 min)
+  and replayed to a late subscriber. Found in the browser test: a quick pass can finish before the browser's
+  EventSource connects to /api/progress, and messages sent before a subscriber existed were lost (the client would
+  never get "done"). Also prunes old runs' never-read first queues (a slow pre-existing leak;
+  `_cleanup_run_queue` was never called).
+
+**gc.js**: after a scan's done, `_watchSweep(msg.sweep)` shows `#s-sweep` (new span in the status bar, desktop and
+mobile) "Checking for sold items & price drops…", polls `/api/sweep-status` every 2.5 s (max 3 min), then
+"✓ Sold items & price drops updated · N sold, M price drops" (green) or "Sold-item check didn't finish — it runs
+again on the next scan."; refreshes only the header item count (`/api/state`). The table is not redrawn. Cleared
+when a new scan starts. Quick-pass log text: "Starting check for new listings…", "N recent listing(s) to check…".
+
+**Known, pre-existing (not S1)**: a listing inserted at the front of Algolia's order during a sweep shifts page
+boundaries, so 1-2 items can be skipped and (within the 120-item coverage tolerance) marked sold; they come back
+on the next sweep. Same as full scans since v2.16.51. The browse "N NEW" badge counts NEW items within the selected
+stores (can be lower than the scan's nationwide NEW list) — same on v2.17.3.
+
+**Local verification** (sandbox Postgres 16, mocked Algolia honoring `startDate>=`; v2.17.3 vs v2.17.4 from the
+same DB snapshot): scan A full, then 150 new / 300 sold / 200 price drops → v2.17.3 full scan vs v2.17.4 quick +
+sweep: **identical NEW ids (150, same md5), identical anchor, identical final items table** (and same number of
+price_drop_since rows); "done" after 0.18 s vs 1.59 s (quick fetched 2 pages vs 83). Edge cases: second user's quick
+pass during a sweep → own NEW item, `sweep: running`, one follow-up sweep, the mid-sweep listing stays available;
+Stop during quick → `skipped (stopped)`; sweep with a 429 on one page → incomplete, 0 sold; no threshold → full
+scan, no sweep. Headless Chromium against gunicorn (gthread ×8) with mocked Algolia: button "Scan for New
+Listings"; 2nd scan done in 0.6-0.8 s with the 40 new listings flagged NEW, status "Checking…" → "✓ … 60 sold,
+20 price drops" ~5 s later, header count refreshed, table untouched. SSE backlog: late subscriber gets progress +
+done; unknown run → None; expired runs pruned. All /api/browse responses byte-identical to v2.17.3 (only `/` HTML
+differs — the new span). py_compile / node --check clean, pyflakes no undefined names.
+
+**After deploy, check**: `[timing] scan done: quick, N found, total …ms` (N small, total ~1-2 s) followed by
+`[timing] sweep done: … complete True`; users' `/api/progress` durations in Railway HTTP logs (were ~15-30 s);
+`[scan] nationwide quick coverage … complete True`; the ✓ line on the site; no `SCAN WRITE FAILED`.
 
 ---
 
@@ -56,6 +125,17 @@ STORE scan (Austin) — identical, store prefetch used (+49 read now); catalog w
 read (catalog written since prefetch started)", identical. Stall (page 40 hangs past a 3 s test timeout) →
 skipped, scan incomplete, 0 sold; Stop after page 30 → ends in 0.7 s, 0 sold. Mock numbers: 990 → 140 KB per
 page. py_compile / node --check clean, pyflakes no undefined names.
+
+**Live verification (2026-09-30, 12:49 CDT, Chuck's scan right after deploy)**: `[timing] scan fetch: mode lean,
+workers 15, pages 480, wall_s 12.2, req_ms p50 334 / p90 420 / max 1,130, kb_per_page 299.4, mb_total 140.3,
+json_decode_s 1.08, parse ~0.9 s`; `[pg] scan saved: 114,993 found, 61 new/changed written, 69 marked sold — read
+57ms (prefetched 115,010 in 914ms during fetch, +52 read now), write 787ms, total 2,140ms`; `[timing] scan done:
+nationwide, total 14,469ms (fetch 12,283, save 2,140, finish 45)`; coverage complete True, 0 missing, 0 retries.
+**vs v2.17.1 baseline: total 29.3 s → 14.5 s (2× faster); fetch 24.7 → 12.3 s; save 4.5 → 2.1 s (prior read
+2,252 → 57 ms); page 630 → 299 KB (295 → 140 MB per scan); request p50 486 → 334 ms; JSON decode 3.0 → 1.1 s.**
+Pages are still ~300 KB — most of what's left is probably longDescription (needed for condition notes).
+Fetch is now close to its floor at this concurrency (480 pages × 334 ms / 15 ≈ 10.7 s); further scan wins come
+from S1 (two-phase) or more workers (Algolia-rate risk).
 
 **After deploy, check**: `[timing] scan fetch: mode lean …` (NOT a `lean pages NOT used` line), kb_per_page
 far below 630, wall_s vs 24.6 s; `[pg] scan saved … (prefetched …)`, read well under 2.25 s; `[timing] scan
