@@ -1,3 +1,19 @@
+# Next Session Prompt — v2.17.5 built (HOTFIX: quick-pass window + creationDate): push, verify with /api/quick-window-check
+
+**2026-09-30 (latest)**: v2.17.4 pushed + live (9b88647). Live logs: quick passes 0.2-0.4 s, sweeps ~14 s complete
+(115,301 found, 81 sold on the first), BUT every quick pass returned 0 hits — GC's recent listings have startDate 0
+(dated from creationDate). No NEW items missed yet (nothing listed after the threshold since 09-29 09:12Z). v2.17.5
+built + locally verified (v2.17.4 reproduced the miss: 50 of 150 NEW; v2.17.5 150 of 150, identical to a full scan),
+written to the Mac, NOT pushed. See HANDOFF.md v2.17.5.
+1. Push: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+   `git add gc_tracker_app.py HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit, `git push origin main`.
+2. Admin: `https://gcgeartracker.com/api/quick-window-check?hours=48` → nb_hits > 0 and ≈ db_count (proves Algolia
+   honors the creationDate filter). Then a scan: quick coverage nbHits > 0 when the window has listings; no
+   `[sweep] WARNING` lines. Then delete /api/quick-window-check in a later version.
+3. Then back to the browse-side list.
+
+---
+
 # Next Session Prompt — v2.17.4 built (Phase G S1: two-phase scan): push + verify live
 
 **2026-09-30 (latest)**: Chuck liked S1 and chose: sweep after each click; quiet + status line when it finishes.

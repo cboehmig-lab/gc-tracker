@@ -1313,7 +1313,11 @@ def fetch_page(store_name: str = None, page: int = 1, _stats: list | None = None
     If store_name is None, fetches ALL used inventory nationwide.
     lean=True (v2.17.3): request only _SCAN_HIT_ATTRS and no facets — same
     hits, same order (same filters / ruleContexts), much smaller response.
-    since_ts (v2.17.4, quick pass): only items with startDate >= since_ts."""
+    since_ts (v2.17.4, quick pass): only items listed at/after since_ts. (v2.17.5)
+    That's `startDate >= since OR creationDate >= since*1000`: live 2026-09-30 GC's
+    recent listings have startDate 0 and parse_products dates them from
+    creationDate (ms) instead — a startDate-only window returned nothing. The OR
+    is a superset of every item whose parsed date_listed >= since."""
     import time as _time
     ts = int(_time.time())
     facet_filters = [
@@ -1336,7 +1340,8 @@ def fetch_page(store_name: str = None, page: int = 1, _stats: list | None = None
         "attributesToRetrieve": ["*"],
     }]}
     if since_ts is not None:
-        payload["requests"][0]["numericFilters"].append(f"startDate>={int(since_ts)}")
+        payload["requests"][0]["numericFilters"].append(
+            [f"startDate>={int(since_ts)}", f"creationDate>={int(since_ts) * 1000}"])
     if lean:
         req = payload["requests"][0]
         req.pop("facets", None)
@@ -1374,6 +1379,8 @@ def _lean_page1_ok(full_data, lean_box) -> tuple[bool, str]:
         pf = {p["id"]: p for p in parse_products(full_data, None)}
         pl = {p["id"]: p for p in parse_products(lean_box["d"], None)}
         if not pf:
+            if not rf.get("nbHits"):
+                return True, "empty (quick window with no listings)"   # v2.17.5: nothing to compare
             return False, "full page 1 parsed to 0 items"
         common = pf.keys() & pl.keys()
         if len(common) < 0.9 * len(pf):
@@ -6481,6 +6488,11 @@ _SWEEP_STOP = threading.Event()         # never set by users (their Stop is _sto
 _SWEEP_STATE = {"running": False, "started_at": None, "finished_at": None,
                 "result": None, "quick_seen": set(), "runs": 0, "again": False}
 _QUICK_SLACK_SECS = 3600   # window starts an hour before the threshold
+# (v2.17.5) Recent quick passes: (finished_at epoch, window start epoch), kept an
+# hour. The sweep uses them to log any listing a quick pass should have found
+# but didn't (see "[sweep] WARNING" in _run) — the check that would have caught
+# the v2.17.4 startDate=0 miss on the first real new listing.
+_RECENT_QUICK: list = []
 
 
 def _quick_since_ts(threshold: str):
@@ -6500,6 +6512,18 @@ def _quick_since_ts(threshold: str):
         return None
     import calendar as _cal
     return int(_cal.timegm(dt.timetuple())) - _QUICK_SLACK_SECS
+
+
+def _iso_epoch(d: str):
+    """'2026-09-30T15:04:05Z' / '2026-09-30' → epoch seconds (UTC), else None."""
+    t = (d or "").strip()
+    try:
+        dt = (datetime.strptime(t, "%Y-%m-%d") if len(t) == 10
+              else datetime.strptime(t[:19], "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return None
+    import calendar as _cal
+    return int(_cal.timegm(dt.timetuple()))
 
 
 def _start_sweep() -> str:
@@ -6547,6 +6571,46 @@ def _start_sweep() -> str:
         _SWEEP_LOCK.release()
         raise
     return "started"
+
+
+@app.route("/api/quick-window-check")
+def api_quick_window_check():
+    """(v2.17.5, admin, temporary) Does Algolia honor the quick pass's window
+    filter? Asks for page 1 of everything listed in the last ?hours= (default 48)
+    exactly as a quick pass would, and counts the same window in Postgres
+    (available items with date_listed >= window start). nbHits should roughly
+    match db_count (items listed/sold since the last scan make small
+    differences); nbHits 0 with db_count > 0 means the filter doesn't work."""
+    if not _is_admin():
+        return jsonify({"error": "Not found"}), 404
+    try:
+        hours = max(1, min(int(request.args.get("hours", 48)), 24 * 14))
+    except ValueError:
+        hours = 48
+    since = int(time.time()) - hours * 3600
+    since_iso = datetime.utcfromtimestamp(since).strftime("%Y-%m-%dT%H:%M:%SZ")
+    out = {"hours": hours, "since": since_iso}
+    try:
+        d = fetch_page(None, 1, lean=True, since_ts=since)
+        r = (d.get("results") or [{}])[0]
+        hits = r.get("hits") or []
+        out.update(nb_hits=r.get("nbHits"), page1_hits=len(hits),
+                   page1_startDate_zero=sum(1 for h in hits if not h.get("startDate")),
+                   page1_parsed=len(parse_products(d, None)))
+    except Exception as e:
+        out["algolia_error"] = f"{type(e).__name__}: {e}"[:200]
+    try:
+        def _q():
+            with _pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*), MAX(date_listed) FROM items WHERE available AND date_listed >= %s",
+                                (since_iso,))
+                    return cur.fetchone()
+        n, mx = _pg_read(_q)
+        out.update(db_count=int(n), db_newest=mx)
+    except Exception as e:
+        out["db_error"] = f"{type(e).__name__}: {e}"[:200]
+    return jsonify(out)
 
 
 @app.route("/api/sweep-status")
@@ -6992,9 +7056,20 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             changed_rows = []
             _price_drops = 0
             _price_idx = _PG_PRIOR_COLS.index("price")
+            _missed = []
+            if mode == "sweep":
+                with _SWEEP_STATE_LOCK:
+                    _rq = list(_RECENT_QUICK)
             for sku, rec in merged.items():
                 row = _pg_row_for(sku, rec)
                 pr = prior.get(sku)
+                if mode == "sweep" and pr is None and _rq:
+                    # v2.17.5: a listing new to the catalog, dated inside a recent
+                    # quick pass's window and at least 10 min before that pass ran,
+                    # should have been found by it.
+                    _ep = _iso_epoch(rec.get("date_listed") or "")
+                    if _ep is not None and any(since <= _ep <= fin - 600 for fin, since in _rq):
+                        _missed.append((sku, rec.get("date_listed")))
                 if pr is None or not _pg_row_unchanged(row, pr):
                     changed_rows.append(row)
                     try:
@@ -7004,6 +7079,9 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                     except (TypeError, ValueError):
                         pass
             del prior
+            if _missed:
+                print(f"[sweep] WARNING: {len(_missed)} new listing(s) inside a recent quick pass's window "
+                      f"were not found by it (NEW may have been missed): {_missed[:5]}")
             _run_ids = ids_this_run | set(merged)
             if mode == "sweep":
                 # v2.17.4: never mark sold anything a quick pass saw listed while
@@ -7022,6 +7100,10 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                 with _SWEEP_STATE_LOCK:
                     if _SWEEP_STATE["running"]:
                         _SWEEP_STATE["quick_seen"] |= set(merged)
+                    if not scan_incomplete and not stop_ev.is_set() and _quick_since is not None:
+                        _RECENT_QUICK.append((time.time(), _quick_since))
+                        _cut = time.time() - 3600
+                        _RECENT_QUICK[:] = [x for x in _RECENT_QUICK if x[0] >= _cut]
             _write_ms = int((time.time() - _t_write) * 1000)
         finally:
             _PG_SCAN_DB_LOCK.release()
@@ -7973,7 +8055,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.17.4"
+APP_VERSION = "2.17.5"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

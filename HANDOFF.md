@@ -1,5 +1,40 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-30 · Current version: v2.17.4 (Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-30 · Current version: v2.17.5 (HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.17.5 — 2026-09-30: HOTFIX — quick-pass window also matches creationDate (GC's recent listings have startDate 0)
+
+**Found live right after v2.17.4 went out**: every quick pass returned 0 hits. The catalog's newest listing
+(2026-09-29T09:12:47Z) equals Chuck's anchor, so 0 NEW was actually correct at that moment — but the window
+(anchor − 1 h) also contained ≥ 9 listings (08:33-08:43Z) that Algolia didn't return. `/api/debug-fetch` showed
+why: GC's recent hits carry **`startDate: 0`** and a real `creationDate` (ms); `parse_products` dates them from
+creationDate. The full scan's `startDate<={now}` lets 0 through; v2.17.4's `startDate>={since}` excluded them.
+Consequence if unfixed: the next real new listing would never be flagged NEW (the sweep would insert it with
+first_seen = sweep time; the anchor wouldn't move, so later quick passes would keep missing it). No NEW items had
+been missed yet (none listed after the threshold since yesterday 09:12Z).
+
+**Fix**: the quick window is now an Algolia OR group — `numericFilters: ["startDate<={now}", ["startDate>={since}",
+"creationDate>={since*1000}"]]` — a superset of every item whose parsed date_listed ≥ since.
+**Guard**: `_RECENT_QUICK` keeps (finished_at, window start) of successful quick passes for an hour; the sweep logs
+`[sweep] WARNING: N new listing(s) inside a recent quick pass's window were not found by it (NEW may have been
+missed): [...]` for SKUs new to the catalog dated inside a window and ≥ 10 min before that pass ran.
+**Temporary admin check**: `GET /api/quick-window-check?hours=48` → Algolia `nb_hits` for that window (as a quick
+pass asks), how many page-1 hits have startDate 0, and `db_count` = available items with date_listed ≥ window
+start. nb_hits ≈ db_count proves Algolia honors the creationDate filter (an index can restrict numeric filtering to
+listed attributes — if nb_hits is 0 while db_count > 0, the filter isn't honored). Delete once verified.
+Also: an empty quick window no longer logs `lean pages NOT used` (nothing to compare).
+
+**Local verification** (mock now realistic: 2/3 of items startDate 0 + creationDate ms, Algolia numericFilters
+semantics incl. nested OR): v2.17.3 full scan vs v2.17.4 vs v2.17.5 quick + sweep from the same snapshot —
+**v2.17.4 found only 50 of 150 NEW items** (the bug reproduced); **v2.17.5 found all 150, same md5, same anchor, same
+final table as v2.17.3**. Guard: with the old filter simulated, the sweep logged the WARNING for exactly the 100 missed
+listings. Edge-case suite (follow-up sweep, mid-sweep listing stays available, Stop, 429 → 0 sold, no-threshold →
+full) passes. py_compile / node --check clean.
+
+**After deploy**: run `/api/quick-window-check?hours=48` as admin (expect nb_hits > 0, close to db_count); then a
+scan: `[scan] nationwide quick coverage: nbHits …` should be > 0 whenever db_count for the window is; watch for
+`[sweep] WARNING`.
 
 ---
 

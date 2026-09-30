@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-30 · Version: v2.17.4 (Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-09-30 · Version: v2.17.5 (quick-window hotfix; v2.17.4 = Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,7 +88,16 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.17.4 — Phase G S1: two-phase scan (2026-09-30)
+## Current State: v2.17.5 — hotfix: quick-pass window matches creationDate too (2026-09-30)
+
+GC's recent Algolia hits have `startDate: 0` (dated from `creationDate` ms by parse_products), so v2.17.4's
+`startDate>=since` window returned nothing. Window is now OR(`startDate>=since`, `creationDate>=since*1000`).
+Sweep logs `[sweep] WARNING … not found by it` if a quick pass misses a listing; temporary admin
+`/api/quick-window-check?hours=48` verifies Algolia honors the filter. See HANDOFF.md v2.17.5.
+
+---
+
+## Previous: v2.17.4 — Phase G S1: two-phase scan (2026-09-30)
 
 A nationwide Scan click is now a QUICK pass (Algolia `startDate>=` the user's NEW threshold − 1 h → same NEW ids +
 anchor as a full scan, done in ~1-2 s, no sold-marking) followed by a background SWEEP (`_start_sweep`, the full
