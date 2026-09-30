@@ -1,5 +1,91 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-30 · Current version: v2.17.0 (Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-30 · Current version: v2.17.1 (Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.17.1 — 2026-09-30: Phase G step 1 — request timing ("measure first"), no behavior change
+
+**Why**: Chuck started Phase G (make the site faster/better for users) with "measure first — real numbers on
+what users wait on before we pick fixes". This version only measures; every response body is unchanged
+(verified byte-identical to v2.17.0 across 9 browse shapes + /api/state, /store/austin, /, saved-search counts).
+
+**Added** (one block placed right before `Compress(app)` in gc_tracker_app.py, plus small hooks):
+- `_timing_start` (before_request) / `_timing_finish` (after_request) / `_timing_teardown`: time every request
+  except the `/api/progress` SSE stream, from the first before_request hook to the last after_request hook.
+  The hooks are registered BEFORE `Compress(app)`; Flask runs after_request hooks in reverse registration
+  order, so `_timing_finish` runs last and the number INCLUDES gzip/br compression. Not included: time queued
+  inside gunicorn before a thread picks the request up, network, and lazy streaming of static files.
+- Groups: the Flask rule (`GET /store/<slug>`, `POST /api/saved-search-counts`, …); static files one group per
+  file that returned 200 (bounded — only real files); `/api/browse` split by request shape via
+  `_timing_set_key` in `_browse_compute`: `browse all|stores|1store` + `+want` / `+wantonly` / `+q` (search box
+  or filter text) / `+filter` (any facet/price/toggle) / `+p2` (page > 1). ≤ 48 browse groups.
+- Phases (`_timing_phase`, accumulates per request, no-op outside a request): `conn` (pool checkout in
+  `_pg_conn`), and in `_pg_browse`: `q1` (totals/new_count), `facets` (the 4-way UNION GROUP BY), `q3`
+  (filtered total, distinct stores, new_want_count), `page` (the ORDER BY … LIMIT/OFFSET page), `kwflags`
+  (want-list flags for the page), `build` (Python row → JSON dicts), and `count` for saved-search counts.
+- `Server-Timing` response header on every timed response (`app;dur=…, conn;dur=…, q1;dur=…`) — visible in
+  DevTools → Network → Timing and to `performance.getEntriesByType('resource')[i].serverTiming`, so browser
+  measurements can split server time from network time.
+- Railway logs: `[timing] SLOW <group> <ms>ms status <code> (conn=… q1=… …)` for any request ≥ 1500 ms
+  (`_TIMING_SLOW_MS`); every 15 min (`_TIMING_SUMMARY_SECS`, emitted lazily by the first request after the
+  window ends — no extra thread) a block `[timing] summary, last N min (v2.17.1):` then one
+  `[timing]   <group>: n, p50, p90, p99, max, 5xx` line per group active in that window.
+- `[timing] scan done: nationwide|N store(s), X found, total …ms (fetch …, save …, finish …)` per completed
+  scan (fetch = start → Postgres phase; save = the existing `_db_ms`; finish = after save → "done").
+- Nationwide scan fetch breakdown: `fetch_page()` takes an optional `_stats` list and appends
+  (request ms, response bytes, json-decode ms) per page; the nationwide branch also times each lock-step batch
+  of 15 and the parse/merge (`_absorb`). After the coverage line it logs
+  `[timing] scan fetch: pages, batches, wall_s, req_ms_p50/p90/max, kb_per_page, mb_total, json_decode_s,
+  parse_s, batch_ms_p50/max` and stores it as `_scan_coverage.last.fetch_timing` (?pg_shadow=1). Store scans
+  call fetch_page without `_stats` (unchanged).
+- Admin: `GET /api/timing` (404 for non-admins) → JSON: per group count / p50 / p90 / p99 / max / avg / 4xx /
+  5xx and per-phase stats (percentiles over the last 1,000 requests per group), `inflight_at_arrival`
+  (how many requests were already running when each request arrived: "0","1","2","3","4+" — the evidence
+  for/against more gunicorn workers), `inflight_max`, last 20 scans' time split. `?reset=1` clears it.
+  Also attached to `POST /api/browse?pg_shadow=1` as `_timing`. Counters reset on every deploy/restart.
+
+**Overhead**: a perf_counter + a lock-protected deque append per request; percentiles only computed when
+/api/timing or a summary is produced. Memory bounded (≤ 1,000 floats × groups × phases + ≤ 5,000 per window).
+
+**Local verification** (cloud sandbox, Postgres 16, 130K synthetic rows / 115K available, gunicorn gthread
+×8 exactly as the Procfile): py_compile / node --check clean, pyflakes no undefined names; responses
+byte-identical to v2.17.0 (md5) for 9 browse shapes + /api/state, /store/austin, /, saved-search counts;
+Server-Timing present on browse/state/static (not on SSE); /api/timing admin 200 / non-admin 404, reset works,
+`_timing` present in ?pg_shadow=1; summary lines printed when the window elapsed; SLOW lines printed under
+6 concurrent all-stores browses (each 1.2-1.7 s vs 0.39 s alone — local Postgres CPU-bound, and `conn` was
+330-430 ms there: new pool connections being opened, since minconn=2); a mocked store scan printed
+`[timing] scan done: 1 store(s), 295 found, total 134ms (fetch 3ms, save 128ms, finish 2ms)`.
+
+**Baseline measurements taken the same day on live v2.17.0** (before this version; Chuck's logged-in Chrome,
+desktop, account with 9 want-list entries and 147 watched items; hidden tab, so paint times unusable —
+network/server numbers only):
+- First load waterfall: HTML TTFB 300 ms (≈210 ms of it connection setup) → gc.js (207 KB raw / 52 KB on the
+  wire) + gc.css (53 / 13 KB) done at 440 ms → then FIVE API round trips in sequence, ~80-110 ms each:
+  `/api/auth/config` + `/api/me` (38 KB) → `/api/sync` → `/api/stores` → `/api/store-coords` (27 KB) +
+  `/api/state`, done at 874 ms → **300 ms idle** (browseCache's `setTimeout(…, 300)` debounce) → `/api/browse`
+  starts at 1,120 ms, ends at 1,881 ms (TTFB 758 ms, 200 KB JSON / 43 KB on the wire) → render ≈ 20 ms.
+  **First results ≈ 1.9 s; of that ≈ 650 ms is database work, ≈ 700 ms is waiting on the serial chain + debounce.**
+- `/api/browse` round trip vs server `_pg_browse_ms` (median of 3, `?pg_shadow=1`):
+  first page 298 stores +want 787 / 648 ms; page 2 772 / 668; page 50 940 / 760; all_stores no want list
+  767 / 624; all_stores +want 818 / 636; sort by price 789 / 591; brand=Fender 735 / 499;
+  search box "fender deluxe" 255 / 165, "strat" 302 / 196; Want List only 303 / 205; one store (Austin) 135 / 30.
+  Small GETs: /api/state 83, /api/me 96, /api/stores 80, /api/store-coords 105, /api/auth/config 88 ms (≈ RTT).
+- **Every page flip / sort re-runs all 5 queries including the facet counts and re-sends the full facet lists:
+  197 KB per response, ~170 KB of it the brand list (5,168 brands).** The page itself is ~28 KB.
+- Search box: 400 ms debounce (`_kwSearchTimer`) + ~250-300 ms request ≈ 0.7 s after the last keystroke.
+- Images: desktop table thumbnails are `display:none` + `loading="lazy"` → never downloaded. Mobile cards load
+  GC's 200×200 JPEGs lazily (sizes not measured — media.guitarcenter.com is blocked from the sandbox).
+- **Scans (the longest wait on the site — Chuck's observation, confirmed)**: Railway HTTP logs, `/api/progress`
+  (the SSE stream is open for the whole scan): every scan 10:56-12:15 took **22-33 s, typically ~28 s**, ~12 scans
+  in 90 minutes. The "Scan For New" button always runs a NATIONWIDE scan (`startRun({stores: []})`). Of ~28 s:
+  ~4.7 s save (prior read 2.4 s, write 1.0 s), so **~23 s fetching 478 Algolia pages** — lock-step batches of 15
+  (`PARALLEL_WORKERS`), a new ThreadPoolExecutor per batch, each batch waiting for its slowest page (~0.7 s per
+  batch on average). Every page request asks Algolia for `facets: ["*"]` (all facet counts, unused by the scan)
+  and `attributesToRetrieve: ["*"]` (the parser reads ~18 attributes). The new `[timing] scan fetch` line will
+  split request time vs payload size vs parse.
+
+**Next**: push, then after a day read `GET /api/timing` (live phase split per shape + `inflight_at_arrival`)
+and the `[timing] summary` lines, then pick from the ranked Phase G list in NEXT_SESSION_PROMPT.md.
 
 ---
 

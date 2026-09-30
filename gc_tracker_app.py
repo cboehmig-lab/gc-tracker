@@ -508,7 +508,9 @@ def _pg_conn():
     dead one. Normal requests never pay for the ping."""
     if _PG_POOL is None:
         raise RuntimeError("Postgres connection pool not available")
+    _tc = time.perf_counter()
     conn = _PG_POOL.getconn()
+    _timing_phase("conn", (time.perf_counter() - _tc) * 1000.0)
     if _PG_VALIDATE_CONN.get():
         for _ in range(_PG_POOL.maxconn + 1):
             try:
@@ -1223,7 +1225,7 @@ ALGOLIA_HEADERS = {
     "Content-Type":             "application/json",
 }
 
-def fetch_page(store_name: str = None, page: int = 1) -> dict:
+def fetch_page(store_name: str = None, page: int = 1, _stats: list | None = None) -> dict:
     """Fetch one page of used inventory via Algolia API.
     If store_name is provided, filters to that store.
     If store_name is None, fetches ALL used inventory nationwide."""
@@ -1248,9 +1250,14 @@ def fetch_page(store_name: str = None, page: int = 1) -> dict:
         "ruleContexts":  ["used-page", "primary_itemtype", "extension_itemtype"],
         "attributesToRetrieve": ["*"],
     }]}
+    _t0 = time.perf_counter()
     r = _http.post(ALGOLIA_URL, headers=ALGOLIA_HEADERS, json=payload, timeout=20)
     r.raise_for_status()
-    return r.json()
+    _t1 = time.perf_counter()
+    out = r.json()
+    if _stats is not None:   # Phase G timing (v2.17.1): (request ms, bytes, json-decode ms)
+        _stats.append(((_t1 - _t0) * 1000.0, len(r.content), (time.perf_counter() - _t1) * 1000.0))
+    return out
 
 
 # ── New Deals helpers ──────────────────────────────────────────────────────────
@@ -2034,6 +2041,231 @@ app.secret_key  = _secret
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"]   = os.environ.get("RAILWAY_ENVIRONMENT") is not None
+# ── Request timing (v2.17.1, Phase G step 1 "measure first") ─────────────────
+# Lightweight per-request timing so we fix what users actually wait on. Adds NO
+# behavior change: it only measures and reports.
+#
+#   * Every request (except the /api/progress SSE stream) is timed from the first
+#     before_request hook to the last after_request hook — i.e. including
+#     Flask-Compress (these hooks are registered BEFORE Compress(app), and Flask
+#     runs after_request hooks in reverse registration order, so ours runs last).
+#     Not included: time queued in gunicorn before a thread picks the request up,
+#     network time, and body streaming of static files (compressed lazily).
+#   * Requests are grouped by route (the Flask rule, e.g. "GET /store/<slug>").
+#     /api/browse is split by request shape ("browse all", "browse stores
+#     +want", …) because a plain first page and a Want List page cost very
+#     different amounts. Group count is bounded (fixed routes + ≤ 48 browse shapes).
+#   * _pg_browse / _pg_conn record per-phase times (q1 totals, facets, q3, page,
+#     kwflags, build, conn = pool checkout) for the current request.
+#   * Each response gets a `Server-Timing` header (app;dur=… plus phases), so the
+#     browser's DevTools and PerformanceResourceTiming.serverTiming see the split
+#     between server time and network time.
+#   * Railway logs: `[timing] SLOW <route> <ms>ms …` for any request over
+#     _TIMING_SLOW_MS, and every _TIMING_SUMMARY_SECS a `[timing] summary` block
+#     (one line per route active in that window: n, p50/p90/p99/max, 5xx).
+#   * Admin: GET /api/timing (JSON, cumulative since restart + scans);
+#     also attached to POST /api/browse?pg_shadow=1 as `_timing`.
+#     GET /api/timing?reset=1 clears the counters.
+# Also tracks requests in flight at arrival (how often >1 request overlaps on the
+# single gunicorn worker — the evidence for / against more workers) and each scan's
+# wall time split into fetch / save / finish.
+from flask import g as _g, has_request_context as _has_request_context
+from collections import deque as _deque
+
+_TIMING_LOCK = threading.Lock()
+_TIMING_RING = 1000            # samples kept per route for cumulative percentiles
+_TIMING_WINDOW_CAP = 5000      # samples kept per route per summary window
+_TIMING_SLOW_MS = 1500
+_TIMING_SUMMARY_SECS = 900     # 15 minutes
+_TIMING_SKIP_PREFIXES = ("/api/progress",)   # SSE: open for minutes by design
+
+
+def _timing_fresh():
+    return {"since": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "routes": {}, "inflight": 0, "inflight_max": 0,
+            "inflight_at_arrival": {}, "window_start": time.time(), "scans": []}
+
+
+_TIMING = _timing_fresh()
+
+
+def _timing_phase(name, ms):
+    """Add `ms` to phase `name` for the current request (accumulates, so a phase
+    that runs twice — e.g. two pool checkouts — sums). No-op outside a request."""
+    if not _has_request_context():
+        return
+    ph = getattr(_g, "_timing_phases", None)
+    if ph is None:
+        ph = _g._timing_phases = {}
+    ph[name] = ph.get(name, 0.0) + ms
+
+
+def _timing_set_key(key):
+    """Override the route group for this request (used by /api/browse shapes)."""
+    if _has_request_context():
+        _g._timing_key = key
+
+
+def _timing_pct(vals, p):
+    if not vals:
+        return None
+    s = sorted(vals)
+    k = min(len(s) - 1, max(0, int(round(p / 100.0 * (len(s) - 1)))))
+    return round(s[k], 1)
+
+
+def _timing_stats(vals):
+    if not vals:
+        return {"n": 0}
+    return {"n": len(vals), "p50": _timing_pct(vals, 50), "p90": _timing_pct(vals, 90),
+            "p99": _timing_pct(vals, 99), "max": round(max(vals), 1),
+            "avg": round(sum(vals) / len(vals), 1)}
+
+
+@app.before_request
+def _timing_start():
+    if request.path.startswith(_TIMING_SKIP_PREFIXES):
+        return None
+    _g._timing_t0 = time.perf_counter()
+    with _TIMING_LOCK:
+        n = _TIMING["inflight"]          # requests already running when this one arrived
+        _TIMING["inflight"] = n + 1
+        _TIMING["inflight_max"] = max(_TIMING["inflight_max"], n + 1)
+        b = str(n) if n < 4 else "4+"
+        _TIMING["inflight_at_arrival"][b] = _TIMING["inflight_at_arrival"].get(b, 0) + 1
+    _g._timing_counted = True
+    return None
+
+
+def _timing_route_key():
+    k = getattr(_g, "_timing_key", None)
+    if k:
+        return k
+    rule = request.url_rule.rule if request.url_rule is not None else "(unmatched)"
+    return f"{request.method} {rule}"
+
+
+def _timing_summary_locked(now):
+    """Build the summary lines for the window just ended and reset the window."""
+    lines = []
+    for key in sorted(_TIMING["routes"]):
+        r = _TIMING["routes"][key]
+        win = r["win"]
+        if not win:
+            continue
+        st = _timing_stats(win)
+        lines.append(f"[timing]   {key}: n {st['n']}, p50 {st['p50']}ms, p90 {st['p90']}ms, "
+                     f"p99 {st['p99']}ms, max {st['max']}ms, 5xx {r['win_5xx']}")
+        r["win"] = []
+        r["win_5xx"] = 0
+    mins = int(round((now - _TIMING["window_start"]) / 60.0))
+    _TIMING["window_start"] = now
+    if lines:
+        lines.insert(0, f"[timing] summary, last {mins} min (v{APP_VERSION}):")
+    return lines
+
+
+@app.after_request
+def _timing_finish(response):
+    if not getattr(_g, "_timing_counted", False):
+        return response
+    _g._timing_counted = False     # never count twice
+    t0 = getattr(_g, "_timing_t0", None)
+    ms = (time.perf_counter() - t0) * 1000.0 if t0 is not None else 0.0
+    phases = getattr(_g, "_timing_phases", None) or {}
+    key = _timing_route_key()
+    status = response.status_code
+    if status == 200 and request.url_rule is not None and request.url_rule.endpoint == "static":
+        # One group per real static file (bounded: only files that exist get a 200).
+        key = f"GET /static/{(request.view_args or {}).get('filename', '')}"
+    now = time.time()
+    summary = []
+    with _TIMING_LOCK:
+        _TIMING["inflight"] = max(0, _TIMING["inflight"] - 1)
+        r = _TIMING["routes"].get(key)
+        if r is None:
+            r = _TIMING["routes"][key] = {"ms": _deque(maxlen=_TIMING_RING), "win": [],
+                                         "n": 0, "n_5xx": 0, "n_4xx": 0, "win_5xx": 0,
+                                         "phases": {}}
+        r["n"] += 1
+        r["ms"].append(ms)
+        if len(r["win"]) < _TIMING_WINDOW_CAP:
+            r["win"].append(ms)
+        if status >= 500:
+            r["n_5xx"] += 1
+            r["win_5xx"] += 1
+        elif status >= 400:
+            r["n_4xx"] += 1
+        for name, v in phases.items():
+            r["phases"].setdefault(name, _deque(maxlen=_TIMING_RING)).append(v)
+        if now - _TIMING["window_start"] >= _TIMING_SUMMARY_SECS:
+            summary = _timing_summary_locked(now)
+    # Server-Timing: app first, then phases in the order they ran.
+    st = [f"app;dur={ms:.1f}"] + [f"{n};dur={v:.1f}" for n, v in phases.items()]
+    response.headers["Server-Timing"] = ", ".join(st)
+    if ms >= _TIMING_SLOW_MS:
+        ph = " ".join(f"{n}={v:.0f}" for n, v in phases.items())
+        print(f"[timing] SLOW {key} {ms:.0f}ms status {status}" + (f" ({ph})" if ph else ""))
+    for line in summary:
+        print(line)
+    return response
+
+
+@app.teardown_request
+def _timing_teardown(exc):
+    # A request that raised before after_request ran (unhandled exception) still
+    # has to leave the in-flight gauge.
+    if getattr(_g, "_timing_counted", False):
+        _g._timing_counted = False
+        with _TIMING_LOCK:
+            _TIMING["inflight"] = max(0, _TIMING["inflight"] - 1)
+
+
+def _timing_note_scan(**kw):
+    """Record one scan's wall time split (called from _run just before 'done')."""
+    kw["at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _TIMING_LOCK:
+        _TIMING["scans"].append(kw)
+        del _TIMING["scans"][:-20]
+
+
+def _timing_report():
+    with _TIMING_LOCK:
+        routes = {}
+        for key, r in _TIMING["routes"].items():
+            d = _timing_stats(list(r["ms"]))
+            d["count"] = r["n"]
+            d["n_5xx"] = r["n_5xx"]
+            d["n_4xx"] = r["n_4xx"]
+            if r["phases"]:
+                d["phases"] = {n: _timing_stats(list(v)) for n, v in r["phases"].items()}
+            routes[key] = d
+        arrivals = dict(_TIMING["inflight_at_arrival"])
+        out = {"version": APP_VERSION, "since": _TIMING["since"],
+               "inflight_now": _TIMING["inflight"], "inflight_max": _TIMING["inflight_max"],
+               "inflight_at_arrival": arrivals,
+               "note": "ms = server time from first before_request to last after_request "
+                       "(incl. compression; excl. gunicorn queueing and network). "
+                       "Percentiles over the last %d requests per route." % _TIMING_RING,
+               "scans": list(_TIMING["scans"])}
+    out["routes"] = dict(sorted(routes.items(), key=lambda kv: -(kv[1].get("count") or 0)))
+    return out
+
+
+@app.route("/api/timing")
+def api_timing():
+    """Admin-only request timing report (Phase G step 1). ?reset=1 clears it."""
+    if not _is_admin():
+        return jsonify({"error": "Not found"}), 404
+    if request.args.get("reset") == "1":
+        global _TIMING
+        with _TIMING_LOCK:
+            fresh = _timing_fresh()
+            fresh["inflight"] = _TIMING["inflight"]   # keep the live gauge honest
+            _TIMING = fresh
+    return jsonify(_timing_report())
+
+
 # Cap request bodies (413 before parsing). /api/browse is unauthenticated and parses
 # request.json in full before any per-field cap applies; without this a huge JSON body
 # is a memory DoS. Largest legit payload (240-store array + 750-keyword want list +
@@ -4747,8 +4979,11 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
         # drift from what applying it shows. Returns an int, not the response dict.
         with _pg_conn() as conn:
             with conn.cursor() as cur:
+                _tp = time.perf_counter()
                 cur.execute(f"SELECT COUNT(*) FROM items WHERE {filtered_where_sql}", params)
-                return int(cur.fetchone()[0])
+                n = int(cur.fetchone()[0])
+                _timing_phase("count", (time.perf_counter() - _tp) * 1000.0)
+                return n
 
     # ── ORDER BY (whitelisted columns only — _PG_SORT_MAP) ─────────────────
     is_new_sql = "(sku = ANY(%(new_ids)s))"
@@ -4778,12 +5013,14 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
     with _pg_conn() as conn:
         with conn.cursor(cursor_factory=_pg_extras.RealDictCursor) as cur:
             # Q1 — total_unfiltered / new_count (pre-_apply_base scope)
+            _tp = time.perf_counter()
             cur.execute(
                 f"SELECT COUNT(*) AS total_unfiltered, "
                 f"COUNT(*) FILTER (WHERE {is_new_sql}) AS new_count "
                 f"FROM items WHERE {scope_sql}", params)
             row = cur.fetchone()
             total_unfiltered, new_count = row["total_unfiltered"], row["new_count"]
+            _tq = time.perf_counter(); _timing_phase("q1", (_tq - _tp) * 1000.0); _tp = _tq
 
             # Q2 — contextual facet counts (each facet: all OTHER facets)
             facet_sql = " UNION ALL ".join([
@@ -4810,6 +5047,7 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
             for c in f_conds:  cond_ctx.setdefault(c, 0)
             for c in f_cats:   cat_ctx.setdefault(c, 0)
             for s in f_subs:   sub_ctx.setdefault(s, 0)
+            _tq = time.perf_counter(); _timing_phase("facets", (_tq - _tp) * 1000.0); _tp = _tq
 
             # Q3 — totals over the fully filtered set
             cur.execute(
@@ -4821,6 +5059,7 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
             total_filtered = row["total_filtered"]
             store_count = row["store_count"]
             new_want_count = row["new_want_count"]
+            _tq = time.perf_counter(); _timing_phase("q3", (_tq - _tp) * 1000.0); _tp = _tq
 
             total_pages = max(1, -(-total_filtered // per_page))
             page = min(page, total_pages)
@@ -4835,6 +5074,7 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
                 f"LIMIT %(_limit)s OFFSET %(_offset)s",
                 {**params, "_limit": per_page, "_offset": start})
             page_rows = cur.fetchall()
+            _tq = time.perf_counter(); _timing_phase("page", (_tq - _tp) * 1000.0); _tp = _tq
 
             # Q5 — kwMatch flags for just this page's rows
             kw_hits = set()
@@ -4843,7 +5083,9 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
                     f"SELECT sku FROM items WHERE sku = ANY(%(_page_skus)s) AND {kw_bool}",
                     {**params, "_page_skus": [r["sku"] for r in page_rows]})
                 kw_hits = {r["sku"] for r in cur.fetchall()}
+                _timing_phase("kwflags", (time.perf_counter() - _tp) * 1000.0)
 
+    _tp = time.perf_counter()
     page_items = []
     for r in page_rows:
         sku = r["sku"]
@@ -4876,6 +5118,7 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
         })
 
     _cond_order = {"Excellent": 0, "Great": 1, "Good": 2, "Fair": 3, "Poor": 4}
+    _timing_phase("build", (time.perf_counter() - _tp) * 1000.0)
     return {
         "items":            page_items,
         "page":             page,
@@ -4946,6 +5189,7 @@ def api_browse():
         resp["_pg_browse_errors"] = _PG_BROWSE_ERRORS
         resp["_pg_scan_writes"] = _PG_SCAN_WRITES   # v2.16.48, Phase F 5b-ii
         resp["_scan_coverage"] = _SCAN_COVERAGE     # v2.16.51
+        resp["_timing"] = _timing_report()           # v2.17.1, Phase G step 1
     return jsonify(resp)
 
 
@@ -5105,6 +5349,19 @@ def _browse_compute(data, *, logged_in, pg_diag=False):
     kw_accepted = _kw_accept_capped(keywords)
     new_ids   = set(data.get("new_ids", []))
     store_set = set(stores) if not search_all else None
+
+    # Phase G timing group (v2.17.1): scope + which costly features are on.
+    _shape = ["browse", "all" if search_all else ("1store" if len(stores) == 1 else "stores")]
+    if kw_accepted:
+        _shape.append("+wantonly" if f_want_only else "+want")
+    if fq:
+        _shape.append("+q")
+    if f_brands or f_conds or f_cats or f_subs or f_watched or f_price_drop_only \
+            or f_vintage_only or f_price_min is not None or f_price_max is not None:
+        _shape.append("+filter")
+    if page > 1:
+        _shape.append("+p2")
+    _timing_set_key(" ".join(_shape))
 
     if _PG_POOL is None:
         raise RuntimeError("Postgres pool not available")
@@ -6053,6 +6310,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         if run_id:
             _broadcast(run_id, msg)   # fan-out to all subscribers
         _q.put(msg)                   # also send to legacy queue for backwards compat
+    _t_scan0 = time.time()            # Phase G timing (v2.17.1)
     try:
         # Use the run_time passed in from api_run (computed before thread start)
         # so the client and server share the exact same timestamp.
@@ -6089,6 +6347,8 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                    "no_new_pages": [], "retried_pages": 0, "recovered": 0,
                    "unique": 0, "missing": 0, "complete": None}
             page_stats = {}   # pg -> (raw, parsed, new)
+            # Phase G timing (v2.17.1): where the fetch phase's time goes.
+            _ft = {"req": [], "absorb_ms": 0.0, "batches": [], "t0": time.perf_counter()}
 
             def _raw_hits(d):
                 try:
@@ -6111,7 +6371,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
 
             # First fetch page 1 to learn total pages
             try:
-                data1 = fetch_page(None, 1)
+                data1 = fetch_page(None, 1, _ft["req"])
             except Exception as e:
                 send({"type":"progress","msg":f"  API error on page 1: {e}"})
                 data1 = None
@@ -6132,7 +6392,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                     if _stop_event.is_set():
                         return pg, None, None
                     try:
-                        d = fetch_page(None, pg)
+                        d = fetch_page(None, pg, _ft["req"])
                         return pg, d, None
                     except Exception as exc:
                         return pg, None, exc
@@ -6146,6 +6406,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                     batch = remaining[batch_idx:batch_idx + PARALLEL_WORKERS]
                     batch_idx += len(batch)
                     pool = ThreadPoolExecutor(max_workers=PARALLEL_WORKERS)
+                    _tb = time.perf_counter()
                     try:
                         futures = {pool.submit(_fetch_one_page, pg): pg for pg in batch}
                         try:
@@ -6157,7 +6418,9 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                                     continue
                                 if data is None:
                                     continue
+                                _ta = time.perf_counter()
                                 _absorb(pg, data)
+                                _ft["absorb_ms"] += (time.perf_counter() - _ta) * 1000.0
                         except _FutureTimeoutError:
                             stuck = [futures[f] for f in futures if not f.done()]
                             scan_incomplete = True
@@ -6168,6 +6431,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                         # abandoned and will finish or die on its own without holding up the scan.
                         pool.shutdown(wait=False)
                     # Progress update after each batch
+                    _ft["batches"].append((time.perf_counter() - _tb) * 1000.0)
                     pages_done = min(batch_idx + 1, nb_pages)
                     send({"type":"progress","msg":f"  page {pages_done}/{nb_pages}… ({len(all_products):,} items so far)"})
 
@@ -6230,6 +6494,22 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                       f"no-new {cov['no_new_pages'][:10]}, retried {cov['retried_pages']}, recovered {cov['recovered']}, "
                       f"complete {cov['complete']}")
                 _SCAN_COVERAGE["last"] = cov
+                try:   # Phase G timing (v2.17.1) — measurement only
+                    _rq = sorted(x[0] for x in _ft["req"])
+                    _pct = lambda v, p: round(v[min(len(v) - 1, int(p / 100.0 * (len(v) - 1)))]) if v else None
+                    _kb = sum(x[1] for x in _ft["req"]) / 1024.0
+                    _dec = sum(x[2] for x in _ft["req"])
+                    _bt = _ft["batches"]
+                    _fetch_s = (time.perf_counter() - _ft["t0"])
+                    _fs = {"pages": len(_rq), "batches": len(_bt), "wall_s": round(_fetch_s, 1),
+                           "req_ms_p50": _pct(_rq, 50), "req_ms_p90": _pct(_rq, 90), "req_ms_max": _pct(_rq, 100),
+                           "kb_per_page": round(_kb / max(1, len(_rq)), 1), "mb_total": round(_kb / 1024.0, 1),
+                           "json_decode_s": round(_dec / 1000.0, 2), "parse_s": round(_ft["absorb_ms"] / 1000.0, 2),
+                           "batch_ms_p50": _pct(sorted(_bt), 50), "batch_ms_max": _pct(sorted(_bt), 100)}
+                    cov["fetch_timing"] = _fs
+                    print("[timing] scan fetch: " + ", ".join(f"{k} {v}" for k, v in _fs.items()))
+                except Exception as _e:
+                    print(f"[timing] scan fetch stats failed: {type(_e).__name__}: {_e}")
                 _SCAN_COVERAGE["recent"].insert(0, {k: cov[k] for k in ("at", "nb_hits", "unique", "missing", "retried_pages", "recovered", "complete")})
                 del _SCAN_COVERAGE["recent"][20:]
                 if _stop_event.is_set():
@@ -6400,6 +6680,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         finally:
             _PG_SCAN_DB_LOCK.release()
         _db_ms = int((time.time() - _t_db) * 1000)
+        _t_db_end = time.time()
         _pg_scan_note("ok", last_ok_at=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                       last_ms=_db_ms, last_rows=len(merged), last_sold=len(sold),
                       last_changed=len(changed_rows), last_read_ms=_read_ms,
@@ -6530,6 +6811,17 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         # For large scans, don't send full item lists via SSE — client will use server-side browse
         large_scan = len(all_products) > 1000
         items_for_sse = [] if large_scan else [fmt(p) for p in all_products[:500]]
+        # Phase G timing (v2.17.1): what the user waited on, start → "done".
+        _t_done = time.time()
+        _timing_note_scan(kind="nationwide" if nationwide else f"{len(stores_to_scan)} store(s)",
+                          found=len(all_products), stopped=_stop_event.is_set(),
+                          total_ms=int((_t_done - _t_scan0) * 1000),
+                          fetch_ms=int((_t_db - _t_scan0) * 1000), save_ms=_db_ms,
+                          finish_ms=int((_t_done - _t_db_end) * 1000))
+        print(f"[timing] scan done: {'nationwide' if nationwide else f'{len(stores_to_scan)} store(s)'}, "
+              f"{len(all_products):,} found, total {int((_t_done - _t_scan0) * 1000)}ms "
+              f"(fetch {int((_t_db - _t_scan0) * 1000)}ms, save {_db_ms}ms, "
+              f"finish {int((_t_done - _t_db_end) * 1000)}ms)")
         send({
             "type":        "done",
             "baseline":    baseline,
@@ -7302,7 +7594,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.17.0"
+APP_VERSION = "2.17.1"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

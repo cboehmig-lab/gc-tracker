@@ -1,3 +1,73 @@
+# Next Session Prompt — v2.17.1 built (Phase G step 1: request timing): push, read the numbers, Chuck picks
+
+**2026-09-30 (Phase G session 1)**:
+- **v2.17.0 health check** (Chuck's Chrome, ~11:05 CDT): Railway web memory ~250-300 MB flat since the v2.17.0
+  deploy (was ~1.5-1.7 GB flat, with spikes to 2.5-2.8 GB, all through the previous 24 h on v2.16.51). Only
+  ~25 min of v2.17.0 data existed, so the "over a day" re-check is still open — look again (Metrics → 7 day).
+  Deploy logs: 2 scans on v2.17.0 code (10:4x and 10:56), both `[pg] scan saved` (latest: 114,693 found, 53
+  new/changed, 16 sold, total 4,703 ms), no `SCAN WRITE FAILED`, coverage complete. Still no STORE scan seen.
+- **v2.17.1 built + locally verified, written to the Mac, NOT pushed**: request timing + nationwide scan fetch
+  breakdown only (no behavior change) — see HANDOFF.md v2.17.1. Baseline live numbers are in that entry.
+
+1. Push: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+   `git add gc_tracker_app.py HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit, `git push origin main`.
+2. After deploy: footer v2.17.1; in DevTools → Network any /api/browse response has a `Server-Timing` header;
+   admin `https://gcgeartracker.com/api/timing` returns JSON. After ~15 min of traffic Railway logs show
+   `[timing] summary …` blocks; each scan logs `[timing] scan fetch: …` (nationwide) and `[timing] scan done: …`.
+3. After ~a day: read `/api/timing` → per-shape p50/p90 and the phase split (`q1` / `facets` / `q3` / `page` /
+   `conn`), `inflight_at_arrival` (how often requests overlap on the single worker), and the scans list. Also
+   grep Railway logs for `[timing] SLOW`. Also re-check memory over the day and watch for a store scan.
+4. Chuck picks from the ranked list below, then build.
+
+## Phase G ranked list (from the 2026-09-30 measurements — confirm with step 3's live phase split)
+
+**The scan is the longest wait by far** (Chuck, confirmed from Railway HTTP logs): ~28 s per "Scan For New"
+(22-33 s), always nationwide; ~23 s of it fetching 478 Algolia pages in lock-step batches of 15, ~4.7 s saving.
+Read the first live `[timing] scan fetch` line (v2.17.1) before choosing between S1-S3:
+
+S1. **Two-phase scan: show NEW items in ~2-3 s, finish the sweep in the background** (M-L, the big one).
+   NEW detection only compares `date_listed` with the user's anchor, so a first pass can ask Algolia only for
+   items listed since the anchor (minus a safety margin) — `numericFilters: startDate>=…` (startDate is already
+   used as a numeric filter) — usually 1-3 pages. Save + send "done" with the NEW items, then keep sweeping all
+   478 pages in the background for sold-marking and price drops (same coverage guard). Needs care: items with no
+   startDate (creationDate fallback), per-user anchors, the scan lock / "joined" scans, and what the UI shows
+   while the background pass runs. Could also let a server-side timer do the full sweep so users never wait on it.
+S2. **Faster full sweep** (S): drop `facets:["*"]`, request only the ~18 attributes parse_products reads, and
+   replace lock-step batches with a continuous pool (next page starts as soon as any finishes). Maybe 23 s →
+   ~10-15 s; verify Algolia doesn't throttle a higher sustained rate.
+S3. **Faster save** (S-M): start the Postgres prior-state read (2.4 s) in parallel with the fetch (e.g. read all
+   available rows up front) instead of after it. ~2 s off every scan.
+
+Where the time goes elsewhere (desktop, logged-in, live v2.17.0):
+first results ≈ 1.9 s = ~0.45 s page + assets, ~0.4 s five API calls one after another, **0.3 s idle debounce**,
+**~0.65 s database** for /api/browse, ~0.1 s moving a 200 KB JSON. Page flip / sort ≈ 0.8 s (the whole query,
+facets included, re-runs). Search box ≈ 0.4 s debounce + 0.25-0.3 s. Want List ≈ 0.3 s. One store ≈ 0.14 s.
+
+1. **Don't recompute facets on page flips / sorts** (effort S-M, gc.js + small server flag). Client sends
+   `facets:false` when only page or sort changed and keeps its current facet lists/totals; server skips Q1,
+   facets, Q3. Expected page flip ~0.8 s → ~0.2-0.3 s and 197 KB → ~30 KB. Biggest win per effort for anyone
+   browsing past page 1 or sorting.
+2. **Trim the brand facet payload** (S). 5,168 brands ≈ 170 KB of every browse response. Send the brands the
+   dropdown actually needs (e.g. top ~200 + any selected), fetch the full list only when the brand dropdown's
+   search is used. Cuts JSON work on both ends; biggest help on phones/slow connections.
+3. **First-load waterfall** (M, gc.js only; careful — sync/merge ordering). Drop the 300 ms browseCache debounce
+   for the initial load, run /api/stores + /api/state + /api/store-coords in parallel with /api/me→/api/sync,
+   start the first browse as soon as stores + me are known. Expected ~0.5-0.7 s off the 1.9 s first load.
+4. **Make the plain all-stores browse query itself cheaper** (M). ~0.65 s server on every first page. Options:
+   cache facet counts/totals per (scope, filters) keyed by a "catalog generation" bumped by each scan write
+   (per-user gate `user_last_scan` complicates reuse — measure how many requests share a key first), or a
+   per-scan precomputed facet table. Needs step 3's phase split to pick the target (facets vs page sort vs q3).
+5. **Search box debounce 400 → ~200 ms** (XS). Saves ~0.2 s per search; slightly more requests (aborts already exist).
+6. **Search autocomplete** (M, one session — design in the Phase G section below). A feature, not a speed fix.
+7. **More than one gunicorn worker** (L — scan coordination + SSE state must move to Postgres first). Only worth it
+   if `inflight_at_arrival` shows real overlap; the local concurrency test was Postgres-bound, not GIL-bound, and
+   Postgres releases the GIL while queries run. Defer unless the numbers say otherwise. (If `conn` phase shows
+   non-trivial time in production, raising the pool's minconn from 2 is a one-line fix to consider first.)
+8. Not worth doing now: gc.js size (52 KB on the wire, cached for a year per version), desktop images (not loaded),
+   memory (fixed by v2.17.0 — confirm over a day).
+
+---
+
 # Next Session Prompt — v2.17.0 built (Phase F step 5c: JSON catalog retired): push + verify, then Phase G
 
 **Update 2026-09-30**: burn-in check on live v2.16.51 clean (74 scan saves / 0 failed; parity 507,520 = 507,520,

@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-30 · Version: v2.17.0 (Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-09-30 · Version: v2.17.1 (Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,7 +88,19 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.17.0 — Phase F step 5c, JSON catalog retired (2026-09-30)
+## Current State: v2.17.1 — Phase G step 1: request timing, no behavior change (2026-09-30)
+
+Phase G = make the site faster/better for users; step 1 is "measure first". v2.17.1 adds per-request timing
+only (responses byte-identical to v2.17.0): `Server-Timing` header on every response (browse split into
+conn/q1/facets/q3/page/kwflags/build), `[timing] SLOW …` (≥1.5 s) and 15-min `[timing] summary` lines in
+Railway logs, `[timing] scan fetch: …` (Algolia request ms / KB per page / parse) + `[timing] scan done: … (fetch / save / finish)` per scan, admin `GET /api/timing` (`?reset=1`;
+also `_timing` in `?pg_shadow=1`) with per-route/per-browse-shape percentiles and `inflight_at_arrival`.
+Baseline live numbers (first load ~1.9 s, page flip ~0.8 s, 197 KB responses from a 5,168-brand facet list)
+and the ranked Phase G list: HANDOFF.md v2.17.1 + NEXT_SESSION_PROMPT.md.
+
+---
+
+## Previous: v2.17.0 — Phase F step 5c, JSON catalog retired (2026-09-30)
 
 Postgres `items` is now the ONLY catalog store. Deleted `_cat_cache` / `_load_cat_cache` / `_save_cat_cache`,
 the per-scan JSON backup, `/api/pg-parity-check`, `/api/pg-full-backfill` + `/admin/pg-backfill`,
