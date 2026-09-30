@@ -73,6 +73,13 @@ stale file at startup and resume writing the backup).
 `/admin/pg-backfill` → 404; the admin nav no longer shows "PG Backfill"; Railway web-service Metrics → memory
 should sit far lower after the restart than on v2.16.51 (compare the same hours of the day).
 
+**Live verification (2026-09-30, ~10:40 CDT)**: v2.17.0 live (footer confirmed). Deploy log clean: boot straight to
+`[pg] items table ready` → `concurrent indexes ready` → `connection pool ready`, no errors. First nationwide scan
+after deploy: coverage complete (114,663 = nbHits, 0 retries), `[pg] scan saved: 114,663 found, 34 new/changed
+written, 6 marked sold — total 4624ms`. `/api/pg-parity-check`, `/api/pg-precheck-5b`, `/admin/pg-backfill` → 404;
+admin nav shows no "PG Backfill". Railway memory: ~1.7-2.0 GB on v2.16.51 → **~300 MB** after the restart, still
+~300 MB after that first nationwide scan. Re-check memory over a day (the old sawtooth climbed between deploys).
+
 ---
 
 ## v2.16.51 — 2026-09-29: nationwide scans must account for Algolia's nbHits before marking anything sold

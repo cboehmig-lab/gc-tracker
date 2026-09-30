@@ -4,6 +4,13 @@
 0 diffs; 13 scans marked items sold via the Postgres write, up to 500; no store scan seen yet — all ~75 were
 nationwide). Chuck: "build 5c". **v2.17.0 built + locally verified, written to the Mac, NOT pushed.** Postgres is
 now the only catalog store — see HANDOFF.md v2.17.0 for what was deleted and reworked.
+**Live verification (2026-09-30, ~10:40 CDT)**: v2.17.0 live (footer confirmed). Deploy log clean: boot straight to
+`[pg] items table ready` → `concurrent indexes ready` → `connection pool ready`, no errors. First nationwide scan
+after deploy: coverage complete (114,663 = nbHits, 0 retries), `[pg] scan saved: 114,663 found, 34 new/changed
+written, 6 marked sold — total 4624ms`. `/api/pg-parity-check`, `/api/pg-precheck-5b`, `/admin/pg-backfill` → 404;
+admin nav shows no "PG Backfill". Railway memory: ~1.7-2.0 GB on v2.16.51 → **~300 MB** after the restart, still
+~300 MB after that first nationwide scan. Re-check memory over a day (the old sawtooth climbed between deploys).
+
 1. Push: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
    `git rm migrate_cat_cache_to_pg.py`,
    `git add gc_tracker_app.py static/gc.js pg_schema.sql HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`,
@@ -15,7 +22,10 @@ now the only catalog store — see HANDOFF.md v2.17.0 for what was deleted and r
    at startup with a 300 MB JSON file present).
 3. Still unconfirmed live: a STORE scan through the Postgres write (same code; tested locally). Watch for a
    `[pg] scan saved` line with a small "found" count.
-4. Open investigation (not caused by 5c): the 2026-09-29 18:16 CDT nationwide scan got 75,840 of 115,423
+4. **RESOLVED 2026-09-30 — not a bug**: Railway HTTP logs show the only `POST /api/stop` of that deploy at
+   18:15:52 (200), 8s before the scan saved; 316 pages = page 1 + exactly 21 batches of 15, i.e. the loop exited
+   cleanly on the stop flag between batches. Someone pressed Stop (gc.js has no unload/pagehide stop handler, so
+   closing a phone alone doesn't stop a scan). Original note: the 2026-09-29 18:16 CDT nationwide scan got 75,840 of 115,423
    (`missing 39583`, `retried 0`, no empty/short pages) — looks like it stopped after ~316 of 481 pages.
    The coverage guard skipped sold-marking, so no data harm. Check how the parallel page loop can end early
    without marking pages as suspect (batch wall-clock ceiling? stop event?) — `_run()` nationwide branch.
