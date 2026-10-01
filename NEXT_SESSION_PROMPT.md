@@ -1,4 +1,9 @@
-# Next Session Prompt — v2.17.8 built (browse speedups — last Phase G build): push + verify live
+# Next Session Prompt — v2.17.8 LIVE (browse speedups verified) — Phase G done
+
+**Live 2026-10-01**: page flips 186-225 ms / ~30 KB (were ~0.8 s / 197 KB), sorts ~120 ms, default view from cache 212 ms
+(was ~790 ms). Agg cache filled to its 32-entry cap quickly (9 hit / 49 miss early) — watch `?pg_shadow=1` →
+`_browse_agg_cache`; raise `_BROWSE_AGG_MAX` if hits stay low. Optional leftover: first-load waterfall (not built).
+
 
 **2026-10-01**: v2.17.7 pushed + live. Chuck: do the browse items; skip autocomplete → v2.17.8 (aggregate cache,
 shared default view, page flips skip facet lists, 200 ms search debounce), built + locally verified (270/270 responses

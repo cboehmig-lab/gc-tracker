@@ -44,6 +44,12 @@ generation → full lists. Headless Chromium (gunicorn gthread ×8, mocked Algol
 a new search and clearing it got full lists, paging within a search skipped, after a scan full lists again, no JS errors.
 py_compile / node --check clean.
 
+**Live verification (2026-10-01, Chuck's Chrome, all 298 stores, logged in)**: footer v2.17.8. Page flips (pages 2/3/4/1)
+**186-225 ms round trip, ~30 KB, server 111-150 ms, facets skipped, aggregate cache hit** — was ~770-940 ms / 197 KB.
+Sort by price 115-121 ms. Full default view with lists (cache hit) 212 ms / 197 KB, server 127 ms — was ~790 ms / 648 ms.
+`_browse_agg_cache` shortly after deploy: 32 entries (at the LRU cap), 9 hits / 49 misses — many distinct searches from
+other users; if the hit rate stays low, raising `_BROWSE_AGG_MAX` (32 → 64-128, ~0.5 MB each) is the knob.
+
 **After deploy**: footer v2.17.8; `/api/timing` → `browse stores` p50 should drop (cache hits) and `browse stores +p2`
 (page flips) ≈ newcounts + page; DevTools page-flip response ~30 KB with `facets_skipped: true`; `?pg_shadow=1` →
 `_browse_agg_cache` hits rising.
