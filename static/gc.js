@@ -1485,6 +1485,21 @@ function _getBrowseFilters() {
   };
 }
 
+// (v2.17.8) Page flips / sorts don't change the filter-dropdown counts, so ask
+// the server to skip them (~170 KB of brand counts) when everything except the
+// page / sort matches the last request whose lists we rendered AND the catalog
+// hasn't changed since (the server only honors skip_facets_gen if it equals its
+// current catalog generation; otherwise it sends the lists anyway). Any code that
+// hides or rebuilds the dropdowns resets _lastFacetKey.
+let _lastFacetKey = null;
+let _lastFacetGen = null;
+function _facetKeyOf(body) {
+  const b = Object.assign({}, body);
+  delete b.page; delete b.sort_field; delete b.sort_dir; delete b.user_sorted;
+  delete b.fav_stores; delete b.skip_facets_gen;
+  return JSON.stringify(b);
+}
+
 async function _fetchBrowsePage(page) {
   const mySeq = ++_browseSeq;
   if (_browseAbort) { try { _browseAbort.abort(); } catch (e) {} }
@@ -1523,6 +1538,10 @@ async function _fetchBrowsePage(page) {
       body.filter_want_list_only = true;
     }
   }
+  const _facetKey = _facetKeyOf(body);
+  if (_lastFacetKey !== null && _facetKey === _lastFacetKey && _lastFacetGen !== null) {
+    body.skip_facets_gen = _lastFacetGen;
+  }
   try {
     const r = await fetch('/api/browse', {
       method: 'POST',
@@ -1550,9 +1569,11 @@ async function _fetchBrowsePage(page) {
       document.getElementById('res-body').innerHTML =
         '<div class="no-res">Select stores on the left, then click <b>Scan for New Listings</b> to scan for inventory.</div>';
       ['cond-dropdown','cat-dropdown','subcat-dropdown'].forEach(id => document.getElementById(id).style.display = 'none');
+      _lastFacetKey = null;
       return;
     }
     if (!d.items || (!d.items.length && page === 1)) {
+      _lastFacetKey = null;
       document.getElementById('res-panel').style.display = 'block';
       document.getElementById('res-badge').textContent = '';
       // Watch/Want List respect store selection, so "empty" usually means "none in these
@@ -1655,8 +1676,13 @@ async function _fetchBrowsePage(page) {
     const clearBtn = document.getElementById('clear-filters-btn');
     if (clearBtn) clearBtn.style.display = (filters.filter_q || (filters.filter_brands && filters.filter_brands.length) || (filters.filter_conditions && filters.filter_conditions.length) || (filters.filter_categories && filters.filter_categories.length) || (filters.filter_subcategories && filters.filter_subcategories.length) || filters.filter_price_drop_only || filters.filter_watched || filters.vintage_only) ? '' : 'none';
 
-    // Populate filter dropdowns from server-provided options
-    _populateFiltersFromServer(d.brands || [], d.conditions || [], d.categories || [], d.subcategories || [], filters);
+    // Populate filter dropdowns from server-provided options (unless the server
+    // skipped them because ours are still current — v2.17.8)
+    if (!d.facets_skipped) {
+      _populateFiltersFromServer(d.brands || [], d.conditions || [], d.categories || [], d.subcategories || [], filters);
+      _lastFacetKey = _facetKey;
+      _lastFacetGen = (d.facet_gen !== undefined) ? d.facet_gen : null;
+    }
 
     // Cache items for mobile view toggle re-render
     window._lastBrowseItems = d.items;
@@ -2862,6 +2888,7 @@ function _watchSweep(state) {
 
 // ── Results ───────────────────────────────────────────────────────────────────
 function showResults(msg, isBaseline) {
+  _lastFacetKey = null;   // v2.17.8: a scan result redraws everything
   const panel = document.getElementById('res-panel');
   panel.style.display = 'block';
 
@@ -3003,6 +3030,7 @@ function showResults(msg, isBaseline) {
 
 // ── Category filters ──────────────────────────────────────────────────────────
 function populateCategoryFilter() {
+  _lastFacetKey = null;   // v2.17.8: local-mode lists replace the server's
   // In server mode, filters are populated by _populateFiltersFromServer — this is for local mode only
   if (_browseMode === 'server') return;
   const data = window._tableData || [];
@@ -3872,7 +3900,7 @@ function _globalKeywordSearch() {
     _srvLoading = false;
     _srvStores = getSelected();
     _fetchBrowsePage(1);
-  }, 400);
+  }, 200);   // v2.17.8: was 400 ms
 }
 
 function clearFilters() {

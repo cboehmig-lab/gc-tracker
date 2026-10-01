@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-30 · Version: v2.17.7 (S1 cleanup; v2.17.6 = silent sweep; v2.17.5 = quick-window hotfix; v2.17.4 = Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-09-30 · Version: v2.17.8 (Phase G browse speedups; v2.17.7 = S1 cleanup; v2.17.6 = silent sweep; v2.17.5 = quick-window hotfix; v2.17.4 = Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,7 +88,18 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.17.7 — cleanup after S1 (2026-10-01)
+## Current State: v2.17.8 — Phase G browse speedups (2026-10-01)
+
+`_pg_browse` caches its aggregates (totals, facet lists, store_count) per catalog generation (`_PG_CATALOG_GEN`, bumped
+before+after every scan write/import); new_count/new_want_count are a separate small query; users with a no-op scan gate
+share the default-view entry. Responses carry `facet_gen`; gc.js sends `skip_facets_gen` on page flips/sorts and the
+server omits the facet lists if the generation still matches. Search debounce 200 ms. Byte-identical to v2.17.7 on a
+270-request comparison. Autocomplete skipped (Chuck); >1 worker not needed (low overlap). This closes Phase G.
+See HANDOFF.md v2.17.8.
+
+---
+
+## Previous: v2.17.7 — cleanup after S1 (2026-10-01)
 
 Removed the v2.17.5 sweep "late arrival" WARNING and the temporary `/api/quick-window-check`. The warnings (319 in ~23 h)
 were listings GC makes searchable late with older creationDates — by Chuck's decision these stay NOT NEW (anchor rule

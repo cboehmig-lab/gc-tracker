@@ -1,5 +1,52 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-30 · Current version: v2.17.7 (removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-30 · Current version: v2.17.8 (browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.17.8 — 2026-10-01: Phase G browse speedups — cached filter counts, shared default view, page flips skip the brand list, 200 ms search debounce
+
+**Why** (live `/api/timing` on v2.17.6, 2026-10-01): the default all-298-stores browse was p50 **674 ms** server, of which
+facets 290 + q3 155 + q1 94 ≈ **540 ms** were aggregates that don't change between page flips / sorts; page query ~100 ms.
+Search-box requests ~130-160 ms. Request overlap low (inflight-at-arrival 0: 210, 1: 19, 2: 2) → more gunicorn workers
+not needed (Phase G item dropped). Chuck: skip autocomplete for now; these browse fixes close Phase G.
+
+**1. Aggregate cache** (`_pg_browse`): total_unfiltered, the 4 contextual facet lists, total_filtered, store_count are
+cached in `_BROWSE_AGG_CACHE` (LRU 32, 15-min TTL) keyed by (catalog generation, scope, effective user gate, filter_q,
+want-list keywords only when Want-List-only is on, price-drop/vintage toggles, watchlist ids only when Watch List is on,
+price range, sorted facet selections). NOT in the key: page, per_page, sort, fav stores, new_ids, keywords otherwise.
+`new_count` / `new_want_count` (need new_ids) moved out of Q1/Q3 into one small per-request query
+(`COUNT … AND sku = ANY(new_ids)`, same sets as the old FILTERs). Q4 page + Q5 kwflags unchanged.
+**Invalidation**: `_PG_CATALOG_GEN` — `_pg_write_scan` and `/api/import-data` now bump it before AND after their write
+commits (and on the failure path), so an aggregate computed while a write was in flight is stored under the old
+generation and can never be served afterwards. Entries of older generations are dropped on the next put.
+**Shared default view**: `_pg_scan_gate_is_noop(uls)` — if no item has first_seen > the user's last scan, the per-user
+gate matches every row, so it's dropped and the key uses "*" (users who've scanned since the last new item share one
+cache entry). The comparison runs in Postgres (`SELECT %s >= max(first_seen)`, same collation as the gate); max is
+cached per generation, verdict per (generation, uls). Errors → keep the gate (always correct).
+Admin `?pg_shadow=1` → `_browse_agg_cache` {hit, miss, entries}; `/api/timing` phases now include `agg_cache_hit`
+(0 ms marker) and `newcounts`.
+
+**2. Page flips / sorts skip the facet lists**: responses include `facet_gen`. gc.js `_fetchBrowsePage` keeps
+`_lastFacetKey` (request body minus page / sort / user_sorted / fav_stores) + `_lastFacetGen`; when the key matches it
+sends `skip_facets_gen`; the server omits brands/conditions/categories/subcategories and sets `facets_skipped: true`
+ONLY if that equals the current generation (a scan wrote since → full lists as before). gc.js then doesn't call
+`_populateFiltersFromServer` (dropdowns keep their lists). `_lastFacetKey` is reset in `showResults` (scan results),
+`populateCategoryFilter` (local mode), and the no-data / empty-result paths that hide the dropdowns.
+Live payload expectation: ~197 KB → ~30 KB per page flip / sort.
+
+**3. Search box debounce** 400 → 200 ms (`_kwSearchTimer`).
+
+**Verified locally** (Postgres 16 synthetic catalog): 90 request shapes × 5 user_last_scan values (none, ancient, mid —
+gate active, far future, = max first_seen) run twice (2nd pass from cache) then again after a real `_pg_write_scan`
+sold-marking 37 items: **270/270 responses byte-identical to v2.17.7** (ignoring the new `facet_gen` key) — 210 cache
+hits, the post-write pass changed 72 responses and all matched. skip-facets: same response minus the lists; stale
+generation → full lists. Headless Chromium (gunicorn gthread ×8, mocked Algolia): page 2/3 and sort skipped the lists,
+a new search and clearing it got full lists, paging within a search skipped, after a scan full lists again, no JS errors.
+py_compile / node --check clean.
+
+**After deploy**: footer v2.17.8; `/api/timing` → `browse stores` p50 should drop (cache hits) and `browse stores +p2`
+(page flips) ≈ newcounts + page; DevTools page-flip response ~30 KB with `facets_skipped: true`; `?pg_shadow=1` →
+`_browse_agg_cache` hits rising.
 
 ---
 

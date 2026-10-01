@@ -1,3 +1,18 @@
+# Next Session Prompt — v2.17.8 built (browse speedups — last Phase G build): push + verify live
+
+**2026-10-01**: v2.17.7 pushed + live. Chuck: do the browse items; skip autocomplete → v2.17.8 (aggregate cache,
+shared default view, page flips skip facet lists, 200 ms search debounce), built + locally verified (270/270 responses
+identical to v2.17.7), written to the Mac, NOT pushed. See HANDOFF.md v2.17.8.
+1. Push: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+   `git add gc_tracker_app.py static/gc.js HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit, `git push origin main`.
+2. Live: footer v2.17.8; browse a few pages + sort → `/api/timing` browse p50s, DevTools page flip ~30 KB with
+   `facets_skipped`, `?pg_shadow=1` → `_browse_agg_cache` hits. Compare against the 2026-10-01 numbers (default view
+   674 ms p50; page flip ~0.8 s round trip).
+3. Phase G is then done. Remaining optional idea: first-load waterfall (5 serial API calls + 300 ms browseCache debounce
+   before the first /api/browse, ~0.7 s of a ~1.9 s first load) — not built; Chuck's call.
+
+---
+
 # Next Session Prompt — v2.17.7 built (cleanup: late-arrival WARNING + /api/quick-window-check removed): push, then browse-side work
 
 **2026-10-01**: the `[sweep] WARNING` lines (319 listings / ~23 h) were late arrivals, not filter misses (Algolia vs DB

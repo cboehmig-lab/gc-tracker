@@ -861,10 +861,12 @@ def _pg_write_scan(rows: list, run_ids: set, sold_scope, send=None) -> set:
                                 RETURNING sku
                             """, (list(sold_scope),))
                         sold = {r[0] for r in cur.fetchall()}
+            _pg_catalog_gen_bump()   # v2.17.8: after commit too (browse aggregate cache)
             return sold
         except Exception as e:
             last_exc = e
             if not _pg_is_conn_error(e) or attempt == _PG_SCAN_WRITE_ATTEMPTS - 1:
+                _pg_catalog_gen_bump()
                 raise
             _pg_scan_note("retried", last_error=f"{type(e).__name__}: {e}"[:300],
                           last_error_at=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
@@ -5047,11 +5049,78 @@ def _pg_kw_expr(kw_entries, out_params):
     return ("(" + " OR ".join(parts) + ")") if parts else None
 
 
+# ── Browse aggregate cache (v2.17.8, Phase G) ──────────────────────────────────
+import collections as _collections
+_BROWSE_AGG_CACHE = _collections.OrderedDict()   # (gen, key) -> agg dict, LRU
+_BROWSE_AGG_LOCK = threading.Lock()
+_BROWSE_AGG_MAX = 32          # ~0.5 MB each (the brand list) -> ~16 MB worst case
+_BROWSE_AGG_TTL = 900         # seconds; belt and braces — generation is the real invalidation
+_BROWSE_AGG_STATS = {"hit": 0, "miss": 0}
+_SCAN_GATE_CACHE = {"gen": None, "max_first_seen": None, "noop": {}}
+
+
+def _browse_agg_get(gen, key):
+    with _BROWSE_AGG_LOCK:
+        hit = _BROWSE_AGG_CACHE.get((gen, key))
+        if hit is not None and time.time() - hit[0] < _BROWSE_AGG_TTL:
+            _BROWSE_AGG_CACHE.move_to_end((gen, key))
+            _BROWSE_AGG_STATS["hit"] += 1
+            return hit[1]
+        _BROWSE_AGG_STATS["miss"] += 1
+        return None
+
+
+def _browse_agg_put(gen, key, agg):
+    with _BROWSE_AGG_LOCK:
+        for k in [k for k in _BROWSE_AGG_CACHE if k[0] != gen]:
+            del _BROWSE_AGG_CACHE[k]          # older generations can never be served
+        _BROWSE_AGG_CACHE[(gen, key)] = (time.time(), agg)
+        _BROWSE_AGG_CACHE.move_to_end((gen, key))
+        while len(_BROWSE_AGG_CACHE) > _BROWSE_AGG_MAX:
+            _BROWSE_AGG_CACHE.popitem(last=False)
+
+
+def _pg_scan_gate_is_noop(user_last_scan: str) -> bool:
+    """True if no item was first seen after `user_last_scan` (so the browse
+    scan gate `first_seen = '' OR first_seen <= uls` matches every row). The
+    comparison runs in Postgres (same text collation as the gate itself). Cached
+    per catalog generation — the max first_seen only changes when a scan writes.
+    Any error → False (keep the gate; always correct, just not shared)."""
+    with _PG_CATALOG_GEN_LOCK:
+        gen = _PG_CATALOG_GEN[0]
+    c = _SCAN_GATE_CACHE
+    with _BROWSE_AGG_LOCK:
+        if c["gen"] == gen and user_last_scan in c["noop"]:
+            return c["noop"][user_last_scan]
+    try:
+        def _q():
+            with _pg_conn() as conn:
+                with conn.cursor() as cur:
+                    if c["gen"] == gen and c["max_first_seen"] is not None:
+                        cur.execute("SELECT %s >= %s", (user_last_scan, c["max_first_seen"]))
+                        return c["max_first_seen"], bool(cur.fetchone()[0])
+                    cur.execute("SELECT MAX(first_seen) FROM items WHERE first_seen <> ''")
+                    mfs = cur.fetchone()[0] or ""
+                    cur.execute("SELECT %s >= %s", (user_last_scan, mfs))
+                    return mfs, bool(cur.fetchone()[0])
+        mfs, noop = _pg_read(_q)
+    except Exception as e:
+        print(f"[pg] scan-gate check failed: {type(e).__name__}: {e}")
+        return False
+    with _BROWSE_AGG_LOCK:
+        if c["gen"] != gen:
+            c.update(gen=gen, max_first_seen=mfs, noop={})
+        if len(c["noop"]) < 2000:
+            c["noop"][user_last_scan] = noop
+    return noop
+
+
 def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
                f_brands, f_conds, f_cats, f_subs, f_watched, wl_ids,
                f_want_only, f_price_drop_only, f_vintage_only,
                f_price_min, f_price_max, sort_field, sort_dir, user_sorted,
-               new_ids, fav_stores, page, per_page, count_only=False) -> dict:
+               new_ids, fav_stores, page, per_page, count_only=False,
+               skip_facets_gen=None) -> dict:
     """Same JSON shape as api_browse()'s response, for ANY request, computed
     in Postgres. Raises _PgBrowseIneligible (untranslatable search) or any
     DB error — the caller decides what to do (/api/browse: 400/503;
@@ -5071,6 +5140,15 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
     except _TsqueryUnsupported as e:
         raise _PgBrowseIneligible(str(e))
     kw_bool = f"COALESCE({kw_sql}, FALSE)" if kw_sql else "FALSE"
+
+    # (v2.17.8) The per-user scan gate hides rows first seen after the user's
+    # last scan. When no such row exists (the user has scanned since the newest
+    # first_seen in the catalog) the gate is a no-op — drop it, so this user's
+    # aggregates share a cache entry with everyone else in the same position.
+    uls_key = user_last_scan or ""
+    if user_last_scan and not count_only and _pg_scan_gate_is_noop(user_last_scan):
+        user_last_scan = ""
+        uls_key = "*"
 
     # ── Q1 scope: availability + store + per-user scan gate ────────────────
     scope = ["available"]
@@ -5164,65 +5242,108 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
     order_parts.append("sku ASC")   # deterministic tiebreak (Phase C finding, v2.16.21)
     order_sql = ", ".join(order_parts)
 
-    new_want_sql = (f"COUNT(*) FILTER (WHERE {is_new_sql} AND {kw_bool})"
-                    if kw_sql else "0")
-
+    # ── (v2.17.8) Aggregates: cached ───────────────────────────────────────
+    # total_unfiltered, the four contextual facet lists, total_filtered and
+    # store_count depend only on the WHERE clauses (scope, filters, and the
+    # want-list keywords only when the Want-List-only toggle is on) — not on the
+    # page, the sort, new_ids or fav stores. They used to be recomputed on every
+    # request (~540 ms of a ~670 ms all-stores browse, live 2026-10-01), so page
+    # flips / sorts paid it again each time. Cached per catalog generation
+    # (_PG_CATALOG_GEN — every scan write / import bumps it before AND after
+    # committing, so an entry computed while a write was in flight can never be
+    # served afterwards). new_count / new_want_count need new_ids and are
+    # counted separately below (cheap: primary-key lookups).
+    agg_key = (
+        "ALL" if search_all else tuple(sorted(store_set or ())), uls_key, fq,
+        tuple(kw_entries) if f_want_only else None,
+        bool(f_price_drop_only), bool(f_vintage_only),
+        tuple(sorted(wl_ids)) if f_watched else None, f_price_min, f_price_max,
+        tuple(sorted(f_brands)), tuple(sorted(f_conds)), tuple(sorted(f_cats)), tuple(sorted(f_subs)),
+    )
+    with _PG_CATALOG_GEN_LOCK:
+        _gen = _PG_CATALOG_GEN[0]
+    agg = _browse_agg_get(_gen, agg_key)
+    if agg is not None:
+        _timing_phase("agg_cache_hit", 0.0)
     with _pg_conn() as conn:
         with conn.cursor(cursor_factory=_pg_extras.RealDictCursor) as cur:
-            # Q1 — total_unfiltered / new_count (pre-_apply_base scope)
-            _tp = time.perf_counter()
-            cur.execute(
-                f"SELECT COUNT(*) AS total_unfiltered, "
-                f"COUNT(*) FILTER (WHERE {is_new_sql}) AS new_count "
-                f"FROM items WHERE {scope_sql}", params)
-            row = cur.fetchone()
-            total_unfiltered, new_count = row["total_unfiltered"], row["new_count"]
-            _tq = time.perf_counter(); _timing_phase("q1", (_tq - _tp) * 1000.0); _tp = _tq
+            if agg is None:
+                # Q1 — total_unfiltered (pre-_apply_base scope)
+                _tp = time.perf_counter()
+                cur.execute(f"SELECT COUNT(*) AS total_unfiltered FROM items WHERE {scope_sql}", params)
+                total_unfiltered = cur.fetchone()["total_unfiltered"]
+                _tq = time.perf_counter(); _timing_phase("q1", (_tq - _tp) * 1000.0); _tp = _tq
 
-            # Q2 — contextual facet counts (each facet: all OTHER facets)
-            facet_sql = " UNION ALL ".join([
-                f"SELECT 'brand' AS facet, COALESCE(NULLIF(brand,''), %(no_brand_label)s) AS value, "
-                f"COUNT(*) AS n FROM items WHERE {base_where_sql} AND {cond_clause} AND {cat_clause} "
-                f"AND {sub_clause} GROUP BY value",
-                f"SELECT 'condition' AS facet, condition AS value, COUNT(*) AS n FROM items "
-                f"WHERE {base_where_sql} AND {brand_clause} AND {cat_clause} AND {sub_clause} "
-                f"AND condition <> '' GROUP BY value",
-                f"SELECT 'category' AS facet, category AS value, COUNT(*) AS n FROM items "
-                f"WHERE {base_where_sql} AND {brand_clause} AND {cond_clause} AND {sub_clause} "
-                f"AND category <> '' GROUP BY value",
-                f"SELECT 'subcategory' AS facet, subcategory AS value, COUNT(*) AS n FROM items "
-                f"WHERE {base_where_sql} AND {brand_clause} AND {cond_clause} AND {cat_clause} "
-                f"AND subcategory <> '' GROUP BY value",
-            ])
-            cur.execute(facet_sql, params)
-            brand_ctx, cond_ctx, cat_ctx, sub_ctx = {}, {}, {}, {}
-            _ctx = {"brand": brand_ctx, "condition": cond_ctx,
-                    "category": cat_ctx, "subcategory": sub_ctx}
-            for r in cur.fetchall():
-                _ctx[r["facet"]][r["value"]] = r["n"]
-            for b in f_brands: brand_ctx.setdefault(b, 0)
-            for c in f_conds:  cond_ctx.setdefault(c, 0)
-            for c in f_cats:   cat_ctx.setdefault(c, 0)
-            for s in f_subs:   sub_ctx.setdefault(s, 0)
-            _tq = time.perf_counter(); _timing_phase("facets", (_tq - _tp) * 1000.0); _tp = _tq
+                # Q2 — contextual facet counts (each facet: all OTHER facets)
+                facet_sql = " UNION ALL ".join([
+                    f"SELECT 'brand' AS facet, COALESCE(NULLIF(brand,''), %(no_brand_label)s) AS value, "
+                    f"COUNT(*) AS n FROM items WHERE {base_where_sql} AND {cond_clause} AND {cat_clause} "
+                    f"AND {sub_clause} GROUP BY value",
+                    f"SELECT 'condition' AS facet, condition AS value, COUNT(*) AS n FROM items "
+                    f"WHERE {base_where_sql} AND {brand_clause} AND {cat_clause} AND {sub_clause} "
+                    f"AND condition <> '' GROUP BY value",
+                    f"SELECT 'category' AS facet, category AS value, COUNT(*) AS n FROM items "
+                    f"WHERE {base_where_sql} AND {brand_clause} AND {cond_clause} AND {sub_clause} "
+                    f"AND category <> '' GROUP BY value",
+                    f"SELECT 'subcategory' AS facet, subcategory AS value, COUNT(*) AS n FROM items "
+                    f"WHERE {base_where_sql} AND {brand_clause} AND {cond_clause} AND {cat_clause} "
+                    f"AND subcategory <> '' GROUP BY value",
+                ])
+                cur.execute(facet_sql, params)
+                brand_ctx, cond_ctx, cat_ctx, sub_ctx = {}, {}, {}, {}
+                _ctx = {"brand": brand_ctx, "condition": cond_ctx,
+                        "category": cat_ctx, "subcategory": sub_ctx}
+                for r in cur.fetchall():
+                    _ctx[r["facet"]][r["value"]] = r["n"]
+                for b in f_brands: brand_ctx.setdefault(b, 0)
+                for c in f_conds:  cond_ctx.setdefault(c, 0)
+                for c in f_cats:   cat_ctx.setdefault(c, 0)
+                for s_ in f_subs:  sub_ctx.setdefault(s_, 0)
+                _tq = time.perf_counter(); _timing_phase("facets", (_tq - _tp) * 1000.0); _tp = _tq
 
-            # Q3 — totals over the fully filtered set
-            cur.execute(
-                f"SELECT COUNT(*) AS total_filtered, "
-                f"COUNT(DISTINCT NULLIF(store, '')) AS store_count, "
-                f"{new_want_sql} AS new_want_count "
-                f"FROM items WHERE {filtered_where_sql}", params)
-            row = cur.fetchone()
-            total_filtered = row["total_filtered"]
-            store_count = row["store_count"]
-            new_want_count = row["new_want_count"]
-            _tq = time.perf_counter(); _timing_phase("q3", (_tq - _tp) * 1000.0); _tp = _tq
+                # Q3 — totals over the fully filtered set
+                cur.execute(
+                    f"SELECT COUNT(*) AS total_filtered, "
+                    f"COUNT(DISTINCT NULLIF(store, '')) AS store_count "
+                    f"FROM items WHERE {filtered_where_sql}", params)
+                row = cur.fetchone()
+                _tq = time.perf_counter(); _timing_phase("q3", (_tq - _tp) * 1000.0); _tp = _tq
+
+                _cond_order = {"Excellent": 0, "Great": 1, "Good": 2, "Fair": 3, "Poor": 4}
+                agg = {
+                    "total_unfiltered": total_unfiltered,
+                    "total_filtered": row["total_filtered"],
+                    "store_count": row["store_count"],
+                    "brands": [(b, c) for b, c in sorted(brand_ctx.items(), key=lambda x: (-x[1], x[0]))],
+                    "conditions": [(c, n) for c, n in sorted(cond_ctx.items(), key=lambda x: _cond_order.get(x[0], 5))],
+                    "categories": sorted(cat_ctx.items()),
+                    "subcategories": sorted(sub_ctx.items()),
+                }
+                _browse_agg_put(_gen, agg_key, agg)
+
+            total_unfiltered = agg["total_unfiltered"]
+            total_filtered = agg["total_filtered"]
+            store_count = agg["store_count"]
+
+            # Per-request NEW counts (were FILTERs inside Q1 / Q3 — same sets)
+            new_count = new_want_count = 0
+            if new_ids:
+                _tp = time.perf_counter()
+                _nw = (f"(SELECT COUNT(*) FROM items WHERE {filtered_where_sql} "
+                       f"AND {is_new_sql} AND {kw_bool})" if kw_sql else "0")
+                cur.execute(
+                    f"SELECT (SELECT COUNT(*) FROM items WHERE {scope_sql} AND {is_new_sql}) AS new_count, "
+                    f"{_nw} AS new_want_count", params)
+                row = cur.fetchone()
+                new_count, new_want_count = row["new_count"], row["new_want_count"]
+                _timing_phase("newcounts", (time.perf_counter() - _tp) * 1000.0)
 
             total_pages = max(1, -(-total_filtered // per_page))
             page = min(page, total_pages)
             start = (page - 1) * per_page
 
             # Q4 — the page
+            _tp = time.perf_counter()
             cur.execute(
                 f"SELECT sku, name, brand, category, subcategory, condition, condition_note, "
                 f"price, list_price, price_drop, price_drop_since, store, location, url, "
@@ -5242,7 +5363,6 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
                 kw_hits = {r["sku"] for r in cur.fetchall()}
                 _timing_phase("kwflags", (time.perf_counter() - _tp) * 1000.0)
 
-    _tp = time.perf_counter()
     page_items = []
     for r in page_rows:
         sku = r["sku"]
@@ -5274,9 +5394,8 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
             "isFav":            store in fav_stores if fav_stores else False,
         })
 
-    _cond_order = {"Excellent": 0, "Great": 1, "Good": 2, "Fair": 3, "Poor": 4}
     _timing_phase("build", (time.perf_counter() - _tp) * 1000.0)
-    return {
+    out = {
         "items":            page_items,
         "page":             page,
         "per_page":         per_page,
@@ -5287,11 +5406,20 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
         "new_count":        new_count,
         "new_want_count":   new_want_count,
         "no_store_data":    False,
-        "brands":        [{"name": b, "count": c} for b, c in sorted(brand_ctx.items(), key=lambda x: (-x[1], x[0]))],
-        "conditions":    [{"name": c, "count": n} for c, n in sorted(cond_ctx.items(), key=lambda x: _cond_order.get(x[0], 5))],
-        "categories":    [{"name": c, "count": n} for c, n in sorted(cat_ctx.items())],
-        "subcategories": [{"name": s, "count": n} for s, n in sorted(sub_ctx.items())],
     }
+    out["facet_gen"] = _gen
+    if skip_facets_gen is not None and skip_facets_gen == _gen:
+        # (v2.17.8) The client already has these exact lists (only the page or
+        # sort changed, and the catalog hasn't changed since — same generation)
+        # — skip ~170 KB of brand counts. static/gc.js keeps its lists. A stale
+        # generation (a scan wrote since) gets the full lists as before.
+        out["facets_skipped"] = True
+    else:
+        out["brands"] = [{"name": b, "count": c} for b, c in agg["brands"]]
+        out["conditions"] = [{"name": c, "count": n} for c, n in agg["conditions"]]
+        out["categories"] = [{"name": c, "count": n} for c, n in agg["categories"]]
+        out["subcategories"] = [{"name": s_, "count": n} for s_, n in agg["subcategories"]]
+    return out
 
 
 
@@ -5347,6 +5475,7 @@ def api_browse():
         resp["_pg_scan_writes"] = _PG_SCAN_WRITES   # v2.16.48, Phase F 5b-ii
         resp["_scan_coverage"] = _SCAN_COVERAGE     # v2.16.51
         resp["_timing"] = _timing_report()           # v2.17.1, Phase G step 1
+        resp["_browse_agg_cache"] = dict(_BROWSE_AGG_STATS, entries=len(_BROWSE_AGG_CACHE))   # v2.17.8
     return jsonify(resp)
 
 
@@ -5532,6 +5661,7 @@ def _browse_compute(data, *, logged_in, pg_diag=False):
         f_price_min=f_price_min, f_price_max=f_price_max,
         sort_field=sort_field, sort_dir=sort_dir, user_sorted=user_sorted,
         new_ids=new_ids, fav_stores=fav_stores, page=page, per_page=per_page,
+        skip_facets_gen=data.get("skip_facets_gen"),
     )
     if pg_diag:
         resp["_pg_browse_ms"] = round((time.time() - _t0) * 1000, 1)
@@ -5777,6 +5907,7 @@ def api_import_data():
                             psycopg2.extras.execute_values(
                                 cur, _PG_UPSERT_SQL, rows[i:i + _IMPORT_CHUNK], page_size=2000)
                 upserted = len(rows)
+                _pg_catalog_gen_bump()   # v2.17.8: after commit too
             finally:
                 _PG_SCAN_DB_LOCK.release()
         except Exception as e:
@@ -7980,7 +8111,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.17.7"
+APP_VERSION = "2.17.8"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
