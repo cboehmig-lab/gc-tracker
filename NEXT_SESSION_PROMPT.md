@@ -1,4 +1,22 @@
-# Next Session Prompt — v2.17.6 built (silent background sweep): push
+# Next Session Prompt — v2.17.7 built (cleanup: late-arrival WARNING + /api/quick-window-check removed): push, then browse-side work
+
+**2026-10-01**: the `[sweep] WARNING` lines (319 listings / ~23 h) were late arrivals, not filter misses (Algolia vs DB
+window counts match). Chuck: keep NEW as is (older-dated late arrivals are not NEW). v2.17.7 removes the warning and the
+test endpoint; written to the Mac, NOT pushed. Push:
+`cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+`git add gc_tracker_app.py HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit, `git push origin main`.
+After: footer v2.17.7; `/api/quick-window-check` → 404; a scan still ~1 s.
+Next: browse-side list — (1) skip facet recompute on page flips / sorts (~0.8 s → ~0.25 s, 197 KB → ~30 KB),
+(2) trim the 5,168-brand facet payload, (3) first-load waterfall (parallel API calls, drop the 300 ms debounce),
+(4) cheaper plain all-stores query (use `/api/timing` phase split), (5) search-box debounce 400 → 200 ms.
+
+---
+
+# Next Session Prompt — v2.17.6 LIVE (silent background sweep, verified 2026-10-01 19:39Z)
+
+Live check: footer v2.17.6, no #s-sweep; scan → quick pass 201 ms (2 found, 0 new), log ends "✓ Done — 0 new this
+scan." (no literal \n), sweep ran silently 22.2 s complete, header count refreshed 116,624 → 116,716.
+
 
 **2026-10-01**: v2.17.5 + its docs live (the docs deploy first failed on a transient GitHub 500 while Railway's builder
 downloaded `mise`; redeployed OK). Chuck: remove the sold/price-drop status line → v2.17.6 (also fixes the literal

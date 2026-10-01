@@ -1,5 +1,31 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-30 · Current version: v2.17.6 (silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-30 · Current version: v2.17.7 (removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.17.7 — 2026-10-01: remove the late-arrival WARNING + /api/quick-window-check (cleanup; NEW rule unchanged)
+
+**What the v2.17.5 `[sweep] WARNING` lines turned out to be**: over ~23 h on v2.17.5 (deployment bcee9604) there were 16
+warning lines totalling **319 listings**, dated from 2026-07-12 to 2026-10-01T07:47Z. They were NOT quick-pass filter
+misses: `/api/quick-window-check` on 2026-10-01 gave Algolia vs DB = 834/834 (24 h), 1,786/1,789 (48 h), 6,308/6,313
+(7 days) — the window returns what's in Algolia. They are **late arrivals**: GC makes listings searchable hours to
+months after their `creationDate` (which is the date we use since GC sets `startDate` to 0). A quick pass can't see an
+item that isn't searchable yet; when it appears later carrying an older date, the sweep inserts it and the guard fired.
+
+**Decision (Chuck, 2026-10-01): keep the NEW rule as is** — NEW = `date_listed` newer than the user's anchor. Late
+arrivals with older dates are deliberately NOT flagged NEW (in the past, too many "old" items showing up as NEW was the
+problem the anchor rule fixed). Full scans before S1 behaved the same way. Options considered and rejected: flag
+anything first seen since the user's last scan as NEW; flag late arrivals only if dated within the last few days.
+
+**Removed**: the sweep's late-arrival check and its `_RECENT_QUICK` registry + `_iso_epoch` helper (v2.17.5), and the
+temporary admin `GET /api/quick-window-check` (now 404). Nothing else changed.
+
+**Verified**: py_compile / node --check clean, pyflakes no new warnings; mock comparison v2.17.3 full scan vs v2.17.7
+quick + sweep: identical NEW ids (150, same md5), anchor, final items table; edge-case suite passes with no WARNING
+output; `/api/quick-window-check` → 404, `/api/sweep-status` → 200.
+
+Also seen in the v2.17.6 log (not changed): sweeps re-fetch ~9-10 suspect pages each and recover ~2,200-2,400 items
+(the v2.16.51 retry), which is why sweeps take ~19-22 s rather than ~14 s. Quick passes: 0.2-0.7 s.
 
 ---
 
