@@ -2752,7 +2752,7 @@ async function stopRun() {
 
 async function startRun(payload, isBaseline) {
   running = true; updateCount(); _updateMobileBottomBar();
-  clearTimeout(_sweepPollTimer); _setSweepStatus('');
+  clearTimeout(_sweepPollTimer);
   const stopBtn = document.getElementById('stop-btn');
   stopBtn.style.display = 'inline-block';
   stopBtn.disabled = false;
@@ -2832,42 +2832,23 @@ async function startRun(payload, isBaseline) {
   };
 }
 
-// ── Background sold / price-drop sweep status (v2.17.4, Phase G S1) ──────────
-// A scan now shows NEW listings as soon as the quick pass is done; the rest of
-// the catalog is checked for sold items and price drops in the background. Per
-// Chuck: the table is NOT redrawn when that finishes — this status line says
-// what changed, and the next page flip / sort / filter shows it.
+// ── Background sold / price-drop sweep (v2.17.4, Phase G S1; silent since v2.17.6) ──
+// A scan shows NEW listings as soon as the quick pass is done; the rest of the
+// catalog is checked for sold items and price drops in the background. Per Chuck
+// (v2.17.6) there is no status line for it — the sweep just runs. The only
+// visible effect: when it finishes, the header item count is refreshed (sold items
+// drop out); the table isn't redrawn — the next page flip / sort / filter shows it.
 let _sweepPollTimer = null;
-function _setSweepStatus(text, color) {
-  const el = document.getElementById('s-sweep');
-  if (!el) return;
-  if (!text) { el.style.display = 'none'; el.textContent = ''; return; }
-  el.textContent = text;
-  el.style.color = color || '#999';
-  el.style.display = '';
-}
 function _watchSweep(state) {
   clearTimeout(_sweepPollTimer);
-  if (state !== 'started' && state !== 'running') { _setSweepStatus(''); return; }
-  _setSweepStatus('Checking for sold items & price drops…');
+  if (state !== 'started' && state !== 'running') return;
   const t0 = Date.now();
   const poll = () => {
     fetch('/api/sweep-status').then(r => r.json()).then(s => {
       if (s.running) {
-        if (Date.now() - t0 < 180000) _sweepPollTimer = setTimeout(poll, 2500);
-        else _setSweepStatus('');
+        if (Date.now() - t0 < 180000) _sweepPollTimer = setTimeout(poll, 3000);
         return;
       }
-      const r = s.result || {};
-      if (r.complete) {
-        const parts = [];
-        parts.push((r.sold || 0).toLocaleString() + ' sold');
-        parts.push((r.price_drops || 0).toLocaleString() + ' price drop' + (r.price_drops === 1 ? '' : 's'));
-        _setSweepStatus('✓ Sold items & price drops updated · ' + parts.join(', '), '#4caf50');
-      } else {
-        _setSweepStatus('Sold-item check didn’t finish — it runs again on the next scan.', '#999');
-      }
-      // The item count in the header can change (sold items) — refresh just that.
       fetch('/api/state').then(r2 => r2.json()).then(st => {
         const k = document.getElementById('s-known');
         if (k && st.total_items != null) k.textContent = st.total_items.toLocaleString();
@@ -2876,7 +2857,7 @@ function _watchSweep(state) {
       if (Date.now() - t0 < 180000) _sweepPollTimer = setTimeout(poll, 5000);
     });
   };
-  _sweepPollTimer = setTimeout(poll, 2500);
+  _sweepPollTimer = setTimeout(poll, 3000);
 }
 
 // ── Results ───────────────────────────────────────────────────────────────────
@@ -2912,7 +2893,7 @@ function showResults(msg, isBaseline) {
     }
   }
 
-  appendLog(`\\n✓ ${isFirstRun ? 'Initial scan complete' : 'Done' + stoppedNote + ' — ' + freshNewCount.toLocaleString() + ' new this scan'}.`, 'log-dim');
+  appendLog(`✓ ${isFirstRun ? 'Initial scan complete' : 'Done' + stoppedNote + ' — ' + freshNewCount.toLocaleString() + ' new this scan'}.`, 'log-dim');
 
   window._lastRunISO = msg.scan_time || new Date().toISOString();
   _lsSet('last_run', window._lastRunISO);

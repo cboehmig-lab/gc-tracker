@@ -1,3 +1,16 @@
+# Next Session Prompt — v2.17.6 built (silent background sweep): push
+
+**2026-10-01**: v2.17.5 + its docs live (the docs deploy first failed on a transient GitHub 500 while Railway's builder
+downloaded `mise`; redeployed OK). Chuck: remove the sold/price-drop status line → v2.17.6 (also fixes the literal
+"\\n✓ Done" log text), written to the Mac, NOT pushed. Push:
+`cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+`git add gc_tracker_app.py static/gc.js HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit, `git push origin main`.
+After: reload the site (footer v2.17.6), scan → no status line, log ends "✓ Done — N new this scan.".
+Still open from v2.17.5: check Railway logs for `[sweep] WARNING` (expect none), then delete /api/quick-window-check.
+Then the browse-side list (skip facet recompute on page flips/sorts, trim the brand payload, first-load waterfall).
+
+---
+
 # Next Session Prompt — v2.17.5 LIVE (quick-pass window fix verified: 1,995 = 1,995); confirm a real scan, then browse-side work
 
 **Live 2026-09-30 14:35 CDT**: `/api/quick-window-check?hours=48` → nb_hits 1995 = db_count 1995 (all startDate 0).

@@ -1,5 +1,23 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-30 · Current version: v2.17.5 (HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-09-30 · Current version: v2.17.6 (silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.17.6 — 2026-10-01: background sweep is silent (no status line); "\n✓ Done" log text fixed
+
+Chuck (on his phone, after using v2.17.4/5): remove the "✓ Sold items & price drops updated · N sold, M price drops"
+line and just let the sweep run in the background. Removed the `#s-sweep` span (HTML_TEMPLATE status bar) and
+`_setSweepStatus` (gc.js). `_watchSweep(msg.sweep)` still polls `/api/sweep-status` (every 3 s, max 3 min) but only to
+refresh the header "Items" count (`/api/state`) when the sweep finishes — no text, table not redrawn. Server side
+unchanged (`/api/sweep-status` stays; it's tiny and public).
+Also fixed a pre-existing cosmetic bug in `showResults`: the final log line was built as `` `\\n✓ …` `` inside a template
+literal, which printed a literal "\n" ("\n✓ Done — 0 new this scan." in Chuck's screenshot); now "✓ Done — N new this scan."
+
+**Verified**: node --check / py_compile clean; headless Chromium against gunicorn with mocked Algolia (mock updated for
+the v2.17.5 nested-OR numericFilters): scan → no `#s-sweep` element, log ends "✓ Done — N new this scan.", header item
+count updated after the sweep finished, no JS errors from gc.js.
+
+Note: Chuck's phone header showed v2.17.4 on a page loaded before the v2.17.5 deploy — a reload picks up the new version.
 
 ---
 

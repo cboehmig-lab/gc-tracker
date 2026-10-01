@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-09-30 · Version: v2.17.5 (quick-window hotfix; v2.17.4 = Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-09-30 · Version: v2.17.6 (silent sweep; v2.17.5 = quick-window hotfix; v2.17.4 = Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -88,7 +88,14 @@ Private page (`_require_admin()` gate). New GC inventory (not used) discounted f
 
 ---
 
-## Current State: v2.17.5 — hotfix: quick-pass window matches creationDate too (2026-09-30)
+## Current State: v2.17.6 — background sweep silent (2026-10-01)
+
+Chuck asked to drop the sold/price-drop status line: `#s-sweep` + `_setSweepStatus` removed; `_watchSweep` only refreshes
+the header item count when the sweep finishes. Also fixed the literal "\\n✓ Done" log text. See HANDOFF.md v2.17.6.
+
+---
+
+## Previous: v2.17.5 — hotfix: quick-pass window matches creationDate too (2026-09-30)
 
 GC's recent Algolia hits have `startDate: 0` (dated from `creationDate` ms by parse_products), so v2.17.4's
 `startDate>=since` window returned nothing. Window is now OR(`startDate>=since`, `creationDate>=since*1000`).

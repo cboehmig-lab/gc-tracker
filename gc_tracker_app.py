@@ -7585,7 +7585,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <span>Stores: <b id="s-stores">—</b></span>
       <!-- global-search moved into filter sheet -->
       <span id="s-want-match" style="display:none;color:#4caf50;font-weight:600;font-size:.82rem;cursor:pointer" title="Click to view want list matches"></span>
-      <span id="s-sweep" style="display:none;color:#999;font-size:.78rem" title="After a scan finds your new listings, the rest of the catalog is checked for sold items and price drops in the background"></span>
     </div>
     <div id="log"><span class="log-dim">Ready</span></div>
     <div class="results" id="res-panel" style="display:none">
@@ -8055,7 +8054,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.17.5"
+APP_VERSION = "2.17.6"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
