@@ -1,4 +1,13 @@
-# Next Session Prompt — v2.17.8 LIVE (browse speedups verified) — Phase G done
+# Next Session Prompt — PHASE G COMPLETE (v2.17.8 live). Next: memory/cost check 2026-10-08
+
+**Wrap-up 2026-10-01**: Chuck skipped autocomplete and the first-load waterfall; Phase G is closed at v2.17.8.
+Results: scan 29.3 s → ~1 s to NEW listings (background sweep ~20 s, silent); page flips ~0.8 s → ~0.2 s and 197 → 30 KB;
+default view ~790 → ~210 ms. Railway memory: web ~3 GB → ~0.5-0.8 GB (slow creep within a deploy), Postgres ~1.3 →
+~0.5-0.8 GB. Cost (cycle Sep 20-Oct 20): $17.35 used by 10/01, ~$0.50/day now → ~$27 this cycle; ~$15/mo usage after,
+inside the Pro plan's included $20. A reminder is scheduled in the Cowork session for **2026-10-08 10:00 CDT** to
+re-check web/Postgres memory (7-day view) and Usage; if web memory keeps climbing past ~1-1.5 GB, options: chunk the
+sweep's prior-state comparison, or a quiet daily restart.
+
 
 **Live 2026-10-01**: page flips 186-225 ms / ~30 KB (were ~0.8 s / 197 KB), sorts ~120 ms, default view from cache 212 ms
 (was ~790 ms). Agg cache filled to its 32-entry cap quickly (9 hit / 49 miss early) — watch `?pg_shadow=1` →
