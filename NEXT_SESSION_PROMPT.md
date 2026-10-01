@@ -1,3 +1,16 @@
+# Next Session Prompt — v2.17.9 (Impact verification tag) built, NOT pushed. Phase G complete. Memory/cost check 2026-10-08
+
+**2026-10-01 (affiliate)**: GC's affiliate program appears to be on Impact.com now (see HANDOFF.md v2.17.9). Chuck made
+an Impact partner account; v2.17.9 adds Impact's verification meta tag to the homepage <head>.
+1. Push: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+   `git add gc_tracker_app.py HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit, `git push origin main`.
+2. Live: footer v2.17.9; view-source of / shows `impact-site-verification` right after <head>; Chuck clicks Verify in Impact.
+3. Then: find Guitar Center in Impact's marketplace → check used/vintage commission terms → apply. Profile description
+   draft uses GA (last 30 days: 699 users, +46%; 28 days: 6,218 outbound clicks by 338 of 684 users) and admin numbers
+   (357 accounts, 3,733 watched items, 877 want-list entries). Don't cite the device log's 526K "devices" — bot-dominated.
+
+---
+
 # Next Session Prompt — PHASE G COMPLETE (v2.17.8 live). Next: memory/cost check 2026-10-08
 
 **Wrap-up 2026-10-01**: Chuck skipped autocomplete and the first-load waterfall; Phase G is closed at v2.17.8.

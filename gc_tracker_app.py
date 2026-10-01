@@ -7368,6 +7368,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
+<meta name='impact-site-verification' value='f9ecacb7-3abe-44ce-947f-4de4d768f015' />
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Guitar Center Used Gear Tracker — Browse Inventory by Store Location</title>
@@ -8111,7 +8112,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.17.8"
+APP_VERSION = "2.17.9"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

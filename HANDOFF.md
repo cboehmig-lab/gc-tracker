@@ -1,5 +1,31 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-09-30 · Current version: v2.17.8 (browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-10-01 · Current version: v2.17.9 (Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.17.9 — 2026-10-01: Impact.com site-verification meta tag (affiliate reapplication, step 1)
+
+**Why**: Chuck is reapplying for a Guitar Center affiliate program. Research on 2026-10-01 found GC's program now appears
+to run on **Impact.com** (affi.io: CJ "closed", Impact "opened"; UpPromote: Impact, 6-8%, 30-day cookie), not CJ as the
+July 2026 audit (AUDIT_REPORT_2026-07.md, Phase 4) concluded; FlexOffers no longer offers it. Sovrn denied us in May 2026
+("quality, security, or transparency"). Chuck created an Impact partner account ("GC Tracker"). Its old media property
+pointed at gctracker.animalsintrees.com (April 2026); he added a new Website property for https://gcgeartracker.com and
+chose "verify by pasting code", which needs Impact's tag in the homepage <head>, as the first meta tag if possible.
+
+**Change**: one line at the top of `HTML_TEMPLATE`'s `<head>` (served by `GET /`):
+`<meta name='impact-site-verification' value='f9ecacb7-3abe-44ce-947f-4de4d768f015' />` — placed before
+`<meta charset>` per Impact's "first meta tag" instruction (charset stays well inside the first 1024 bytes, so this is
+harmless). Not added to store pages / /cl / /newdeals — Impact checks the domain root. A meta tag is not script, so the
+CSP (no inline scripts) is unaffected. No behavior change otherwise. The tag is harmless to leave in after verification;
+removing it may un-verify the property, so keep it.
+
+**Verified**: py_compile + node --check clean.
+
+**After deploy**: view-source of https://gcgeartracker.com/ shows the tag as the first line after <head>; then Chuck clicks
+Verify in Impact → Media Properties. Next affiliate steps (not built): find Guitar Center in Impact's marketplace, check
+whether used/vintage items earn commission, apply. If approved, revive the July audit's server-side `_affiliate_wrap(url)`
+sketch + disclosure line + rel="sponsored" (no tracking script; CSP-safe). Logo drafts for the Impact profile are in
+`branding/` (not committed unless Chuck chooses to).
 
 ---
 
