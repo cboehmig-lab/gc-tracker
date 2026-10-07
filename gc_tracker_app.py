@@ -191,6 +191,65 @@ def _init_user_db():
             conn.execute("ALTER TABLE users ADD COLUMN last_login TEXT")
         except Exception:
             pass  # Column already exists
+        # ── Want List email alerts (v2.18.0, step 1 — see EMAIL_ALERTS_DESIGN.md) ──
+        # Alert addresses live ONLY here, Fernet-encrypted (email_enc). email_bidx is a
+        # keyed HMAC of the normalized address (per-address rate limits / bounce matching)
+        # — neither is readable without the Railway env keys. users.email is a separate,
+        # older column (registration / Google) and is never used for alerts.
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN alerts_beta INTEGER DEFAULT 0")
+        except Exception:
+            pass  # Column already exists
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alert_email (
+                user_id      INTEGER PRIMARY KEY REFERENCES users(id),
+                email_enc    TEXT NOT NULL,
+                email_bidx   TEXT NOT NULL,
+                confirmed_at TEXT,
+                created_at   TEXT,
+                updated_at   TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alert_settings (
+                user_id    INTEGER PRIMARY KEY REFERENCES users(id),
+                frequency  TEXT    DEFAULT 'hourly',
+                paused     INTEGER DEFAULT 0,
+                suppressed TEXT,
+                updated_at TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alert_codes (
+                user_id    INTEGER PRIMARY KEY REFERENCES users(id),
+                email_enc  TEXT NOT NULL,
+                email_bidx TEXT NOT NULL,
+                code_hash  TEXT NOT NULL,
+                expires_at REAL NOT NULL,
+                attempts   INTEGER DEFAULT 0,
+                sent_at    REAL NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alert_code_sends (
+                user_id    INTEGER NOT NULL,
+                email_bidx TEXT    NOT NULL,
+                sent_at    REAL    NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_code_sends_t ON alert_code_sends(sent_at)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alert_sends (
+                day   TEXT PRIMARY KEY,
+                count INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alert_meta (
+                k TEXT PRIMARY KEY,
+                v TEXT
+            )
+        """)
         conn.commit()
 
 def _user_by_username(username: str) -> dict | None:
@@ -209,6 +268,19 @@ def _user_by_id(user_id: int) -> dict | None:
     with _user_db() as conn:
         row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
         return dict(row) if row else None
+
+# Every per-user table except users itself. Account deletion (admin "now", the lazy
+# scheduled purge, the Google import-merge, and later self-service deletion) goes
+# through _purge_user_rows so a new per-user table can't be forgotten in one path.
+# (v2.18.0) Add new per-user tables HERE.
+_PER_USER_TABLES = ("user_data", "alert_email", "alert_settings", "alert_codes",
+                    "alert_code_sends")
+
+def _purge_user_rows(conn, user_id: int) -> None:
+    """Hard-delete every row belonging to user_id (caller commits)."""
+    for t in _PER_USER_TABLES:
+        conn.execute(f"DELETE FROM {t} WHERE user_id=?", (user_id,))  # t is from the constant above
+    conn.execute("DELETE FROM users WHERE id=?", (user_id,))
 
 def _user_by_email(email: str) -> dict | None:
     with _user_db() as conn:
@@ -3110,8 +3182,7 @@ def api_setup_google_account():
         }
         _set_user_data(user_id, **merged)
         with _user_db() as conn:
-            conn.execute("DELETE FROM user_data WHERE user_id=?", (existing["id"],))
-            conn.execute("DELETE FROM users WHERE id=?", (existing["id"],))
+            _purge_user_rows(conn, existing["id"])
             conn.execute("UPDATE users SET username=? WHERE id=?", (new_username, user_id))
             conn.commit()
         session["user_username"] = new_username
@@ -3125,6 +3196,7 @@ def api_setup_google_account():
 
 _ADMIN_NAV_LINKS = [
     ("/admin/users",            "👤 Users"),
+    ("/admin/alerts",           "✉ Alerts"),
     ("/admin/devices",          "📡 Devices"),
     ("/admin/listing-patterns", "📊 Listing Patterns"),
     ("/admin/build-coords",     "🗺 Build Coords"),
@@ -3331,15 +3403,14 @@ def admin_users():
             "SELECT id FROM users WHERE deleted_at IS NOT NULL AND deleted_at <= ?", (now_iso,)
         ).fetchall()]
         for uid_del in due:
-            conn.execute("DELETE FROM user_data WHERE user_id=?", (uid_del,))
-            conn.execute("DELETE FROM users WHERE id=?", (uid_del,))
+            _purge_user_rows(conn, uid_del)
         if due:
             conn.commit()
 
     # Load all users + their data
     with _user_db() as conn:
         users = [dict(r) for r in conn.execute(
-            "SELECT u.id, u.username, u.email, u.created_at, u.deleted_at, "
+            "SELECT u.id, u.username, u.created_at, u.deleted_at, "
             "       u.last_login, d.last_run, d.updated_at "
             "FROM users u "
             "LEFT JOIN user_data d ON d.user_id = u.id "
@@ -3514,8 +3585,7 @@ def admin_delete_user():
         return Response("User not found.", status=404, content_type="text/plain")
     with _user_db() as conn:
         if action == "now":
-            conn.execute("DELETE FROM user_data WHERE user_id=?", (user_id,))
-            conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+            _purge_user_rows(conn, user_id)
         elif action == "cancel":
             conn.execute("UPDATE users SET deleted_at=NULL WHERE id=?", (user_id,))
         else:  # schedule
@@ -3523,6 +3593,425 @@ def admin_delete_user():
             delete_on = (datetime.now(timezone.utc) + timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
             conn.execute("UPDATE users SET deleted_at=? WHERE id=?", (delete_on, user_id))
     return redirect("/admin/users")
+
+
+# ── Want List email alerts — step 1 plumbing (v2.18.0) ────────────────────────
+# Design: EMAIL_ALERTS_DESIGN.md. Step 1 = Postmark send wrapper, encrypted address
+# storage, confirm-by-code flow, admin-only test page. No user-visible UI yet.
+#
+# PRIVACY RULES for everything in this section (and later alert code):
+#   * An address is decrypted in exactly two places: building a Postmark request
+#     (send_email's `to`) and the masked hint shown to its own owner.
+#   * Never print/log an address, a subject, a code, Postmark's error *message*
+#     (it can echo the address) or an exception's text from the send path —
+#     log tags, Postmark MessageID / ErrorCode and exception TYPE names only.
+#   * Never put an address in a URL, a response other than the owner's masked
+#     hint, or an admin page.
+#   * Missing/invalid env vars disable alerts; they never stop the app booting
+#     (the v2.16.16 crash lesson).
+import hashlib as _hashlib
+import secrets as _secrets_alerts
+try:
+    from cryptography.fernet import Fernet as _Fernet, MultiFernet as _MultiFernet, InvalidToken as _InvalidToken
+    _CRYPTO_AVAILABLE = True
+except ImportError:
+    _CRYPTO_AVAILABLE = False
+
+_POSTMARK_TOKEN   = (os.environ.get("POSTMARK_SERVER_TOKEN") or "").strip()
+_POSTMARK_URL     = "https://api.postmarkapp.com/email"
+_ALERTS_FROM      = (os.environ.get("ALERTS_FROM") or "GC Gear Tracker <alerts@gcgeartracker.com>").strip()
+_ALERTS_HMAC_KEY  = (os.environ.get("ALERTS_HMAC_KEY") or "").strip().encode()
+try:
+    # Hard global ceiling on emails per UTC day (all kinds). Postmark bills overage
+    # automatically, so this is the only brake. Default sized for the free
+    # developer plan (100/month); raise via env when on Basic (~500).
+    _ALERTS_DAILY_CEILING = max(0, int(os.environ.get("ALERTS_DAILY_CEILING") or 50))
+except ValueError:
+    _ALERTS_DAILY_CEILING = 50
+
+_CODE_TTL_S          = 15 * 60   # confirmation code lifetime
+_CODE_MAX_ATTEMPTS   = 5         # wrong guesses per code before it's burned
+_CODE_MIN_GAP_S      = 60        # per user: one code email per minute
+_CODE_MAX_PER_HOUR   = 5         # per user
+_CODE_MAX_PER_ADDR_D = 5         # per address (blind index), per 24 h
+_CODE_MAX_GLOBAL_H   = 30        # all users, per hour — caps abuse of the code mailer
+
+def _alerts_build_fernet():
+    keys = [k for k in ((os.environ.get("ALERTS_EMAIL_KEY") or "").strip(),
+                        (os.environ.get("ALERTS_EMAIL_KEY_OLD") or "").strip()) if k]
+    if not keys or not _CRYPTO_AVAILABLE:
+        return None
+    try:
+        return _MultiFernet([_Fernet(k.encode()) for k in keys])  # first key encrypts; all decrypt
+    except Exception:
+        return None
+
+_ALERTS_FERNET = _alerts_build_fernet()
+_ALERTS_MISSING = []
+if not _CRYPTO_AVAILABLE:
+    _ALERTS_MISSING.append("cryptography package")
+if not _POSTMARK_TOKEN:
+    _ALERTS_MISSING.append("POSTMARK_SERVER_TOKEN")
+if _ALERTS_FERNET is None:
+    _ALERTS_MISSING.append("ALERTS_EMAIL_KEY (missing or not a valid Fernet key)")
+if len(_ALERTS_HMAC_KEY) < 32:
+    _ALERTS_MISSING.append("ALERTS_HMAC_KEY (missing or shorter than 32 chars)")
+_ALERTS_READY = not _ALERTS_MISSING
+print("[alerts] ready" if _ALERTS_READY else f"[alerts] disabled — missing/invalid: {', '.join(_ALERTS_MISSING)}")
+
+_EMAIL_RE = re.compile(r"^[^@\s<>,;\"']+@[^@\s<>,;\"']+\.[^@\s<>,;\"'.]{2,}$")
+
+def _norm_email(raw: str) -> str:
+    return (raw or "").strip().lower()
+
+def _valid_email(e: str) -> bool:
+    return 3 <= len(e) <= 254 and bool(_EMAIL_RE.match(e))
+
+def _enc_email(e: str) -> str:
+    return _ALERTS_FERNET.encrypt(e.encode()).decode()
+
+def _dec_email(tok: str) -> str | None:
+    try:
+        return _ALERTS_FERNET.decrypt(tok.encode()).decode()
+    except (_InvalidToken, AttributeError, ValueError):
+        return None
+
+def _alerts_hmac(purpose: str, msg: str) -> str:
+    """Keyed hash with a purpose label so one key can't be replayed across uses."""
+    return hmac.new(_ALERTS_HMAC_KEY, f"{purpose}:{msg}".encode(), _hashlib.sha256).hexdigest()
+
+def _email_bidx(e: str) -> str:
+    return _alerts_hmac("bidx", _norm_email(e))
+
+def _hash_code(user_id: int, code: str) -> str:
+    return _alerts_hmac("code", f"{user_id}:{code}")
+
+def _mask_email(e: str) -> str:
+    local, _, domain = (e or "").partition("@")
+    if not local or not domain:
+        return "•••"
+    return f"{local[0]}•••@{domain}"
+
+def _alerts_allowed() -> bool:
+    """Who can see/use alerts right now. Step 1: admin only. (Steps 3-5 add the
+    per-user beta flag users.alerts_beta and then a global switch.)"""
+    return bool(session.get("user_id")) and _is_admin()
+
+def _alerts_day() -> str:
+    return datetime.utcnow().strftime("%Y-%m-%d")
+
+def _alerts_sends_today() -> int:
+    with _user_db() as conn:
+        row = conn.execute("SELECT count FROM alert_sends WHERE day=?", (_alerts_day(),)).fetchone()
+    return int(row["count"]) if row else 0
+
+def _alerts_take_send_slot() -> bool:
+    """Atomically count one send against today's ceiling. False = ceiling reached."""
+    day = _alerts_day()
+    with _user_db() as conn:
+        cur = conn.execute(
+            "INSERT INTO alert_sends(day, count) VALUES(?, 1) "
+            "ON CONFLICT(day) DO UPDATE SET count = count + 1 WHERE count < ?",
+            (day, _ALERTS_DAILY_CEILING))
+        took = cur.rowcount == 1 and _ALERTS_DAILY_CEILING > 0
+        if not took:
+            first = conn.execute("SELECT v FROM alert_meta WHERE k='ceiling_hit'").fetchone()
+            if not first or first["v"] != day:
+                conn.execute("INSERT INTO alert_meta(k, v) VALUES('ceiling_hit', ?) "
+                             "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (day,))
+                print(f"[alerts] DAILY SEND CEILING REACHED ({_ALERTS_DAILY_CEILING}) — sends paused until 00:00 UTC")
+        conn.commit()
+    return took
+
+def send_email(to: str, subject: str, text: str, html: str | None = None, *,
+               tag: str, stream: str = "outbound", headers: dict | None = None) -> tuple[bool, str]:
+    """The ONLY way the app sends email. Returns (ok, short_reason). Never logs
+    `to` or `subject`. Open/click tracking always off."""
+    if not _ALERTS_READY:
+        return False, "not_configured"
+    if not _alerts_take_send_slot():
+        return False, "ceiling"
+    payload = {
+        "From": _ALERTS_FROM, "To": to, "Subject": subject, "TextBody": text,
+        "MessageStream": stream, "Tag": tag,
+        "TrackOpens": False, "TrackLinks": "None",
+    }
+    if html:
+        payload["HtmlBody"] = html
+    if headers:
+        payload["Headers"] = [{"Name": k, "Value": v} for k, v in headers.items()]
+    try:
+        r = http.post(_POSTMARK_URL, json=payload, timeout=10, headers={
+            "Accept": "application/json", "Content-Type": "application/json",
+            "X-Postmark-Server-Token": _POSTMARK_TOKEN})
+        try:
+            body = r.json()
+        except ValueError:
+            body = {}
+        code = body.get("ErrorCode")
+        if r.status_code == 200 and code == 0:
+            print(f"[alerts] sent tag={tag} id={body.get('MessageID', '?')}")
+            return True, "sent"
+        print(f"[alerts] send FAILED tag={tag} http={r.status_code} postmark_code={code}")
+        return False, f"postmark_{code}"
+    except Exception as e:
+        print(f"[alerts] send FAILED tag={tag} exc={type(e).__name__}")
+        return False, "network"
+
+# ── Confirmation flow (shared by the JSON API and the admin test page) ────────
+
+def _alerts_status(user_id: int) -> dict:
+    with _user_db() as conn:
+        em  = conn.execute("SELECT email_enc, confirmed_at FROM alert_email WHERE user_id=?", (user_id,)).fetchone()
+        st  = conn.execute("SELECT frequency, paused FROM alert_settings WHERE user_id=?", (user_id,)).fetchone()
+        pc  = conn.execute("SELECT expires_at, attempts FROM alert_codes WHERE user_id=?", (user_id,)).fetchone()
+    masked = None
+    if em and _ALERTS_READY:
+        addr = _dec_email(em["email_enc"])
+        masked = _mask_email(addr) if addr else "(unreadable — key changed?)"
+    pending = bool(pc and pc["expires_at"] > time.time() and pc["attempts"] < _CODE_MAX_ATTEMPTS)
+    return {
+        "ready":      _ALERTS_READY,
+        "confirmed":  bool(em and em["confirmed_at"]),
+        "masked":     masked,
+        "frequency":  st["frequency"] if st else "hourly",
+        "paused":     bool(st["paused"]) if st else False,
+        "code_pending": pending,
+        "code_expires_in": int(pc["expires_at"] - time.time()) if pending else 0,
+    }
+
+def _alerts_start(user_id: int, raw_email: str) -> tuple[bool, str, int]:
+    """Send a 6-digit code to a NEW address (first setup or change). The address is
+    stored only encrypted, in alert_codes, until the code is confirmed."""
+    if not _ALERTS_READY:
+        return False, "Email alerts aren't configured on the server yet.", 503
+    email = _norm_email(raw_email)
+    if not _valid_email(email):
+        return False, "Please enter a valid email address.", 400
+    bidx, now = _email_bidx(email), time.time()
+    with _user_db() as conn:
+        conn.execute("DELETE FROM alert_code_sends WHERE sent_at < ?", (now - 86400 * 2,))
+        last_user = conn.execute("SELECT MAX(sent_at) AS t, "
+                                 "SUM(CASE WHEN sent_at > ? THEN 1 ELSE 0 END) AS h "
+                                 "FROM alert_code_sends WHERE user_id=?", (now - 3600, user_id)).fetchone()
+        per_addr  = conn.execute("SELECT COUNT(*) AS n FROM alert_code_sends WHERE email_bidx=? AND sent_at > ?",
+                                 (bidx, now - 86400)).fetchone()["n"]
+        global_h  = conn.execute("SELECT COUNT(*) AS n FROM alert_code_sends WHERE sent_at > ?",
+                                 (now - 3600,)).fetchone()["n"]
+        conn.commit()
+    if last_user["t"] and now - last_user["t"] < _CODE_MIN_GAP_S:
+        return False, "A code was just sent — please wait a minute before asking for another.", 429
+    if (last_user["h"] or 0) >= _CODE_MAX_PER_HOUR or per_addr >= _CODE_MAX_PER_ADDR_D:
+        return False, "Too many codes requested. Please try again later.", 429
+    if global_h >= _CODE_MAX_GLOBAL_H:
+        print("[alerts] global code-send cap hit this hour")
+        return False, "Too many codes requested. Please try again later.", 429
+    code = f"{_secrets_alerts.randbelow(1_000_000):06d}"
+    with _user_db() as conn:
+        conn.execute("INSERT INTO alert_code_sends(user_id, email_bidx, sent_at) VALUES(?,?,?)",
+                     (user_id, bidx, now))
+        conn.execute(
+            "INSERT INTO alert_codes(user_id, email_enc, email_bidx, code_hash, expires_at, attempts, sent_at) "
+            "VALUES(?,?,?,?,?,0,?) ON CONFLICT(user_id) DO UPDATE SET email_enc=excluded.email_enc, "
+            "email_bidx=excluded.email_bidx, code_hash=excluded.code_hash, expires_at=excluded.expires_at, "
+            "attempts=0, sent_at=excluded.sent_at",
+            (user_id, _enc_email(email), bidx, _hash_code(user_id, code), now + _CODE_TTL_S, now))
+        conn.commit()
+    text = (f"Your GC Gear Tracker confirmation code is {code}\n\n"
+            f"Type it into the box on gcgeartracker.com to turn on Want List email alerts. "
+            f"It expires in {_CODE_TTL_S // 60} minutes.\n\n"
+            "If you didn't ask for this, ignore this email. You won't get anything else from us "
+            "unless the code is entered.\n\n— GC Gear Tracker (gcgeartracker.com)\n")
+    html = (f"<p>Your GC Gear Tracker confirmation code is</p>"
+            f"<p style=\"font-size:28px;font-weight:bold;letter-spacing:4px;font-family:monospace\">{code}</p>"
+            f"<p>Type it into the box on gcgeartracker.com to turn on Want List email alerts. "
+            f"It expires in {_CODE_TTL_S // 60} minutes.</p>"
+            "<p style=\"color:#666\">If you didn't ask for this, ignore this email. You won't get anything "
+            "else from us unless the code is entered.</p>")
+    ok, why = send_email(email, f"Your GC Gear Tracker code: {code}", text, html, tag="confirm-code")
+    if not ok:
+        with _user_db() as conn:  # don't leave a code the user never received
+            conn.execute("DELETE FROM alert_codes WHERE user_id=?", (user_id,))
+            conn.commit()
+        if why == "ceiling":
+            return False, "Email sending is paused for today. Please try again tomorrow.", 503
+        return False, "We couldn't send the code. Please check the address and try again.", 502
+    return True, f"Code sent to {_mask_email(email)}. It expires in {_CODE_TTL_S // 60} minutes.", 200
+
+def _alerts_confirm(user_id: int, raw_code: str) -> tuple[bool, str, int]:
+    if not _ALERTS_READY:
+        return False, "Email alerts aren't configured on the server yet.", 503
+    code = re.sub(r"\D", "", raw_code or "")
+    now = time.time()
+    with _user_db() as conn:
+        row = conn.execute("SELECT * FROM alert_codes WHERE user_id=?", (user_id,)).fetchone()
+        if not row or row["expires_at"] < now or row["attempts"] >= _CODE_MAX_ATTEMPTS:
+            if row:
+                conn.execute("DELETE FROM alert_codes WHERE user_id=?", (user_id,))
+                conn.commit()
+            return False, "That code has expired. Please request a new one.", 400
+        if len(code) != 6 or not hmac.compare_digest(_hash_code(user_id, code), row["code_hash"]):
+            conn.execute("UPDATE alert_codes SET attempts = attempts + 1 WHERE user_id=?", (user_id,))
+            conn.commit()
+            left = _CODE_MAX_ATTEMPTS - row["attempts"] - 1
+            return False, (f"That code isn't right. {left} tr{'y' if left == 1 else 'ies'} left."
+                           if left > 0 else "Too many wrong codes. Please request a new one."), 400
+        stamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        conn.execute(
+            "INSERT INTO alert_email(user_id, email_enc, email_bidx, confirmed_at, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET email_enc=excluded.email_enc, "
+            "email_bidx=excluded.email_bidx, confirmed_at=excluded.confirmed_at, updated_at=excluded.updated_at",
+            (user_id, row["email_enc"], row["email_bidx"], stamp, stamp, stamp))
+        conn.execute("INSERT OR IGNORE INTO alert_settings(user_id, frequency, paused, updated_at) "
+                     "VALUES(?, 'hourly', 0, ?)", (user_id, stamp))
+        conn.execute("DELETE FROM alert_codes WHERE user_id=?", (user_id,))
+        conn.commit()
+    return True, "Email confirmed.", 200
+
+def _alerts_test_send(user_id: int) -> tuple[bool, str, int]:
+    if not _ALERTS_READY:
+        return False, "Email alerts aren't configured on the server yet.", 503
+    with _user_db() as conn:
+        em = conn.execute("SELECT email_enc FROM alert_email WHERE user_id=? AND confirmed_at IS NOT NULL",
+                          (user_id,)).fetchone()
+    addr = _dec_email(em["email_enc"]) if em else None
+    if not addr:
+        return False, "No confirmed email on this account.", 400
+    text = ("This is a test email from GC Gear Tracker. If you're reading it, Want List alerts "
+            "can reach you.\n\n— GC Gear Tracker (gcgeartracker.com)\n")
+    html = ("<p>This is a test email from GC Gear Tracker. If you're reading it, Want List alerts "
+            "can reach you.</p><p style=\"color:#666\">— GC Gear Tracker (gcgeartracker.com)</p>")
+    ok, why = send_email(addr, "GC Gear Tracker test email", text, html, tag="test")
+    if ok:
+        return True, f"Test email sent to {_mask_email(addr)}.", 200
+    if why == "ceiling":
+        return False, "Email sending is paused for today (daily limit reached).", 503
+    return False, f"Send failed ({why}).", 502
+
+def _alerts_remove(user_id: int) -> tuple[bool, str, int]:
+    """'Remove my email': the address and everything tied to it, gone.
+    alert_code_sends is deliberately kept: it's the code-mailer rate-limit log
+    (user id + keyed hash, no address), pruned after 48 h — deleting it here would
+    let remove → re-add reset the limits. Account deletion still purges it."""
+    with _user_db() as conn:
+        for t in ("alert_email", "alert_codes", "alert_settings"):
+            conn.execute(f"DELETE FROM {t} WHERE user_id=?", (user_id,))
+        conn.commit()
+    return True, "Your email address has been removed.", 200
+
+# ── JSON API (used by the step-3 UI; admin-only until the beta) ───────────────
+
+def _alerts_json(result):
+    ok, msg, status = result
+    return jsonify({"ok": ok, "message": msg, **({} if ok else {"error": msg})}), status
+
+@app.route("/api/alerts/status")
+def api_alerts_status():
+    if not _alerts_allowed():
+        return jsonify({"error": "Not found"}), 404
+    return jsonify(_alerts_status(session["user_id"]))
+
+@app.route("/api/alerts/email/start", methods=["POST"])
+def api_alerts_email_start():
+    if not _alerts_allowed():
+        return jsonify({"error": "Not found"}), 404
+    return _alerts_json(_alerts_start(session["user_id"], (request.json or {}).get("email", "")))
+
+@app.route("/api/alerts/email/confirm", methods=["POST"])
+def api_alerts_email_confirm():
+    if not _alerts_allowed():
+        return jsonify({"error": "Not found"}), 404
+    return _alerts_json(_alerts_confirm(session["user_id"], str((request.json or {}).get("code", ""))))
+
+@app.route("/api/alerts/test-send", methods=["POST"])
+def api_alerts_test_send():
+    if not _alerts_allowed():
+        return jsonify({"error": "Not found"}), 404
+    return _alerts_json(_alerts_test_send(session["user_id"]))
+
+@app.route("/api/alerts/email/remove", methods=["POST"])
+def api_alerts_email_remove():
+    if not _alerts_allowed():
+        return jsonify({"error": "Not found"}), 404
+    return _alerts_json(_alerts_remove(session["user_id"]))
+
+# ── Admin test page (plain forms, no JS — CSP-safe) ───────────────────────────
+
+@app.route("/admin/alerts", methods=["GET", "POST"])
+def admin_alerts():
+    denied = _require_admin()
+    if denied:
+        return denied
+    uid = session.get("user_id")
+    if request.method == "POST":
+        submitted = request.form.get("_csrf", "")
+        expected  = session.get("_admin_csrf") or ""
+        if not expected or not submitted or not hmac.compare_digest(submitted, expected):
+            return Response("Invalid CSRF token — go back and reload the page.", status=403, content_type="text/plain")
+        if not uid:
+            session["_alerts_flash"] = "Log in with your Google admin account (not the break-glass password) to test."
+            return redirect("/admin/alerts")
+        action = request.form.get("action", "")
+        if action == "start":
+            res = _alerts_start(uid, request.form.get("email", ""))
+        elif action == "confirm":
+            res = _alerts_confirm(uid, request.form.get("code", ""))
+        elif action == "test":
+            res = _alerts_test_send(uid)
+        elif action == "remove":
+            res = _alerts_remove(uid)
+        else:
+            res = (False, "Unknown action.", 400)
+        session["_alerts_flash"] = ("✓ " if res[0] else "✕ ") + res[1]
+        return redirect("/admin/alerts")
+
+    flash = session.pop("_alerts_flash", "")
+    csrf  = _admin_page_csrf()
+    st    = _alerts_status(uid) if uid else None
+    yn    = lambda b: '<span style="color:#8fc88f">yes</span>' if b else '<span style="color:#e88">NO</span>'
+    env_rows = "".join(
+        f"<tr><td>{_html.escape(name)}</td><td>{yn(ok)}</td></tr>" for name, ok in (
+            ("cryptography package", _CRYPTO_AVAILABLE),
+            ("POSTMARK_SERVER_TOKEN set", bool(_POSTMARK_TOKEN)),
+            ("ALERTS_EMAIL_KEY valid", _ALERTS_FERNET is not None),
+            ("ALERTS_HMAC_KEY ≥ 32 chars", len(_ALERTS_HMAC_KEY) >= 32),
+        ))
+    if st:
+        me = (f"Confirmed address: <b>{_html.escape(st['masked'] or '—')}</b>" if st["confirmed"]
+              else "No confirmed address.")
+        if st["code_pending"]:
+            me += f" &nbsp;·&nbsp; code pending, expires in {st['code_expires_in'] // 60} min"
+    else:
+        me = "Not logged in as a site user (break-glass admin login) — the forms need a Google admin login."
+    def form(action, inner, label, color="#253"):
+        return (f'<form method="POST" action="/admin/alerts" style="margin:10px 0">'
+                f'<input type="hidden" name="_csrf" value="{csrf}">'
+                f'<input type="hidden" name="action" value="{action}">{inner}'
+                f'<button type="submit" style="background:{color};color:#eee;border:none;border-radius:4px;'
+                f'padding:5px 14px;cursor:pointer;font-family:monospace">{label}</button></form>')
+    inp = ('style="background:#1a1a1a;color:#eee;border:1px solid #333;border-radius:4px;padding:5px 8px;'
+           'font-family:monospace;margin-right:8px;width:260px"')
+    html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Alerts</title>
+<style>body{{background:#111;color:#ddd;font-family:monospace;padding:24px;font-size:.88rem}}
+h1{{color:#fff}} h2{{color:#ccc;font-size:1rem;margin-top:28px}} td{{padding:3px 14px 3px 0}}
+.flash{{background:#1e1e1e;border:1px solid #333;padding:8px 12px;border-radius:4px;margin:12px 0}}
+.note{{color:#777;font-size:.8rem}}</style></head><body>
+{_admin_nav('/admin/alerts')}
+<h1>✉ Email alerts — step 1 test page</h1>
+<div>Alerts ready: {yn(_ALERTS_READY)} &nbsp;·&nbsp; From: {_html.escape(_ALERTS_FROM)}
+ &nbsp;·&nbsp; Sent today (UTC): {_alerts_sends_today()} / {_ALERTS_DAILY_CEILING}</div>
+<table style="margin-top:10px">{env_rows}</table>
+{f'<div class="flash">{_html.escape(flash)}</div>' if flash else ''}
+<h2>Your alert address</h2>
+<div>{me}</div>
+{form("start", f'<input type="email" name="email" placeholder="address to confirm" autocomplete="off" required {inp}>', "Send code")}
+{form("confirm", f'<input type="text" name="code" inputmode="numeric" maxlength="7" placeholder="6-digit code" autocomplete="one-time-code" required {inp}>', "Confirm")}
+{form("test", "", "Send test email")}
+{form("remove", "", "Remove my email", "#600")}
+<p class="note">Addresses are stored encrypted (Fernet, key in Railway env) and are never shown here
+except your own, masked. Codes are stored hashed and expire in {_CODE_TTL_S // 60} min.</p>
+</body></html>"""
+    return Response(html, mimetype="text/html")
 
 
 @app.route("/admin/clear-lock")
@@ -8112,7 +8601,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.17.9"
+APP_VERSION = "2.18.0"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

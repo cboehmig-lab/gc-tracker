@@ -5,3 +5,4 @@ openpyxl
 authlib
 gunicorn
 psycopg2-binary
+cryptography

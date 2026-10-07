@@ -1,5 +1,72 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-10-01 · Current version: v2.17.9 (Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-10-07 · Current version: v2.18.0 (email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.18.0 — 2026-10-07: Email alerts step 1 — plumbing (Postmark wrapper, encrypted address storage, confirm-by-code, admin test page). No user-visible change.
+
+First version of the Want List email alerts project. **Read EMAIL_ALERTS_DESIGN.md** for the full design, the
+2026-10-07 code investigation, and decisions. Step 1 = plumbing only; everything is admin-only (`_alerts_allowed()`
+= logged-in site user + `_is_admin()`), non-admins get 404 from every alerts route.
+
+### What changed
+- **requirements.txt**: `cryptography` (was only a transitive authlib dependency).
+- **Schema (SQLite gc_users.db, `_init_user_db`)**: `users.alerts_beta` (unused until step 3/4); new tables
+  `alert_email` (user_id PK, `email_enc` Fernet ciphertext, `email_bidx` HMAC blind index, confirmed_at…),
+  `alert_settings` (frequency/paused/suppressed), `alert_codes` (pending address encrypted + code HMAC, expiry,
+  attempts), `alert_code_sends` (rate-limit log: user_id, bidx, time; pruned after 48 h), `alert_sends` (per-UTC-day
+  send counter), `alert_meta` (k/v; `ceiling_hit` now, engine state in step 2). Per-user data stays in SQLite so
+  account deletion is one transaction and the daily backup covers it (as ciphertext).
+- **`_PER_USER_TABLES` + `_purge_user_rows(conn, user_id)`** (next to `_user_by_id`): the single delete-a-user helper.
+  All three existing deletion paths now use it — admin "Delete Now", the lazy scheduled purge at the top of
+  `admin_users()`, and the Google import-merge in `api_setup_google_account`. Any new per-user table goes in
+  `_PER_USER_TABLES`.
+- **Admin users page** no longer SELECTs `u.email` (it was never rendered; now it isn't even read).
+- **Env vars** (all optional — missing/invalid → `_ALERTS_READY=False`, one boot log line naming which, app boots
+  normally): `POSTMARK_SERVER_TOKEN`, `ALERTS_EMAIL_KEY` (Fernet key; `ALERTS_EMAIL_KEY_OLD` supported via MultiFernet
+  for rotation), `ALERTS_HMAC_KEY` (≥32 chars; code hashes, blind index, later unsubscribe signatures),
+  `ALERTS_FROM` (default `GC Gear Tracker <alerts@gcgeartracker.com>`), `ALERTS_DAILY_CEILING` (default **50**, sized
+  for Postmark's free 100/mo plan; raise to ~500 on Basic).
+- **`send_email(to, subject, text, html=None, *, tag, stream="outbound", headers=None)`** — the only path to Postmark
+  (`POST https://api.postmarkapp.com/email` via `requests`, 10 s timeout, `TrackOpens:false`, `TrackLinks:"None"`).
+  Takes a slot from the daily ceiling first (atomic SQLite upsert `… WHERE count < ceiling`); at the ceiling it
+  refuses, logs `[alerts] DAILY SEND CEILING REACHED` once per day and records `alert_meta.ceiling_hit` (admin
+  warning/pausing alerts = step 2). Logs only `tag`, MessageID, HTTP status, Postmark ErrorCode, exception type —
+  never the address, subject, code, Postmark's error message (it can echo the address) or exception text.
+- **Confirmation flow** (`_alerts_start/_alerts_confirm/_alerts_status/_alerts_test_send/_alerts_remove`):
+  6-digit `secrets` code, stored as HMAC(user_id:code), 15-min expiry, 5 wrong tries burns it; the pending address
+  sits encrypted in `alert_codes` until confirmed, then moves to `alert_email` + default `alert_settings`
+  (hourly, not paused). Code-mail limits: 1/min and 5/hour per user, 5/24 h per address (blind index), 30/hour
+  globally. A failed send deletes the pending code. "Change address" = start again; the old confirmed address stays
+  until the new one is confirmed. "Remove my email" deletes `alert_email`, `alert_codes`, `alert_settings` but keeps
+  the 48 h rate-limit log (otherwise remove → re-add would reset the limits); account deletion purges it too.
+- **JSON API** (for the step-3 UI): `GET /api/alerts/status` → {ready, confirmed, masked, frequency, paused,
+  code_pending, code_expires_in}; `POST /api/alerts/email/start {email}`, `/api/alerts/email/confirm {code}`,
+  `/api/alerts/test-send`, `/api/alerts/email/remove`. Masked address (`c•••@gmail.com`) is computed at read time
+  for its owner only.
+- **`/admin/alerts`** (new admin nav item "✉ Alerts"): plain HTML forms with `_csrf` (no JS, CSP-safe): which env
+  vars are present/valid, ready yes/no, today's sends vs ceiling, your masked confirmed address / pending code,
+  Send code → Confirm → Send test email → Remove my email. Needs the Google admin login (break-glass
+  `/admin/login` has no site user id). Flash messages via `session["_alerts_flash"]`.
+
+### Verified locally (cloud sandbox, scratch DATA_DIR, Postmark HTTP mocked)
+`py_compile` + `node --check static/gc.js` clean. Non-admin → 404; invalid address 400; start sends one payload with
+tracking off; second request within 60 s → 429; wrong code → "4 tries left"; right code confirms; status shows
+masked; test send goes to the confirmed address; admin page shows the masked address, not the plaintext;
+`/admin/users` has no email; **no alert address in `gc_users.db` + `-wal`** (byte search); remove clears the three
+tables; remove → re-add within the window still 429; `_purge_user_rows` clears everything; ceiling=3 → 4th send
+refused + one log line; boot with keys missing/invalid → `[alerts] disabled — missing/invalid: …`, routes answer
+"not configured", `/`, `/privacy`, `/api/me` unaffected. Only six `print`s in the section, none with an address.
+Not tested: a real Postmark call (the sandbox proxy blocks api.postmarkapp.com) — that's the live check.
+
+### Live check after push (needs the Railway env vars set first)
+1. Deploy log: `[alerts] ready` (or the disabled line naming what's missing). 2. Admin nav → ✉ Alerts: all env rows
+"yes". 3. Send code to your address → email arrives from alerts@gcgeartracker.com → Confirm → Send test email
+arrives. 4. Postmark Activity shows the messages, tracking off. 5. Railway logs show only `[alerts] sent tag=… id=…`.
+
+### Next
+Step 2 (engine) per EMAIL_ALERTS_DESIGN.md: ledger, hourly scheduler + advisory lock, alerts anchor, daily summary,
+unsubscribe tokens/headers, Postmark bounce/complaint webhook, ceiling → pause + admin warning.
 
 ---
 

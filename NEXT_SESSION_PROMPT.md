@@ -1,3 +1,39 @@
+# Next Session Prompt — EMAIL ALERTS: v2.18.0 (step 1 plumbing) built, NOT pushed; Postmark setup in progress
+
+**2026-10-07 (later)**: Chuck approved step 1 + decided: deletion confirm = password, or Google re-sign-in for
+Google-only accounts; self-service deletion is immediate; start on Postmark's free plan. v2.18.0 built + locally
+verified (see HANDOFF.md v2.18.0), written to the Mac, NOT pushed. Push:
+`cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+`git add gc_tracker_app.py requirements.txt EMAIL_ALERTS_DESIGN.md HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`,
+commit, `git push origin main`. Safe to push before Postmark is ready: with no env vars, alerts are just disabled.
+Postmark: signup rejects Gmail → Chuck needs a gcgeartracker.com address first (free forwarding at the DNS host).
+Then server, sender domain (DKIM TXT + Return-Path CNAME + `_dmarc`), approval request, and Railway env vars
+(POSTMARK_SERVER_TOKEN, ALERTS_EMAIL_KEY, ALERTS_HMAC_KEY — generated/pasted by Chuck, never in chat). Then the
+live check in HANDOFF.md v2.18.0.
+
+---
+
+# (earlier 2026-10-07) EMAIL ALERTS project started (design + investigation done). base = v2.17.9 (latest commit f59dc9b).
+
+**2026-10-07**: Want List email alerts kicked off. Read **EMAIL_ALERTS_DESIGN.md** first — decided design (from the
+claude.ai chat 2026-10-02 → 10-07), what the code looks like today (no self-service account deletion; registration
+and Google sign-in already store a plaintext `users.email` that alerts must NOT use; privacy policy is the inline
+`PRIVACY_TEMPLATE`; `gc_users.db` lives at `/data` with 7 daily `VACUUM INTO` backups and no export of user rows;
+admin users page = server-rendered forms + `_csrf`), the proposed data model, open decisions (§4), and the
+**step 1 plan (v2.18.0)** at the bottom.
+1. Chuck answers the step-1 go-ahead + open decisions 1-2 (deletion confirmation for Google-only accounts;
+   immediate vs 10-day delete) if not already answered in the session that wrote this.
+2. Postmark: account + domain `gcgeartracker.com` (DKIM TXT, Return-Path CNAME, `_dmarc` `v=DMARC1; p=none;`) +
+   approval request; `POSTMARK_SERVER_TOKEN` goes only into Railway (serene-determination → web → Variables).
+   Also needs `ALERTS_EMAIL_KEY` (Fernet key) and `ALERTS_HMAC_KEY` — generate on Chuck's Mac, paste straight into
+   Railway, never into chat/files. Ask Postmark: alerts on transactional or broadcast stream?
+3. Build step 1 per the doc. Standing rules: bump APP_VERSION, py_compile + node --check, HANDOFF.md/HANDOFF_PROMPT.md
+   entries, push from Chuck's Mac only (`cd ~/Desktop/gc_tracker` then `rm -f .git/index.lock`). Commit
+   EMAIL_ALERTS_DESIGN.md with the first push.
+Still pending from before: memory/cost re-check reminder 2026-10-08 10:00 CDT (see the v2.17.9 section below).
+
+---
+
 # Next Session Prompt — v2.17.9 (Impact verification tag) built, NOT pushed. Phase G complete. Memory/cost check 2026-10-08
 
 **2026-10-01 (affiliate)**: GC's affiliate program appears to be on Impact.com now (see HANDOFF.md v2.17.9). Chuck made
