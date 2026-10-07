@@ -1,6 +1,6 @@
 # Want List Email Alerts — Design (gcgeartracker.com)
 
-Status: **design settled, nothing built.** Design agreed in claude.ai chat 2026-10-02 → 10-07; code investigation
+Status: **step 1 (v2.18.0) LIVE and verified 2026-10-07; step 2 next.** Design agreed in claude.ai chat 2026-10-02 → 10-07; code investigation
 done in Cowork 2026-10-07 (app at v2.17.9). Build happens in the 5 steps at the bottom, each step its own version(s),
 each waiting on Chuck's go-ahead.
 
@@ -267,3 +267,7 @@ Verified, Return-Path Verified. Account is in **test mode** (100 emails total, o
   account emails are not used. Every alert has one-click unsubscribe (List-Unsubscribe + RFC 8058) and per-search
   stop links; bounces and spam complaints suppress the address via webhook; a hard daily send cap.
 - OPEN question to include: should the alert emails go on the transactional stream or a broadcast stream?
+
+**Railway + live test (2026-10-07)**: env vars POSTMARK_SERVER_TOKEN, ALERTS_EMAIL_KEY (backed up in Chuck's password
+manager — losing it makes stored addresses unreadable), ALERTS_HMAC_KEY added to web. v2.18.0 deployed, `[alerts] ready`;
+code → confirm → test email to chuck@gcgeartracker.com all worked.

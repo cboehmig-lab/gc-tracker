@@ -1,4 +1,25 @@
-# Next Session Prompt — EMAIL ALERTS: v2.18.0 (step 1 plumbing) built, NOT pushed; Postmark setup in progress
+# Next Session Prompt — EMAIL ALERTS: v2.18.0 LIVE + verified (step 1 done). Next: Postmark approval, then step 2 (engine)
+
+**2026-10-07 (end of day)**: v2.18.0 pushed, deployed, `[alerts] ready`; Chuck confirmed chuck@gcgeartracker.com via
+/admin/alerts and received the test email. Setup done today (details in EMAIL_ALERTS_DESIGN.md §6):
+- Cloudflare (DNS host): Email Routing chuck@gcgeartracker.com → Chuck's Gmail; old `v=spf1 -all` replaced with
+  Cloudflare's SPF; Postmark DKIM TXT + `pm-bounces` CNAME added; `_dmarc` relaxed to `v=DMARC1; p=none;`.
+- Postmark: account owner chuck@gcgeartracker.com, server "GC Gear Tracker" (21088536), domain DKIM + Return-Path
+  Verified, tracking off. Still in TEST MODE (100 sends, verified-domain recipients only).
+- Railway web Variables: POSTMARK_SERVER_TOKEN, ALERTS_EMAIL_KEY (backed up in Chuck's password manager), ALERTS_HMAC_KEY.
+Next session:
+1. Push the end-of-day docs commit if it isn't on GitHub yet (`git log origin/main -1` should be "Docs: v2.18.0 live verification").
+2. Fill Postmark's approval form (Account → Test mode → Request approval) from the draft in EMAIL_ALERTS_DESIGN.md §6
+   — Chuck reviews + submits. Ask about transactional vs broadcast stream for alerts.
+3. Step 2 (engine): ledger, hourly scheduler + Postgres advisory lock, alerts anchor (NEW rule), matcher limited to new
+   SKUs, daily 10:00 ET summary with catch-up, unsubscribe/pause HMAC links + List-Unsubscribe headers, Postmark
+   bounce/complaint webhook, ceiling → pause + admin warning. Plan first, Chuck's go-ahead before coding.
+4. Later: tighten DMARC (quarantine) once alert mail is flowing cleanly; raise ALERTS_DAILY_CEILING when on Basic.
+Still pending from before: memory/cost re-check 2026-10-08 10:00 CDT (v2.17.9 section below).
+
+---
+
+# (earlier 2026-10-07) EMAIL ALERTS: v2.18.0 built, NOT pushed; Postmark setup in progress
 
 **2026-10-07 (later)**: Chuck approved step 1 + decided: deletion confirm = password, or Google re-sign-in for
 Google-only accounts; self-service deletion is immediate; start on Postmark's free plan. v2.18.0 built + locally

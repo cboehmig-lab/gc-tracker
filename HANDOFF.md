@@ -64,8 +64,16 @@ Not tested: a real Postmark call (the sandbox proxy blocks api.postmarkapp.com) 
 "yes". 3. Send code to your address → email arrives from alerts@gcgeartracker.com → Confirm → Send test email
 arrives. 4. Postmark Activity shows the messages, tracking off. 5. Railway logs show only `[alerts] sent tag=… id=…`.
 
+### Live verification (2026-10-07, ~evening CDT) — PASSED
+Railway env vars added (POSTMARK_SERVER_TOKEN, ALERTS_EMAIL_KEY, ALERTS_HMAC_KEY; values never in chat/files; Chuck
+backed up ALERTS_EMAIL_KEY in his password manager). v2.18.0 deployment Active, deploy log `[alerts] ready`, no errors.
+/admin/alerts: all four env checks "yes", 0/50 sent. Chuck sent a code to chuck@gcgeartracker.com (Cloudflare Email
+Routing → his Gmail), confirmed it, page showed the masked address, test email arrived. Postmark account is still in
+TEST MODE (sends only to verified-domain addresses, 100 total) — approval request not yet submitted (draft in
+EMAIL_ALERTS_DESIGN.md §6). Postmark/Cloudflare setup details: EMAIL_ALERTS_DESIGN.md §6.
+
 ### Next
-Step 2 (engine) per EMAIL_ALERTS_DESIGN.md: ledger, hourly scheduler + advisory lock, alerts anchor, daily summary,
+Submit the Postmark approval request (draft ready), then step 2 (engine) per EMAIL_ALERTS_DESIGN.md: ledger, hourly scheduler + advisory lock, alerts anchor, daily summary,
 unsubscribe tokens/headers, Postmark bounce/complaint webhook, ceiling → pause + admin warning.
 
 ---
