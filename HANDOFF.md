@@ -1,7 +1,89 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-10-08 · Current version: v2.18.1 (privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-10-08 · Current version: v2.19.0 (email alerts step 2: daily 10 AM ET alert engine, /go/<sku>, signed pause/stop links, Postmark bounce webhook — Chuck-only; v2.18.1 privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
 
 ---
+
+## v2.19.0 — 2026-10-08: Email alerts step 2 — the daily alert engine (Chuck-only; no user-visible change)
+
+Plan approved by Chuck 2026-10-08 ("looks good") — full plan in EMAIL_ALERTS_DESIGN.md "Step 2 plan (v2.19.0)".
+Decisions behind it (same day): daily alert only (no hourly), at most one email/day at 10:00 ET and **none when
+nothing matches**; alerts cover the whole Want List by default (`mode='all'`) or only chosen pills (`'selected'`);
+max 25 items per email + "View all N"; every day incl. weekends; catch-up until 13:00 ET then skip; the mail-app
+unsubscribe pauses (doesn't delete the address); incomplete sweep → retry twice 20 min apart, then send without
+advancing anchors. Postmark approved the account the same day (test mode lifted, still the free 100/mo plan).
+
+### How it works
+- **Scheduler**: daemon thread `_alerts_scheduler_loop` (started at bootstrap unless `ALERTS_SCHEDULER=off`), ticks
+  every 60 s. `_alerts_due_day()` = ET date if 10:00 ≤ ET < 13:00 and `alert_meta.last_daily_run` ≠ today
+  (`zoneinfo` America/New_York — `tzdata` added to requirements.txt so slim images have the tz database; missing tz →
+  engine off, app boots). Global switch `alert_meta.global_switch` ('on' default; off = the day is marked done).
+- **`_alerts_daily_job(day)`**: in-process lock + `pg_try_advisory_lock(7101987019)` on a pooled connection (deploy
+  overlap = two containers), re-checks last_daily_run, then `_alerts_wait_for_sweep()` = `_start_sweep()` + wait for
+  `_SWEEP_STATE` (a click-started sweep queues one follow-up, so the result is always from a sweep that started after
+  10:00). Incomplete → `retry` (next_try +20 min, max 3 tries/day); on the 3rd it sends anyway with `advance=False`.
+  Then `_alerts_run_users(run_max)` where run_max = newest normalized `date_listed` of available items, prune ledger
+  (180 days), write `last_daily_run` + `last_run_summary` (counts only) and one log line.
+- **Per user (`_alerts_process_user`)**: eligible = confirmed address, not deleted, admin or `users.alerts_beta`
+  (`_alerts_subscribers`). Paused/suppressed → skip and advance anchor (no backlog on resume). No anchor (confirmed
+  under v2.18.0, e.g. Chuck) → anchor = run_max, `init`, no email. Pills = `_alerts_active_pills` (Want List order,
+  after `_kw_accept_capped`; `alert_pills.on_` overrides; stale rows pruned). Matches = per pill
+  `_tsquery_want_list_entry` SQL over `available AND norm(date_listed) > anchor AND <= run_max` (norm = date-only →
+  T23:59:59Z, same as the NEW rule), ≤500 rows/pill, minus ledger `alert_sent`. None → advance, no email. Else build
+  + `send_email(tag="daily-alert")`; success → ledger rows for ALL matches + `alert_batches` row (id in the email's
+  `/?alert=<id>` link; the filtered view is step 3) + advance anchor + `last_alert_at`. Failure / ceiling → anchor
+  kept (tomorrow); ceiling stops the loop.
+- **Email (`_alerts_build_email`)**: subject `Want List Item Found: <name>` / `Want List Items Found: N matches for
+  <pill>, <pill>[ and N more]`; grouped by each item's first matching pill, newest first, max 25; price / price drop /
+  condition / store; links `/go/<sku>`; "View all N matches" (or "Open your Want List"); Chuck's disclaimer; footer:
+  Manage alerts · Stop alerts for "<pill>" (per pill shown) · Pause all alerts; `List-Unsubscribe` +
+  `List-Unsubscribe-Post: List-Unsubscribe=One-Click`. Plain-text + HTML, tracking off (send_email).
+- **Signed links**: `_alerts_link_token(uid, action, pid)` = `uid.action.pid.HMAC32` (actions u pause / r resume / p
+  stop pill; pid = HMAC of the pill text, so no keyword in the URL). No expiry; dead once the address is removed.
+
+### New schema (SQLite gc_users.db, `_init_user_db`) — all in `_PER_USER_TABLES`
+`alert_settings` + `mode` ('all'), `anchor`, `last_alert_at` (frequency left, unused) · `alert_pills(user_id, keyword,
+on_)` · `alert_sent(user_id, sku, sent_at, batch)` · `alert_batches(id, user_id, created_at, skus JSON)`.
+`_alerts_confirm` now creates settings with mode 'all' + anchor = current newest listing (`_alerts_initial_anchor`);
+"Remove my email" also deletes pills/ledger/batches. `/api/alerts/status` returns `mode` + `suppressed` instead of
+`frequency`.
+
+### New routes
+- `GET /go/<sku>` → 302 to the item's guitarcenter.com URL (anything else → `/`); robots.txt disallows /go/ + /alerts/.
+- `GET|POST /alerts/u/<tok>` pause all (GET shows a button only — link scanners; POST or RFC 8058 one-click POST
+  does it; the "paused" page offers a signed resume button, resume restarts the window from now), `GET|POST
+  /alerts/p/<tok>` stop one pill. No session/CSRF token needed (signature is the auth; the global Origin check still
+  blocks cross-origin POSTs and lets header-less provider POSTs through).
+- `POST /api/alerts/postmark-webhook` — 404 unless `ALERTS_WEBHOOK_SECRET` is set; HTTP basic auth (password =
+  secret). Bounce (HardBounce, BadEmailAddress, ManuallyDeactivated, SpamNotification) / SpamComplaint →
+  `alert_settings.suppressed`; SubscriptionChange SuppressSending false → clears it. Matched by blind index only.
+- `/admin/alerts`: run summary (subscribers / eligible / paused / suppressed, switch, scheduler, tz, webhook secret,
+  last run counts, ceiling warning) + Preview my alert (dry run, rendered inline) · Send my alert now · Rewind my
+  window 24 h (testing; ledger still prevents repeats) · global switch toggle.
+
+### Verified (cloud sandbox: Postgres 16 + scratch DATA_DIR, Postmark mocked) — 61/61 checks
+Only admin + beta eligible; two users emailed with the right items (old + sold excluded), subjects, headers,
+tracking off, disclaimer, /go links; date-only listings normalized; second run same day no-op; next day only new
+items; ledger blocks repeats after a rewind; no matches → no email + anchor advanced; 25 cap / newest first / view-all
+30 / batch stores 30; send failure keeps anchor → arrives next day; incomplete sweep retry ×2 then send without
+advancing, next day no repeat; paused skip + advance; selected / all-minus-stopped pills + stale prune; 9:59 not due,
+10:00 due across the Nov 1 DST change, 12:59 due, 13:00 skipped; global switch off; advisory lock held elsewhere →
+locked; ceiling 0 → nothing sent, anchor kept; GET pause changes nothing, one-click POST pauses, resume, tampered /
+unknown-user token 404, stop-pill POST, cross-origin POST 403; /go redirect + unknown → /; webhook 401 without auth,
+soft bounce ignored, hard bounce (case-insensitive) suppresses, reactivation clears, spam complaint suppresses; admin
+preview sends nothing, send-mine sends one; no plaintext address in gc_users.db(+wal); purge clears all alert tables;
+no address/subject/item in log lines. Boot with alert env vars missing: home 200, /go 302, links + webhook 404,
+scheduler tick "off". `py_compile` + `node --check static/gc.js` clean.
+
+### After push (live check)
+1. Deploy log `[alerts] ready`, no tracebacks. Footer v2.19.0.
+2. Postmark webhook: Railway web Variables → add `ALERTS_WEBHOOK_SECRET` (long random, generated on Chuck's Mac,
+   never in chat); Postmark → server GC Gear Tracker → Default Transactional Stream → Webhooks → Add →
+   `https://postmark:<secret>@gcgeartracker.com/api/alerts/postmark-webhook`, events Bounce + Spam Complaint +
+   Subscription Change → Postmark's "Send test" should get 200.
+3. /admin/alerts: summary shows scheduler on, tz ok, webhook secret set. Chuck's row starts at `init` (confirmed under
+   v2.18.0): click "Rewind my window 24 h" → "Preview my alert" → "Send my alert now" → email arrives; check links
+   (/go, Stop alerts for…, Pause all → button page; don't click if you want to keep alerts on, or resume after).
+4. Next morning ~10:00-10:05 ET: Railway log `[alerts] daily run <day>: …`, and the email if anything matched.
 
 ## v2.18.1 — 2026-10-08: Privacy policy covers Want List email alerts (ahead of the Postmark approval request). Text only.
 

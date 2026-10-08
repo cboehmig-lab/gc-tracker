@@ -1,6 +1,6 @@
 # Want List Email Alerts — Design (gcgeartracker.com)
 
-Status: **step 1 (v2.18.0) LIVE and verified 2026-10-07; step 2 next.** Design agreed in claude.ai chat 2026-10-02 → 10-07; code investigation
+Status: **step 1 (v2.18.0) LIVE 2026-10-07; v2.18.1 privacy policy LIVE + Postmark APPROVED 2026-10-08; step 2 (v2.19.0, daily alert engine) BUILT + locally verified 2026-10-08, not yet pushed.** Design agreed in claude.ai chat 2026-10-02 → 10-07; code investigation
 done in Cowork 2026-10-07 (app at v2.17.9). Build happens in the 5 steps at the bottom, each step its own version(s),
 each waiting on Chuck's go-ahead.
 
@@ -29,12 +29,18 @@ each waiting on Chuck's go-ahead.
     listed and then sold or removed between scans may have been missed." Supersedes the hourly/daily choice
     above (drop `frequency` from alert_settings, the hourly scheduler and `last_hourly_run`; update the popup /
     privacy copy that mentions hourly).
-  - **PROPOSED 2026-10-08 (Chuck raised, not yet decided): which pills alert.** Chuck suggested an "alert on my
+  - **DECIDED 2026-10-08 (Chuck agreed): which pills alert.** Chuck suggested an "alert on my
     entire Want List" option plus per-pill selection, shown as a vertical list with a bell beside each pill (instead
     of the cloud), so huge Want Lists don't flood people. Proposal: one alert mode per user, `all` (default; pills
     added later are included automatically) or `selected` (only belled pills). Since it's at most one email a day,
     a big list makes a longer email, not more emails, so also cap items per email (e.g. top ~25, newest first, then
-    "+N more on gcgeartracker.com"). Awaiting Chuck's pick.
+    "+N more on gcgeartracker.com"). Chuck agreed: all by default, choose pills optionally, ~25 per email.
+  - **Email "view all" link (Chuck, 2026-10-08)**: the "+N more" / "View all N matches" link opens the site on the
+    Want List view showing exactly that email's matches. Proposed mechanics: link `gcgeartracker.com/?alert=<signed
+    token>` → the page loads that alert's SKUs from the ledger (still-available ones, sold ones dropped) and shows them
+    as a filtered Want List view. Do NOT auto-run a scan or rely on the NEW tag here — NEW is relative to the user's
+    own last scan, so if they scanned on the site earlier that morning the emailed items would no longer be NEW, and
+    an auto-scan would move their anchor. Requires login (signed token is per-user; logged-out → sign in, then land).
 - **"New" = exactly the site's NEW-tag rule**: `date_listed` newer than an anchor, anchor only advanced on a scan
   with complete coverage. Late-arriving older-dated listings do not count (Chuck, 2026-10-01).
 - **Matching** = the existing Postgres Want List matcher (`_tsquery_want_list_entry`, same one `/api/browse` uses),
@@ -251,6 +257,84 @@ ceiling of 50 (`ALERTS_DAILY_CEILING`) for the free plan. See HANDOFF.md v2.18.0
   DB file (`strings gc_users.db | grep @` finds nothing), codes hashed, limits fire, missing-env boot works, logs
   contain no address. Then live: Chuck confirms his own address and receives a test send.
 
+### Step 2 plan (v2.19.0, daily alert engine) — APPROVED by Chuck 2026-10-08, BUILT (see HANDOFF.md v2.19.0)
+Supersedes the hourly parts of §1/§3. Still Chuck-only: a user gets alerts only if confirmed address AND
+(admin or `users.alerts_beta`) AND the global switch (`alert_meta.global_switch`, default on for admin only).
+
+**What we found in the code that shapes this**
+- The background **sweep** (`_start_sweep()` → `_run(mode="sweep")`, v2.17.4) already does a full nationwide fetch
+  (~20 s), writes Postgres, and reports `result.complete` (the nbHits coverage guard). A click during a sweep queues
+  one follow-up sweep. So the 10 AM "scan" = call `_start_sweep()` and wait for a `complete` result — no new scan code.
+- Every listing any scan saw stays in `items` (sold ones flip `available = false`), so "what's new since yesterday's
+  alert" is a Postgres query on `date_listed`. Correction to my 2026-10-08 chat idea of "collecting matches from every
+  scan during the day": not needed — those items are already in `items`, and the ones that sold before 10 AM shouldn't
+  be emailed anyway. The disclaimer covers that gap.
+- Matcher = `_tsquery_want_list_entry(kw)` per pill (same SQL the site's Want List uses), after `_kw_accept_capped`.
+  `_TsqueryUnsupported` → skip that pill, count it.
+
+**Schedule**
+- Daemon thread (pattern: `_malloc_trim_loop`), wakes every 60 s. Fires once per ET calendar day at/after 10:00
+  America/New_York (zoneinfo, DST-safe), every day including weekends. Catch-up after a deploy/restart: if today's run
+  hasn't happened, run any time until 13:00 ET; after that skip the day (no evening surprise emails).
+- `pg_try_advisory_lock(<const>)` on a pooled Postgres connection so only one container runs it during a deploy overlap;
+  `alert_meta.last_daily_run = <ET date>` written when done → never twice a day.
+- Run: `_start_sweep()`, wait for it to finish (max ~5 min). If `complete` is false: retry at +20 and +40 min. If still
+  incomplete: send anyway from what's in Postgres, but don't advance anyone's anchor (ledger stops duplicates; the next
+  day picks up anything missed).
+
+**Who gets what (per user)**
+- `alert_settings` gets `mode` ('all' default | 'selected') and `anchor` (TEXT, same normalized `date_listed` form as
+  the NEW rule, `_norm_item_date`). `frequency` column left in place, ignored.
+- `anchor` is set when the address is confirmed = current max available `date_listed` → a new subscriber's first alert
+  covers only listings after they signed up, never the whole back catalog.
+- `alert_pills (user_id, keyword, on INTEGER, updated_at, PK(user_id, keyword))`. Mode `all`: every Want List pill
+  except rows with on=0. Mode `selected`: only rows with on=1. Pills whose text is no longer in the Want List are
+  ignored (and pruned).
+- Window for a user: `available AND date_listed > user.anchor AND date_listed <= run_max` (run_max = max date_listed
+  after the sweep). One query per pill limited to the window's SKUs (a day's window is a few hundred to ~2,000 rows).
+- Drop SKUs already in the ledger `alert_sent (user_id, sku, sent_at, PK(user_id, sku))`. Nothing left → no email.
+- After a successful send, or no matches: write ledger rows and `anchor = run_max`. Paused/suppressed users: skip and
+  advance the anchor (no backlog dump when they un-pause). Send failure or ceiling hit: anchor NOT advanced → tomorrow.
+- Ledger pruned after 180 days.
+
+**The email**
+- Subject: one item → `Want List Item Found: <item name>`; several → `Want List Items Found: N matches for <pill>,
+  <pill>` (+ "and N more" if long). From `GC Gear Tracker <alerts@gcgeartracker.com>`, transactional stream.
+- Body (HTML + plain text): grouped by pill, newest first, **max 25 items total**; each: name, price (and price drop
+  if any), condition, store, "View at Guitar Center" → `https://gcgeartracker.com/go/<sku>`.
+- "View all N matches on GC Gear Tracker" → `/?alert=<id>` (the Want List view filtered to exactly this email's still-
+  available SKUs, read from the ledger; login required; no scan, no NEW tag). The site-side view is step 3 UI; in step
+  2 the link lands on the Want List page.
+- Disclaimer (Chuck's wording, tidied): "Listings were available when we checked at 10 AM ET and may have sold since.
+  Items that were listed and sold between checks may not appear."
+- Footer: Manage alerts · Stop alerts for "<pill>" (one per pill shown) · Pause all alerts. The last two are one-click
+  HMAC-signed links (no login): GET shows a small confirm page with a button, POST does it (link scanners in mail apps
+  issue GETs, so GET never changes anything). Headers `List-Unsubscribe: <https://gcgeartracker.com/alerts/u/<token>>`
+  + `List-Unsubscribe-Post: List-Unsubscribe=One-Click` (RFC 8058 POST → pause all, no confirm page).
+- Tokens: HMAC(ALERTS_HMAC_KEY, "u:<user_id>:<action>:<pill>") — no expiry, invalid once the address is removed.
+
+**New routes**
+- `GET /go/<sku>` → 302 to that item's GC URL (only if it's a guitarcenter.com URL, else home). Logs nothing per user.
+- `GET|POST /alerts/u/<token>` (pause all), `GET|POST /alerts/p/<token>` (stop one pill). CSRF-exempt by design (the
+  signature is the auth; the global Origin check already lets header-less POSTs through).
+- `POST /api/alerts/postmark-webhook` — Postmark Bounce + Spam Complaint + Subscription Change webhooks, protected by
+  HTTP basic auth (new env var `ALERTS_WEBHOOK_SECRET`, set in Postmark's webhook URL). HardBounce / SpamComplaint /
+  SuppressSending → `alert_settings.suppressed = <type>`; matched by blind index of the address, never logged.
+
+**Admin (/admin/alerts additions)**
+- Last run: time, sweep complete y/n, users considered / emailed / no matches / skipped (counts only, no addresses).
+- Ceiling-hit warning. Global switch on/off.
+- "Preview my alert" (dry run for Chuck's own account: shows the email that WOULD go out, sends nothing) and "Send my
+  alert now" (real send to Chuck only, doesn't wait for 10 AM; uses the same window/ledger so it's a true test).
+
+**Not in step 2** (step 3): the bell / vertical pill list UI, the settings panel, the `?alert=` view, account deletion UI.
+
+**Verify locally** (cloud sandbox, throwaway Postgres + scratch DATA_DIR, Postmark mocked, fake clock): no email when
+nothing matches; one email with grouped items when matches; never the same SKU twice; 25-item cap; anchor not
+advanced on failure/ceiling/incomplete sweep; paused + suppressed skip; catch-up before 13:00 ET, skip after; DST
+boundary; advisory lock blocks a second runner; one-click POST pauses, GET doesn't; bad token 404; webhook without
+auth 401; no address in logs or DB plaintext. Then live: Chuck's own 10 AM alert the next morning.
+
 ---
 
 ## 6. Setup log (2026-10-07)
@@ -283,6 +367,13 @@ Verified, Return-Path Verified. Account is in **test mode** (100 emails total, o
 - Stream: transactional (resolved 2026-10-08 — Postmark's own docs list "individual alert emails the user has
   opted-in to receive" and per-user digest emails as transactional). Mention: in development, Chuck only → a few beta users;
   privacy policy (v2.18.1) at gcgeartracker.com/privacy describes the feature.
+
+**Postmark APPROVED 2026-10-08** — submitted the form above (adjusted to the daily-alert wording, stream =
+transactional; fields: volume 1-1,000/mo, why Postmark, message types, recipient acquisition) and Postmark showed
+"approved" right away. Test mode is lifted: can send to any address. Still on the FREE plan (100 emails/mo) — keep
+ALERTS_DAILY_CEILING at 50 until upgrading to Basic before beta. The form promised: one-click unsubscribe
+(List-Unsubscribe + RFC 8058), pause/stop links, bounce/complaint suppression via webhook, daily cap — step 2 MUST
+ship all of these before anyone but Chuck gets alerts.
 
 **Railway + live test (2026-10-07)**: env vars POSTMARK_SERVER_TOKEN, ALERTS_EMAIL_KEY (backed up in Chuck's password
 manager — losing it makes stored addresses unreadable), ALERTS_HMAC_KEY added to web. v2.18.0 deployed, `[alerts] ready`;

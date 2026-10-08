@@ -250,6 +250,45 @@ def _init_user_db():
                 v TEXT
             )
         """)
+        # ── v2.19.0 (step 2, daily alert engine) ──
+        # alert_settings.mode: 'all' (every Want List pill except ones switched off in
+        # alert_pills) or 'selected' (only pills switched on). anchor: normalized
+        # date_listed (same form as the NEW rule's _norm_item_date) — the user's next
+        # alert covers available items listed after it. frequency is left in place,
+        # unused (alerts are daily only since 2026-10-08).
+        for _col in ("mode TEXT DEFAULT 'all'", "anchor TEXT", "last_alert_at TEXT"):
+            try:
+                conn.execute(f"ALTER TABLE alert_settings ADD COLUMN {_col}")
+            except Exception:
+                pass  # Column already exists
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alert_pills (
+                user_id    INTEGER NOT NULL,
+                keyword    TEXT    NOT NULL,
+                on_        INTEGER NOT NULL,
+                updated_at TEXT,
+                PRIMARY KEY (user_id, keyword)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alert_sent (
+                user_id INTEGER NOT NULL,
+                sku     TEXT    NOT NULL,
+                sent_at TEXT    NOT NULL,
+                batch   TEXT,
+                PRIMARY KEY (user_id, sku)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_sent_t ON alert_sent(sent_at)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alert_batches (
+                id         TEXT PRIMARY KEY,
+                user_id    INTEGER NOT NULL,
+                created_at TEXT    NOT NULL,
+                skus       TEXT    NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_batches_u ON alert_batches(user_id, created_at)")
         conn.commit()
 
 def _user_by_username(username: str) -> dict | None:
@@ -274,7 +313,7 @@ def _user_by_id(user_id: int) -> dict | None:
 # through _purge_user_rows so a new per-user table can't be forgotten in one path.
 # (v2.18.0) Add new per-user tables HERE.
 _PER_USER_TABLES = ("user_data", "alert_email", "alert_settings", "alert_codes",
-                    "alert_code_sends")
+                    "alert_code_sends", "alert_pills", "alert_sent", "alert_batches")
 
 def _purge_user_rows(conn, user_id: int) -> None:
     """Hard-delete every row belonging to user_id (caller commits)."""
@@ -3763,7 +3802,7 @@ def send_email(to: str, subject: str, text: str, html: str | None = None, *,
 def _alerts_status(user_id: int) -> dict:
     with _user_db() as conn:
         em  = conn.execute("SELECT email_enc, confirmed_at FROM alert_email WHERE user_id=?", (user_id,)).fetchone()
-        st  = conn.execute("SELECT frequency, paused FROM alert_settings WHERE user_id=?", (user_id,)).fetchone()
+        st  = conn.execute("SELECT mode, paused, suppressed FROM alert_settings WHERE user_id=?", (user_id,)).fetchone()
         pc  = conn.execute("SELECT expires_at, attempts FROM alert_codes WHERE user_id=?", (user_id,)).fetchone()
     masked = None
     if em and _ALERTS_READY:
@@ -3774,8 +3813,9 @@ def _alerts_status(user_id: int) -> dict:
         "ready":      _ALERTS_READY,
         "confirmed":  bool(em and em["confirmed_at"]),
         "masked":     masked,
-        "frequency":  st["frequency"] if st else "hourly",
+        "mode":       (st["mode"] or "all") if st else "all",
         "paused":     bool(st["paused"]) if st else False,
+        "suppressed": (st["suppressed"] or None) if st else None,
         "code_pending": pending,
         "code_expires_in": int(pc["expires_at"] - time.time()) if pending else 0,
     }
@@ -3862,8 +3902,11 @@ def _alerts_confirm(user_id: int, raw_code: str) -> tuple[bool, str, int]:
             "VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET email_enc=excluded.email_enc, "
             "email_bidx=excluded.email_bidx, confirmed_at=excluded.confirmed_at, updated_at=excluded.updated_at",
             (user_id, row["email_enc"], row["email_bidx"], stamp, stamp, stamp))
-        conn.execute("INSERT OR IGNORE INTO alert_settings(user_id, frequency, paused, updated_at) "
-                     "VALUES(?, 'hourly', 0, ?)", (user_id, stamp))
+        # v2.19.0: a new subscriber's first alert covers only listings after now
+        # (anchor = newest available date_listed), never the back catalog. A
+        # changed address keeps its existing settings row (INSERT OR IGNORE).
+        conn.execute("INSERT OR IGNORE INTO alert_settings(user_id, frequency, paused, mode, anchor, updated_at) "
+                     "VALUES(?, 'daily', 0, 'all', ?, ?)", (user_id, _alerts_initial_anchor(), stamp))
         conn.execute("DELETE FROM alert_codes WHERE user_id=?", (user_id,))
         conn.commit()
     return True, "Email confirmed.", 200
@@ -3894,7 +3937,7 @@ def _alerts_remove(user_id: int) -> tuple[bool, str, int]:
     (user id + keyed hash, no address), pruned after 48 h — deleting it here would
     let remove → re-add reset the limits. Account deletion still purges it."""
     with _user_db() as conn:
-        for t in ("alert_email", "alert_codes", "alert_settings"):
+        for t in ("alert_email", "alert_codes", "alert_settings", "alert_pills", "alert_sent", "alert_batches"):
             conn.execute(f"DELETE FROM {t} WHERE user_id=?", (user_id,))
         conn.commit()
     return True, "Your email address has been removed.", 200
@@ -3943,6 +3986,7 @@ def admin_alerts():
     if denied:
         return denied
     uid = session.get("user_id")
+    preview = ""
     if request.method == "POST":
         submitted = request.form.get("_csrf", "")
         expected  = session.get("_admin_csrf") or ""
@@ -3960,10 +4004,22 @@ def admin_alerts():
             res = _alerts_test_send(uid)
         elif action == "remove":
             res = _alerts_remove(uid)
+        elif action == "preview":       # v2.19.0: rendered inline (too big for the session cookie)
+            _msg, preview = _alerts_admin_preview(uid)
+            session["_alerts_flash"] = "✓ " + _msg
+            res = None
+        elif action == "send_mine":
+            res = (True, _alerts_admin_send_mine(uid), 200)
+        elif action == "rewind":
+            res = (True, _alerts_admin_rewind(uid), 200)
+        elif action in ("switch_on", "switch_off"):
+            _alerts_meta_set("global_switch", "on" if action == "switch_on" else "off")
+            res = (True, f"Global switch {'ON' if action == 'switch_on' else 'OFF'}.", 200)
         else:
             res = (False, "Unknown action.", 400)
-        session["_alerts_flash"] = ("✓ " if res[0] else "✕ ") + res[1]
-        return redirect("/admin/alerts")
+        if res is not None:
+            session["_alerts_flash"] = ("✓ " if res[0] else "✕ ") + res[1]
+            return redirect("/admin/alerts")
 
     flash = session.pop("_alerts_flash", "")
     csrf  = _admin_page_csrf()
@@ -3997,7 +4053,7 @@ h1{{color:#fff}} h2{{color:#ccc;font-size:1rem;margin-top:28px}} td{{padding:3px
 .flash{{background:#1e1e1e;border:1px solid #333;padding:8px 12px;border-radius:4px;margin:12px 0}}
 .note{{color:#777;font-size:.8rem}}</style></head><body>
 {_admin_nav('/admin/alerts')}
-<h1>✉ Email alerts — step 1 test page</h1>
+<h1>✉ Email alerts</h1>
 <div>Alerts ready: {yn(_ALERTS_READY)} &nbsp;·&nbsp; From: {_html.escape(_ALERTS_FROM)}
  &nbsp;·&nbsp; Sent today (UTC): {_alerts_sends_today()} / {_ALERTS_DAILY_CEILING}</div>
 <table style="margin-top:10px">{env_rows}</table>
@@ -4008,10 +4064,705 @@ h1{{color:#fff}} h2{{color:#ccc;font-size:1rem;margin-top:28px}} td{{padding:3px
 {form("confirm", f'<input type="text" name="code" inputmode="numeric" maxlength="7" placeholder="6-digit code" autocomplete="one-time-code" required {inp}>', "Confirm")}
 {form("test", "", "Send test email")}
 {form("remove", "", "Remove my email", "#600")}
+<h2>Daily alert (10 AM ET)</h2>
+<div>{_alerts_admin_summary_html()}</div>
+{form("preview", "", "Preview my alert (sends nothing)")}
+{form("send_mine", "", "Send my alert now")}
+{form("rewind", "", "Rewind my window 24 h (testing)", "#443")}
+{form("switch_off" if _alerts_global_on() else "switch_on", "", "Turn global switch OFF" if _alerts_global_on() else "Turn global switch ON", "#600" if _alerts_global_on() else "#253")}
+{f'<pre style="background:#1a1a1a;border:1px solid #333;padding:12px;white-space:pre-wrap;max-width:760px">{_html.escape(preview)}</pre>' if preview else ''}
 <p class="note">Addresses are stored encrypted (Fernet, key in Railway env) and are never shown here
 except your own, masked. Codes are stored hashed and expire in {_CODE_TTL_S // 60} min.</p>
 </body></html>"""
     return Response(html, mimetype="text/html")
+
+
+# ── Daily alert engine (v2.19.0, email alerts step 2 — EMAIL_ALERTS_DESIGN.md) ─
+# Once per ET day at/after 10:00 America/New_York (catch-up until 13:00, then the
+# day is skipped): run the background nationwide sweep, then for every eligible
+# user email the still-available Want List matches listed since their last alert.
+# No matches → no email. Same privacy rules as the section above: an address is
+# decrypted only to build the Postmark request; nothing here logs an address,
+# subject, keyword or SKU list — counts and tags only.
+from datetime import timezone as _timezone
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _ALERTS_TZ = _ZoneInfo("America/New_York")
+except Exception:          # no tz database — engine stays off, app boots normally
+    _ALERTS_TZ = None
+    print("[alerts] engine disabled — America/New_York time zone unavailable (tzdata)")
+
+_ALERTS_RUN_HOUR        = 10      # ET
+_ALERTS_CATCHUP_END     = 13      # ET; after this a missed day is skipped
+_ALERTS_RETRY_MIN       = 20      # incomplete sweep → retry after this many minutes
+_ALERTS_MAX_ATTEMPTS    = 3       # sweep tries per day before sending from what's there
+_ALERTS_MAX_ITEMS       = 25      # items shown per email
+_ALERTS_PILL_ROW_CAP    = 500     # rows read per pill per run (a day is ~hundreds)
+_ALERTS_SENT_KEEP_DAYS  = 180
+_ALERTS_SITE            = "https://gcgeartracker.com"
+_ALERTS_ADV_LOCK_KEY    = 7101987019   # pg_try_advisory_lock key for the daily job
+_ALERTS_WEBHOOK_SECRET  = (os.environ.get("ALERTS_WEBHOOK_SECRET") or "").strip()
+_ALERTS_SCHEDULER_ON    = (os.environ.get("ALERTS_SCHEDULER") or "on").strip().lower() != "off"
+_ALERTS_DL_NORM_SQL     = "(CASE WHEN length(date_listed) = 10 THEN date_listed || 'T23:59:59Z' ELSE date_listed END)"
+_ALERTS_RUN_STATE       = {"day": None, "attempts": 0, "next_try": 0.0, "running": False}
+_ALERTS_RUN_LOCK        = threading.Lock()   # one run (scheduled or admin) at a time in-process
+
+
+def _alerts_norm_dl(d: str) -> str:
+    """Same normalization as the NEW rule (_run's _norm_item_date)."""
+    return d + "T23:59:59Z" if d and len(d) == 10 else (d or "")
+
+
+def _alerts_meta_get(k: str, default=None):
+    with _user_db() as conn:
+        row = conn.execute("SELECT v FROM alert_meta WHERE k=?", (k,)).fetchone()
+    return row["v"] if row else default
+
+
+def _alerts_meta_set(k: str, v: str) -> None:
+    with _user_db() as conn:
+        conn.execute("INSERT INTO alert_meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))
+        conn.commit()
+
+
+def _alerts_global_on() -> bool:
+    return (_alerts_meta_get("global_switch", "on") or "on") == "on"
+
+
+def _alerts_pg_max_listed() -> str | None:
+    """Newest normalized date_listed among available items (None if no Postgres)."""
+    if _PG_POOL is None:
+        return None
+    def _q():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT MAX({_ALERTS_DL_NORM_SQL}) FROM items WHERE available")
+                return cur.fetchone()[0]
+    try:
+        return _pg_read(_q)
+    except Exception as e:
+        print(f"[alerts] max date_listed read failed: {type(e).__name__}")
+        return None
+
+
+def _alerts_initial_anchor() -> str:
+    """Anchor for a newly confirmed address: newest available listing, or now."""
+    return _alerts_pg_max_listed() or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _alerts_user_row_is_admin(u: dict) -> bool:
+    return bool(ADMIN_EMAIL and u.get("google_id") and (u.get("email") or "").strip().lower() == ADMIN_EMAIL)
+
+
+def _alerts_subscribers(only_user: int | None = None) -> list[dict]:
+    """Confirmed subscribers allowed to get alerts right now: admin, or the
+    per-user beta flag. (The global switch is checked by the caller.)"""
+    sql = ("SELECT u.id AS user_id, u.email, u.google_id, u.alerts_beta, u.deleted_at, "
+           "e.email_enc, s.paused, s.suppressed, s.mode, s.anchor "
+           "FROM alert_email e JOIN users u ON u.id = e.user_id "
+           "LEFT JOIN alert_settings s ON s.user_id = e.user_id "
+           "WHERE e.confirmed_at IS NOT NULL")
+    args = ()
+    if only_user is not None:
+        sql += " AND u.id = ?"
+        args = (only_user,)
+    with _user_db() as conn:
+        rows = [dict(r) for r in conn.execute(sql + " ORDER BY u.id", args).fetchall()]
+    return [r for r in rows if not r["deleted_at"] and (r["alerts_beta"] or _alerts_user_row_is_admin(r))]
+
+
+def _alerts_active_pills(user_id: int, keywords: list, mode: str) -> list[str]:
+    """The Want List pills this user is alerted on, in Want List order, after the
+    same per-shape caps the site applies. Prunes alert_pills rows whose pill is
+    no longer in the Want List."""
+    accepted = _kw_accept_capped([k for k in keywords if isinstance(k, str)])
+    with _user_db() as conn:
+        rows = {r["keyword"]: r["on_"] for r in
+                conn.execute("SELECT keyword, on_ FROM alert_pills WHERE user_id=?", (user_id,)).fetchall()}
+        stale = [k for k in rows if k not in keywords]
+        if stale:
+            conn.executemany("DELETE FROM alert_pills WHERE user_id=? AND keyword=?", [(user_id, k) for k in stale])
+            conn.commit()
+    if mode == "selected":
+        return [k for k in accepted if rows.get(k) == 1]
+    return [k for k in accepted if rows.get(k, 1) == 1]
+
+
+def _alerts_pill_label(kw: str) -> str:
+    return kw.lstrip("=").strip()
+
+
+def _alerts_pill_id(user_id: int, kw: str) -> str:
+    return _alerts_hmac("pill", f"{user_id}:{kw}")[:16]
+
+
+def _alerts_link_token(user_id: int, action: str, pid: str = "-") -> str:
+    """action: 'u' pause all, 'r' resume, 'p' stop one pill (pid = _alerts_pill_id).
+    No expiry; dead once the address is removed (the routes check alert_email)."""
+    body = f"{user_id}.{action}.{pid}"
+    return f"{body}.{_alerts_hmac('link', body)[:32]}"
+
+
+def _alerts_parse_token(tok: str):
+    parts = (tok or "").split(".")
+    if len(parts) != 4 or not parts[0].isdigit() or parts[1] not in ("u", "r", "p"):
+        return None
+    body = ".".join(parts[:3])
+    if not _ALERTS_READY or not hmac.compare_digest(_alerts_hmac("link", body)[:32], parts[3]):
+        return None
+    return int(parts[0]), parts[1], parts[2]
+
+
+def _alerts_find_matches(user_id: int, pills: list[str], lo: str, hi: str) -> tuple[list[dict], int]:
+    """Available items listed in (lo, hi] matching any pill, newest first, minus
+    the ledger. Returns (items, pills_skipped). Each item carries `pills`."""
+    found, skipped = {}, 0
+    def _q():
+        nonlocal skipped
+        out = {}
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                for kw in pills:
+                    try:
+                        frag, prm = _tsquery_want_list_entry(kw)
+                    except _TsqueryUnsupported:
+                        skipped += 1
+                        continue
+                    if frag is None:
+                        continue
+                    cur.execute(
+                        f"SELECT sku, name, brand, price, list_price, has_price_drop, price_drop, condition, "
+                        f"store, url, {_ALERTS_DL_NORM_SQL} AS dl FROM items "
+                        f"WHERE available AND {_ALERTS_DL_NORM_SQL} > %s AND {_ALERTS_DL_NORM_SQL} <= %s "
+                        f"AND ({frag}) ORDER BY dl DESC, sku LIMIT {_ALERTS_PILL_ROW_CAP}",
+                        [lo, hi] + list(prm))
+                    for r in cur.fetchall():
+                        it = out.get(r[0])
+                        if it is None:
+                            it = out[r[0]] = {
+                                "sku": r[0], "name": r[1] or "", "brand": r[2] or "",
+                                "price": float(r[3] or 0), "list_price": float(r[4] or 0),
+                                "has_price_drop": bool(r[5]), "price_drop": float(r[6] or 0),
+                                "condition": r[7] or "", "store": r[8] or "", "url": r[9] or "",
+                                "dl": r[10] or "", "pills": []}
+                        it["pills"].append(kw)
+        return out
+    skipped = 0
+    found = _pg_read(_q)
+    if found:
+        with _user_db() as conn:
+            sent = {r["sku"] for r in conn.execute(
+                f"SELECT sku FROM alert_sent WHERE user_id=? AND sku IN ({','.join('?' * len(found))})",
+                (user_id, *found.keys())).fetchall()}
+        for sku in sent:
+            found.pop(sku, None)
+    items = sorted(found.values(), key=lambda it: (it["dl"], it["sku"]), reverse=True)
+    return items, skipped
+
+
+def _alerts_money(v: float) -> str:
+    return f"${v:,.0f}" if v == int(v) else f"${v:,.2f}"
+
+
+def _alerts_build_email(user_id: int, items: list[dict], pills: list[str], batch_id: str) -> tuple[str, str, str, dict]:
+    """(subject, text, html, headers) for one user's daily alert."""
+    shown = items[:_ALERTS_MAX_ITEMS]
+    n = len(items)
+    matched_pills = [p for p in pills if any(p in it["pills"] for it in items)]
+    labels = [_alerts_pill_label(p) for p in matched_pills]
+    if n == 1:
+        subject = f"Want List Item Found: {items[0]['name'] or labels[0]}"
+    else:
+        lab = ", ".join(labels[:3]) + (f" and {len(labels) - 3} more" if len(labels) > 3 else "")
+        subject = f"Want List Items Found: {n} matches for {lab}"
+    subject = subject[:180]
+    # Group the shown items by the first of the user's pills they matched.
+    groups = []
+    for p in matched_pills:
+        g = [it for it in shown if it["pills"][0] == p]
+        if g:
+            groups.append((p, g))
+    view_all = f"{_ALERTS_SITE}/?alert={batch_id}"
+    pause_url = f"{_ALERTS_SITE}/alerts/u/{_alerts_link_token(user_id, 'u')}"
+    manage_url = f"{_ALERTS_SITE}/"
+    note = ("Listings were available when we checked at 10 AM ET and may have sold since. "
+            "Items that were listed and sold between checks may not appear.")
+    esc = _html.escape
+
+    def _line(it):
+        bits = [_alerts_money(it["price"])]
+        if it["has_price_drop"] and it["price_drop"] > 0:
+            bits.append(f"price drop {_alerts_money(it['price_drop'])}")
+        if it["condition"]:
+            bits.append(it["condition"])
+        if it["store"]:
+            bits.append(it["store"])
+        return " · ".join(bits)
+
+    t = [f"{n} new Want List match{'es' if n != 1 else ''} at Guitar Center", ""]
+    h = ['<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,Arial,sans-serif;'
+         'color:#222;max-width:600px;margin:0 auto;padding:8px">',
+         f'<h2 style="font-size:18px;margin:0 0 4px">{n} new Want List match{"es" if n != 1 else ""}</h2>',
+         '<p style="color:#666;font-size:13px;margin:0 0 16px">Used gear at Guitar Center, found by GC Gear Tracker</p>']
+    stop_links = []
+    for p, g in groups:
+        lab = _alerts_pill_label(p)
+        t.append(f"== {lab} ==")
+        h.append(f'<h3 style="font-size:15px;margin:18px 0 6px;border-bottom:1px solid #ddd;padding-bottom:4px">'
+                 f'{esc(lab)}</h3>')
+        for it in g:
+            go = f"{_ALERTS_SITE}/go/{it['sku']}"
+            t += [it["name"], f"  {_line(it)}", f"  {go}", ""]
+            h.append(f'<p style="margin:0 0 12px"><a href="{esc(go)}" style="color:#b00;font-weight:600;'
+                     f'text-decoration:none">{esc(it["name"])}</a><br>'
+                     f'<span style="font-size:13px;color:#444">{esc(_line(it))}</span></p>')
+        stop_links.append((lab, f"{_ALERTS_SITE}/alerts/p/{_alerts_link_token(user_id, 'p', _alerts_pill_id(user_id, p))}"))
+    more = n - len(shown)
+    t += [f"View all {n} match{'es' if n != 1 else ''} on GC Gear Tracker: {view_all}" if more > 0
+          else f"Open your Want List on GC Gear Tracker: {view_all}", ""]
+    h.append(f'<p style="margin:18px 0"><a href="{esc(view_all)}" style="background:#b00;color:#fff;padding:9px 16px;'
+             f'border-radius:4px;text-decoration:none;font-size:14px">'
+             f'{"View all " + str(n) + " matches" if more > 0 else "Open your Want List"} on GC Gear Tracker</a>'
+             + (f'<span style="font-size:13px;color:#666"> &nbsp;(+{more} more not shown here)</span>' if more > 0 else "")
+             + '</p>')
+    t += [f"Note: {note}", ""]
+    h.append(f'<p style="font-size:12px;color:#777;margin:16px 0">Note: {esc(note)}</p>')
+    t.append("You're getting this because you turned on Want List email alerts at gcgeartracker.com.")
+    t.append(f"Manage alerts: {manage_url}")
+    for lab, url in stop_links:
+        t.append(f'Stop alerts for "{lab}": {url}')
+    t.append(f"Pause all alerts: {pause_url}")
+    t.append("")
+    t.append("GC Gear Tracker is independent and not affiliated with Guitar Center.")
+    foot = [f'<a href="{esc(manage_url)}" style="color:#777">Manage alerts</a>']
+    foot += [f'<a href="{esc(url)}" style="color:#777">Stop alerts for &ldquo;{esc(lab)}&rdquo;</a>' for lab, url in stop_links]
+    foot.append(f'<a href="{esc(pause_url)}" style="color:#777">Pause all alerts</a>')
+    h.append('<p style="font-size:12px;color:#777;border-top:1px solid #ddd;padding-top:10px;margin-top:18px">'
+             "You're getting this because you turned on Want List email alerts at gcgeartracker.com.<br>"
+             + " &nbsp;·&nbsp; ".join(foot) +
+             '<br>GC Gear Tracker is independent and not affiliated with Guitar Center.</p></div>')
+    headers = {"List-Unsubscribe": f"<{pause_url}>", "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"}
+    return subject, "\n".join(t), "".join(h), headers
+
+
+def _alerts_set_anchor(user_id: int, anchor: str, sent: bool = False) -> None:
+    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _user_db() as conn:
+        conn.execute("INSERT OR IGNORE INTO alert_settings(user_id, frequency, paused, mode, updated_at) "
+                     "VALUES(?, 'daily', 0, 'all', ?)", (user_id, now))
+        if sent:
+            conn.execute("UPDATE alert_settings SET anchor=?, last_alert_at=? WHERE user_id=?", (anchor, now, user_id))
+        else:
+            conn.execute("UPDATE alert_settings SET anchor=? WHERE user_id=?", (anchor, user_id))
+        conn.commit()
+
+
+def _alerts_process_user(u: dict, run_max: str, *, advance: bool = True, dry_run: bool = False) -> dict:
+    """One user's daily alert. Returns {"result": sent|none|skipped|init|failed|ceiling|error, ...}.
+    dry_run: compute + build the email, change nothing, send nothing."""
+    uid = u["user_id"]
+    if u.get("paused") or u.get("suppressed"):
+        if advance and not dry_run and run_max:
+            _alerts_set_anchor(uid, run_max)      # no backlog dump when they resume
+        return {"result": "skipped"}
+    anchor = u.get("anchor")
+    if not anchor:
+        if not dry_run and run_max:
+            _alerts_set_anchor(uid, run_max)
+        return {"result": "init"}
+    if not run_max or run_max <= anchor:
+        return {"result": "none"}
+    pills = _alerts_active_pills(uid, _get_user_data(uid).get("keywords") or [], u.get("mode") or "all")
+    if not pills:
+        if advance and not dry_run:
+            _alerts_set_anchor(uid, run_max)
+        return {"result": "none", "pills": 0}
+    items, skipped = _alerts_find_matches(uid, pills, anchor, run_max)
+    if not items:
+        if advance and not dry_run:
+            _alerts_set_anchor(uid, run_max)
+        return {"result": "none", "pills": len(pills), "pills_skipped": skipped}
+    batch_id = _secrets_alerts.token_urlsafe(12)
+    subject, text, html, headers = _alerts_build_email(uid, items, pills, batch_id)
+    if dry_run:
+        return {"result": "preview", "matches": len(items), "pills": len(pills), "pills_skipped": skipped,
+                "subject": subject, "text": text}
+    addr = _dec_email(u["email_enc"])
+    if not addr:
+        return {"result": "error", "why": "undecryptable"}
+    ok, why = send_email(addr, subject, text, html, tag="daily-alert", headers=headers)
+    if not ok:
+        return {"result": "ceiling" if why == "ceiling" else "failed", "why": why}
+    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _user_db() as conn:
+        conn.executemany("INSERT OR IGNORE INTO alert_sent(user_id, sku, sent_at, batch) VALUES(?,?,?,?)",
+                         [(uid, it["sku"], now, batch_id) for it in items])
+        conn.execute("INSERT INTO alert_batches(id, user_id, created_at, skus) VALUES(?,?,?,?)",
+                     (batch_id, uid, now, json.dumps([it["sku"] for it in items])))
+        conn.commit()
+    if advance:
+        _alerts_set_anchor(uid, run_max, sent=True)
+    return {"result": "sent", "matches": len(items), "pills": len(pills), "pills_skipped": skipped}
+
+
+def _alerts_prune() -> None:
+    cut = (datetime.utcnow() - timedelta(days=_ALERTS_SENT_KEEP_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _user_db() as conn:
+        conn.execute("DELETE FROM alert_sent WHERE sent_at < ?", (cut,))
+        conn.execute("DELETE FROM alert_batches WHERE created_at < ?", (cut,))
+        conn.commit()
+
+
+def _alerts_wait_for_sweep(timeout_s: int = 420) -> dict:
+    """Run (or join) the background nationwide sweep and wait for its result.
+    A click-started sweep already running queues one follow-up sweep, so the
+    result we read always comes from a sweep that started after this call."""
+    _start_sweep()
+    t0 = time.time()
+    time.sleep(2)
+    while time.time() - t0 < timeout_s:
+        with _SWEEP_STATE_LOCK:
+            running = _SWEEP_STATE["running"]
+            res = dict(_SWEEP_STATE["result"]) if _SWEEP_STATE["result"] else None
+        if not running:
+            return res or {"complete": False, "error": "no result"}
+        time.sleep(3)
+    return {"complete": False, "error": "timeout"}
+
+
+def _alerts_run_users(run_max: str, advance: bool) -> dict:
+    counts = {"considered": 0, "sent": 0, "none": 0, "skipped": 0, "init": 0, "failed": 0,
+              "ceiling": 0, "error": 0, "matches": 0, "pills_skipped": 0}
+    for u in _alerts_subscribers():
+        counts["considered"] += 1
+        try:
+            r = _alerts_process_user(u, run_max, advance=advance)
+        except Exception as e:
+            print(f"[alerts] user run failed: {type(e).__name__}")
+            r = {"result": "error"}
+        counts[r["result"]] = counts.get(r["result"], 0) + 1
+        counts["matches"] += r.get("matches", 0) if r["result"] == "sent" else 0
+        counts["pills_skipped"] += r.get("pills_skipped", 0)
+        if r["result"] == "ceiling":
+            break             # everyone left keeps their anchor → tomorrow
+    return counts
+
+
+def _alerts_daily_job(day: str, *, sweep=None) -> str:
+    """The 10 AM job for ET date `day`. Returns 'done', 'retry', 'busy' or 'locked'.
+    `sweep` is injectable for tests (default: _alerts_wait_for_sweep)."""
+    if not _ALERTS_RUN_LOCK.acquire(blocking=False):
+        return "busy"
+    conn = None
+    locked = False
+    try:
+        conn = _PG_POOL.getconn()
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (_ALERTS_ADV_LOCK_KEY,))
+            locked = bool(cur.fetchone()[0])
+        if not locked:
+            return "locked"            # another container is running it
+        if _alerts_meta_get("last_daily_run") == day:
+            return "done"
+        st = _ALERTS_RUN_STATE
+        if st["day"] != day:
+            st.update(day=day, attempts=0, next_try=0.0)
+        st["attempts"] += 1
+        t0 = time.time()
+        res = (sweep or _alerts_wait_for_sweep)()
+        complete = bool(res.get("complete"))
+        if not complete and st["attempts"] < _ALERTS_MAX_ATTEMPTS:
+            st["next_try"] = time.time() + _ALERTS_RETRY_MIN * 60
+            print(f"[alerts] daily run {day}: sweep incomplete (try {st['attempts']}), retrying in {_ALERTS_RETRY_MIN} min")
+            return "retry"
+        run_max = _alerts_pg_max_listed()
+        counts = _alerts_run_users(run_max or "", advance=complete) if run_max else {"error": "no postgres"}
+        _alerts_prune()
+        summary = {"day": day, "at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                   "sweep_complete": complete, "attempts": st["attempts"],
+                   "seconds": int(time.time() - t0), **counts}
+        _alerts_meta_set("last_daily_run", day)
+        _alerts_meta_set("last_run_summary", json.dumps(summary))
+        print(f"[alerts] daily run {day}: " + ", ".join(f"{k} {v}" for k, v in summary.items()
+                                                         if k not in ("day", "at")))
+        return "done"
+    finally:
+        if conn is not None:
+            try:
+                if locked:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT pg_advisory_unlock(%s)", (_ALERTS_ADV_LOCK_KEY,))
+                conn.autocommit = False
+            except Exception:
+                pass
+            _PG_POOL.putconn(conn)
+        _ALERTS_RUN_LOCK.release()
+
+
+def _alerts_due_day(now_utc: datetime | None = None) -> str | None:
+    """ET date string if the daily job is due now (10:00 ≤ ET < 13:00 and not
+    yet run today), else None."""
+    if _ALERTS_TZ is None:
+        return None
+    now = (now_utc or datetime.now(_timezone.utc)).astimezone(_ALERTS_TZ)
+    if not (_ALERTS_RUN_HOUR <= now.hour < _ALERTS_CATCHUP_END):
+        return None
+    day = now.date().isoformat()
+    if _alerts_meta_get("last_daily_run") == day:
+        return None
+    return day
+
+
+def _alerts_scheduler_tick(now_utc: datetime | None = None, *, sweep=None) -> str:
+    if not (_ALERTS_READY and _PG_POOL is not None and _ALERTS_TZ is not None):
+        return "off"
+    day = _alerts_due_day(now_utc)
+    if not day:
+        return "idle"
+    st = _ALERTS_RUN_STATE
+    if st["day"] == day and time.time() < st["next_try"]:
+        return "waiting"
+    if not _alerts_global_on():
+        _alerts_meta_set("last_daily_run", day)
+        _alerts_meta_set("last_run_summary", json.dumps({"day": day, "skipped": "global switch off"}))
+        return "switch_off"
+    return _alerts_daily_job(day, sweep=sweep)
+
+
+def _alerts_scheduler_loop():
+    time.sleep(90)                     # let boot (pool, schema) settle
+    while True:
+        try:
+            _alerts_scheduler_tick()
+        except Exception as e:
+            print(f"[alerts] scheduler tick failed: {type(e).__name__}")
+        time.sleep(60)
+
+
+# ── Public routes: item redirect, one-click links, Postmark webhook ───────────
+
+_ALERTS_SKU_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+
+@app.route("/go/<sku>")
+def alerts_go(sku):
+    """Email item links: 302 to the item's Guitar Center page. Logs nothing per
+    user; one place to swap in affiliate links later."""
+    target = "/"
+    if _ALERTS_SKU_RE.match(sku or "") and _PG_POOL is not None:
+        def _q():
+            with _pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT url FROM items WHERE sku=%s", (sku,))
+                    row = cur.fetchone()
+                    return row[0] if row else ""
+        try:
+            url = _pg_read(_q) or ""
+        except Exception:
+            url = ""
+        if url.startswith("https://www.guitarcenter.com/"):
+            target = url
+    return redirect(target, code=302)
+
+
+def _alerts_link_page(title: str, body_html: str, status: int = 200) -> Response:
+    page = ("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            "<meta name=\"robots\" content=\"noindex\">"
+            f"<title>{_html.escape(title)} — GC Gear Tracker</title>"
+            "<style>body{background:#111;color:#ccc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',"
+            "Roboto,sans-serif;padding:48px 20px;line-height:1.6}.box{max-width:480px;margin:0 auto}"
+            "h1{color:#fff;font-size:1.3rem}button{background:#b00;color:#fff;border:none;border-radius:4px;"
+            "padding:9px 18px;font-size:1rem;cursor:pointer}a{color:#f88}</style></head><body><div class=\"box\">"
+            f"<h1>{_html.escape(title)}</h1>{body_html}"
+            "<p style=\"margin-top:28px\"><a href=\"/\">GC Gear Tracker</a></p></div></body></html>")
+    return Response(page, status=status, mimetype="text/html")
+
+
+def _alerts_link_user(tok: str):
+    """(user_id, action, pid) for a valid token whose user still has an address."""
+    parsed = _alerts_parse_token(tok)
+    if not parsed:
+        return None
+    with _user_db() as conn:
+        ok = conn.execute("SELECT 1 FROM alert_email WHERE user_id=?", (parsed[0],)).fetchone()
+    return parsed if ok else None
+
+
+@app.route("/alerts/u/<tok>", methods=["GET", "POST"])
+def alerts_link_pause(tok):
+    """Pause all alerts (also the List-Unsubscribe target). GET only shows a
+    button — mail apps' link scanners issue GETs, so a GET never changes
+    anything. POST (the button, or an RFC 8058 one-click POST) does it."""
+    parsed = _alerts_link_user(tok)
+    if not parsed or parsed[1] not in ("u", "r"):
+        return _alerts_link_page("Link not valid", "<p>This link has expired or isn't valid.</p>", 404)
+    uid, action, _ = parsed
+    pause = action == "u"
+    if request.method == "POST":
+        now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        with _user_db() as conn:
+            conn.execute("INSERT OR IGNORE INTO alert_settings(user_id, frequency, paused, mode, updated_at) "
+                         "VALUES(?, 'daily', 0, 'all', ?)", (uid, now))
+            conn.execute("UPDATE alert_settings SET paused=?, updated_at=? WHERE user_id=?",
+                         (1 if pause else 0, now, uid))
+            if not pause:   # resuming: start fresh from now, no backlog
+                conn.execute("UPDATE alert_settings SET anchor=? WHERE user_id=?", (_alerts_initial_anchor(), uid))
+            conn.commit()
+        if request.form.get("List-Unsubscribe") == "One-Click":
+            return Response("ok", mimetype="text/plain")
+        if pause:
+            resume = _alerts_link_token(uid, "r")
+            return _alerts_link_page("Alerts paused",
+                "<p>You won't get any more Want List alert emails. Your address is kept so you can turn them "
+                "back on; to delete it, use “Remove my email” in your alert settings.</p>"
+                f"<form method=\"POST\" action=\"/alerts/u/{_html.escape(resume)}\"><button type=\"submit\">"
+                "Turn alerts back on</button></form>")
+        return _alerts_link_page("Alerts are back on", "<p>You'll get Want List alerts again, starting with "
+                                 "listings from now on.</p>")
+    label = "Pause all Want List email alerts?" if pause else "Turn Want List email alerts back on?"
+    btn = "Pause all alerts" if pause else "Turn alerts back on"
+    return _alerts_link_page(label, f"<form method=\"POST\"><button type=\"submit\">{btn}</button></form>")
+
+
+@app.route("/alerts/p/<tok>", methods=["GET", "POST"])
+def alerts_link_pill(tok):
+    """Stop alerts for one Want List pill (the pill stays on the Want List)."""
+    parsed = _alerts_link_user(tok)
+    if not parsed or parsed[1] != "p":
+        return _alerts_link_page("Link not valid", "<p>This link has expired or isn't valid.</p>", 404)
+    uid, _, pid = parsed
+    kw = next((k for k in (_get_user_data(uid).get("keywords") or [])
+               if isinstance(k, str) and hmac.compare_digest(_alerts_pill_id(uid, k), pid)), None)
+    if kw is None:
+        return _alerts_link_page("Search not found",
+                                 "<p>That search is no longer on your Want List, so there's nothing to stop.</p>")
+    lab = _html.escape(_alerts_pill_label(kw))
+    if request.method == "POST":
+        now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        with _user_db() as conn:
+            conn.execute("INSERT INTO alert_pills(user_id, keyword, on_, updated_at) VALUES(?,?,0,?) "
+                         "ON CONFLICT(user_id, keyword) DO UPDATE SET on_=0, updated_at=excluded.updated_at",
+                         (uid, kw, now))
+            conn.commit()
+        return _alerts_link_page("Stopped", f"<p>No more alerts for “{lab}”. It's still on your Want List, "
+                                 "and your other alerts are unchanged.</p>")
+    return _alerts_link_page(f"Stop alerts for “{_alerts_pill_label(kw)}”?",
+                             "<p>It stays on your Want List; you just won't get emails for it.</p>"
+                             "<form method=\"POST\"><button type=\"submit\">Stop these alerts</button></form>")
+
+
+_ALERTS_SUPPRESS_BOUNCES = {"HardBounce", "BadEmailAddress", "ManuallyDeactivated", "SpamNotification", "SpamComplaint"}
+
+@app.route("/api/alerts/postmark-webhook", methods=["POST"])
+def alerts_postmark_webhook():
+    """Postmark Bounce / Spam Complaint / Subscription Change webhooks → suppress
+    (or un-suppress) the matching subscriber. HTTP basic auth with
+    ALERTS_WEBHOOK_SECRET (Postmark: https://postmark:<secret>@gcgeartracker.com/...).
+    The address is only turned into its blind index, never logged or stored."""
+    if not _ALERTS_WEBHOOK_SECRET or not _ALERTS_READY:
+        return jsonify({"error": "Not found"}), 404
+    auth = request.authorization
+    if not auth or not hmac.compare_digest((auth.password or "").encode(), _ALERTS_WEBHOOK_SECRET.encode()):
+        return Response("Unauthorized", status=401, headers={"WWW-Authenticate": 'Basic realm="webhook"'})
+    d = request.get_json(silent=True) or {}
+    rtype = d.get("RecordType", "")
+    addr, reason = "", None
+    if rtype == "Bounce":
+        addr = d.get("Email") or ""
+        reason = d.get("Type") if d.get("Type") in _ALERTS_SUPPRESS_BOUNCES else None
+    elif rtype == "SpamComplaint":
+        addr, reason = d.get("Email") or "", "SpamComplaint"
+    elif rtype == "SubscriptionChange":
+        addr = d.get("Recipient") or ""
+        reason = (d.get("SuppressionReason") or "Suppressed") if d.get("SuppressSending") else ""
+    if addr and reason is not None:
+        bidx = _email_bidx(addr)
+        now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        with _user_db() as conn:
+            uids = [r["user_id"] for r in conn.execute("SELECT user_id FROM alert_email WHERE email_bidx=?", (bidx,))]
+            for uid in uids:
+                conn.execute("INSERT OR IGNORE INTO alert_settings(user_id, frequency, paused, mode, updated_at) "
+                             "VALUES(?, 'daily', 0, 'all', ?)", (uid, now))
+                conn.execute("UPDATE alert_settings SET suppressed=?, updated_at=? WHERE user_id=?",
+                             (reason or None, now, uid))
+            conn.commit()
+        print(f"[alerts] webhook {rtype} → {'suppressed' if reason else 'unsuppressed'} {len(uids)} subscriber(s)")
+    return jsonify({"ok": True})
+
+
+# ── Admin helpers (used by /admin/alerts) ─────────────────────────────────────
+
+def _alerts_admin_preview(uid: int) -> tuple[str, str]:
+    """(flash, preview_text) — what Chuck's alert would contain right now."""
+    subs = _alerts_subscribers(uid)
+    if not subs:
+        return "No confirmed alert address on this account.", ""
+    r = _alerts_process_user(subs[0], _alerts_pg_max_listed() or "", advance=False, dry_run=True)
+    if r["result"] == "preview":
+        return (f"Preview: {r['matches']} match(es) across {r['pills']} pill(s) — nothing sent.",
+                f"Subject: {r['subject']}\n\n{r['text']}")
+    msg = {"none": "No new matches since your last alert — no email would be sent.",
+           "skipped": "Your alerts are paused or suppressed — no email would be sent.",
+           "init": "No alert window yet (it starts at your next alert)."}.get(r["result"], r["result"])
+    return msg, ""
+
+
+def _alerts_admin_send_mine(uid: int) -> str:
+    subs = _alerts_subscribers(uid)
+    if not subs:
+        return "No confirmed alert address on this account."
+    if not _ALERTS_RUN_LOCK.acquire(blocking=False):
+        return "The daily run is in progress — try again in a minute."
+    try:
+        r = _alerts_process_user(subs[0], _alerts_pg_max_listed() or "", advance=True)
+    finally:
+        _ALERTS_RUN_LOCK.release()
+    return {"sent": f"Sent: {r.get('matches', 0)} match(es).",
+            "none": "No new matches since your last alert — nothing sent.",
+            "skipped": "Your alerts are paused or suppressed — nothing sent.",
+            "init": "Alert window started now; matches will come from listings after this.",
+            "ceiling": "Daily send limit reached — nothing sent.",
+            }.get(r["result"], f"Send failed ({r.get('why', r['result'])}).")
+
+
+def _alerts_admin_rewind(uid: int, hours: int = 24) -> str:
+    """Testing aid: move your own window back so the next alert has content.
+    Already-sent items stay in the ledger and still won't repeat."""
+    a = (datetime.utcnow() - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _alerts_set_anchor(uid, a)
+    return f"Your alert window now starts {hours} h ago ({a})."
+
+
+def _alerts_admin_summary_html() -> str:
+    raw = _alerts_meta_get("last_run_summary")
+    try:
+        s = json.loads(raw) if raw else None
+    except ValueError:
+        s = None
+    with _user_db() as conn:
+        subs = conn.execute("SELECT COUNT(*) AS n FROM alert_email WHERE confirmed_at IS NOT NULL").fetchone()["n"]
+        paused = conn.execute("SELECT COUNT(*) AS n FROM alert_settings WHERE paused=1").fetchone()["n"]
+        supp = conn.execute("SELECT COUNT(*) AS n FROM alert_settings WHERE suppressed IS NOT NULL").fetchone()["n"]
+    ceiling_day = _alerts_meta_get("ceiling_hit")
+    esc = _html.escape
+    rows = [f"Confirmed subscribers: <b>{subs}</b> (paused {paused}, suppressed {supp}) · eligible now "
+            f"(admin/beta): <b>{len(_alerts_subscribers())}</b>",
+            f"Global switch: <b>{'ON' if _alerts_global_on() else 'OFF'}</b> · scheduler: "
+            f"<b>{'on' if _ALERTS_SCHEDULER_ON else 'OFF (ALERTS_SCHEDULER=off)'}</b> · "
+            f"time zone: {'ok' if _ALERTS_TZ else '<span style=color:#e88>MISSING</span>'} · "
+            f"webhook secret: {'set' if _ALERTS_WEBHOOK_SECRET else '<span style=color:#e88>not set</span>'}",
+            f"Schedule: daily {_ALERTS_RUN_HOUR}:00 ET (catch-up until {_ALERTS_CATCHUP_END}:00 ET); "
+            f"last run day: <b>{esc(_alerts_meta_get('last_daily_run') or 'never')}</b>"]
+    if s:
+        rows.append("Last run: " + esc(", ".join(f"{k} {v}" for k, v in s.items())))
+    if ceiling_day == _alerts_day():
+        rows.append('<span style="color:#e88">⚠ Daily send ceiling reached today — remaining alerts roll to tomorrow.</span>')
+    return "<br>".join(rows)
 
 
 @app.route("/admin/clear-lock")
@@ -4543,6 +5294,8 @@ def robots_txt():
         "Allow: /\n"
         "Disallow: /admin/\n"
         "Disallow: /api/\n"
+        "Disallow: /go/\n"
+        "Disallow: /alerts/\n"
         "\n"
         "Sitemap: https://gcgeartracker.com/sitemap.xml\n"
     )
@@ -8631,7 +9384,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.18.1"
+APP_VERSION = "2.19.0"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
@@ -8696,6 +9449,11 @@ def _malloc_trim_loop():
             pass  # best-effort — never let this background thread take the app down
 
 threading.Thread(target=_malloc_trim_loop, daemon=True).start()
+
+# Daily Want List alert scheduler (v2.19.0). ALERTS_SCHEDULER=off disables it
+# (local dev / tests); it also no-ops while alerts or Postgres aren't ready.
+if _ALERTS_SCHEDULER_ON:
+    threading.Thread(target=_alerts_scheduler_loop, daemon=True).start()
 
 # Nightly scan removed — "Check for New" is manual only
 

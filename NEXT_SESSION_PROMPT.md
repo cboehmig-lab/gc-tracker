@@ -1,9 +1,25 @@
-# 2026-10-08 update — v2.18.1 built (privacy policy covers alerts), NOT pushed
-- v2.18.1 (see HANDOFF.md): privacy policy gets a Want List Email Alerts section + Postmark; contact →
+# Next Session Prompt — EMAIL ALERTS v2.19.0 (step 2: daily alert engine) built, NOT pushed
+
+**2026-10-08**: v2.18.1 live, Postmark approved (test mode lifted, free plan). Chuck approved the step 2 plan;
+v2.19.0 built + verified locally (61/61 — see HANDOFF.md v2.19.0), written to the Mac, NOT pushed.
+1. Push: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+   `git add gc_tracker_app.py requirements.txt EMAIL_ALERTS_DESIGN.md HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`,
+   commit, `git push origin main`.
+2. Live check = HANDOFF.md v2.19.0 "After push" (ALERTS_WEBHOOK_SECRET in Railway + the Postmark webhook; admin
+   Rewind → Preview → Send my alert now; next-morning `[alerts] daily run` log line).
+3. Then step 3 (UI, Chuck only): bell / "alert on my whole Want List" toggle + vertical pill list with bells, settings
+   panel (masked address, pause, mode, remove my email), the `/?alert=<id>` filtered view, self-service account
+   deletion (password / Google re-auth, immediate). Plan first, Chuck's go-ahead before coding.
+4. Before beta: upgrade Postmark to Basic, raise ALERTS_DAILY_CEILING (~500); tighten DMARC later.
+
+---
+
+# 2026-10-08 update — v2.18.1 LIVE; POSTMARK APPROVED (test mode lifted). Next: step 2 plan (daily alert engine)
+- v2.18.1 LIVE + verified 2026-10-08 (/privacy + security.txt show new text/contact). Was: privacy policy gets a Want List Email Alerts section + Postmark; contact →
   chuck@gcgeartracker.com. Push: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
   `git add gc_tracker_app.py EMAIL_ALERTS_DESIGN.md HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit,
   `git push origin main`. Live: footer v2.18.1, /privacy shows "October 2026" + alerts section.
-- THEN: fill the Postmark approval form from the updated draft (EMAIL_ALERTS_DESIGN.md §6, stream = transactional);
+- DONE 2026-10-08: Postmark approval submitted + approved (see EMAIL_ALERTS_DESIGN.md §6). Was: fill the Postmark approval form from the updated draft (EMAIL_ALERTS_DESIGN.md §6, stream = transactional);
   Chuck reviews + submits. Then plan step 2 (daily alert engine — email only when ≥1 match).
 - Memory/cost check DONE (10:20 CDT). Web: after the 10/01 deploy ~0.55 GB → ~0.85 GB over 6 days, flattening
   (no runaway); after the 10/07 v2.18.0 deploy 0.55 → ~0.8 GB in a day, same shape. Postgres 0.5-1.1 GB, noisy but
