@@ -889,7 +889,16 @@ function _applyAlertDeepLink(loggedIn) {
     url.searchParams.delete('alert');
     history.replaceState(null, '', url.toString());
     if (!loggedIn) { _openAuthModal('login'); return; }
-    if (window._keywords && window._keywords.length && !_wantListSearchActive) searchWantList();
+    if (!window._keywords || !window._keywords.length) return;
+    // v2.19.2: run the user's own scan first. Browse hides listings first seen
+    // by someone else's scan until this user scans (the per-user scan gate that
+    // keeps NEW tags right), so without a scan an emailed item can be missing.
+    // Then open the Want List once the scan's results have rendered.
+    window._afterScanDone = function () {
+      setTimeout(function () { if (!_wantListSearchActive) searchWantList(); }, 700);
+    };
+    if (running) return;          // a scan is already going; the hook fires when it ends
+    runTracker();
   } catch (e) { /* never block app init on a bad deep link */ }
 }
 
@@ -2792,6 +2801,14 @@ async function stopRun() {
   });
 }
 
+// One-shot callback after a scan ends, however it ends (v2.19.2, alert-email deep link).
+function _runAfterScanHook(msg) {
+  const f = window._afterScanDone;
+  if (!f) return;
+  window._afterScanDone = null;
+  try { f(msg || {}); } catch (e) { /* never break the scan UI */ }
+}
+
 async function startRun(payload, isBaseline) {
   running = true; updateCount(); _updateMobileBottomBar();
   clearTimeout(_sweepPollTimer);
@@ -2818,6 +2835,7 @@ async function startRun(payload, isBaseline) {
     const e = await resp.json();
     running = false; stopBtn.style.display = 'none'; updateCount(); _updateMobileBottomBar();
     appendLog('Error: ' + (e.error || resp.statusText), 'log-err');
+    _runAfterScanHook({error: e.error || resp.statusText});
     return;
   }
   // Get run_id and run_time from start response.
@@ -2846,6 +2864,7 @@ async function startRun(payload, isBaseline) {
       _skipBrowse = true;  // Prevent browseCache from overwriting scan results
       updateCount(); _updateMobileBottomBar(); loadState(); showResults(msg, isBaseline);
       if (msg.sweep && !msg.error && !isBaseline) _watchSweep(msg.sweep);
+      _runAfterScanHook(msg);
     }
   };
   es.onerror = () => {
@@ -2869,6 +2888,7 @@ async function startRun(payload, isBaseline) {
       setTimeout(() => {
         const stores = getSelected();
         if (stores.length) browseCache();
+        _runAfterScanHook({});
       }, 1000);
     }
   };

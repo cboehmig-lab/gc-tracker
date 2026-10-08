@@ -2,9 +2,14 @@
 
 **2026-10-08 (later)**: v2.19.0 live; /admin/alerts all green except "webhook secret: not set"; Chuck's Rewind →
 Preview → Send worked (1 match). v2.19.1 = the email's red button opens the Want List + quote fix (HANDOFF.md). Push:
-`git add gc_tracker_app.py static/gc.js HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`. Still to do: the
-ALERTS_WEBHOOK_SECRET + Postmark webhook setup (HANDOFF.md v2.19.0 "After push" step 2); first scheduled run
-tomorrow 10:00 ET.
+`git add gc_tracker_app.py static/gc.js HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`. DONE 2026-10-08: v2.19.1 pushed;
+ALERTS_WEBHOOK_SECRET added in Railway; Postmark webhook (Default Transactional Stream → Webhooks) = the URL above,
+basic auth user `postmark` + the secret, events Bounce + Spam Complaint + Subscription Change, status Verified;
+/admin/alerts all green ("webhook secret: set", 0 suppressed). Today's 10 AM ET window had already passed, so the
+FIRST scheduled run is 2026-10-09 10:00 ET — check Railway logs for `[alerts] daily run 2026-10-09: …` and
+/admin/alerts "last run day". v2.19.2 (built, NOT pushed at writing): the red button runs the user's scan then opens the Want List (scan gate —
+see HANDOFF.md v2.19.2); push `git add static/gc.js gc_tracker_app.py HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`.
+Chuck may add a few broad temporary pills so the 10/09 run has matches. Then step 3 (incl. "from this email" marker).
 
 (earlier)
 
