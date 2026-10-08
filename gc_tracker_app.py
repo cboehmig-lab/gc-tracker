@@ -4192,6 +4192,11 @@ def _alerts_pill_label(kw: str) -> str:
     return kw.lstrip("=").strip()
 
 
+def _alerts_quoted(lab: str) -> str:
+    """Curly-quote a pill label for prose, unless it's already a "quoted" search."""
+    return lab if len(lab) >= 2 and lab[0] == '"' and lab[-1] == '"' else f"\u201c{lab}\u201d"
+
+
 def _alerts_pill_id(user_id: int, kw: str) -> str:
     return _alerts_hmac("pill", f"{user_id}:{kw}")[:16]
 
@@ -4232,7 +4237,7 @@ def _alerts_find_matches(user_id: int, pills: list[str], lo: str, hi: str) -> tu
                         continue
                     cur.execute(
                         f"SELECT sku, name, brand, price, list_price, has_price_drop, price_drop, condition, "
-                        f"store, url, {_ALERTS_DL_NORM_SQL} AS dl FROM items "
+                        f"store, url, {_ALERTS_DL_NORM_SQL} AS dl, image_id FROM items "
                         f"WHERE available AND {_ALERTS_DL_NORM_SQL} > %s AND {_ALERTS_DL_NORM_SQL} <= %s "
                         f"AND ({frag}) ORDER BY dl DESC, sku LIMIT {_ALERTS_PILL_ROW_CAP}",
                         [lo, hi] + list(prm))
@@ -4244,7 +4249,7 @@ def _alerts_find_matches(user_id: int, pills: list[str], lo: str, hi: str) -> tu
                                 "price": float(r[3] or 0), "list_price": float(r[4] or 0),
                                 "has_price_drop": bool(r[5]), "price_drop": float(r[6] or 0),
                                 "condition": r[7] or "", "store": r[8] or "", "url": r[9] or "",
-                                "dl": r[10] or "", "pills": []}
+                                "dl": r[10] or "", "image_id": r[11] or "", "pills": []}
                         it["pills"].append(kw)
         return out
     skipped = 0
@@ -4264,85 +4269,154 @@ def _alerts_money(v: float) -> str:
     return f"${v:,.0f}" if v == int(v) else f"${v:,.2f}"
 
 
+def _alerts_listed_label(dl: str) -> str:
+    """'Oct 9, 8:42 AM ET' from a normalized date_listed; date-only → 'Oct 9'."""
+    if not dl:
+        return ""
+    try:
+        if dl.endswith("T23:59:59Z"):          # normalized date-only value
+            d = datetime.strptime(dl[:10], "%Y-%m-%d")
+            return f"{d:%b} {d.day}"
+        t = datetime.strptime(dl[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=_timezone.utc)
+        if _ALERTS_TZ is not None:
+            t = t.astimezone(_ALERTS_TZ)
+            h = t.hour % 12 or 12
+            return f"{t:%b} {t.day}, {h}:{t:%M} {'AM' if t.hour < 12 else 'PM'} ET"
+        return f"{t:%b} {t.day}"
+    except ValueError:
+        return ""
+
+
 def _alerts_build_email(user_id: int, items: list[dict], pills: list[str], batch_id: str) -> tuple[str, str, str, dict]:
-    """(subject, text, html, headers) for one user's daily alert."""
+    """(subject, text, html, headers) for one user's daily alert (v2.19.3 layout:
+    the newest 25 by listed date in one list, styled like the site; the matched
+    Want List terms only at the bottom, each with its own stop link)."""
     shown = items[:_ALERTS_MAX_ITEMS]
     n = len(items)
+    more = n - len(shown)
     matched_pills = [p for p in pills if any(p in it["pills"] for it in items)]
-    labels = [_alerts_pill_label(p) for p in matched_pills]
     if n == 1:
-        subject = f"Want List Item Found: {items[0]['name'] or labels[0]}"
+        subject = f"Want List Item Found: {items[0]['name'] or 'new match'}"
     else:
-        lab = ", ".join(labels[:3]) + (f" and {len(labels) - 3} more" if len(labels) > 3 else "")
-        subject = f"Want List Items Found: {n} matches for {lab}"
+        subject = f"Want List Items Found: {n} new matches"
     subject = subject[:180]
-    # Group the shown items by the first of the user's pills they matched.
-    groups = []
-    for p in matched_pills:
-        g = [it for it in shown if it["pills"][0] == p]
-        if g:
-            groups.append((p, g))
     view_all = f"{_ALERTS_SITE}/?alert={batch_id}"
     pause_url = f"{_ALERTS_SITE}/alerts/u/{_alerts_link_token(user_id, 'u')}"
     manage_url = f"{_ALERTS_SITE}/"
+    stop_links = [(_alerts_pill_label(p),
+                   f"{_ALERTS_SITE}/alerts/p/{_alerts_link_token(user_id, 'p', _alerts_pill_id(user_id, p))}")
+                  for p in matched_pills]
     note = ("Listings were available when we checked at 10 AM ET and may have sold since. "
             "Items that were listed and sold between checks may not appear.")
     esc = _html.escape
+    today = ""
+    if _ALERTS_TZ is not None:
+        _now = datetime.now(_timezone.utc).astimezone(_ALERTS_TZ)
+        today = f"{_now:%b} {_now.day}"
+    btn_label = f"View all {n} matches on GC Gear Tracker" if more > 0 else "Open my Want List on GC Gear Tracker"
 
-    def _line(it):
-        bits = [_alerts_money(it["price"])]
+    # ── plain text ──
+    t = [f"{n} new Want List match{'es' if n != 1 else ''} at Guitar Center" + (" (newest first)" if n > 1 else ""), ""]
+    for it in shown:
+        price = _alerts_money(it["price"])
         if it["has_price_drop"] and it["price_drop"] > 0:
-            bits.append(f"price drop {_alerts_money(it['price_drop'])}")
-        if it["condition"]:
-            bits.append(it["condition"])
-        if it["store"]:
-            bits.append(it["store"])
-        return " · ".join(bits)
-
-    t = [f"{n} new Want List match{'es' if n != 1 else ''} at Guitar Center", ""]
-    h = ['<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,Arial,sans-serif;'
-         'color:#222;max-width:600px;margin:0 auto;padding:8px">',
-         f'<h2 style="font-size:18px;margin:0 0 4px">{n} new Want List match{"es" if n != 1 else ""}</h2>',
-         '<p style="color:#666;font-size:13px;margin:0 0 16px">Used gear at Guitar Center, found by GC Gear Tracker</p>']
-    stop_links = []
-    for p, g in groups:
-        lab = _alerts_pill_label(p)
-        t.append(f"== {lab} ==")
-        h.append(f'<h3 style="font-size:15px;margin:18px 0 6px;border-bottom:1px solid #ddd;padding-bottom:4px">'
-                 f'{esc(lab)}</h3>')
-        for it in g:
-            go = f"{_ALERTS_SITE}/go/{it['sku']}"
-            t += [it["name"], f"  {_line(it)}", f"  {go}", ""]
-            h.append(f'<p style="margin:0 0 12px"><a href="{esc(go)}" style="color:#b00;font-weight:600;'
-                     f'text-decoration:none">{esc(it["name"])}</a><br>'
-                     f'<span style="font-size:13px;color:#444">{esc(_line(it))}</span></p>')
-        stop_links.append((lab, f"{_ALERTS_SITE}/alerts/p/{_alerts_link_token(user_id, 'p', _alerts_pill_id(user_id, p))}"))
-    more = n - len(shown)
-    t += [f"View all {n} match{'es' if n != 1 else ''} on GC Gear Tracker: {view_all}" if more > 0
-          else f"Open your Want List on GC Gear Tracker: {view_all}", ""]
-    h.append(f'<p style="margin:18px 0"><a href="{esc(view_all)}" style="background:#b00;color:#fff;padding:9px 16px;'
-             f'border-radius:4px;text-decoration:none;font-size:14px">'
-             f'{"View all " + str(n) + " matches" if more > 0 else "Open your Want List"} on GC Gear Tracker</a>'
-             + (f'<span style="font-size:13px;color:#666"> &nbsp;(+{more} more not shown here)</span>' if more > 0 else "")
-             + '</p>')
-    t += [f"Note: {note}", ""]
-    h.append(f'<p style="font-size:12px;color:#777;margin:16px 0">Note: {esc(note)}</p>')
-    t.append("You're getting this because you turned on Want List email alerts at gcgeartracker.com.")
-    t.append(f"Manage alerts: {manage_url}")
+            price += f" (was {_alerts_money(it['price'] + it['price_drop'])})"
+        bits = [price] + [b for b in (it["condition"], it["store"]) if b]
+        t += [it["name"], "  " + " · ".join(bits)]
+        lab = _alerts_listed_label(it["dl"])
+        if lab:
+            t.append(f"  Listed {lab}")
+        t += [f"  {_ALERTS_SITE}/go/{it['sku']}", ""]
+    if more > 0:
+        t += [f"+{more} more not shown here.", ""]
+    t += [f"{btn_label}: {view_all}", "", f"Note: {note}", ""]
+    t.append("Matched Want List terms in this alert:")
     for lab, url in stop_links:
-        t.append(f'Stop alerts for "{lab}": {url}')
-    t.append(f"Pause all alerts: {pause_url}")
-    t.append("")
-    t.append("GC Gear Tracker is independent and not affiliated with Guitar Center.")
-    foot = [f'<a href="{esc(manage_url)}" style="color:#777">Manage alerts</a>']
-    foot += [f'<a href="{esc(url)}" style="color:#777">Stop alerts for &ldquo;{esc(lab)}&rdquo;</a>' for lab, url in stop_links]
-    foot.append(f'<a href="{esc(pause_url)}" style="color:#777">Pause all alerts</a>')
-    h.append('<p style="font-size:12px;color:#777;border-top:1px solid #ddd;padding-top:10px;margin-top:18px">'
-             "You're getting this because you turned on Want List email alerts at gcgeartracker.com.<br>"
-             + " &nbsp;·&nbsp; ".join(foot) +
-             '<br>GC Gear Tracker is independent and not affiliated with Guitar Center.</p></div>')
+        t.append(f"  {lab} — stop alerts for this term: {url}")
+    t += ["", "You're getting this because you turned on Want List email alerts at gcgeartracker.com.",
+          f"Manage alerts: {manage_url}", f"Pause all alerts: {pause_url}", "",
+          "GC Gear Tracker is independent and not affiliated with Guitar Center."]
+
+    # ── HTML (tables + inline styles + bgcolor so it survives email clients) ──
+    F = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+    rows = []
+    for i, it in enumerate(shown):
+        go = esc(f"{_ALERTS_SITE}/go/{it['sku']}")
+        img = (f'<img src="https://media.guitarcenter.com/is/image/MMGS7/{esc(it["image_id"])}-00-200x200.jpg" '
+               f'width="72" height="72" alt="{esc(it["name"][:60])}" style="display:block;width:72px;height:72px;border-radius:6px;'
+               f'background:#252525;border:0;object-fit:cover">' if it.get("image_id") else
+               '<div style="width:72px;height:72px;border-radius:6px;background:#252525"></div>')
+        price = f'<span style="color:#ffffff;font-weight:700">{esc(_alerts_money(it["price"]))}</span>'
+        if it["has_price_drop"] and it["price_drop"] > 0:
+            price = (f'<span style="color:#bdbdbd;text-decoration:line-through;font-size:12px">'
+                     f'{esc(_alerts_money(it["price"] + it["price_drop"]))}</span>&nbsp;' + price +
+                     f'&nbsp;<span style="color:#4ade80;font-size:12px">&darr; {esc(_alerts_money(it["price_drop"]))}</span>')
+        cond = (f'&nbsp;&nbsp;<span style="color:#dddddd;font-size:12px">{esc(it["condition"])}</span>'
+                if it["condition"] else "")
+        meta = " · ".join(esc(x) for x in (it["store"], ("Listed " + _alerts_listed_label(it["dl"]))
+                                             if _alerts_listed_label(it["dl"]) else "") if x)
+        border = "" if i == len(shown) - 1 else "border-bottom:1px solid #2a2a2a;"
+        rows.append(
+            f'<tr><td style="padding:14px 20px;{border}"><table role="presentation" width="100%" cellpadding="0" '
+            f'cellspacing="0" border="0"><tr><td width="72" valign="top" style="width:72px"><a href="{go}">{img}</a></td>'
+            f'<td valign="top" style="padding-left:14px;font-family:{F}">'
+            f'<a href="{go}" style="color:#ffffff;font-size:15px;font-weight:600;line-height:1.35;text-decoration:none">'
+            f'{esc(it["name"])}</a>'
+            f'<div style="margin-top:5px;font-size:14px;line-height:1.4">{price}{cond}</div>'
+            f'<div style="margin-top:4px;font-size:12px;color:#bdbdbd;line-height:1.4">{meta}</div>'
+            f'</td></tr></table></td></tr>')
+    chips = "".join(
+        f'<span style="display:inline-block;margin:0 6px 8px 0;padding:4px 10px;border-radius:12px;background:#0a2e17;'
+        f'border:1px solid #2d6a2d;font-size:12px;color:#4ade80;font-family:{F};white-space:nowrap">{esc(lab)}'
+        f'&nbsp;&nbsp;<a href="{esc(url)}" style="color:#b6e6c2;text-decoration:underline;font-size:11px">stop alerts</a>'
+        f'</span>' for lab, url in stop_links)
+    more_html = (f'<div style="margin-top:10px;font-size:12px;color:#bdbdbd;font-family:{F}">'
+                 f'+{more} more not shown here</div>' if more > 0 else "")
+    html = (
+        '<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<meta name="color-scheme" content="dark light"><meta name="supported-color-schemes" content="dark light">'
+        f'<title>{esc(subject)}</title></head>'
+        f'<body style="margin:0;padding:0;background:#111111" bgcolor="#111111">'
+        # preheader: the inbox preview line
+        f'<div style="display:none;max-height:0;overflow:hidden;color:#111111">{esc(shown[0]["name"])}'
+        + (f" and {n - 1} more" if n > 1 else "") + '</div>'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#111111" '
+        'style="background:#111111"><tr><td align="center" style="padding:20px 10px">'
+        '<table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" '
+        'style="width:100%;max-width:600px;background:#1a1a1a;border:1px solid #2e2e2e;border-radius:10px;overflow:hidden" bgcolor="#1a1a1a">'
+        # header bar (solid fallback for clients without gradients)
+        f'<tr><td bgcolor="#6a0000" style="background:#6a0000;background-image:linear-gradient(135deg,#4a0000,#7a0000);'
+        f'padding:16px 20px;font-family:{F}"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
+        f'<tr><td style="color:#ffffff;font-size:18px;font-weight:700;font-family:{F}">GC Gear Tracker</td>'
+        f'<td align="right" style="color:#ffd6d6;font-size:12px;font-family:{F}">Want List alert'
+        + (f" · {esc(today)}" if today else "") + '</td></tr></table></td></tr>'
+        # intro
+        f'<tr><td style="padding:18px 20px 6px;font-family:{F}">'
+        f'<div style="color:#ffffff;font-size:19px;font-weight:700">{n} new match{"es" if n != 1 else ""} on your Want List</div>'
+        f'<div style="color:#bdbdbd;font-size:13px;margin-top:4px">Used gear at Guitar Center'
+        + (" · newest first" if n > 1 else "") + '</div></td></tr>'
+        + "".join(rows) +
+        # button
+        f'<tr><td style="padding:8px 20px 18px;font-family:{F}">'
+        f'<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="#cc0000" '
+        f'style="background:#cc0000;border-radius:6px"><a href="{esc(view_all)}" style="display:inline-block;padding:11px 20px;'
+        f'color:#ffffff;font-size:14px;font-weight:700;text-decoration:none;font-family:{F}">{esc(btn_label)}</a>'
+        f'</td></tr></table>{more_html}'
+        f'<div style="margin-top:14px;font-size:12px;color:#b5b5b5;line-height:1.5">Note: {esc(note)}</div></td></tr>'
+        # matched terms
+        f'<tr><td style="padding:16px 20px 10px;border-top:1px solid #2a2a2a;font-family:{F}">'
+        f'<div style="font-size:11px;font-weight:700;color:#bbbbbb;letter-spacing:.5px;text-transform:uppercase;'
+        f'margin-bottom:10px">Matched Want List terms in this alert</div>{chips}</td></tr>'
+        # footer
+        f'<tr><td style="padding:12px 20px 18px;border-top:1px solid #2a2a2a;font-size:12px;color:#b5b5b5;'
+        f'line-height:1.6;font-family:{F}">You\'re getting this because you turned on Want List email alerts at '
+        f'<a href="{esc(manage_url)}" style="color:#dddddd">gcgeartracker.com</a>.<br>'
+        f'<a href="{esc(manage_url)}" style="color:#dddddd">Manage alerts</a> &nbsp;·&nbsp; '
+        f'<a href="{esc(pause_url)}" style="color:#dddddd">Pause all alerts</a><br>'
+        'GC Gear Tracker is independent and not affiliated with Guitar Center.</td></tr>'
+        '</table></td></tr></table></body></html>')
     headers = {"List-Unsubscribe": f"<{pause_url}>", "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"}
-    return subject, "\n".join(t), "".join(h), headers
+    return subject, "\n".join(t), html, headers
 
 
 def _alerts_set_anchor(user_id: int, anchor: str, sent: bool = False) -> None:
@@ -4641,7 +4715,7 @@ def alerts_link_pill(tok):
     if kw is None:
         return _alerts_link_page("Search not found",
                                  "<p>That search is no longer on your Want List, so there's nothing to stop.</p>")
-    lab = _html.escape(_alerts_pill_label(kw))
+    lab = _html.escape(_alerts_quoted(_alerts_pill_label(kw)))
     if request.method == "POST":
         now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
         with _user_db() as conn:
@@ -4649,9 +4723,9 @@ def alerts_link_pill(tok):
                          "ON CONFLICT(user_id, keyword) DO UPDATE SET on_=0, updated_at=excluded.updated_at",
                          (uid, kw, now))
             conn.commit()
-        return _alerts_link_page("Stopped", f"<p>No more alerts for “{lab}”. It's still on your Want List, "
+        return _alerts_link_page("Stopped", f"<p>No more alerts for {lab}. It's still on your Want List, "
                                  "and your other alerts are unchanged.</p>")
-    return _alerts_link_page(f"Stop alerts for “{_alerts_pill_label(kw)}”?",
+    return _alerts_link_page(f"Stop alerts for {_alerts_quoted(_alerts_pill_label(kw))}?",
                              "<p>It stays on your Want List; you just won't get emails for it.</p>"
                              "<form method=\"POST\"><button type=\"submit\">Stop these alerts</button></form>")
 
@@ -9384,7 +9458,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.19.0"
+APP_VERSION = "2.19.3"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

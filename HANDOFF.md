@@ -27,6 +27,13 @@ should be a lighter grey if it's not white" → all secondary text lightened (#b
 - Spam/deliverability: images are small, hosted by GC, every image has alt text, the email is mostly text, has a
   plain-text part, DKIM/SPF/DMARC align, no tracking — thumbnails don't meaningfully raise spam risk.
 
+### Deploy mishap (fixed same day)
+Commit 2dce7ff ("v2.19.3") actually shipped a STALE gc_tracker_app.py (the v2.19.0 file, 478,509 bytes): the
+Cowork file-copy tool reused an earlier staged copy with the same name. Net effect on that deploy: Python back to
+v2.19.0 (no redesign, no v2.19.1 quote fix; footer showed v2.19.0), static/gc.js correct (v2.19.2 button). The real
+v2.19.3 file (md5 a6221207…, APP_VERSION 2.19.3, contains `_alerts_listed_label` + `_alerts_quoted`) was re-copied and
+pushed in a follow-up commit. Lesson: after copying a file back to the Mac, check its md5/APP_VERSION before pushing.
+
 ### Verified
 Engine suite 61/61 (subject expectation updated); mockups rendered at 700 px and 390 px (phone); `py_compile` +
 `node --check` clean. Live: tomorrow's 10:00 ET alert (or admin Rewind → Send my alert now).
