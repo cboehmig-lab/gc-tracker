@@ -4287,6 +4287,12 @@ def _alerts_listed_label(dl: str) -> str:
         return ""
 
 
+def _alerts_listed_day(dl: str) -> str:
+    """'Oct 9' — the ET calendar day an item was listed (v2.19.4: no time of day)."""
+    lab = _alerts_listed_label(dl)
+    return lab.split(",")[0] if lab else ""
+
+
 def _alerts_build_email(user_id: int, items: list[dict], pills: list[str], batch_id: str) -> tuple[str, str, str, dict]:
     """(subject, text, html, headers) for one user's daily alert (v2.19.3 layout:
     the newest 25 by listed date in one list, styled like the site; the matched
@@ -4322,11 +4328,10 @@ def _alerts_build_email(user_id: int, items: list[dict], pills: list[str], batch
         if it["has_price_drop"] and it["price_drop"] > 0:
             price += f" (was {_alerts_money(it['price'] + it['price_drop'])})"
         bits = [price] + [b for b in (it["condition"], it["store"]) if b]
-        t += [it["name"], "  " + " · ".join(bits)]
-        lab = _alerts_listed_label(it["dl"])
-        if lab:
-            t.append(f"  Listed {lab}")
-        t += [f"  {_ALERTS_SITE}/go/{it['sku']}", ""]
+        _ld = _alerts_listed_day(it["dl"])
+        if _ld:
+            bits.append(f"Listed {_ld}")
+        t += [it["name"], "  " + " · ".join(bits), f"  {_ALERTS_SITE}/go/{it['sku']}", ""]
     if more > 0:
         t += [f"+{more} more not shown here.", ""]
     t += [f"{btn_label}: {view_all}", "", f"Note: {note}", ""]
@@ -4353,8 +4358,8 @@ def _alerts_build_email(user_id: int, items: list[dict], pills: list[str], batch
                      f'&nbsp;<span style="color:#4ade80;font-size:12px">&darr; {esc(_alerts_money(it["price_drop"]))}</span>')
         cond = (f'&nbsp;&nbsp;<span style="color:#dddddd;font-size:12px">{esc(it["condition"])}</span>'
                 if it["condition"] else "")
-        meta = " · ".join(esc(x) for x in (it["store"], ("Listed " + _alerts_listed_label(it["dl"]))
-                                             if _alerts_listed_label(it["dl"]) else "") if x)
+        _ld = _alerts_listed_day(it["dl"])   # v2.19.4: day only, no time (Chuck)
+        meta = " · ".join(esc(x) for x in (it["store"], f"Listed {_ld}" if _ld else "") if x)
         border = "" if i == len(shown) - 1 else "border-bottom:1px solid #2a2a2a;"
         rows.append(
             f'<tr><td style="padding:14px 20px;{border}"><table role="presentation" width="100%" cellpadding="0" '
@@ -9458,7 +9463,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.19.3"
+APP_VERSION = "2.19.4"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
