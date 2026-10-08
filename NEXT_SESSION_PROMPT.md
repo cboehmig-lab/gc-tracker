@@ -9,6 +9,7 @@ basic auth user `postmark` + the secret, events Bounce + Spam Complaint + Subscr
 FIRST scheduled run is 2026-10-09 10:00 ET — check Railway logs for `[alerts] daily run 2026-10-09: …` and
 /admin/alerts "last run day". v2.19.2 (built, NOT pushed at writing): the red button runs the user's scan then opens the Want List (scan gate —
 see HANDOFF.md v2.19.2); push `git add static/gc.js gc_tracker_app.py HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`.
+v2.19.3 (built, NOT pushed at writing): email redesign (HANDOFF.md v2.19.3) — push gc_tracker_app.py + docs.
 Chuck may add a few broad temporary pills so the 10/09 run has matches. Then step 3 (incl. "from this email" marker).
 
 (earlier)

@@ -1,7 +1,35 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-10-08 · Current version: v2.19.2 (alert email button runs the user's scan then opens the Want List; v2.19.1 alert email button opens the Want List; v2.19.0 email alerts step 2: daily 10 AM ET alert engine, /go/<sku>, signed pause/stop links, Postmark bounce webhook — Chuck-only; v2.18.1 privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-10-08 · Current version: v2.19.3 (alert email redesign: newest-first list in the site's look, terms at the bottom; v2.19.2 alert email button runs the user's scan then opens the Want List; v2.19.1 alert email button opens the Want List; v2.19.0 email alerts step 2: daily 10 AM ET alert engine, /go/<sku>, signed pause/stop links, Postmark bounce webhook — Chuck-only; v2.18.1 privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
 
 ---
+
+## v2.19.3 — 2026-10-08: Alert email redesign — one newest-first list, site look, terms only at the bottom
+
+**Why (Chuck, 2026-10-08)**: "just put the 25 latest at the top, by listed date, not grouped by want list term … don't
+show the want list terms at all except at the bottom … 'matched want list terms this pull' where you can remove each
+one", and "match the look and feel of the site". After the first mockup: "I hate grey text on black background, it
+should be a lighter grey if it's not white" → all secondary text lightened (#bdbdbd / #b5b5b5, links #dddddd).
+
+### What changed (`_alerts_build_email` rewritten; `_alerts_find_matches` also selects `image_id`)
+- One list, newest `date_listed` first (the engine already sorts), max 25, "+N more not shown here" + red button
+  "View all N matches on GC Gear Tracker" (or "Open my Want List…").
+- Each row: 72 px GC thumbnail (`media.guitarcenter.com/is/image/MMGS7/<image_id>-00-200x200.jpg`, same URL the site
+  uses; alt = item name; gray box if no image_id), name (white), price (white bold; price drop = struck-through old
+  price + green ↓amount like the site), condition, store · "Listed Oct 9, 9:42 AM ET" (`_alerts_listed_label`, ET via
+  zoneinfo; date-only listings show just the date).
+- Bottom: "MATCHED WANT LIST TERMS IN THIS ALERT" — green pills like the site's `.tag-kw`, each with its own "stop
+  alerts" link (same signed /alerts/p/ link; stops alerts only — the term stays on the Want List). Footer: why you got
+  it, Manage alerts · Pause all alerts, not-affiliated line.
+- Subject: one item → `Want List Item Found: <name>`; several → `Want List Items Found: N new matches` (no terms).
+  Hidden preheader = newest item name "and N more" (the inbox preview line).
+- Built for email clients: tables + inline styles + `bgcolor` fallbacks (solid #6a0000 header behind the gradient),
+  `color-scheme: dark light` meta so dark-mode apps don't invert it. Plain-text part rewritten to match.
+- Spam/deliverability: images are small, hosted by GC, every image has alt text, the email is mostly text, has a
+  plain-text part, DKIM/SPF/DMARC align, no tracking — thumbnails don't meaningfully raise spam risk.
+
+### Verified
+Engine suite 61/61 (subject expectation updated); mockups rendered at 700 px and 390 px (phone); `py_compile` +
+`node --check` clean. Live: tomorrow's 10:00 ET alert (or admin Rewind → Send my alert now).
 
 ## v2.19.2 — 2026-10-08: Alert email button runs the user's scan, then opens the Want List
 
