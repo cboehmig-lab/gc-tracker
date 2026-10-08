@@ -4192,6 +4192,11 @@ def _alerts_pill_label(kw: str) -> str:
     return kw.lstrip("=").strip()
 
 
+def _alerts_quoted(lab: str) -> str:
+    """Curly-quote a pill label for prose, unless it's already a "quoted" search."""
+    return lab if len(lab) >= 2 and lab[0] == '"' and lab[-1] == '"' else f"\u201c{lab}\u201d"
+
+
 def _alerts_pill_id(user_id: int, kw: str) -> str:
     return _alerts_hmac("pill", f"{user_id}:{kw}")[:16]
 
@@ -4330,12 +4335,12 @@ def _alerts_build_email(user_id: int, items: list[dict], pills: list[str], batch
     t.append("You're getting this because you turned on Want List email alerts at gcgeartracker.com.")
     t.append(f"Manage alerts: {manage_url}")
     for lab, url in stop_links:
-        t.append(f'Stop alerts for "{lab}": {url}')
+        t.append(f'Stop alerts for {_alerts_quoted(lab)}: {url}')
     t.append(f"Pause all alerts: {pause_url}")
     t.append("")
     t.append("GC Gear Tracker is independent and not affiliated with Guitar Center.")
     foot = [f'<a href="{esc(manage_url)}" style="color:#777">Manage alerts</a>']
-    foot += [f'<a href="{esc(url)}" style="color:#777">Stop alerts for &ldquo;{esc(lab)}&rdquo;</a>' for lab, url in stop_links]
+    foot += [f'<a href="{esc(url)}" style="color:#777">Stop alerts for {esc(_alerts_quoted(lab))}</a>' for lab, url in stop_links]
     foot.append(f'<a href="{esc(pause_url)}" style="color:#777">Pause all alerts</a>')
     h.append('<p style="font-size:12px;color:#777;border-top:1px solid #ddd;padding-top:10px;margin-top:18px">'
              "You're getting this because you turned on Want List email alerts at gcgeartracker.com.<br>"
@@ -4641,7 +4646,7 @@ def alerts_link_pill(tok):
     if kw is None:
         return _alerts_link_page("Search not found",
                                  "<p>That search is no longer on your Want List, so there's nothing to stop.</p>")
-    lab = _html.escape(_alerts_pill_label(kw))
+    lab = _html.escape(_alerts_quoted(_alerts_pill_label(kw)))
     if request.method == "POST":
         now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
         with _user_db() as conn:
@@ -4649,9 +4654,9 @@ def alerts_link_pill(tok):
                          "ON CONFLICT(user_id, keyword) DO UPDATE SET on_=0, updated_at=excluded.updated_at",
                          (uid, kw, now))
             conn.commit()
-        return _alerts_link_page("Stopped", f"<p>No more alerts for “{lab}”. It's still on your Want List, "
+        return _alerts_link_page("Stopped", f"<p>No more alerts for {lab}. It's still on your Want List, "
                                  "and your other alerts are unchanged.</p>")
-    return _alerts_link_page(f"Stop alerts for “{_alerts_pill_label(kw)}”?",
+    return _alerts_link_page(f"Stop alerts for {_alerts_quoted(_alerts_pill_label(kw))}?",
                              "<p>It stays on your Want List; you just won't get emails for it.</p>"
                              "<form method=\"POST\"><button type=\"submit\">Stop these alerts</button></form>")
 
@@ -9384,7 +9389,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.19.0"
+APP_VERSION = "2.19.1"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

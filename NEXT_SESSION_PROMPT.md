@@ -1,4 +1,12 @@
-# Next Session Prompt — EMAIL ALERTS v2.19.0 (step 2: daily alert engine) built, NOT pushed
+# Next Session Prompt — EMAIL ALERTS v2.19.0 LIVE (first real alert received 2026-10-08 12:07 CDT); v2.19.1 built, NOT pushed
+
+**2026-10-08 (later)**: v2.19.0 live; /admin/alerts all green except "webhook secret: not set"; Chuck's Rewind →
+Preview → Send worked (1 match). v2.19.1 = the email's red button opens the Want List + quote fix (HANDOFF.md). Push:
+`git add gc_tracker_app.py static/gc.js HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`. Still to do: the
+ALERTS_WEBHOOK_SECRET + Postmark webhook setup (HANDOFF.md v2.19.0 "After push" step 2); first scheduled run
+tomorrow 10:00 ET.
+
+(earlier)
 
 **2026-10-08**: v2.18.1 live, Postmark approved (test mode lifted, free plan). Chuck approved the step 2 plan;
 v2.19.0 built + verified locally (61/61 — see HANDOFF.md v2.19.0), written to the Mac, NOT pushed.

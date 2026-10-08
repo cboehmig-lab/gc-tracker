@@ -875,7 +875,23 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadData();
   await loadState(alreadyLoggedIn);
   _applyStoreDeepLink();
+  _applyAlertDeepLink(alreadyLoggedIn);
 });
+
+// ?alert=<id> deep link from a Want List alert email's button (v2.19.1): open the
+// Want List view. (Showing exactly that email's items is a later step.) Logged
+// out -> open the sign-in box; the Want List lives on the account.
+function _applyAlertDeepLink(loggedIn) {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    if (!params.get('alert')) return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete('alert');
+    history.replaceState(null, '', url.toString());
+    if (!loggedIn) { _openAuthModal('login'); return; }
+    if (window._keywords && window._keywords.length && !_wantListSearchActive) searchWantList();
+  } catch (e) { /* never block app init on a bad deep link */ }
+}
 
 // ?store=<slug> deep link from the /store/<slug> SEO landing pages (v2.15.2):
 // pre-select just that store so "Browse all N <city> items" lands filtered to it.
