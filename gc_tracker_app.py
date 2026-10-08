@@ -4585,7 +4585,7 @@ def security_txt():
     # RFC 9116 — gives researchers a private channel to report issues instead of
     # posting "this isn't secure" publicly. Update Expires before it lapses.
     content = (
-        "Contact: mailto:cboehmig@gmail.com\n"
+        "Contact: mailto:chuck@gcgeartracker.com\n"
         "Expires: 2027-06-05T00:00:00Z\n"
         "Preferred-Languages: en\n"
         "Canonical: https://gcgeartracker.com/.well-known/security.txt\n"
@@ -8503,7 +8503,7 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid #222;color:#555;fon
 <div class="wrap">
   <a href="/" class="back">← Back to GC Used Inventory Tracker</a>
   <h1>Privacy Policy</h1>
-  <p class="subtitle">Last updated: May 2026</p>
+  <p class="subtitle">Last updated: October 2026</p>
 
   <p>GC Used Inventory Tracker ("the site", "we", "us") is an independent personal project that
   helps musicians track used gear listings at Guitar Center. It is not affiliated with, sponsored
@@ -8515,8 +8515,9 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid #222;color:#555;fon
   <p><strong style="color:#eee">Account information.</strong> If you create an account, we store
   your chosen username, an optional email address, and a hashed (never plain-text) version of your
   password. If you sign in with Google, we store your Google account ID and the display name Google
-  provides. Your email address is never required and is used only for account recovery if you
-  choose to provide it.</p>
+  provides. Your account email address is never required and is used only for account recovery if
+  you choose to provide it. It is never used for Want List email alerts, which use a separate
+  address you confirm yourself (see below).</p>
 
   <p><strong style="color:#eee">Preferences and scan history.</strong> To sync your data across
   devices, we store your watch list, want list keywords, favorited stores, saved searches, and the
@@ -8534,10 +8535,34 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid #222;color:#555;fon
   <a href="https://tools.google.com/dlpage/gaoptout" target="_blank" rel="noopener">Google Analytics
   Opt-out Browser Add-on</a>.</p>
 
+  <h2>Want List Email Alerts</h2>
+  <p>Want List email alerts are an optional feature for registered users (currently being rolled
+  out to a small number of users). If you turn them on, we check once a day for new Guitar Center
+  used listings that match the Want List searches you chose to be alerted on. If something
+  matches, you get one email that day listing the matches; if nothing matches, we send nothing.</p>
+  <ul>
+    <li><strong style="color:#eee">Opt-in only.</strong> Alerts are off unless you turn them on.
+    You enter the address you want alerts sent to and confirm it with a one-time code we email to
+    you. We never add addresses ourselves, and we never use your account email for alerts.</li>
+    <li><strong style="color:#eee">Used only for your alerts.</strong> Your alert address is used
+    only to send you the alerts and confirmation codes you asked for. It is never sold, rented or
+    shared, and never used for marketing, newsletters or promotions.</li>
+    <li><strong style="color:#eee">Stored encrypted.</strong> Your alert address is encrypted on our
+    server and is not shown in the site's admin pages or logs.</li>
+    <li><strong style="color:#eee">No tracking.</strong> Alert emails do not use open tracking or
+    click tracking.</li>
+    <li><strong style="color:#eee">Easy to stop.</strong> Every alert email has an unsubscribe link.
+    You can also turn alerts off, or use "Remove my email" to delete your alert address, at any
+    time. Deleting your account deletes it too.</li>
+  </ul>
+  <p>Alert emails are delivered by Postmark (see Third-Party Services), which receives your alert
+  address and the content of each email only in order to deliver it.</p>
+
   <h2>How We Use Your Information</h2>
   <ul>
     <li>To provide the core tracker functionality (scan results, watch list, want list)</li>
     <li>To sync your preferences across your own devices when you are logged in</li>
+    <li>To send the Want List email alerts and confirmation codes you have opted in to</li>
     <li>To prevent abuse via rate limiting on scan and login endpoints</li>
     <li>To understand aggregate site usage through analytics</li>
   </ul>
@@ -8563,12 +8588,17 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid #222;color:#555;fon
     Drive files, or any other Google data.</li>
     <li><strong style="color:#eee">Railway</strong> — the cloud platform that hosts the site.
     Your data is stored on Railway's infrastructure in the United States.</li>
+    <li><strong style="color:#eee">Postmark</strong> — delivers Want List email alerts and
+    confirmation codes, only for users who opt in.
+    <a href="https://postmarkapp.com/privacy-policy" target="_blank" rel="noopener">Postmark Privacy Policy</a>.</li>
   </ul>
 
   <h2>Data Retention</h2>
   <p>Your account and associated data are retained until you request deletion. You can request
   that your account be deleted at any time by contacting us at the address below. Guest users
-  (no account) have no data stored on our servers beyond the anonymous device ID cookie.</p>
+  (no account) have no data stored on our servers beyond the anonymous device ID cookie.
+  When you remove your alert address or your account is deleted, it is deleted right away; it can
+  remain, in encrypted form only, in our daily server backups for up to 7 days.</p>
 
   <h2>Children's Privacy</h2>
   <p>This site is not directed at children under 13. We do not knowingly collect personal
@@ -8581,7 +8611,7 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid #222;color:#555;fon
 
   <h2>Contact</h2>
   <p>Questions about this privacy policy or your data can be sent to:
-  <a href="mailto:cboehmig@gmail.com">cboehmig@gmail.com</a></p>
+  <a href="mailto:chuck@gcgeartracker.com">chuck@gcgeartracker.com</a></p>
 
   <footer>GC Used Inventory Tracker is an independent tool and is not affiliated with or
   endorsed by Guitar Center, Inc.</footer>
@@ -8601,7 +8631,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.18.0"
+APP_VERSION = "2.18.1"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

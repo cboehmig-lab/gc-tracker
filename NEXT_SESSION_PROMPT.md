@@ -1,3 +1,20 @@
+# 2026-10-08 update — v2.18.1 built (privacy policy covers alerts), NOT pushed
+- v2.18.1 (see HANDOFF.md): privacy policy gets a Want List Email Alerts section + Postmark; contact →
+  chuck@gcgeartracker.com. Push: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+  `git add gc_tracker_app.py EMAIL_ALERTS_DESIGN.md HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit,
+  `git push origin main`. Live: footer v2.18.1, /privacy shows "October 2026" + alerts section.
+- THEN: fill the Postmark approval form from the updated draft (EMAIL_ALERTS_DESIGN.md §6, stream = transactional);
+  Chuck reviews + submits. Then plan step 2 (daily alert engine — email only when ≥1 match).
+- Memory/cost check DONE (10:20 CDT). Web: after the 10/01 deploy ~0.55 GB → ~0.85 GB over 6 days, flattening
+  (no runaway); after the 10/07 v2.18.0 deploy 0.55 → ~0.8 GB in a day, same shape. Postgres 0.5-1.1 GB, noisy but
+  flat. No action needed. Usage Sep 20-Oct 20: $22.73 so far (was $17.35 on 10/01 → ~$0.77/day, higher than the
+  ~$0.50/day estimate), Railway estimates $31.71 this cycle; at this rate a full cycle is ~$23 (a few $ over the
+  Pro plan's included $20). Memory is 95% of the bill.
+- Email alerts: Chuck decided "DAILY ALERT" ONLY (10:00 ET scan; email only if ≥1 match; no hourly) — see EMAIL_ALERTS_DESIGN.md
+  "DECISION 2026-10-08". Step 2 plan must reflect this.
+
+---
+
 # Next Session Prompt — EMAIL ALERTS: v2.18.0 LIVE + verified (step 1 done). Next: Postmark approval, then step 2 (engine)
 
 **2026-10-07 (end of day)**: v2.18.0 pushed, deployed, `[alerts] ready`; Chuck confirmed chuck@gcgeartracker.com via

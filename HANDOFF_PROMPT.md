@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-10-07 · Version: v2.18.0 (email alerts step 1: plumbing, admin-only — see EMAIL_ALERTS_DESIGN.md; v2.17.9 Impact.com verification meta tag; v2.17.8 = Phase G browse speedups; v2.17.7 = S1 cleanup; v2.17.6 = silent sweep; v2.17.5 = quick-window hotfix; v2.17.4 = Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-10-08 · Version: v2.18.1 (privacy policy covers email alerts + Postmark; contact chuck@gcgeartracker.com; v2.18.0 email alerts step 1: plumbing, admin-only — see EMAIL_ALERTS_DESIGN.md; v2.17.9 Impact.com verification meta tag; v2.17.8 = Phase G browse speedups; v2.17.7 = S1 cleanup; v2.17.6 = silent sweep; v2.17.5 = quick-window hotfix; v2.17.4 = Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -19,7 +19,9 @@ Use this at the start of a new session to bring Claude up to speed instantly.
 
 ## Email alerts project (started 2026-10-07)
 
-Design + investigation + decisions: **EMAIL_ALERTS_DESIGN.md**. v2.18.0 = step 1 plumbing (admin-only).
+Design + investigation + decisions: **EMAIL_ALERTS_DESIGN.md**. v2.18.0 = step 1 plumbing (admin-only). v2.18.1 = privacy policy covers alerts
+(daily alert — only sent when something matches, opt-in, encrypted, never sold/marketing, Postmark, unsubscribe) — keep it true as step 2 lands.
+Decision 2026-10-08: "daily alert" only (10:00 ET server scan; email only if ≥1 match), no hourly.
 Rules specific to alerts: the alert address is ONLY in `alert_email.email_enc` (Fernet, key in Railway env) — never
 use `users.email` for alerts; never log/print/render an address, subject, code or Postmark error message; every
 email goes through `send_email()` (daily ceiling, tracking off); new per-user tables go in `_PER_USER_TABLES` so

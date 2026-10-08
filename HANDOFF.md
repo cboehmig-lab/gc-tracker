@@ -1,7 +1,39 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-10-07 · Current version: v2.18.0 (email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-10-08 · Current version: v2.18.1 (privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
 
 ---
+
+## v2.18.1 — 2026-10-08: Privacy policy covers Want List email alerts (ahead of the Postmark approval request). Text only.
+
+**Why**: Postmark reviews new accounts by hand before lifting test mode, and a reviewer is likely to open
+gcgeartracker.com/privacy. The old policy (May 2026) said the email address "is used only for account recovery",
+never mentioned alerts or Postmark, and gave a Gmail contact — a direct contradiction of the approval request
+(opt-in alert emails from gcgeartracker.com). Chuck didn't want a repeat of the May 2026 affiliate rejection, so the
+policy is fixed BEFORE the request is submitted. Also matches the requirement that the policy promise alert
+addresses are never sold or used for marketing.
+
+### What changed (all in `PRIVACY_TEMPLATE`, plus security.txt)
+- "Last updated: October 2026".
+- Account-information paragraph: the account email is still recovery-only and is never used for alerts (alerts use
+  a separate, self-confirmed address — matches the design: alerts never read `users.email`).
+- New section **"Want List Email Alerts"**: optional, being rolled out to a small number of users; once-a-day check;
+  one email that day only if something matches, nothing otherwise (Chuck's 2026-10-08 "daily alert" decision); opt-in only with a one-time code; address
+  used only for alerts/codes, never sold/rented/shared or used for marketing; stored encrypted, not shown in admin
+  pages or logs; no open/click tracking; unsubscribe link in every alert, turn off or "Remove my email" any time,
+  account deletion deletes it; Postmark receives the address + content only to deliver.
+- "How We Use" gets an alerts bullet; "Third-Party Services" gets Postmark (with its privacy-policy link).
+- Data Retention: removal/account deletion deletes the alert address right away; it can remain, encrypted only, in
+  the 7 daily `VACUUM INTO` backups for up to 7 days (true of `_BACKUP_KEEP = 7`).
+- Contact (policy + `/.well-known/security.txt`): `cboehmig@gmail.com` → `chuck@gcgeartracker.com` (Cloudflare
+  Email Routing forwards it to the same Gmail). No other occurrences of the Gmail address remain in the app.
+- Deliberately NOT changed: "request deletion by contacting us" (self-service account deletion isn't built yet —
+  update this line when it ships in a later step).
+- Promises this policy now makes that step 2 must keep: unsubscribe link in every alert, at most one email a day and none when nothing matches, no
+  tracking, address never logged/rendered.
+
+### Verified
+`py_compile` + `node --check static/gc.js` clean. After deploy: /privacy shows "October 2026", the alerts section,
+Postmark under Third-Party Services, the new contact; /.well-known/security.txt shows the new contact.
 
 ## v2.18.0 — 2026-10-07: Email alerts step 1 — plumbing (Postmark wrapper, encrypted address storage, confirm-by-code, admin test page). No user-visible change.
 

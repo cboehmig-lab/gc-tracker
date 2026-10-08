@@ -21,6 +21,20 @@ each waiting on Chuck's go-ahead.
 - Frequency (one per user):
   - **Hourly**: an email after an hourly run only if there are new matches.
   - **Daily summary**: 10:00 America/New_York (zoneinfo, so DST-safe), with catch-up on boot if today's run was missed.
+  - **DECISION 2026-10-08 (Chuck): "daily alert" only — no hourly option.** At most one email a day, at 10:00 ET: the
+    server runs its own scan at 10:00 ET (GC tends to post new listings ~8-9 AM Central, so this catches the
+    morning upload), compiles that user's Want List matches since the last daily alert, and sends ONLY if there is at least one
+    match — no matches = no email (Chuck, 2026-10-08: "daily alert", not a digest). Body carries a note
+    along the lines of: "Items listed as available at scan time may have sold since. Matching items that were
+    listed and then sold or removed between scans may have been missed." Supersedes the hourly/daily choice
+    above (drop `frequency` from alert_settings, the hourly scheduler and `last_hourly_run`; update the popup /
+    privacy copy that mentions hourly).
+  - **PROPOSED 2026-10-08 (Chuck raised, not yet decided): which pills alert.** Chuck suggested an "alert on my
+    entire Want List" option plus per-pill selection, shown as a vertical list with a bell beside each pill (instead
+    of the cloud), so huge Want Lists don't flood people. Proposal: one alert mode per user, `all` (default; pills
+    added later are included automatically) or `selected` (only belled pills). Since it's at most one email a day,
+    a big list makes a longer email, not more emails, so also cap items per email (e.g. top ~25, newest first, then
+    "+N more on gcgeartracker.com"). Awaiting Chuck's pick.
 - **"New" = exactly the site's NEW-tag rule**: `date_listed` newer than an anchor, anchor only advanced on a scan
   with complete coverage. Late-arriving older-dated listings do not count (Chuck, 2026-10-01).
 - **Matching** = the existing Postgres Want List matcher (`_tsquery_want_list_entry`, same one `/api/browse` uses),
@@ -261,12 +275,14 @@ Verified, Return-Path Verified. Account is in **test mode** (100 emails total, o
   no-marketing focus.
 - Message types: (1) 6-digit confirmation codes when a registered user turns on alerts; (2) opt-in "Want List"
   alerts — when a used-gear listing matching a search the user saved appears at Guitar Center, an email with links
-  to those listings (hourly if new matches, or a once-a-day summary). No newsletters or marketing.
+  to those listings, at most one email a day (~10 AM ET), sent only when there are new matches — no match, no email. No newsletters or marketing.
 - Acquisition: only registered gcgeartracker.com users who click a bell on one of their saved searches, enter an
   address and confirm it with the emailed code (confirmed opt-in). Never imported or purchased lists; existing
   account emails are not used. Every alert has one-click unsubscribe (List-Unsubscribe + RFC 8058) and per-search
   stop links; bounces and spam complaints suppress the address via webhook; a hard daily send cap.
-- OPEN question to include: should the alert emails go on the transactional stream or a broadcast stream?
+- Stream: transactional (resolved 2026-10-08 — Postmark's own docs list "individual alert emails the user has
+  opted-in to receive" and per-user digest emails as transactional). Mention: in development, Chuck only → a few beta users;
+  privacy policy (v2.18.1) at gcgeartracker.com/privacy describes the feature.
 
 **Railway + live test (2026-10-07)**: env vars POSTMARK_SERVER_TOKEN, ALERTS_EMAIL_KEY (backed up in Chuck's password
 manager — losing it makes stored addresses unreadable), ALERTS_HMAC_KEY added to web. v2.18.0 deployed, `[alerts] ready`;
