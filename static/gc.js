@@ -535,6 +535,7 @@ function _setAuthUI(username, email) {
     userInfo.style.display  = 'none';
     syncDot.style.display   = 'none';
   }
+  _alertsRefreshAccess(!!(username || email));   // v2.22.0 Email alerts button
   // Saved searches chip — only meaningful when logged in
   const ssWrap = document.getElementById('ss-wrap');
   if (ssWrap) ssWrap.style.display = (username || email) ? '' : 'none';
@@ -4808,4 +4809,183 @@ document.addEventListener('DOMContentLoaded', function() {
     e.preventDefault();
     _openAboutModal();
   });
+});
+
+
+// ── Email alerts panel (v2.22.0) ─────────────────────────────────────────────
+// Shown to the admin and to accounts with the alerts beta flag (/admin/users).
+// /api/alerts/status answers 404 for everyone else, so the buttons stay hidden.
+// Alerts always cover the whole Want List + Watch List (no per-term choices).
+var _alertsState = null;
+
+function _alertsRefreshAccess(loggedIn) {
+  const btns = document.querySelectorAll('.alerts-open-btn');
+  const show = on => btns.forEach(b => { b.style.display = on ? '' : 'none'; });
+  if (!loggedIn) { show(false); _alertsState = null; return; }
+  fetch('/api/alerts/status', {credentials: 'same-origin'})
+    .then(r => r.ok ? r.json() : null)
+    .then(st => { _alertsState = st; show(!!(st && st.ready)); })
+    .catch(() => show(false));
+}
+
+function _alertsMsg(text, isErr) {
+  const el = document.getElementById('al-msg');
+  if (!el) return;
+  el.textContent = text || '';
+  el.classList.toggle('err', !!isErr);
+}
+
+function _alertsShowState(name) {
+  ['al-setup', 'al-code', 'al-on'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('show', id === name);
+  });
+}
+
+function _alertsRender(st) {
+  _alertsState = st;
+  if (!st) return;
+  if (st.confirmed) {
+    document.getElementById('al-on-addr').textContent = st.masked || '';
+    const stEl = document.getElementById('al-on-status');
+    const pauseBtn = document.getElementById('al-pause-btn');
+    stEl.classList.remove('on', 'off', 'bad');
+    if (st.suppressed) {
+      stEl.textContent = 'Emails to this address bounced, so alerts are stopped. Use “Change address” to add a working one.';
+      stEl.classList.add('bad');
+      pauseBtn.style.display = 'none';
+    } else if (st.paused) {
+      stEl.textContent = 'Alerts are paused.';
+      stEl.classList.add('off');
+      pauseBtn.style.display = '';
+      pauseBtn.textContent = 'Turn alerts back on';
+    } else {
+      stEl.textContent = 'Alerts are on — daily, only when something is new.';
+      stEl.classList.add('on');
+      pauseBtn.style.display = '';
+      pauseBtn.textContent = 'Pause alerts';
+    }
+    _alertsShowState('al-on');
+  } else if (st.code_pending) {
+    _alertsShowState('al-code');
+  } else {
+    _alertsShowState('al-setup');
+  }
+}
+
+function _alertsLoad() {
+  return fetch('/api/alerts/status', {credentials: 'same-origin'})
+    .then(r => r.ok ? r.json() : null)
+    .then(st => { if (st) _alertsRender(st); return st; });
+}
+
+function _alertsPost(url, body) {
+  return fetch(url, {
+    method: 'POST', credentials: 'same-origin',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body || {})
+  }).then(r => r.json().catch(() => ({})).then(d => ({ok: r.ok && d.ok !== false, d})));
+}
+
+function _alertsBusy(btn, busy) { if (btn) btn.disabled = !!busy; }
+
+function openAlertsPanel() {
+  _alertsMsg('');
+  document.getElementById('alerts-modal').classList.add('open');
+  _alertsLoad();
+}
+
+function closeAlertsPanel() {
+  document.getElementById('alerts-modal').classList.remove('open');
+}
+
+function _alertsSendCode() {
+  const btn = document.getElementById('al-send-code-btn');
+  const email = (document.getElementById('al-email-input').value || '').trim();
+  if (!email) { _alertsMsg('Please enter your email address.', true); return; }
+  _alertsBusy(btn, true); _alertsMsg('Sending…');
+  _alertsPost('/api/alerts/email/start', {email}).then(({ok, d}) => {
+    _alertsBusy(btn, false);
+    if (!ok) { _alertsMsg(d.error || d.message || 'Something went wrong.', true); return; }
+    _alertsMsg(d.message || 'Code sent.');
+    const m = (d.message || '').match(/sent to (.+?)\. It expires/);
+    document.getElementById('al-code-addr').textContent = m ? m[1] : 'your email';
+    document.getElementById('al-code-input').value = '';
+    _alertsShowState('al-code');
+    setTimeout(() => document.getElementById('al-code-input').focus(), 50);
+  }).catch(() => { _alertsBusy(btn, false); _alertsMsg('Network error — please try again.', true); });
+}
+
+function _alertsConfirm() {
+  const btn = document.getElementById('al-confirm-btn');
+  const code = (document.getElementById('al-code-input').value || '').replace(/\D/g, '');
+  if (code.length !== 6) { _alertsMsg('Enter the 6-digit code from the email.', true); return; }
+  _alertsBusy(btn, true); _alertsMsg('Checking…');
+  _alertsPost('/api/alerts/email/confirm', {code}).then(({ok, d}) => {
+    _alertsBusy(btn, false);
+    if (!ok) { _alertsMsg(d.error || d.message || 'That code didn’t work.', true); return; }
+    _alertsMsg('You’re all set. Your first alert comes the next morning something new shows up.');
+    _alertsLoad();
+  }).catch(() => { _alertsBusy(btn, false); _alertsMsg('Network error — please try again.', true); });
+}
+
+function _alertsTogglePause() {
+  const btn = document.getElementById('al-pause-btn');
+  const pause = !(_alertsState && _alertsState.paused);
+  _alertsBusy(btn, true);
+  _alertsPost('/api/alerts/pause', {paused: pause}).then(({ok, d}) => {
+    _alertsBusy(btn, false);
+    _alertsMsg(ok ? (d.message || '') : (d.error || 'Something went wrong.'), !ok);
+    _alertsLoad();
+  }).catch(() => { _alertsBusy(btn, false); _alertsMsg('Network error — please try again.', true); });
+}
+
+function _alertsTest() {
+  const btn = document.getElementById('al-test-btn');
+  _alertsBusy(btn, true); _alertsMsg('Sending…');
+  _alertsPost('/api/alerts/test-send').then(({ok, d}) => {
+    _alertsBusy(btn, false);
+    _alertsMsg(ok ? (d.message || 'Sent.') : (d.error || 'Send failed.'), !ok);
+  }).catch(() => { _alertsBusy(btn, false); _alertsMsg('Network error — please try again.', true); });
+}
+
+function _alertsRemove() {
+  const sure = document.getElementById('al-remove-btn');
+  if (sure.dataset.armed !== '1') {
+    sure.dataset.armed = '1';
+    sure.textContent = 'Click again to remove your email';
+    setTimeout(() => { sure.dataset.armed = ''; sure.textContent = 'Remove my email'; }, 5000);
+    return;
+  }
+  sure.dataset.armed = ''; sure.textContent = 'Remove my email';
+  _alertsBusy(sure, true);
+  _alertsPost('/api/alerts/email/remove').then(({ok, d}) => {
+    _alertsBusy(sure, false);
+    _alertsMsg(ok ? 'Your email has been removed. No more alerts.' : (d.error || 'Something went wrong.'), !ok);
+    document.getElementById('al-email-input').value = '';
+    _alertsLoad();
+  }).catch(() => { _alertsBusy(sure, false); _alertsMsg('Network error — please try again.', true); });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.alerts-open-btn').forEach(b => b.addEventListener('click', () => {
+    if (b.id === 'kw-alerts-btn') { const done = document.getElementById('kw-done-btn'); if (done) done.click(); }
+    openAlertsPanel();
+  }));
+  const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+  on('alerts-close-x', closeAlertsPanel);
+  on('alerts-close-btn', closeAlertsPanel);
+  on('al-send-code-btn', _alertsSendCode);
+  on('al-confirm-btn', _alertsConfirm);
+  on('al-restart-btn', () => { _alertsMsg(''); _alertsShowState('al-setup'); });
+  on('al-change-btn', () => { _alertsMsg(''); _alertsShowState('al-setup'); });
+  on('al-pause-btn', _alertsTogglePause);
+  on('al-test-btn', _alertsTest);
+  on('al-remove-btn', _alertsRemove);
+  const em = document.getElementById('al-email-input');
+  if (em) em.addEventListener('keydown', e => { if (e.key === 'Enter') _alertsSendCode(); });
+  const cd = document.getElementById('al-code-input');
+  if (cd) cd.addEventListener('keydown', e => { if (e.key === 'Enter') _alertsConfirm(); });
+  const modal = document.getElementById('alerts-modal');
+  if (modal) modal.addEventListener('click', e => { if (e.target === modal) closeAlertsPanel(); });
 });

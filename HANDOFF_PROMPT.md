@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-10-09 · Version: v2.21.0 (alert email: new items + Want List drops + Watch List drops; v2.20.0 NEW = dated-new OR first seen by the site since your last scan — late arrivals, returns excluded; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign; v2.19.2 alert button = scan → Want List; v2.19.1 alert email button → Want List view; v2.19.0 email alerts step 2: daily alert engine, Chuck-only; v2.18.1 privacy policy covers email alerts + Postmark; contact chuck@gcgeartracker.com; v2.18.0 email alerts step 1: plumbing, admin-only — see EMAIL_ALERTS_DESIGN.md; v2.17.9 Impact.com verification meta tag; v2.17.8 = Phase G browse speedups; v2.17.7 = S1 cleanup; v2.17.6 = silent sweep; v2.17.5 = quick-window hotfix; v2.17.4 = Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-10-09 · Version: v2.22.0 (alerts beta + Email alerts panel; v2.21.0 alert email: new items + Want List drops + Watch List drops; v2.20.0 NEW = dated-new OR first seen by the site since your last scan — late arrivals, returns excluded; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign; v2.19.2 alert button = scan → Want List; v2.19.1 alert email button → Want List view; v2.19.0 email alerts step 2: daily alert engine, Chuck-only; v2.18.1 privacy policy covers email alerts + Postmark; contact chuck@gcgeartracker.com; v2.18.0 email alerts step 1: plumbing, admin-only — see EMAIL_ALERTS_DESIGN.md; v2.17.9 Impact.com verification meta tag; v2.17.8 = Phase G browse speedups; v2.17.7 = S1 cleanup; v2.17.6 = silent sweep; v2.17.5 = quick-window hotfix; v2.17.4 = Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -117,6 +117,12 @@ share the default-view entry. Responses carry `facet_gen`; gc.js sends `skip_fac
 server omits the facet lists if the generation still matches. Search debounce 200 ms. Byte-identical to v2.17.7 on a
 270-request comparison. Autocomplete skipped (Chuck); >1 worker not needed (low overlap). This closes Phase G.
 See HANDOFF.md v2.17.8.
+
+---
+
+## v2.22.0 — alerts beta (2026-10-09)
+
+Beta switch per user on /admin/users (`POST /admin/alerts-beta`); `_alerts_allowed` = admin or `users.alerts_beta`. "✉ Email alerts" panel (header + Want List editor footer) for set up / confirm code / pause / test / change / remove. Everyone gets the whole Want List + Watch List — no per-pill bells or per-term stop links (`_alerts_active_pills` ignores alert_pills). Full detail: HANDOFF.md v2.22.0.
 
 ---
 

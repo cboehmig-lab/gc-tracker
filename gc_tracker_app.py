@@ -3464,7 +3464,7 @@ def admin_users():
     # Load all users + their data
     with _user_db() as conn:
         users = [dict(r) for r in conn.execute(
-            "SELECT u.id, u.username, u.created_at, u.deleted_at, "
+            "SELECT u.id, u.username, u.created_at, u.deleted_at, u.alerts_beta, "
             "       u.last_login, d.last_run, d.updated_at "
             "FROM users u "
             "LEFT JOIN user_data d ON d.user_id = u.id "
@@ -3520,6 +3520,13 @@ def admin_users():
         except: return ts
 
     csrf_token = _admin_page_csrf()
+    # v2.22.0: alerts state per user (never the address).
+    with _user_db() as conn:
+        _al_conf = {r["user_id"] for r in conn.execute(
+            "SELECT user_id FROM alert_email WHERE confirmed_at IS NOT NULL").fetchall()}
+        _al_set = {r["user_id"]: dict(r) for r in conn.execute(
+            "SELECT user_id, paused, suppressed FROM alert_settings").fetchall()}
+        _al_code = {r["user_id"] for r in conn.execute("SELECT user_id FROM alert_codes").fetchall()}
     rows_html = ""
     for u in users:
         last_scan      = _fmt(u.get("last_run"))
@@ -3572,6 +3579,7 @@ def admin_users():
             f'<td style="text-align:center">{int(u["wl_count"])}</td>'
             f'<td style="text-align:center">{int(u["kw_count"])}</td>'
             f'<td style="text-align:center">{int(u["fav_count"])}</td>'
+            f'<td style="text-align:center;white-space:nowrap" data-value="{1 if u.get("alerts_beta") else 0}">{_alerts_admin_cell(u, csrf_token, _al_conf, _al_set, _al_code)}</td>'
             f'<td style="text-align:center">{action_html}</td>'
             f'</tr>'
         )
@@ -3608,13 +3616,63 @@ a{{color:#888;text-decoration:none;font-size:.78rem}}
   <th data-col="4" style="text-align:center">Watch</th>
   <th data-col="5" style="text-align:center">Want</th>
   <th data-col="6" style="text-align:center">Favs</th>
+  <th data-col="7" style="text-align:center">Alerts</th>
   <th data-col="-1"></th>
 </tr>
-{rows_html if rows_html else '<tr><td colspan="8" style="color:#555;padding:20px">No accounts yet.</td></tr>'}
+{rows_html if rows_html else '<tr><td colspan="9" style="color:#555;padding:20px">No accounts yet.</td></tr>'}
 </table>
 </body></html>"""
 
     return Response(html, mimetype="text/html")
+
+
+def _alerts_admin_cell(u: dict, csrf: str, confirmed: set, settings: dict, codes: set) -> str:
+    """/admin/users "Alerts" cell: beta switch + state (no address). v2.22.0."""
+    uid = int(u["id"])
+    on = bool(u.get("alerts_beta"))
+    st = settings.get(uid) or {}
+    if uid in confirmed:
+        state = ("bounced" if st.get("suppressed") else "paused" if st.get("paused") else "on")
+    elif uid in codes:
+        state = "code sent"
+    else:
+        state = "no email"
+    color = {"on": "#4ade80", "paused": "#e8c060", "bounced": "#e88", "code sent": "#9cf"}.get(state, "#777")
+    btn = ("background:#1a3a1a;color:#8fc88f" if not on else "background:#3a2a1a;color:#e8c060")
+    return (f'<span style="color:{color};font-size:.75rem">{state}</span> '
+            f'<form method="POST" action="/admin/alerts-beta" style="display:inline">'
+            f'<input type="hidden" name="id" value="{uid}">'
+            f'<input type="hidden" name="_csrf" value="{_html.escape(csrf)}">'
+            f'<input type="hidden" name="on" value="{0 if on else 1}">'
+            f'<button type="submit" style="{btn};border:none;border-radius:4px;padding:2px 8px;cursor:pointer;'
+            f'font-size:.75rem">{"Beta ✓ — turn off" if on else "Add to beta"}</button></form>')
+
+
+@app.route("/admin/alerts-beta", methods=["POST"])
+def admin_alerts_beta():
+    """Turn one account's alerts beta flag on/off (v2.22.0). Off = that account
+    stops getting alert emails at the next run (_alerts_subscribers skips
+    non-beta accounts) and loses the Email alerts panel; its address and
+    settings are kept, so turning it back on resumes where it was."""
+    denied = _require_admin()
+    if denied:
+        return denied
+    submitted = request.form.get("_csrf", "")
+    expected  = session.get("_admin_csrf") or ""
+    if not expected or not submitted or not hmac.compare_digest(submitted, expected):
+        return Response("Invalid CSRF token — go back and reload the page.", status=403, content_type="text/plain")
+    try:
+        user_id = int(request.form.get("id", ""))
+    except (ValueError, TypeError):
+        return Response("Invalid user id.", status=400, content_type="text/plain")
+    if not _user_by_id(user_id):
+        return Response("User not found.", status=404, content_type="text/plain")
+    on = request.form.get("on") == "1"
+    with _user_db() as conn:
+        conn.execute("UPDATE users SET alerts_beta=? WHERE id=?", (1 if on else 0, user_id))
+        conn.commit()
+    print(f"[alerts] beta flag {'on' if on else 'off'} for user {user_id}")
+    return redirect("/admin/users")
 
 
 @app.route("/admin/delete-user", methods=["POST"])
@@ -3747,9 +3805,15 @@ def _mask_email(e: str) -> str:
     return f"{local[0]}•••@{domain}"
 
 def _alerts_allowed() -> bool:
-    """Who can see/use alerts right now. Step 1: admin only. (Steps 3-5 add the
-    per-user beta flag users.alerts_beta and then a global switch.)"""
-    return bool(session.get("user_id")) and _is_admin()
+    """Who can see/use alerts right now: the admin, or a signed-in account whose
+    beta flag (users.alerts_beta, toggled on /admin/users) is on. v2.22.0."""
+    uid = session.get("user_id")
+    if not uid:
+        return False
+    if _is_admin():
+        return True
+    u = _user_by_id(uid)
+    return bool(u and u.get("alerts_beta") and not u.get("deleted_at"))
 
 def _alerts_day() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d")
@@ -3873,13 +3937,13 @@ def _alerts_start(user_id: int, raw_email: str) -> tuple[bool, str, int]:
             (user_id, _enc_email(email), bidx, _hash_code(user_id, code), now + _CODE_TTL_S, now))
         conn.commit()
     text = (f"Your GC Gear Tracker confirmation code is {code}\n\n"
-            f"Type it into the box on gcgeartracker.com to turn on Want List email alerts. "
+            f"Type it into the box on gcgeartracker.com to turn on email alerts. "
             f"It expires in {_CODE_TTL_S // 60} minutes.\n\n"
             "If you didn't ask for this, ignore this email. You won't get anything else from us "
             "unless the code is entered.\n\n— GC Gear Tracker (gcgeartracker.com)\n")
     html = (f"<p>Your GC Gear Tracker confirmation code is</p>"
             f"<p style=\"font-size:28px;font-weight:bold;letter-spacing:4px;font-family:monospace\">{code}</p>"
-            f"<p>Type it into the box on gcgeartracker.com to turn on Want List email alerts. "
+            f"<p>Type it into the box on gcgeartracker.com to turn on email alerts. "
             f"It expires in {_CODE_TTL_S // 60} minutes.</p>"
             "<p style=\"color:#666\">If you didn't ask for this, ignore this email. You won't get anything "
             "else from us unless the code is entered.</p>")
@@ -3922,9 +3986,36 @@ def _alerts_confirm(user_id: int, raw_code: str) -> tuple[bool, str, int]:
         # changed address keeps its existing settings row (INSERT OR IGNORE).
         conn.execute("INSERT OR IGNORE INTO alert_settings(user_id, frequency, paused, mode, anchor, updated_at) "
                      "VALUES(?, 'daily', 0, 'all', ?, ?)", (user_id, _alerts_initial_anchor(), stamp))
+        # v2.22.0: a newly confirmed address replaces one that bounced.
+        conn.execute("UPDATE alert_settings SET suppressed=NULL WHERE user_id=?", (user_id,))
         conn.execute("DELETE FROM alert_codes WHERE user_id=?", (user_id,))
         conn.commit()
     return True, "Email confirmed.", 200
+
+def _alerts_set_paused(user_id: int, pause: bool) -> tuple[bool, str, int]:
+    with _user_db() as conn:
+        em = conn.execute("SELECT 1 FROM alert_email WHERE user_id=? AND confirmed_at IS NOT NULL",
+                          (user_id,)).fetchone()
+    if not em:
+        return False, "Add and confirm an email address first.", 400
+    _alerts_apply_pause(user_id, pause)
+    return True, ("Alerts paused." if pause else "Alerts are on."), 200
+
+
+def _alerts_apply_pause(user_id: int, pause: bool) -> None:
+    """Pause or resume one user's alerts. Resuming starts from now: anchor =
+    newest listing, checked_at = now, so no backlog of items or price drops."""
+    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _user_db() as conn:
+        conn.execute("INSERT OR IGNORE INTO alert_settings(user_id, frequency, paused, mode, updated_at) "
+                     "VALUES(?, 'daily', 0, 'all', ?)", (user_id, now))
+        conn.execute("UPDATE alert_settings SET paused=?, updated_at=? WHERE user_id=?",
+                     (1 if pause else 0, now, user_id))
+        if not pause:
+            conn.execute("UPDATE alert_settings SET anchor=?, checked_at=? WHERE user_id=?",
+                         (_alerts_initial_anchor(), now, user_id))
+        conn.commit()
+
 
 def _alerts_test_send(user_id: int) -> tuple[bool, str, int]:
     if not _ALERTS_READY:
@@ -3935,9 +4026,9 @@ def _alerts_test_send(user_id: int) -> tuple[bool, str, int]:
     addr = _dec_email(em["email_enc"]) if em else None
     if not addr:
         return False, "No confirmed email on this account.", 400
-    text = ("This is a test email from GC Gear Tracker. If you're reading it, Want List alerts "
+    text = ("This is a test email from GC Gear Tracker. If you're reading it, your daily alerts "
             "can reach you.\n\n— GC Gear Tracker (gcgeartracker.com)\n")
-    html = ("<p>This is a test email from GC Gear Tracker. If you're reading it, Want List alerts "
+    html = ("<p>This is a test email from GC Gear Tracker. If you're reading it, your daily alerts "
             "can reach you.</p><p style=\"color:#666\">— GC Gear Tracker (gcgeartracker.com)</p>")
     ok, why = send_email(addr, "GC Gear Tracker test email", text, html, tag="test")
     if ok:
@@ -3987,6 +4078,14 @@ def api_alerts_test_send():
     if not _alerts_allowed():
         return jsonify({"error": "Not found"}), 404
     return _alerts_json(_alerts_test_send(session["user_id"]))
+
+@app.route("/api/alerts/pause", methods=["POST"])
+def api_alerts_pause():
+    """v2.22.0 settings panel: {"paused": true|false}. Turning alerts back on
+    starts fresh from now (no backlog), same as the email's resume link."""
+    if not _alerts_allowed():
+        return jsonify({"error": "Not found"}), 404
+    return _alerts_json(_alerts_set_paused(session["user_id"], bool((request.json or {}).get("paused"))))
 
 @app.route("/api/alerts/email/remove", methods=["POST"])
 def api_alerts_email_remove():
@@ -4188,20 +4287,11 @@ def _alerts_subscribers(only_user: int | None = None) -> list[dict]:
 
 
 def _alerts_active_pills(user_id: int, keywords: list, mode: str) -> list[str]:
-    """The Want List pills this user is alerted on, in Want List order, after the
-    same per-shape caps the site applies. Prunes alert_pills rows whose pill is
-    no longer in the Want List."""
-    accepted = _kw_accept_capped([k for k in keywords if isinstance(k, str)])
-    with _user_db() as conn:
-        rows = {r["keyword"]: r["on_"] for r in
-                conn.execute("SELECT keyword, on_ FROM alert_pills WHERE user_id=?", (user_id,)).fetchall()}
-        stale = [k for k in rows if k not in keywords]
-        if stale:
-            conn.executemany("DELETE FROM alert_pills WHERE user_id=? AND keyword=?", [(user_id, k) for k in stale])
-            conn.commit()
-    if mode == "selected":
-        return [k for k in accepted if rows.get(k) == 1]
-    return [k for k in accepted if rows.get(k, 1) == 1]
+    """The Want List pills this user is alerted on: all of them, in Want List
+    order, after the same per-shape caps the site applies. (v2.22.0, Chuck
+    2026-10-09: everyone gets the default — no per-pill choices; the old
+    alert_pills rows and `mode` are ignored.)"""
+    return _kw_accept_capped([k for k in keywords if isinstance(k, str)])
 
 
 def _alerts_pill_label(kw: str) -> str:
@@ -4439,9 +4529,7 @@ def _alerts_build_email(user_id: int, new_items: list[dict], want_drops: list[di
     pause_url = f"{_ALERTS_SITE}/alerts/u/{_alerts_link_token(user_id, 'u')}"
     manage_url = f"{_ALERTS_SITE}/"
     matched_pills = [p for p in pills if any(p in it["pills"] for it in new_items + want_drops)]
-    stop_links = [(_alerts_pill_label(p),
-                   f"{_ALERTS_SITE}/alerts/p/{_alerts_link_token(user_id, 'p', _alerts_pill_id(user_id, p))}")
-                  for p in matched_pills]
+    term_labels = [_alerts_pill_label(p) for p in matched_pills]   # v2.22.0: no per-term stop links
     note = ("Listings were available when we checked at 10 AM ET and may have sold since. "
             "Items that were listed and sold between checks may not appear.")
     today = ""
@@ -4485,11 +4573,8 @@ def _alerts_build_email(user_id: int, new_items: list[dict], want_drops: list[di
         more = len(items) - len(shown)
         t += [(f"See {more} more on GC Gear Tracker" if more > 0 else btn) + f": {links[key]}", ""]
     t += [f"Note: {note}", ""]
-    if stop_links:
-        t.append("Matched Want List terms in this alert:")
-        for lab, url in stop_links:
-            t.append(f"  {lab} — stop alerts for this term: {url}")
-        t.append("")
+    if term_labels:
+        t += ["Matched Want List terms: " + ", ".join(term_labels), ""]
     t += ["You're getting this because you turned on email alerts at gcgeartracker.com.",
           f"Manage alerts: {manage_url}", f"Pause all alerts: {pause_url}",
           "This mailbox isn't monitored — use the links above to stop or pause alerts.", "",
@@ -4543,12 +4628,11 @@ def _alerts_build_email(user_id: int, new_items: list[dict], want_drops: list[di
                     f'</td></tr></table></td></tr>')
     chips = "".join(
         f'<span style="display:inline-block;margin:0 6px 8px 0;padding:4px 10px;border-radius:12px;background:#0a2e17;'
-        f'border:1px solid #2d6a2d;font-size:12px;color:#4ade80;font-family:{F};white-space:nowrap">{esc(lab)}'
-        f'&nbsp;&nbsp;<a href="{esc(url)}" style="color:#d6f5de;text-decoration:underline;font-size:11px">stop alerts</a>'
-        f'</span>' for lab, url in stop_links)
+        f'border:1px solid #2d6a2d;font-size:12px;color:#4ade80;font-family:{F};white-space:nowrap">{esc(lab)}</span>'
+        for lab in term_labels)
     terms_html = (f'<tr><td style="padding:16px 20px 10px;border-top:1px solid #2a2a2a;font-family:{F}">'
                   f'<div style="font-size:11px;font-weight:700;color:#ffffff;letter-spacing:.5px;text-transform:uppercase;'
-                  f'margin-bottom:10px">Matched Want List terms in this alert</div>{chips}</td></tr>') if stop_links else ""
+                  f'margin-bottom:10px">Matched Want List terms in this alert</div>{chips}</td></tr>') if term_labels else ""
     first = (new_items + want_drops + watch_drops)[0]
     html = (
         '<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -4857,56 +4941,35 @@ def alerts_link_pause(tok):
     uid, action, _ = parsed
     pause = action == "u"
     if request.method == "POST":
-        now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-        with _user_db() as conn:
-            conn.execute("INSERT OR IGNORE INTO alert_settings(user_id, frequency, paused, mode, updated_at) "
-                         "VALUES(?, 'daily', 0, 'all', ?)", (uid, now))
-            conn.execute("UPDATE alert_settings SET paused=?, updated_at=? WHERE user_id=?",
-                         (1 if pause else 0, now, uid))
-            if not pause:   # resuming: start fresh from now, no backlog
-                conn.execute("UPDATE alert_settings SET anchor=? WHERE user_id=?", (_alerts_initial_anchor(), uid))
-            conn.commit()
+        _alerts_apply_pause(uid, pause)     # resuming starts fresh from now, no backlog
         if request.form.get("List-Unsubscribe") == "One-Click":
             return Response("ok", mimetype="text/plain")
         if pause:
             resume = _alerts_link_token(uid, "r")
             return _alerts_link_page("Alerts paused",
-                "<p>You won't get any more Want List alert emails. Your address is kept so you can turn them "
+                "<p>You won't get any more alert emails. Your address is kept so you can turn them "
                 "back on; to delete it, use “Remove my email” in your alert settings.</p>"
                 f"<form method=\"POST\" action=\"/alerts/u/{_html.escape(resume)}\"><button type=\"submit\">"
                 "Turn alerts back on</button></form>")
-        return _alerts_link_page("Alerts are back on", "<p>You'll get Want List alerts again, starting with "
-                                 "listings from now on.</p>")
-    label = "Pause all Want List email alerts?" if pause else "Turn Want List email alerts back on?"
+        return _alerts_link_page("Alerts are back on", "<p>You'll get alert emails again, starting with "
+                                 "listings and price drops from now on.</p>")
+    label = "Pause all alert emails?" if pause else "Turn alert emails back on?"
     btn = "Pause all alerts" if pause else "Turn alerts back on"
     return _alerts_link_page(label, f"<form method=\"POST\"><button type=\"submit\">{btn}</button></form>")
 
 
 @app.route("/alerts/p/<tok>", methods=["GET", "POST"])
 def alerts_link_pill(tok):
-    """Stop alerts for one Want List pill (the pill stays on the Want List)."""
+    """Per-term "stop alerts" links from emails sent before v2.22.0. Alerts now
+    always cover the whole Want List, so this only explains how to stop a term."""
     parsed = _alerts_link_user(tok)
     if not parsed or parsed[1] != "p":
         return _alerts_link_page("Link not valid", "<p>This link has expired or isn't valid.</p>", 404)
-    uid, _, pid = parsed
-    kw = next((k for k in (_get_user_data(uid).get("keywords") or [])
-               if isinstance(k, str) and hmac.compare_digest(_alerts_pill_id(uid, k), pid)), None)
-    if kw is None:
-        return _alerts_link_page("Search not found",
-                                 "<p>That search is no longer on your Want List, so there's nothing to stop.</p>")
-    lab = _html.escape(_alerts_quoted(_alerts_pill_label(kw)))
-    if request.method == "POST":
-        now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-        with _user_db() as conn:
-            conn.execute("INSERT INTO alert_pills(user_id, keyword, on_, updated_at) VALUES(?,?,0,?) "
-                         "ON CONFLICT(user_id, keyword) DO UPDATE SET on_=0, updated_at=excluded.updated_at",
-                         (uid, kw, now))
-            conn.commit()
-        return _alerts_link_page("Stopped", f"<p>No more alerts for {lab}. It's still on your Want List, "
-                                 "and your other alerts are unchanged.</p>")
-    return _alerts_link_page(f"Stop alerts for {_alerts_quoted(_alerts_pill_label(kw))}?",
-                             "<p>It stays on your Want List; you just won't get emails for it.</p>"
-                             "<form method=\"POST\"><button type=\"submit\">Stop these alerts</button></form>")
+    uid = parsed[0]
+    pause = _html.escape(_alerts_link_token(uid, "u"))
+    return _alerts_link_page("Alerts cover your whole Want List",
+        "<p>To stop alerts for one search, remove it from your Want List on gcgeartracker.com.</p>"
+        f"<p>To stop all alert emails, <a href=\"/alerts/u/{pause}\" style=\"color:#fff\">pause all alerts</a>.</p>")
 
 
 _ALERTS_SUPPRESS_BOUNCES = {"HardBounce", "BadEmailAddress", "ManuallyDeactivated", "SpamNotification", "SpamComplaint"}
@@ -9089,6 +9152,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <!-- pinned footer: always visible -->
     <div style="display:flex;gap:10px;justify-content:space-between;border-top:1px solid #2e2e2e;padding:14px 24px 20px;flex-shrink:0">
       <button id="kw-clear-btn" style="padding:6px 14px;background:#1a1a1a;border:1px solid #5a2a2a;border-radius:5px;color:#a05050;font-size:.78rem;cursor:pointer">Clear Want List</button>
+      <button id="kw-alerts-btn" class="alerts-open-btn" style="display:none">✉ Email alerts</button>
       <button id="kw-done-btn" style="padding:6px 18px;background:#252525;border:1px solid #3a3a3a;border-radius:5px;color:#aaa;font-size:.85rem;cursor:pointer">Done</button>
     </div>
   </div>
@@ -9102,6 +9166,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <span id="auth-sync-dot" title="Synced to account"></span>
     <div id="auth-user-info">
       <span id="auth-email"></span>
+      <button id="alerts-open-btn" class="alerts-open-btn" style="display:none">✉ Email alerts</button>
       <button id="auth-logout-btn">Sign out</button>
     </div>
     <button id="auth-login-btn">Sign in</button>
@@ -9537,6 +9602,41 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </div>
 
 <!-- ── About modal ── -->
+<!-- ── Email alerts panel (v2.22.0, beta accounts + admin; JS in static/gc.js) ── -->
+<div id="alerts-modal">
+  <div id="alerts-box">
+    <button id="alerts-close-x" class="alerts-x" aria-label="Close">✕</button>
+    <h3>Email alerts</h3>
+    <p class="alerts-intro">Once a day, around 10 AM Eastern, we'll email you new listings that match your
+      Want List, plus price drops on Want List matches and on your Watch List. Nothing new that day means no email.</p>
+    <div id="al-setup" class="al-state">
+      <label for="al-email-input">Email address</label>
+      <input id="al-email-input" type="email" autocomplete="email" placeholder="you@example.com" maxlength="254">
+      <button id="al-send-code-btn" class="al-primary">Send code</button>
+      <p class="alerts-fine">Your address is stored encrypted and used only for these alerts. It's never sold or
+        used for marketing. You can pause or remove it any time.</p>
+    </div>
+    <div id="al-code" class="al-state">
+      <p>Enter the 6-digit code we sent to <b id="al-code-addr"></b>.</p>
+      <input id="al-code-input" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456">
+      <button id="al-confirm-btn" class="al-primary">Confirm</button>
+      <button id="al-restart-btn" class="al-link">Use a different address</button>
+    </div>
+    <div id="al-on" class="al-state">
+      <p>Alerts go to <b id="al-on-addr"></b></p>
+      <p id="al-on-status" class="al-status"></p>
+      <button id="al-pause-btn" class="al-primary"></button>
+      <div class="al-row">
+        <button id="al-test-btn" class="al-secondary">Send a test email</button>
+        <button id="al-change-btn" class="al-secondary">Change address</button>
+      </div>
+      <button id="al-remove-btn" class="al-danger">Remove my email</button>
+    </div>
+    <p id="al-msg" class="al-msg"></p>
+    <button id="alerts-close-btn" class="about-close-btn">Close</button>
+  </div>
+</div>
+
 <div id="about-modal">
   <div id="about-box">
     <h3>GC Used Inventory Tracker</h3>
@@ -9641,8 +9741,9 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid #222;color:#555;fon
   <h2>Want List Email Alerts</h2>
   <p>Want List email alerts are an optional feature for registered users (currently being rolled
   out to a small number of users). If you turn them on, we check once a day for new Guitar Center
-  used listings that match the Want List searches you chose to be alerted on. If something
-  matches, you get one email that day listing the matches; if nothing matches, we send nothing.</p>
+  used listings that match your Want List searches, and for price drops on those matches and on
+  items in your Watch List. If there is something new, you get one email that day listing it; if
+  there is nothing new, we send nothing.</p>
   <ul>
     <li><strong style="color:#eee">Opt-in only.</strong> Alerts are off unless you turn them on.
     You enter the address you want alerts sent to and confirm it with a one-time code we email to
@@ -9734,7 +9835,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.21.0"
+APP_VERSION = "2.22.0"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

@@ -1,5 +1,55 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-10-09 · Current version: v2.21.0 (alert email: 3 sections — new Want List items, Want List price drops, Watch List price drops; "Gear Alert:" subjects; v2.20.0 NEW also flags listings new to the site regardless of listed date — late arrivals; returns excluded; /api/new-catchup after the sweep; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign: newest-first list in the site's look, terms at the bottom; v2.19.2 alert email button runs the user's scan then opens the Want List; v2.19.1 alert email button opens the Want List; v2.19.0 email alerts step 2: daily 10 AM ET alert engine, /go/<sku>, signed pause/stop links, Postmark bounce webhook — Chuck-only; v2.18.1 privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-10-09 · Current version: v2.22.0 (alerts beta: /admin/users beta switch, "Email alerts" panel for beta users, whole-list alerts only — no per-term choices; v2.21.0 alert email: 3 sections — new Want List items, Want List price drops, Watch List price drops; "Gear Alert:" subjects; v2.20.0 NEW also flags listings new to the site regardless of listed date — late arrivals; returns excluded; /api/new-catchup after the sweep; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign: newest-first list in the site's look, terms at the bottom; v2.19.2 alert email button runs the user's scan then opens the Want List; v2.19.1 alert email button opens the Want List; v2.19.0 email alerts step 2: daily 10 AM ET alert engine, /go/<sku>, signed pause/stop links, Postmark bounce webhook — Chuck-only; v2.18.1 privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.22.0 — 2026-10-09: Alerts beta — testers can turn on email alerts themselves; everyone gets the whole lists
+
+**Why (Chuck, 2026-10-09)**: let two hand-picked users test. Decisions: everyone gets the default — alerts always
+cover the whole Want List + Watch List; **no bells by Want List pills, no per-term on/off, no per-term "stop alerts"
+links** (Chuck: most people don't have gigantic lists). Self-service account deletion deferred to before public launch
+(testers can still "Remove my email"). No announcement popup yet — Chuck tells the testers directly.
+
+**Admin — beta switch**: /admin/users has a new **Alerts** column per user: state (no email / code sent / on / paused /
+bounced — never the address) + a button "Add to beta" / "Beta ✓ — turn off" → `POST /admin/alerts-beta`
+{id, on, _csrf} (same CSRF pattern as delete-user) → `users.alerts_beta`. Off = the account stops getting emails at the
+next run (`_alerts_subscribers` already filters on admin-or-beta) and loses the panel; address/settings kept.
+
+**Who can use alerts**: `_alerts_allowed()` = signed in AND (admin OR `alerts_beta` and not scheduled for deletion).
+All /api/alerts/* routes use it (404 otherwise), so the UI stays invisible to everyone else.
+
+**Site UI (static/gc.js `_alerts*`, markup `#alerts-modal` in HTML_TEMPLATE, styles at the end of gc.css)**:
+"✉ Email alerts" button in the desktop header (next to Sign out) and in the Want List editor's footer (the mobile entry
+point — the desktop header is hidden on phones; that button closes the Want List editor first). Both hidden unless
+`/api/alerts/status` answers 200 with ready=true (`_alertsRefreshAccess`, called from `_setAuthUI`). Panel states:
+setup (email → "Send code"), code (6-digit code → Confirm, "Use a different address"), on (masked address, status line
+on / paused / bounced, Pause ↔ Turn back on, Send a test email, Change address, Remove my email with a click-again
+confirm). Intro explains: daily ~10 AM ET, new Want List matches + price drops on Want List matches and Watch List,
+no email on days with nothing new; fine print: encrypted, never sold / marketing, pause or remove any time. Light text
+only. No inline handlers (CSP).
+
+**Server**
+- `POST /api/alerts/pause {paused}` → `_alerts_set_paused` → `_alerts_apply_pause` (shared with the email's
+  /alerts/u/ pause/resume links). Resuming starts fresh: anchor = newest listing AND checked_at = now (no backlog of
+  items or price drops).
+- `_alerts_active_pills` now returns every Want List entry (after `_kw_accept_capped`); `alert_pills` rows and `mode`
+  are ignored (tables left in place).
+- Email: matched terms still shown (plain chips / text line), per-term stop links removed. Old emails' `/alerts/p/<tok>`
+  links now show "Alerts cover your whole Want List — remove the search from your Want List, or pause all alerts".
+- Confirming a new address clears a bounce suppression (`alert_settings.suppressed = NULL`).
+- Wording: code/test emails and pause pages say "email alerts" / "alert emails" (not "Want List" only); privacy policy
+  alerts paragraph now mentions price drops on Want List matches and Watch List items.
+
+**Verified locally** (Flask test client + Playwright on a local server): non-beta user → /api/alerts/status 404; admin
+page shows the column; bad CSRF → 403; beta on → status 200; code sent / wrong code rejected / confirm; masked address;
+pause → resume resets anchor + checked_at; beta user is a subscriber; test send; bounced + new address → suppression
+cleared; old per-term link explains; beta off → 404 + no longer a subscriber; Remove my email. Email suite from v2.21.0
+re-run green plus "no /alerts/p/ links, terms still listed". Screenshots: panel on desktop + phone, Want List editor with
+the button on phone; no page JS errors.
+
+**Before inviting the testers (Chuck)**: upgrade Postmark to Basic (free plan = 100 emails/month; 3 people daily ≈ 90 +
+codes) and set Railway `ALERTS_DAILY_CEILING` (~100 is plenty for now). Then /admin/users → "Add to beta" for each
+tester; they sign in, click "✉ Email alerts", enter + confirm their address.
 
 ---
 

@@ -1,3 +1,18 @@
+# Next Session Prompt — v2.22.0 (alerts beta) built, NOT pushed. Then: invite the two testers
+
+**2026-10-09 (evening)**: v2.21.0 pushed (three-section email). v2.22.0 built + tested locally (HANDOFF.md v2.22.0).
+1. **Push v2.22.0**: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+   `git add gc_tracker_app.py static/gc.js static/gc.css HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit,
+   `git push origin main`.
+2. **Before inviting**: Postmark → upgrade to Basic; Railway web Variables → `ALERTS_DAILY_CEILING` ~100.
+3. **Invite**: /admin/users → "Add to beta" on each tester's row (state column shows no email → code sent → on). Testers
+   sign in → "✉ Email alerts" (header on desktop; Want List editor on phones) → address → code → done. Chuck's own panel
+   works the same (admin always allowed).
+4. Later, before public launch: self-service account deletion (password / Google re-auth, immediate), announcement
+   popup (once a day, max 3, don't show again), global switch on for everyone, DMARC tighten.
+
+---
+
 # Next Session Prompt — v2.21.0 (three-section alert email) built, NOT pushed. Then: step 3 (alerts settings UI)
 
 **2026-10-09 (later)**: v2.20.0 pushed + verified live by Chuck. v2.21.0 built + tested locally (HANDOFF.md v2.21.0).

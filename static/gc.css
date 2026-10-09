@@ -793,3 +793,34 @@ tr.fav-row td:last-child{color:#4ade80}
 }
 .seo-footer a{color:#666;text-decoration:none}
 .seo-footer a:hover{color:#aaa}
+
+/* ── Email alerts panel (v2.22.0) ── light text only, per Chuck ── */
+.alerts-open-btn{padding:5px 10px;background:rgba(0,0,0,.25);color:#ffffff;border:1px solid rgba(255,255,255,.25);border-radius:4px;font-size:.72rem;cursor:pointer;white-space:nowrap}
+.alerts-open-btn:hover{background:rgba(0,0,0,.45)}
+#kw-alerts-btn{padding:6px 14px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:5px;color:#ffffff;font-size:.78rem}
+#alerts-modal{display:none;position:fixed;inset:0;z-index:950;background:rgba(0,0,0,.7);align-items:center;justify-content:center}
+#alerts-modal.open{display:flex}
+#alerts-box{background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:22px 24px;max-width:400px;width:92%;position:relative;color:#ffffff;max-height:90vh;overflow-y:auto;box-sizing:border-box}
+#alerts-box h3{color:#ffffff;font-size:1.05rem;margin:0 0 8px}
+.alerts-x{position:absolute;top:10px;right:12px;background:none;border:none;color:#ffffff;font-size:1rem;cursor:pointer}
+.alerts-intro{font-size:.82rem;line-height:1.5;color:#e6e6e6;margin:0 0 14px}
+.alerts-fine{font-size:.74rem;line-height:1.45;color:#e6e6e6;margin:14px 0 0}
+.al-state{display:none}
+.al-state.show{display:block}
+.al-state label{display:block;font-size:.78rem;color:#e6e6e6;margin-bottom:4px}
+.al-state p{font-size:.85rem;color:#ffffff;margin:0 0 10px;line-height:1.45}
+#al-email-input,#al-code-input{width:100%;box-sizing:border-box;padding:9px 12px;background:#252525;border:1px solid #4a4a4a;border-radius:5px;color:#ffffff;font-size:.95rem;outline:none;margin-bottom:10px}
+#al-code-input{letter-spacing:4px;font-family:monospace;font-size:1.1rem}
+.al-primary{width:100%;padding:9px;background:#cc0000;border:none;border-radius:5px;color:#ffffff;font-weight:700;font-size:.88rem;cursor:pointer}
+.al-primary:hover{background:#e00000}
+.al-primary:disabled,.al-secondary:disabled,.al-danger:disabled{opacity:.6;cursor:default}
+.al-secondary{flex:1;padding:7px;background:#2a2a2a;border:1px solid #4a4a4a;border-radius:5px;color:#ffffff;font-size:.8rem;cursor:pointer}
+.al-danger{width:100%;margin-top:10px;padding:7px;background:#1a1a1a;border:1px solid #7a3a3a;border-radius:5px;color:#ffb3b3;font-size:.8rem;cursor:pointer}
+.al-link{display:block;margin:10px auto 0;background:none;border:none;color:#ffffff;text-decoration:underline;font-size:.78rem;cursor:pointer}
+.al-row{display:flex;gap:8px;margin-top:10px}
+.al-status{font-size:.82rem!important}
+.al-status.on{color:#4ade80!important}
+.al-status.off{color:#ffd27a!important}
+.al-status.bad{color:#ffb3b3!important}
+.al-msg{min-height:1em;font-size:.8rem;color:#ffffff;margin:12px 0 0}
+.al-msg.err{color:#ffb3b3}
