@@ -1,3 +1,16 @@
+# Next Session Prompt — v2.22.3 (date-sorted NEW + Newly Listed chip) built, NOT pushed
+
+1. **Push v2.22.3**: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+   `git add gc_tracker_app.py static/gc.js HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit, `git push origin main`.
+2. Live check: after a scan the table is in listed-date order with NEW tags where they fall (not floated); the log
+   says "✓ Done — N new this scan (including M older listings that just became visible)"; the
+   "😮 Newly Listed" chip next to Price Drops shows only NEW (also with Want List on).
+3. NEW rule decision (2026-10-09): keep "first seen since your last scan", no age cap, no second tag. Data from that
+   afternoon (via /api/new-catchup windows): last 24 h first-seen ≈ 843 listed <1 day, 228 1-3 days, 969 3-14 days,
+   900 >14 days; late ones arrive around the clock in regional clumps. Every sweep's coverage = nbHits (complete).
+
+---
+
 # Next Session Prompt — v2.22.2 (NEW = first seen since your last scan) built, NOT pushed
 
 1. **Push v2.22.2**: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then

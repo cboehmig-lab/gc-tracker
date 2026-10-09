@@ -206,6 +206,7 @@ function _updateFilterDot() {
     (window._selectedSubs && window._selectedSubs.length) ||
     _watchFilterActive ||
     _priceDropFilterActive ||
+    _newFilterActive ||
     _vintageFilterActive ||
     window._priceMin !== null ||
     window._priceMax !== null ||
@@ -252,7 +253,7 @@ function _updateMobileBottomBar() {
     (window._selectedConds && window._selectedConds.length) ||
     (window._selectedCats && window._selectedCats.length) ||
     (window._selectedSubs && window._selectedSubs.length) ||
-    _watchFilterActive || _priceDropFilterActive || _vintageFilterActive ||
+    _watchFilterActive || _priceDropFilterActive || _newFilterActive || _vintageFilterActive ||
     (document.getElementById('res-search')?.value.trim().length > 0);
   const dot = document.getElementById('mbb-filter-dot');
   if (dot) dot.classList.toggle('visible', !!hasFilters);
@@ -1348,6 +1349,7 @@ let _browseTimer = null;
 let _skipBrowse = false;  // Set after a scan to prevent browseCache from overwriting results
 let _watchFilterActive = false;
 let _priceDropFilterActive = false;
+let _newFilterActive = false;   // v2.22.3 "😮 Newly Listed" chip — only this user's NEW listings
 let _vintageFilterActive = false;
 window._priceMin = null;   // null = no filter; number = active min price
 window._priceMax = null;   // null = no filter; number = active max price
@@ -1374,6 +1376,7 @@ function _captureFilterState() {
     searchQ:        (document.getElementById('res-search') || {}).value || '',
     watchActive:    _watchFilterActive,
     priceDropActive:_priceDropFilterActive,
+    newActive:      _newFilterActive,
     vintageActive:  _vintageFilterActive,
     wantListActive: _wantListSearchActive,
     globalActive:   _globalSearchActive,
@@ -1412,6 +1415,8 @@ function _restoreFilterState() {
   _priceDropFilterActive = state.priceDropActive;
   const pdBtn = document.getElementById('price-drop-toggle');
   if (pdBtn) pdBtn.classList.toggle('wl-active', _priceDropFilterActive);
+  _newFilterActive = !!state.newActive;
+  document.getElementById('new-toggle')?.classList.toggle('wl-active', _newFilterActive);
   _vintageFilterActive = state.vintageActive;
   const vnBtn = document.getElementById('vintage-toggle');
   if (vnBtn) vnBtn.classList.toggle('wl-active', _vintageFilterActive);
@@ -1517,6 +1522,7 @@ function _getBrowseFilters() {
     filter_subcategories:  window._selectedSubs || [],
     filter_watched:         _watchFilterActive,
     filter_price_drop_only: _priceDropFilterActive,
+    filter_new_only:        _newFilterActive,
     vintage_only:           _vintageFilterActive,
     filter_price_min:       window._priceMin,
     filter_price_max:       window._priceMax,
@@ -1645,6 +1651,7 @@ async function _fetchBrowsePage(page) {
       (filters.filter_subcategories && filters.filter_subcategories.length) ||
       filters.filter_watched ||
       filters.filter_price_drop_only ||
+      filters.filter_new_only ||
       filters.vintage_only ||
       filters.filter_price_min != null ||
       filters.filter_price_max != null ||
@@ -1671,6 +1678,10 @@ async function _fetchBrowsePage(page) {
       document.getElementById('res-title').textContent = _srvTotalCount > 0
         ? `${_srvTotalCount.toLocaleString()} Want List matches ${_wlScopeLabel}`
         : 'No Want List matches found';
+    } else if (_newFilterActive && !_watchFilterActive) {
+      document.getElementById('res-title').textContent = _srvTotalCount > 0
+        ? `😮 Newly Listed — ${_srvTotalCount.toLocaleString()} item${_srvTotalCount !== 1 ? 's' : ''}`
+        : 'Nothing new since your last scan in the selected stores';
     } else if (_priceDropFilterActive) {
       document.getElementById('res-title').textContent = _srvTotalCount > 0
         ? `↓ Price Drops — ${_srvTotalCount.toLocaleString()} item${_srvTotalCount !== 1 ? 's' : ''}`
@@ -1712,7 +1723,7 @@ async function _fetchBrowsePage(page) {
       countEl.textContent = '';
     }
     const clearBtn = document.getElementById('clear-filters-btn');
-    if (clearBtn) clearBtn.style.display = (filters.filter_q || (filters.filter_brands && filters.filter_brands.length) || (filters.filter_conditions && filters.filter_conditions.length) || (filters.filter_categories && filters.filter_categories.length) || (filters.filter_subcategories && filters.filter_subcategories.length) || filters.filter_price_drop_only || filters.filter_watched || filters.vintage_only) ? '' : 'none';
+    if (clearBtn) clearBtn.style.display = (filters.filter_q || (filters.filter_brands && filters.filter_brands.length) || (filters.filter_conditions && filters.filter_conditions.length) || (filters.filter_categories && filters.filter_categories.length) || (filters.filter_subcategories && filters.filter_subcategories.length) || filters.filter_price_drop_only || filters.filter_new_only || filters.filter_watched || filters.vintage_only) ? '' : 'none';
 
     // Populate filter dropdowns from server-provided options (unless the server
     // skipped them because ours are still current — v2.17.8)
@@ -2220,6 +2231,18 @@ async function showWatchList() {
   if (!_watchFilterActive) toggleWatchFilter();
 }
 
+// v2.22.3 "😮 Newly Listed" chip: like Price Drops — an extra filter that works with the
+// others (store selection, Want List, Watch List, search, dropdowns).
+function toggleNewFilter() {
+  _newFilterActive = !_newFilterActive;
+  document.getElementById('new-toggle')?.classList.toggle('wl-active', _newFilterActive);
+  _updateFilterDot();
+  _browseMode = 'server';
+  _srvPage = 1;
+  _srvLoading = false;  // cancel any in-flight request so the toggle always lands
+  _fetchBrowsePage(1);
+}
+
 function togglePriceDropFilter() {
   _priceDropFilterActive = !_priceDropFilterActive;
   const btn = document.getElementById('price-drop-toggle');
@@ -2271,6 +2294,7 @@ function _updateSaveSearchBtn() {
     (f.filter_categories    && f.filter_categories.length)    ||
     (f.filter_subcategories && f.filter_subcategories.length) ||
     f.filter_price_drop_only ||
+    f.filter_new_only ||
     f.vintage_only ||
     f.filter_price_min !== null ||
     f.filter_price_max !== null;
@@ -2439,6 +2463,8 @@ function _applySavedSearch(id) {
   _priceDropFilterActive = !!f.filter_price_drop_only;
   const pdBtn = document.getElementById('price-drop-toggle');
   if (pdBtn) pdBtn.classList.toggle('wl-active', _priceDropFilterActive);
+  _newFilterActive = !!f.filter_new_only;
+  document.getElementById('new-toggle')?.classList.toggle('wl-active', _newFilterActive);
   _vintageFilterActive = !!f.vintage_only;
   const vnBtn = document.getElementById('vintage-toggle');
   if (vnBtn) vnBtn.classList.toggle('wl-active', _vintageFilterActive);
@@ -2942,8 +2968,8 @@ function _watchSweep(state) {
 // database; the sweep can add more. When it finishes, ask the server for
 // everything first seen since the PREVIOUS scan (window._lateSince, from the
 // done message), add it to the NEW set and move the last-scan time forward so
-// the browse gate shows them. Per Chuck, the table is NOT redrawn — they appear
-// on the next page flip / sort / filter; only the "N NEW" badge updates now.
+// the browse gate shows them. v2.20.0 left the table alone (badge only);
+// (v2.22.3: NEW rows sort by date like the rest; the table only refreshes if the New chip is on.)
 window._lateSince = '';
 function _newCatchup() {
   const since = window._lateSince;
@@ -2955,7 +2981,12 @@ function _newCatchup() {
     if (!d || running || window._lateSince !== since) return;   // a newer scan took over
     if (!(window._newIds instanceof Set)) window._newIds = new Set(window._newIds || []);
     const before = window._newIds.size;
-    (d.new_ids || []).forEach(id => window._newIds.add(id));
+    const olderSet = new Set(d.older_ids || []);
+    let addedOlder = 0;
+    (d.new_ids || []).forEach(id => {
+      if (!window._newIds.has(id) && olderSet.has(id)) addedOlder++;
+      window._newIds.add(id);
+    });
     const added = window._newIds.size - before;
     if (d.until && (!window._lastRunISO || d.until > window._lastRunISO)) {
       window._lastRunISO = d.until;
@@ -2969,7 +3000,17 @@ function _newCatchup() {
     _syncToServer(true);
     _updateRelativeTime();
     if (added > 0) {
-      _refreshNewBadge();
+      // v2.22.3 (Chuck): NEW rows sort by listed date like everything else, so
+      // late finds just pick up their NEW tag where they belong — no redraw.
+      // Exception: with the "😮 Newly Listed" chip on, refresh so they join that list.
+      appendLog(`  +${added.toLocaleString()} more new listing${added === 1 ? '' : 's'} found` +
+        (addedOlder > 0 ? ` (including ${addedOlder.toLocaleString()} older listing${addedOlder === 1 ? '' : 's'} that just became visible).` : '.'), 'log-dim');
+      if (_browseMode === 'server' && _newFilterActive) {
+        _srvLoading = false;
+        _fetchBrowsePage(_srvPage || 1);
+      } else {
+        _refreshNewBadge();
+      }
       _checkNewWantMatches(window._newIds);
     }
   }).catch(() => {});
@@ -3059,7 +3100,10 @@ function showResults(msg, isBaseline) {
     }
   }
 
-  appendLog(`✓ ${isFirstRun ? 'Initial scan complete' : 'Done' + stoppedNote + ' — ' + freshNewCount.toLocaleString() + ' new this scan'}.`, 'log-dim');
+  // v2.22.3 (Chuck): say how many NEW ones are older listings that only just showed up on GC.
+  const _olderNote = (!isFirstRun && msg.new_older > 0)
+    ? ` (including ${msg.new_older.toLocaleString()} older listing${msg.new_older === 1 ? '' : 's'} that just became visible)` : '';
+  appendLog(`✓ ${isFirstRun ? 'Initial scan complete' : 'Done' + stoppedNote + ' — ' + freshNewCount.toLocaleString() + ' new this scan' + _olderNote}.`, 'log-dim');
 
   window._lastRunISO = msg.scan_time || new Date().toISOString();
   _lsSet('last_run', window._lastRunISO);
@@ -3118,6 +3162,8 @@ function showResults(msg, isBaseline) {
     document.getElementById('watchlist-toggle').classList.remove('wl-active');
     _priceDropFilterActive = false;
     document.getElementById('price-drop-toggle').classList.remove('wl-active');
+    _newFilterActive = false;
+    document.getElementById('new-toggle')?.classList.remove('wl-active');
     _wantListSearchActive = false;
     document.getElementById('want-list-toggle').classList.remove('wl-active');
     if (!_srvStores.length) {
@@ -3139,10 +3185,7 @@ function showResults(msg, isBaseline) {
     kwMatch: _itemMatchesKeyword(item),
   }));
   window._tableData.sort((a, b) => {
-    // Only NEW items float to top; everything else by date desc
-    const aNew = a.isNew ? 0 : 1;
-    const bNew = b.isNew ? 0 : 1;
-    if (aNew !== bNew) return aNew - bNew;
+    // v2.22.3: listed date only (NEW rows no longer float to the top)
     return (b.date_raw || '').localeCompare(a.date_raw || '');
   });
   window._sortCol = null; window._sortDir = 1; window._localPage = 1;
@@ -4047,6 +4090,10 @@ function clearFilters() {
     _priceDropFilterActive = false;
     document.getElementById('price-drop-toggle').classList.remove('wl-active');
   }
+  if (_newFilterActive) {
+    _newFilterActive = false;
+    document.getElementById('new-toggle')?.classList.remove('wl-active');
+  }
   if (_vintageFilterActive) {
     _vintageFilterActive = false;
     document.getElementById('vintage-toggle').classList.remove('wl-active');
@@ -4714,6 +4761,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // Quick filter chips
   document.getElementById('price-drop-toggle')?.addEventListener('click', togglePriceDropFilter);
+  document.getElementById('new-toggle')?.addEventListener('click', toggleNewFilter);   // v2.22.3
   document.getElementById('vintage-toggle')?.addEventListener('click', toggleVintageFilter);
   document.getElementById('saved-searches-btn')?.addEventListener('click', _toggleSavedSearchesDropdown);
   document.getElementById('watchlist-toggle')?.addEventListener('click', toggleWatchFilter);

@@ -6740,7 +6740,7 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
                f_want_only, f_price_drop_only, f_vintage_only,
                f_price_min, f_price_max, sort_field, sort_dir, user_sorted,
                new_ids, fav_stores, page, per_page, count_only=False,
-               skip_facets_gen=None) -> dict:
+               skip_facets_gen=None, f_new_only=False) -> dict:
     """Same JSON shape as api_browse()'s response, for ANY request, computed
     in Postgres. Raises _PgBrowseIneligible (untranslatable search) or any
     DB error — the caller decides what to do (/api/browse: 400/503;
@@ -6790,6 +6790,8 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
         where.append(f"({kw_sql})" if kw_sql else "FALSE")
     if f_price_drop_only:
         where.append("price_drop > 0")
+    if f_new_only:   # v2.22.3 "New" chip: only this user's NEW listings
+        where.append("sku = ANY(%(new_ids)s)")
     if f_vintage_only:
         where.append("is_vintage")
     if f_watched:
@@ -6844,14 +6846,11 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
     is_new_sql = "(sku = ANY(%(new_ids)s))"
     reverse = (sort_dir == "desc")
     order_parts = []
-    if not user_sorted:
-        # Python path's 3-tier partition: new+want, new-only, rest — each
-        # internally in primary-sort order. Two leading boolean keys do it:
-        # (T,T) / (F,T) / (F,F). is_new is first inside the AND so non-NEW
-        # rows never evaluate the keyword expression.
-        if kw_sql:
-            order_parts.append(f"({is_new_sql} AND {kw_bool}) DESC")
-        order_parts.append(f"{is_new_sql} DESC")
+    # v2.22.3 (Chuck, 2026-10-09): NEW rows no longer float to the top — every
+    # view sorts by the chosen column only (default: listed date, newest first).
+    # Fresh listings are still at the top by date; late arrivals carry their NEW
+    # tag wherever their listed date puts them. The "New" chip (f_new_only) shows
+    # just the NEW ones. (Was: new+want / new / rest partition when not user-sorted.)
     if sort_field == "condition":
         order_parts.append(f"{_PG_COND_KNOWN_SQL} DESC")
         order_parts.append(f"{_PG_COND_RANK_SQL} {'DESC' if reverse else 'ASC'}")
@@ -6878,6 +6877,7 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
         tuple(kw_entries) if f_want_only else None,
         bool(f_price_drop_only), bool(f_vintage_only),
         tuple(sorted(wl_ids)) if f_watched else None, f_price_min, f_price_max,
+        tuple(sorted(new_ids)) if f_new_only else None,
         tuple(sorted(f_brands)), tuple(sorted(f_conds)), tuple(sorted(f_cats)), tuple(sorted(f_subs)),
     )
     with _PG_CATALOG_GEN_LOCK:
@@ -7226,6 +7226,7 @@ def _browse_compute(data, *, logged_in, pg_diag=False):
     f_watched = bool(data.get("filter_watched"))
     f_want_only = bool(data.get("filter_want_list_only"))
     f_price_drop_only = bool(data.get("filter_price_drop_only"))
+    f_new_only = bool(data.get("filter_new_only"))   # v2.22.3 "New" chip
     f_vintage_only = bool(data.get("vintage_only"))
     def _to_float(v):
         try: return float(v) if v is not None and v != '' else None
@@ -7262,7 +7263,7 @@ def _browse_compute(data, *, logged_in, pg_diag=False):
         _shape.append("+wantonly" if f_want_only else "+want")
     if fq:
         _shape.append("+q")
-    if f_brands or f_conds or f_cats or f_subs or f_watched or f_price_drop_only \
+    if f_brands or f_conds or f_cats or f_subs or f_watched or f_price_drop_only or f_new_only \
             or f_vintage_only or f_price_min is not None or f_price_max is not None:
         _shape.append("+filter")
     if page > 1:
@@ -7277,7 +7278,7 @@ def _browse_compute(data, *, logged_in, pg_diag=False):
         user_last_scan=user_last_scan, kw_entries=kw_accepted, fq=fq,
         f_brands=f_brands, f_conds=f_conds, f_cats=f_cats, f_subs=f_subs,
         f_watched=f_watched, wl_ids=wl_ids, f_want_only=f_want_only,
-        f_price_drop_only=f_price_drop_only, f_vintage_only=f_vintage_only,
+        f_price_drop_only=f_price_drop_only, f_vintage_only=f_vintage_only, f_new_only=f_new_only,
         f_price_min=f_price_min, f_price_max=f_price_max,
         sort_field=sort_field, sort_dir=sort_dir, user_sorted=user_sorted,
         new_ids=new_ids, fav_stores=fav_stores, page=page, per_page=per_page,
@@ -8377,7 +8378,10 @@ def api_new_catchup():
         _PG_SCAN_DB_LOCK.release()
     dates = [d for _, d in rows if d]
     return jsonify({"new_ids": [sku for sku, _ in rows], "until": until,
-                    "max_date": max(dates) if dates else ""})
+                    "max_date": max(dates) if dates else "",
+                    # v2.22.3: listed before `since` (the previous scan) — older
+                    # listings that only just became visible on GC
+                    "older_ids": [sku for sku, d in rows if d and d < since]})
 
 
 def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_last_run: str = "", run_time: str = "", device_last_anchor: str = "", user_id: int | None = None,
@@ -8765,6 +8769,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             return
         send({"type": "progress", "msg": f"  Saving changes for {len(all_products):,} items…"})
         late_ids = None        # v2.22.2: first-seen NEW list, filled under the DB lock below
+        _new_older = 0         # v2.22.3: of those, listed before the previous scan
         _t_db = time.time()
         if not _PG_SCAN_DB_LOCK.acquire(timeout=_PG_SCAN_DB_LOCK_TIMEOUT):
             _save_failed("lock", TimeoutError("previous scan's database write still running"))
@@ -8863,8 +8868,12 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                     _fs_since = _lsf0.read_text().strip() if _lsf0.exists() else ""
                 if _fs_since:
                     try:
-                        late_ids = [r[0] for r in _pg_first_seen_between(
-                            _fs_since, run_time, None if nationwide else stores_to_scan)]
+                        _fs_rows = _pg_first_seen_between(
+                            _fs_since, run_time, None if nationwide else stores_to_scan)
+                        late_ids = [r[0] for r in _fs_rows]
+                        # v2.22.3: how many were listed before the previous scan, i.e.
+                        # older listings that only just became visible on GC.
+                        _new_older = sum(1 for _sku, _dl in _fs_rows if _dl and _dl < _fs_since)
                     except Exception as e:
                         late_ids = None
                         print(f"[new] first-seen lookup failed (scan falls back to the dated NEW rule): "
@@ -9065,6 +9074,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             "sweep":       _sweep,
             "scan_time":   run_time,
             "late_since":  "" if baseline else (device_last_run or ""),   # v2.20.0: /api/new-catchup window start
+            "new_older":   _new_older,   # v2.22.3: NEW listings listed before the previous scan
             "scan_anchor": new_anchor,
             "items":       items_for_sse,
             "use_browse":  large_scan,
@@ -9378,6 +9388,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div class="quick-filter-bar">
         <button id="view-toggle-chip"       class="qf-chip view-toggle-chip-btn" title="Switch list / card view">☰</button>
         <button id="desktop-thumb-toggle" class="qf-chip" title="Show thumbnail grid view">⊞</button>
+        <button id="new-toggle" class="qf-chip" title="Show only listings tagged NEW — new on Guitar Center's site since your last scan">😮 Newly Listed</button>
         <button id="price-drop-toggle" class="qf-chip">↓ Price Drops</button>
         <button id="vintage-toggle" class="qf-chip" title="Show only genuine vintage gear (GC's own classification)">🎸 Vintage</button>
         <div id="ss-wrap" style="display:none;position:relative">
@@ -9954,7 +9965,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.22.2"
+APP_VERSION = "2.22.3"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
