@@ -4039,8 +4039,8 @@ def _alerts_confirm(user_id: int, raw_code: str) -> tuple[bool, str, int]:
         # v2.19.0: a new subscriber's first alert covers only listings after now
         # (anchor = newest available date_listed), never the back catalog. A
         # changed address keeps its existing settings row (INSERT OR IGNORE).
-        conn.execute("INSERT OR IGNORE INTO alert_settings(user_id, frequency, paused, mode, anchor, updated_at) "
-                     "VALUES(?, 'daily', 0, 'all', ?, ?)", (user_id, _alerts_initial_anchor(), stamp))
+        conn.execute("INSERT OR IGNORE INTO alert_settings(user_id, frequency, paused, mode, anchor, checked_at, updated_at) "
+                     "VALUES(?, 'daily', 0, 'all', ?, ?, ?)", (user_id, _alerts_initial_anchor(), stamp, stamp))
         # v2.22.0: a newly confirmed address replaces one that bounced.
         conn.execute("UPDATE alert_settings SET suppressed=NULL WHERE user_id=?", (user_id,))
         conn.execute("DELETE FROM alert_codes WHERE user_id=?", (user_id,))
@@ -4394,10 +4394,11 @@ def _alerts_row_item(r) -> dict:
 
 def _alerts_find_matches(user_id: int, pills: list[str], lo: str, hi: str,
                          fs_lo: str = "", fs_hi: str = "") -> tuple[list[dict], int]:
-    """New Want List items: available items matching any pill that were listed in
-    (lo, hi] OR (v2.21.0, the v2.20.0 NEW rule) first seen by the site in
-    (fs_lo, fs_hi] whatever their listed date — minus the ledger. Newest listed
-    first. Returns (items, pills_skipped). Each item carries `pills`."""
+    """New Want List items: available items matching any pill that were first seen
+    by the site in (fs_lo, fs_hi] whatever their listed date (v2.22.2 — the site's
+    NEW rule; the listed-date window (lo, hi] is only used if no first-seen window
+    is given) — minus the ledger. Newest listed first. Returns (items,
+    pills_skipped). Each item carries `pills`."""
     skipped = 0
     def _q():
         nonlocal skipped
@@ -4412,11 +4413,15 @@ def _alerts_find_matches(user_id: int, pills: list[str], lo: str, hi: str,
                         continue
                     if frag is None:
                         continue
-                    win = f"({_ALERTS_DL_NORM_SQL} > %s AND {_ALERTS_DL_NORM_SQL} <= %s)"
-                    wprm = [lo, hi]
+                    # v2.22.2: same NEW rule as the site — first seen by the site in
+                    # (fs_lo, fs_hi], whatever the listed date. The listed-date
+                    # window is only a fallback if no first-seen window is given.
                     if fs_lo and fs_hi:
-                        win = f"({win} OR (first_seen <> '' AND first_seen > %s AND first_seen <= %s))"
-                        wprm += [fs_lo, fs_hi]
+                        win = "(first_seen <> '' AND first_seen > %s AND first_seen <= %s)"
+                        wprm = [fs_lo, fs_hi]
+                    else:
+                        win = f"({_ALERTS_DL_NORM_SQL} > %s AND {_ALERTS_DL_NORM_SQL} <= %s)"
+                        wprm = [lo, hi]
                     cur.execute(
                         f"SELECT {_ALERTS_ITEM_COLS} FROM items WHERE available AND {win} "
                         f"AND ({frag}) ORDER BY dl DESC, sku LIMIT {_ALERTS_PILL_ROW_CAP}",
@@ -8759,7 +8764,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             _save_failed("config", RuntimeError("Postgres not configured"))
             return
         send({"type": "progress", "msg": f"  Saving changes for {len(all_products):,} items…"})
-        late_ids = []          # v2.20.0, filled under the DB lock below
+        late_ids = None        # v2.22.2: first-seen NEW list, filled under the DB lock below
         _t_db = time.time()
         if not _PG_SCAN_DB_LOCK.acquire(timeout=_PG_SCAN_DB_LOCK_TIMEOUT):
             _save_failed("lock", TimeoutError("previous scan's database write still running"))
@@ -8846,16 +8851,24 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                     if _SWEEP_STATE["running"]:
                         _SWEEP_STATE["quick_seen"] |= set(merged)
             _write_ms = int((time.time() - _t_write) * 1000)
-            # v2.20.0: late arrivals — listings first seen by the site since this
-            # user's last scan, whatever their listed date. Read while still
+            # v2.22.2 NEW rule (Chuck, 2026-10-09): NEW = listings first seen by the
+            # site since this user's previous scan (no-history devices: since the
+            # last scan anyone ran), whatever their listed date. Read while still
             # holding the DB lock so no other write can land in between.
-            if mode != "sweep" and not baseline and device_last_run:
-                try:
-                    late_ids = [r[0] for r in _pg_first_seen_between(
-                        device_last_run, run_time, None if nationwide else stores_to_scan)]
-                except Exception as e:
-                    print(f"[new] late-arrival lookup failed (scan continues with dated NEW only): "
-                          f"{type(e).__name__}: {e}")
+            # late_ids stays None on failure → the old dated rule is the fallback.
+            if mode != "sweep" and not baseline:
+                _fs_since = device_last_run
+                if not _fs_since:
+                    _lsf0 = DATA_DIR / "gc_last_scan.txt"
+                    _fs_since = _lsf0.read_text().strip() if _lsf0.exists() else ""
+                if _fs_since:
+                    try:
+                        late_ids = [r[0] for r in _pg_first_seen_between(
+                            _fs_since, run_time, None if nationwide else stores_to_scan)]
+                    except Exception as e:
+                        late_ids = None
+                        print(f"[new] first-seen lookup failed (scan falls back to the dated NEW rule): "
+                              f"{type(e).__name__}: {e}")
         finally:
             _PG_SCAN_DB_LOCK.release()
         _db_ms = int((time.time() - _t_db) * 1000)
@@ -8949,28 +8962,30 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
         threshold = _norm_anchor if _norm_anchor else prev_scan_time
 
         new_ids_list = []
-        if not baseline and threshold:
+        if late_ids is not None:
+            # v2.22.2 (Chuck, 2026-10-09): NEW is ONLY "first seen by the site since
+            # your previous scan". Dropped the listed-date half: it could tag an item
+            # the site already had (e.g. a return GC relisted with a fresh date) and
+            # anything it caught that was genuinely new is first-seen in the window
+            # anyway (this scan's own inserts carry first_seen = run_time).
+            new_ids_list = list(dict.fromkeys(late_ids))
+        elif not baseline and threshold:
             for p in all_products:
                 item_date = p.get("date_listed") or merged.get(p["id"], {}).get("date_listed", "")
                 if item_date and _norm_item_date(item_date) > threshold:
                     new_ids_list.append(p["id"])
 
-        # v2.20.0 (Chuck, 2026-10-09): NEW also means "new to the site since your
-        # last scan" — a listing GC made searchable late, carrying an older listed
-        # date, is still NEW the first time this user's table can show it. Only
-        # never-seen listings: first_seen is kept when an item sells and comes
-        # back, so returns / reappearing items stay un-flagged.
-        _late_added = 0
-        if late_ids:
-            _have = set(new_ids_list)
-            for sku in late_ids:
-                if sku not in _have:
-                    new_ids_list.append(sku)
-                    _have.add(sku)
-                    _late_added += 1
-
-        send({"type":"progress","msg":f"  {len(new_ids_list):,} new items since last scan"
-              + (f" ({_late_added:,} listed earlier, new to the site)." if _late_added else ".")})
+        # (first_seen is kept when an item sells and comes back, so returns and
+        # reappearing items are never NEW under the v2.22.2 rule.)
+        _cut = (datetime.utcnow() - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _old_dated = 0
+        if late_ids is not None and new_ids_list:
+            _dl_of = {p["id"]: (p.get("date_listed") or "") for p in all_products}
+            _old_dated = sum(1 for sku in new_ids_list if (_dl_of.get(sku) or "9") < _cut)
+        send({"type":"progress","msg":f"  {len(new_ids_list):,} new items since last scan."})
+        if late_ids is not None:
+            print(f"[new] {len(new_ids_list)} NEW (first seen since {(device_last_run or 'global last scan')}); "
+                  f"of the ones this pass fetched, {_old_dated} listed 3+ days ago")
 
         # ── Compute new per-user anchor (post-scan) ─────────────────────────────
         # The anchor we persist for this user is the max date_listed across the
@@ -9939,7 +9954,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.22.1"
+APP_VERSION = "2.22.2"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

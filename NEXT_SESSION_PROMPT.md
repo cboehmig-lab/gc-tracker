@@ -1,3 +1,15 @@
+# Next Session Prompt — v2.22.2 (NEW = first seen since your last scan) built, NOT pushed
+
+1. **Push v2.22.2**: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+   `git add gc_tracker_app.py HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit, `git push origin main`.
+2. **Watch the NEW counts** for a few days (Railway log `[new] N NEW (first seen since …); … M listed 3+ days ago`).
+   If still too many, the agreed fallback is an age cap: late listings count as NEW only if listed within ~7 days.
+   (Tip for Chuck: wait for the background check to finish before rescanning, or the second scan shows the first
+   scan's late finds.)
+3. v2.22.1 (account deletion) pushed 2026-10-09 (commit 478e907) — live-test it on a throwaway account if not done.
+
+---
+
 # Next Session Prompt — v2.22.1 (self-service account deletion) built, NOT pushed
 
 1. **Push v2.22.1**: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
