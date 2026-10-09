@@ -6997,6 +6997,34 @@ def _browse_compute(data, *, logged_in, pg_diag=False):
 # gc_watchlist.json were deleted in v2.16.48 — nothing read that file.)
 
 
+# ── v2.20.0: "new to the site" half of the NEW rule ────────────────────────────
+# A listing is NEW for a user if its listed date is after their anchor (the
+# original rule) OR it was first seen by the site after their last scan — GC
+# often makes a listing searchable days or months after its listed date, and
+# Chuck wants those flagged too (2026-10-09, reversing the 2026-10-01 call).
+# first_seen survives a sale + return, so returns don't count. Backed by
+# idx_items_first_seen (pg_schema.sql).
+_NEW_LATE_ROW_CAP = 20000
+
+
+def _pg_first_seen_between(since: str, until: str, stores=None) -> list[tuple[str, str]]:
+    """(sku, date_listed) of available items with since < first_seen <= until,
+    optionally limited to `stores`. Read-only."""
+    def _q():
+        sql = ("SELECT sku, date_listed FROM items WHERE available AND first_seen <> '' "
+               "AND first_seen > %s AND first_seen <= %s")
+        prm = [since, until]
+        if stores is not None:
+            sql += " AND store = ANY(%s)"
+            prm.append(list(stores))
+        sql += f" ORDER BY first_seen LIMIT {_NEW_LATE_ROW_CAP}"
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, prm)
+                return [(r[0], r[1] or "") for r in cur.fetchall()]
+    return _pg_read(_q)
+
+
 # (v2.16.46) /api/state runs on every page load; the available-item count only
 # changes when a scan syncs, so cache it briefly rather than COUNT(*) each time.
 _PG_AVAILABLE_COUNT = {"ts": 0.0, "n": None}
@@ -8019,6 +8047,40 @@ def api_sweep_status():
     return jsonify(st)
 
 
+_CATCHUP_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$")
+
+
+@app.route("/api/new-catchup", methods=["POST"])
+def api_new_catchup():
+    """v2.20.0: after a quick pass, the background sweep may add listings the
+    site had never seen (late arrivals with older listed dates). When the sweep
+    finishes, static/gc.js asks for everything first seen since the user's
+    PREVIOUS scan (`since` = the done message's late_since) up to now, adds it to
+    its NEW set and moves its last-scan time to `until`, so those listings show
+    (tagged NEW) on the next page flip / sort / filter. Public and cheap
+    (first_seen index); it holds the scan DB lock only to read, so it never sees
+    half of a scan's write."""
+    data = request.get_json(silent=True) or {}
+    since = str(data.get("since") or "").strip()
+    if not _CATCHUP_TS_RE.match(since):
+        return jsonify({"error": "bad since"}), 400
+    if _PG_POOL is None:
+        return jsonify({"error": "unavailable"}), 503
+    if not _PG_SCAN_DB_LOCK.acquire(timeout=20):
+        return jsonify({"error": "busy"}), 503
+    try:
+        until = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        rows = [] if until <= since else _pg_first_seen_between(since, until)
+    except Exception as e:
+        print(f"[new] catch-up failed: {type(e).__name__}: {e}")
+        return jsonify({"error": "failed"}), 500
+    finally:
+        _PG_SCAN_DB_LOCK.release()
+    dates = [d for _, d in rows if d]
+    return jsonify({"new_ids": [sku for sku, _ in rows], "until": until,
+                    "max_date": max(dates) if dates else ""})
+
+
 def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_last_run: str = "", run_time: str = "", device_last_anchor: str = "", user_id: int | None = None,
          mode: str = "full"):
     """mode (v2.17.4, Phase G S1): "full" = the classic scan (baseline, store scans,
@@ -8403,6 +8465,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             _save_failed("config", RuntimeError("Postgres not configured"))
             return
         send({"type": "progress", "msg": f"  Saving changes for {len(all_products):,} items…"})
+        late_ids = []          # v2.20.0, filled under the DB lock below
         _t_db = time.time()
         if not _PG_SCAN_DB_LOCK.acquire(timeout=_PG_SCAN_DB_LOCK_TIMEOUT):
             _save_failed("lock", TimeoutError("previous scan's database write still running"))
@@ -8429,6 +8492,12 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             # Categories, condition, brand all come from the API — the prior
             # row only fills blanks and carries price_drop_since / first_seen.
             merged = {}
+            # v2.20.0: the background sweep stamps first_seen / price_drop_since
+            # with the moment it took the DB lock, not when it started fetching.
+            # Its writes then never carry a time earlier than a quick pass that
+            # read the table before them — so "first seen after your last scan"
+            # (the late-arrival half of the NEW rule) can't skip one of them.
+            _stamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ") if mode == "sweep" else run_time
             for p in all_products:
                 sku = p["id"]
                 if sku in merged:            # duplicate SKU in one run: chain, like the JSON path did
@@ -8437,7 +8506,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                     cached = dict(zip(_PG_PRIOR_COLS, prior[sku]))
                 else:
                     cached = {}
-                rec = _merge_scan_item(p, cached, run_time)
+                rec = _merge_scan_item(p, cached, _stamp)
                 merged[sku] = rec
                 p["category"]    = rec["category"]
                 p["subcategory"] = rec["subcategory"]
@@ -8483,6 +8552,16 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                     if _SWEEP_STATE["running"]:
                         _SWEEP_STATE["quick_seen"] |= set(merged)
             _write_ms = int((time.time() - _t_write) * 1000)
+            # v2.20.0: late arrivals — listings first seen by the site since this
+            # user's last scan, whatever their listed date. Read while still
+            # holding the DB lock so no other write can land in between.
+            if mode != "sweep" and not baseline and device_last_run:
+                try:
+                    late_ids = [r[0] for r in _pg_first_seen_between(
+                        device_last_run, run_time, None if nationwide else stores_to_scan)]
+                except Exception as e:
+                    print(f"[new] late-arrival lookup failed (scan continues with dated NEW only): "
+                          f"{type(e).__name__}: {e}")
         finally:
             _PG_SCAN_DB_LOCK.release()
         _db_ms = int((time.time() - _t_db) * 1000)
@@ -8582,7 +8661,22 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                 if item_date and _norm_item_date(item_date) > threshold:
                     new_ids_list.append(p["id"])
 
-        send({"type":"progress","msg":f"  {len(new_ids_list):,} new items since last scan."})
+        # v2.20.0 (Chuck, 2026-10-09): NEW also means "new to the site since your
+        # last scan" — a listing GC made searchable late, carrying an older listed
+        # date, is still NEW the first time this user's table can show it. Only
+        # never-seen listings: first_seen is kept when an item sells and comes
+        # back, so returns / reappearing items stay un-flagged.
+        _late_added = 0
+        if late_ids:
+            _have = set(new_ids_list)
+            for sku in late_ids:
+                if sku not in _have:
+                    new_ids_list.append(sku)
+                    _have.add(sku)
+                    _late_added += 1
+
+        send({"type":"progress","msg":f"  {len(new_ids_list):,} new items since last scan"
+              + (f" ({_late_added:,} listed earlier, new to the site)." if _late_added else ".")})
 
         # ── Compute new per-user anchor (post-scan) ─────────────────────────────
         # The anchor we persist for this user is the max date_listed across the
@@ -8661,6 +8755,7 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             "new_ids":     new_ids_list,
             "sweep":       _sweep,
             "scan_time":   run_time,
+            "late_since":  "" if baseline else (device_last_run or ""),   # v2.20.0: /api/new-catchup window start
             "scan_anchor": new_anchor,
             "items":       items_for_sse,
             "use_browse":  large_scan,
@@ -9463,7 +9558,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.19.4"
+APP_VERSION = "2.20.0"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

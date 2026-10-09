@@ -2915,11 +2915,101 @@ function _watchSweep(state) {
         const k = document.getElementById('s-known');
         if (k && st.total_items != null) k.textContent = st.total_items.toLocaleString();
       }).catch(() => {});
+      _newCatchup();
     }).catch(() => {
       if (Date.now() - t0 < 180000) _sweepPollTimer = setTimeout(poll, 5000);
     });
   };
   _sweepPollTimer = setTimeout(poll, 3000);
+}
+
+// ── Late arrivals found by the sweep (v2.20.0) ──
+// NEW also covers listings first seen by the site since the user's last scan,
+// whatever their listed date. The quick pass flags the ones already in the
+// database; the sweep can add more. When it finishes, ask the server for
+// everything first seen since the PREVIOUS scan (window._lateSince, from the
+// done message), add it to the NEW set and move the last-scan time forward so
+// the browse gate shows them. Per Chuck, the table is NOT redrawn — they appear
+// on the next page flip / sort / filter; only the "N NEW" badge updates now.
+window._lateSince = '';
+function _newCatchup() {
+  const since = window._lateSince;
+  if (!since || running) return;
+  fetch('/api/new-catchup', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({since})
+  }).then(r => r.ok ? r.json() : null).then(d => {
+    if (!d || running || window._lateSince !== since) return;   // a newer scan took over
+    if (!(window._newIds instanceof Set)) window._newIds = new Set(window._newIds || []);
+    const before = window._newIds.size;
+    (d.new_ids || []).forEach(id => window._newIds.add(id));
+    const added = window._newIds.size - before;
+    if (d.until && (!window._lastRunISO || d.until > window._lastRunISO)) {
+      window._lastRunISO = d.until;
+      _lsSet('last_run', window._lastRunISO);
+    }
+    if (d.max_date && (!window._lastAnchorISO || d.max_date > window._lastAnchorISO)) {
+      window._lastAnchorISO = d.max_date;
+      _lsSet('last_anchor', window._lastAnchorISO);
+    }
+    _lsSet('new_ids', [...window._newIds]);
+    _syncToServer(true);
+    _updateRelativeTime();
+    if (added > 0) {
+      _refreshNewBadge();
+      _checkNewWantMatches(window._newIds);
+    }
+  }).catch(() => {});
+}
+
+// Re-count NEW for the plain table view (the only view whose header shows
+// "N NEW") without redrawing the table (v2.20.0 catch-up).
+function _refreshNewBadge() {
+  if (_browseMode !== 'server' || _watchFilterActive || _globalSearchActive ||
+      _wantListSearchActive || _vintageFilterActive || _priceDropFilterActive) return;
+  const f = _getBrowseFilters();
+  const hasFilters = f.filter_q ||
+    (f.filter_brands && f.filter_brands.length) || (f.filter_conditions && f.filter_conditions.length) ||
+    (f.filter_categories && f.filter_categories.length) || (f.filter_subcategories && f.filter_subcategories.length) ||
+    f.filter_watched || f.filter_price_drop_only || f.vintage_only ||
+    f.filter_price_min != null || f.filter_price_max != null;
+  if (hasFilters) return;
+  const body = {
+    page: 1, per_page: 1, sort_field: _srvSortField, sort_dir: _srvSortDir,
+    keywords: window._keywords || [],
+    new_ids: [...window._newIds], user_last_scan: window._lastRunISO || '', ...f,
+  };
+  if (_srvStores && _srvStores.length) body.stores = _srvStores; else body.all_stores = true;
+  if (_lastFacetGen !== null) body.skip_facets_gen = _lastFacetGen;
+  fetch('/api/browse', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)})
+    .then(r => r.json()).then(d => {
+      if (!d || d.error || running) return;
+      const b = document.getElementById('res-badge');
+      if (b) b.textContent = (d.new_count || 0) > 0 ? d.new_count + ' NEW' : '';
+    }).catch(() => {});
+}
+
+// "🎯 N new want list matches!" for a NEW set (scan done, and v2.20.0 catch-up).
+function _checkNewWantMatches(newIdSet) {
+  const wantMatchEl = document.getElementById('s-want-match');
+  if (!wantMatchEl) return;
+  if (newIdSet.size > 0 && window._keywords && window._keywords.length) {
+    fetch('/api/browse', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({page:1, per_page:1000, all_stores:true, new_ids:[...newIdSet], keywords:window._keywords, filter_want_list_only:true})
+    }).then(r => r.json()).then(d => {
+      const wantNewCount = d.new_want_count ?? d.total_count ?? 0;
+      if (wantNewCount > 0) {
+        wantMatchEl.textContent = '🎯 ' + wantNewCount + ' new want list match' + (wantNewCount > 1 ? 'es' : '') + '!';
+        wantMatchEl.style.display = '';
+      } else {
+        wantMatchEl.style.display = 'none';
+      }
+    }).catch(() => { wantMatchEl.style.display = 'none'; });
+  } else {
+    wantMatchEl.style.display = 'none';
+  }
 }
 
 // ── Results ───────────────────────────────────────────────────────────────────
@@ -2960,6 +3050,7 @@ function showResults(msg, isBaseline) {
 
   window._lastRunISO = msg.scan_time || new Date().toISOString();
   _lsSet('last_run', window._lastRunISO);
+  window._lateSince = (!isFirstRun && msg.late_since) ? msg.late_since : '';   // v2.20.0
   // Per-user anchor (v2.10.18): server sends the max date_listed in the
   // post-scan cache. Store locally so the next scan's threshold isn't
   // contaminated by other users' activity.
@@ -2973,25 +3064,7 @@ function showResults(msg, isBaseline) {
   document.getElementById('check-now-btn').style.display = 'inline';
 
   // Check if any new items match the want list and show notification
-  const wantMatchEl = document.getElementById('s-want-match');
-  if (freshNewCount > 0 && window._keywords && window._keywords.length) {
-    // We need item details to check want list — fetch from server cache
-    fetch('/api/browse', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({page:1, per_page:1000, all_stores:true, new_ids:[...newIdSet], keywords:window._keywords, filter_want_list_only:true})
-    }).then(r => r.json()).then(d => {
-      const wantNewCount = d.new_want_count ?? d.total_count ?? 0;
-      if (wantNewCount > 0) {
-        wantMatchEl.textContent = '🎯 ' + wantNewCount + ' new want list match' + (wantNewCount > 1 ? 'es' : '') + '!';
-        wantMatchEl.style.display = '';
-      } else {
-        wantMatchEl.style.display = 'none';
-      }
-    }).catch(() => { wantMatchEl.style.display = 'none'; });
-  } else {
-    wantMatchEl.style.display = 'none';
-  }
+  _checkNewWantMatches(newIdSet);
 
   // Refresh shared item count from server
   fetch('/api/state').then(r => r.json()).then(s => {

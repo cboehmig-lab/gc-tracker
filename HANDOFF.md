@@ -1,5 +1,66 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-10-08 · Current version: v2.19.4 (alert email: listed day only; v2.19.3 alert email redesign: newest-first list in the site's look, terms at the bottom; v2.19.2 alert email button runs the user's scan then opens the Want List; v2.19.1 alert email button opens the Want List; v2.19.0 email alerts step 2: daily 10 AM ET alert engine, /go/<sku>, signed pause/stop links, Postmark bounce webhook — Chuck-only; v2.18.1 privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-10-09 · Current version: v2.20.0 (NEW also flags listings new to the site regardless of listed date — late arrivals; returns excluded; /api/new-catchup after the sweep; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign: newest-first list in the site's look, terms at the bottom; v2.19.2 alert email button runs the user's scan then opens the Want List; v2.19.1 alert email button opens the Want List; v2.19.0 email alerts step 2: daily 10 AM ET alert engine, /go/<sku>, signed pause/stop links, Postmark bounce webhook — Chuck-only; v2.18.1 privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.20.0 — 2026-10-09: NEW also flags listings new to the site (late arrivals), whatever their listed date
+
+**Why (Chuck, 2026-10-09, after power-user feedback)**: listings GC makes searchable days/months after their listed
+date (the ~320/day "late arrivals" found in v2.17.5/v2.17.7) showed up in the table untagged. Chuck now wants them
+NEW: "I run the scan and anything new to the site shows up regardless of listing date." This reverses the
+2026-10-01 decision recorded under v2.17.7. **Only never-seen listings** — returns / sold-then-back items are NOT
+NEW (Chuck: "I don't want returns clogging things up"); that falls out for free because `first_seen` is preserved
+when an item sells and reappears (`_merge_scan_item` keeps the prior row's first_seen; items are never deleted).
+Chuck also required: **no loss of scan speed** (quick pass stays ~1 s) and **no table redraw** when the sweep finishes —
+late finds appear on the next page flip / sort / filter; only the "N NEW" badge updates.
+
+**Rule now**: NEW = (date_listed > the user's anchor — unchanged) **OR** (available AND first_seen > the user's
+previous last_run AND first_seen <= now/this scan, store-scoped for store scans). Baseline / no-history scans flag
+nothing (no previous last_run).
+
+**Server**
+- `_pg_first_seen_between(since, until, stores=None)` → (sku, date_listed) of available items with
+  `since < first_seen <= until` (cap 20,000 rows). New index `idx_items_first_seen` (pg_schema.sql concurrent
+  section; also helps the browse gate's `MAX(first_seen)`).
+- `_run()` (quick + full, not sweep/baseline, only with a `device_last_run`): runs that lookup for
+  `(device_last_run, run_time]` **while still holding `_PG_SCAN_DB_LOCK` right after its own write**, and unions the
+  result into `new_ids_list` (progress line: "N new items since last scan (M listed earlier, new to the site).").
+  Lookup failure is logged `[new] late-arrival lookup failed` and the scan continues with dated NEW only.
+- `done` message gains `late_since` = the previous last_run (the catch-up window start; "" on baseline).
+- **Sweep stamp**: the background sweep now stamps first_seen / price_drop_since with the time it acquires
+  `_PG_SCAN_DB_LOCK` (`_stamp`), not its start time. Before, a sweep that started before a quick pass but wrote after
+  it inserted rows with first_seen < that quick pass's run_time → visible to that user (browse gate
+  `first_seen <= user_last_scan`) but outside both that scan's window and the next one → never NEW. With the stamp
+  taken under the same lock the quick pass reads under, every sweep insert is either committed before the read (and
+  inside the window if stamp <= run_time) or stamped after it (hidden by the gate until catch-up / next scan).
+- `POST /api/new-catchup {since}` (public): validates `since` (ISO UTC), takes `_PG_SCAN_DB_LOCK` (20 s timeout →
+  503 busy) so it never reads half a write, `until = now`, returns `{new_ids, until, max_date}` for
+  `(since, until]`. Bad since → 400.
+
+**Client (static/gc.js)**
+- `showResults` stores `window._lateSince = msg.late_since`. `_watchSweep` → when the sweep is done → `_newCatchup()`:
+  POST /api/new-catchup, union into `window._newIds`, move `window._lastRunISO` to `until` (so the gate shows the
+  late finds) and `_lastAnchorISO` to max(anchor, max_date) (so a recent-dated sweep find isn't re-flagged by the date
+  rule next scan), persist localStorage + `_syncToServer(true)`. Skipped if a new scan is running / took over.
+- If anything was added: `_refreshNewBadge()` (one per_page=1 /api/browse for the plain table view only — no
+  watch/want/vintage/price-drop/search/filters — sets "N NEW" from `new_count`) and `_checkNewWantMatches()` (the
+  "🎯 N new want list matches!" check, factored out of showResults). **The table is not redrawn** (Chuck).
+- Known side effects (accepted by Chuck): late finds land at the bottom of the NEW group (NEW floats to the top, then
+  listed date desc), so they may land on a page already left; rows shift down by the number added, so page 2 can
+  repeat the last few rows of page 1.
+
+**Verified locally** (Postgres 16 + mocked Algolia, `_run` called directly, Flask test client): baseline flags
+nothing; a late item already in the DB (found by another sweep) is NEW on the quick pass; the sweep stamps after the
+quick pass; the gate hides the sweep's find until catch-up; catch-up returns it, after which it's visible and
+new_count = 3; next scan flags only a brand-new late item — a sold-then-returned item is NOT NEW and nothing is
+re-flagged; no-history scan → late_since "" and nothing flagged; bad since → 400; index exists. py_compile +
+node --check clean.
+
+**Known gaps (rare, accepted)**: a full (non-quick) nationwide scan stamps first_seen with its START time but writes
+~20-30 s later; a catch-up that ran in between would miss its inserts (only first-ever / no-threshold scans are full).
+A user who leaves before the sweep finishes gets the sweep's finds on their next scan instead (still NEW).
+"Joined" scans still share the initiator's new_ids (pre-existing). The **alert email still uses the dated rule** —
+switching it to the same rule is part of the email redesign release (next).
 
 ---
 

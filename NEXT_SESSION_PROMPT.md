@@ -1,3 +1,52 @@
+# Next Session Prompt — v2.20.0 (NEW includes late arrivals) built, NOT pushed. Then: alert email redesign
+
+**2026-10-09**: First scheduled alert run (10:00 ET) worked — Chuck got the email.
+1. **Push v2.20.0**: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+   `git add gc_tracker_app.py static/gc.js pg_schema.sql HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit,
+   `git push origin main`. Live check: footer v2.20.0; Railway log `[pg] concurrent indexes ready` (builds
+   idx_items_first_seen); a scan's log line "N new items since last scan (M listed earlier, new to the site)";
+   ~20 s later `/api/new-catchup` 200s in the logs; no `[new] … failed` lines; scan time still ~1 s
+   (admin /api/timing).
+2. **Then the alert email redesign** (Chuck approved the mockup 2026-10-09 — "Claude outputs/alert_email_mockup_2026-10-09.html",
+   ): three sections, up to 10 items each + "See N more on GC Gear Tracker" button,
+   white bold headlines "New Want List Items" / "Want List Price Drops" / "Watch List Price Drops", empty section →
+   "No new <X> today."; no dark grays anywhere (secondary text #e6e6e6 / white); header "Daily alert · <day>";
+   footer "This mailbox isn't monitored…" line. Decisions: price drop = price lower than at the last alert (a further
+   drop shows again); Want List drops = any available listing matching the terms, all stores; send only if ≥1 section
+   has items; price-drop "see more" buttons open Want/Watch List filtered to price drops (small site work).
+   Subject: "Gear Alert: 14 new Want List items, 3 price drops"; exactly one new item → "New Want List Item: <name>";
+   exactly one drop → "Price Drop: <name>, now $79". New-items section must switch to the v2.20.0 rule (first_seen
+   window as well as the dated one). Plan first, then build.
+3. Then step 3 (alerts settings UI, Chuck only) as queued below.
+
+---
+
+# Next Session Prompt — EMAIL ALERTS step 2 LIVE (v2.19.4). Next: check the first scheduled run, then step 3
+
+**2026-10-08 end of day**: v2.19.0 → v2.19.4 all pushed (if `git log origin/main -1` isn't "v2.19.4…", push it:
+`git add gc_tracker_app.py HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`). Postmark approved; webhook
+(Bounce / Spam Complaint / Subscription Change, basic auth) Verified; ALERTS_WEBHOOK_SECRET in Railway; /admin/alerts
+all green. Email = redesigned dark site-style layout, newest 25, "Listed <day>", terms at the bottom (v2.19.3/4).
+Button = user's scan → Want List (v2.19.2). NOTE the v2.19.3 stale-file mishap (HANDOFF.md v2.19.3): after copying a
+file back to the Mac, verify md5 / APP_VERSION before Chuck pushes.
+1. **First scheduled run 2026-10-09 10:00 ET**: Railway web logs `[alerts] daily run 2026-10-09: …` (sweep_complete,
+   sent/none counts), /admin/alerts "last run day" + summary, and Chuck's inbox (he may have added broad temporary
+   pills so something matches — remind him to remove them after). Footer should show v2.19.4.
+2. Then **step 3 (UI, Chuck only)** — plan first, go-ahead before coding: alerts toggle ("whole Want List" default) +
+   vertical pill list with bells (mode 'selected' / alert_pills), settings panel (masked address, pause, Remove my
+   email), "items from this email" marker for `/?alert=<id>` (alert_batches.skus), self-service account deletion
+   (password / Google re-auth, immediate), privacy policy line on deletion.
+- **Sender = noreply (2026-10-08 evening)**: Railway web `ALERTS_FROM = GC Gear Tracker <noreply@gcgeartracker.com>`
+  (admin page confirms). Cloudflare Email Routing (gcgeartracker.com lives under the cboehmig@gmail.com Cloudflare
+  login's 2nd account "ec9a9e…", NOT the real-estate one) → Catch-all = Drop now ACTIVE, so replies to noreply@ /
+  alerts@ vanish instead of bouncing; chuck@ still forwards to Gmail. TODO in the next code change: footer line
+  "This mailbox isn't monitored — use the links below to stop or pause alerts." CAUTION: on Railway's canvas, typing
+  while focus isn't in a field triggers shortcuts (it created a draft "function-bun" service once — discarded, never
+  deployed); add variables by hand.
+3. Before beta: Postmark Basic + ALERTS_DAILY_CEILING ~500; later tighten DMARC.
+
+---
+
 # Next Session Prompt — EMAIL ALERTS v2.19.0 LIVE (first real alert received 2026-10-08 12:07 CDT); v2.19.1 built, NOT pushed
 
 **2026-10-08 (later)**: v2.19.0 live; /admin/alerts all green except "webhook secret: not set"; Chuck's Rewind →

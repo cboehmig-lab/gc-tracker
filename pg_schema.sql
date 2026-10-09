@@ -130,3 +130,5 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- rebuild it if so.
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_items_search_vector ON items USING gin (search_vector);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_items_name_brand_trgm ON items USING gin ((coalesce(name, '') || ' ' || coalesce(brand, '')) gin_trgm_ops);
+-- v2.20.0: NEW rule late arrivals (first_seen after the last scan) and the browse scan gate MAX(first_seen)
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_items_first_seen ON items (first_seen);

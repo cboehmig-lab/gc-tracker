@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-10-08 · Version: v2.19.4 (alert email: listed day only; v2.19.3 alert email redesign; v2.19.2 alert button = scan → Want List; v2.19.1 alert email button → Want List view; v2.19.0 email alerts step 2: daily alert engine, Chuck-only; v2.18.1 privacy policy covers email alerts + Postmark; contact chuck@gcgeartracker.com; v2.18.0 email alerts step 1: plumbing, admin-only — see EMAIL_ALERTS_DESIGN.md; v2.17.9 Impact.com verification meta tag; v2.17.8 = Phase G browse speedups; v2.17.7 = S1 cleanup; v2.17.6 = silent sweep; v2.17.5 = quick-window hotfix; v2.17.4 = Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-10-09 · Version: v2.20.0 (NEW = dated-new OR first seen by the site since your last scan — late arrivals, returns excluded; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign; v2.19.2 alert button = scan → Want List; v2.19.1 alert email button → Want List view; v2.19.0 email alerts step 2: daily alert engine, Chuck-only; v2.18.1 privacy policy covers email alerts + Postmark; contact chuck@gcgeartracker.com; v2.18.0 email alerts step 1: plumbing, admin-only — see EMAIL_ALERTS_DESIGN.md; v2.17.9 Impact.com verification meta tag; v2.17.8 = Phase G browse speedups; v2.17.7 = S1 cleanup; v2.17.6 = silent sweep; v2.17.5 = quick-window hotfix; v2.17.4 = Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -54,7 +54,7 @@ ALERTS_EMAIL_KEY_OLD). Values never go in chat, files or logs.
 
 **Server-side browse**: `POST /api/browse` → `_browse_compute()` (request parsing + want-list caps via `_kw_accept_capped`) → `_pg_browse()` — every filter, want-list/search-box match (tsquery translator + trigram ILIKE), facet count, sort and page computed in Postgres (sole path since v2.16.44; no JSON fallback — DB errors return 503 `{error}`, one retry on a dead pooled connection). Space-separated search terms are AND'd.
 
-**NEW detection**: anchor-based per-user. `threshold = _norm_anchor` (user's "top of table" high-water mark). Anchor only advances when browsing fully unfiltered (`!hasFilters && !_globalSearchActive`). Persisted server-side in `user_data.last_anchor`.
+**NEW detection (v2.20.0)**: NEW = date_listed > the user's anchor OR (available AND first_seen > the user's previous last_run) — the second half catches GC's late-searchable listings; returns keep their old first_seen so they are not NEW. Quick pass reads it under `_PG_SCAN_DB_LOCK`; sweep finds come via `POST /api/new-catchup` when the sweep ends (no table redraw — next page flip shows them). See HANDOFF.md v2.20.0. Original rule: anchor-based per-user. `threshold = _norm_anchor` (user's "top of table" high-water mark). Anchor only advances when browsing fully unfiltered (`!hasFilters && !_globalSearchActive`). Persisted server-side in `user_data.last_anchor`.
 
 **Special view state save/restore**: `_captureFilterState()` / `_restoreFilterState()` in `gc.js`. `_preSpecialViewState` is set when Watch List, Want List, or a Saved Search is activated — stores all filter state. Toggling any of these off calls `_restoreFilterState()` to return to the exact prior state. Watch and Want List also clear all filters (brand, cond, cat, price, search) and go nationwide (`all_stores: true` in browse body) on activation.
 
@@ -120,7 +120,13 @@ See HANDOFF.md v2.17.8.
 
 ---
 
-## Previous: v2.17.7 — cleanup after S1 (2026-10-01)
+## v2.20.0 — NEW includes late arrivals (2026-10-09)
+
+Chuck reversed the v2.17.7 call: listings new to the site since the user's last scan are NEW whatever their listed date (returns excluded). Sweep now stamps first_seen at DB-lock time; `/api/new-catchup` adds the sweep's finds client-side; new index idx_items_first_seen. Alert email still on the dated rule until the email redesign release. Full detail: HANDOFF.md v2.20.0.
+
+---
+
+## Previous: v2.17.7 — cleanup after S1 (2026-10-01) (superseded by v2.20.0)
 
 Removed the v2.17.5 sweep "late arrival" WARNING and the temporary `/api/quick-window-check`. The warnings (319 in ~23 h)
 were listings GC makes searchable late with older creationDates — by Chuck's decision these stay NOT NEW (anchor rule
