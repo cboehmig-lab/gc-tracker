@@ -536,6 +536,7 @@ function _setAuthUI(username, email) {
     syncDot.style.display   = 'none';
   }
   _alertsRefreshAccess(!!(username || email));   // v2.22.0 Email alerts button
+  _acctRefreshUI(!!(username || email));          // v2.22.1 Your account
   // Saved searches chip — only meaningful when logged in
   const ssWrap = document.getElementById('ss-wrap');
   if (ssWrap) ssWrap.style.display = (username || email) ? '' : 'none';
@@ -861,7 +862,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const meD = await meR.json();
     if (meD.logged_in) {
       alreadyLoggedIn = true;
-      window._authUser = {username: meD.username, googleLinked: !!meD.google_linked};
+      window._authUser = {username: meD.username, googleLinked: !!meD.google_linked, hasPassword: !!meD.has_password};
       _setAuthUI(meD.username, '');
       await _loadAndMergeServerData(meD.data || {});
       _maybeShowLinkBanner(!!meD.google_linked, !!meD.has_email, window._googleOauthEnabled);
@@ -877,6 +878,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadState(alreadyLoggedIn);
   _applyStoreDeepLink();
   _applyAlertDeepLink(alreadyLoggedIn);
+  _acctApplyDeepLink();   // v2.22.1: back from Google re-confirm for account deletion
 });
 
 // ?alert=<id>[&view=wantdrops|watchdrops] deep link from an alert email's buttons (v2.19.1, v2.21.0): open the
@@ -4804,7 +4806,7 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('about-modal')?.addEventListener('click', function(e) {
     if (e.target === this) _closeAboutModal();
   });
-  document.querySelector('.about-close-btn')?.addEventListener('click', _closeAboutModal);
+  document.querySelector('#about-modal .about-close-btn')?.addEventListener('click', _closeAboutModal);   // v2.22.1: scoped — other modals reuse the class
   document.querySelector('[data-action="open-about"]')?.addEventListener('click', function(e) {
     e.preventDefault();
     _openAboutModal();
@@ -4988,4 +4990,138 @@ document.addEventListener('DOMContentLoaded', () => {
   if (cd) cd.addEventListener('keydown', e => { if (e.key === 'Enter') _alertsConfirm(); });
   const modal = document.getElementById('alerts-modal');
   if (modal) modal.addEventListener('click', e => { if (e.target === modal) closeAlertsPanel(); });
+});
+
+
+// ── Your account / self-service deletion (v2.22.1) ───────────────────────────
+// Open from the header username (desktop) or About → "Your account" (phones).
+// Confirm by password, or by a fresh Google sign-in (/api/auth/google?purpose=delete,
+// which comes back to /?account_delete=confirm|failed). Deletion is immediate.
+function _acctRefreshUI(loggedIn) {
+  const nameEl = document.getElementById('auth-email');
+  if (nameEl) {
+    nameEl.classList.toggle('acct-clickable', loggedIn);
+    nameEl.title = loggedIn ? 'Your account' : '';
+  }
+  const ab = document.getElementById('about-account-btn');
+  if (ab) ab.style.display = loggedIn ? '' : 'none';
+}
+
+function _acctMsg(t, err) {
+  const el = document.getElementById('acct-msg');
+  if (!el) return;
+  el.textContent = t || '';
+  el.classList.toggle('err', !!err);
+}
+
+function _acctShow(state) {
+  ['acct-info', 'acct-confirm', 'acct-last', 'acct-done'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('show', id === state);
+  });
+}
+
+function _acctOpen(state) {
+  // Refresh sign-in methods first (the in-page login paths don't all know them).
+  if (state === 'acct-done') { _acctRender(state); return; }
+  fetch('/api/me', {credentials: 'same-origin'}).then(r => r.json()).then(me => {
+    if (me && me.logged_in) {
+      window._authUser = Object.assign(window._authUser || {}, {
+        username: me.username || (window._authUser || {}).username,
+        googleLinked: !!me.google_linked, hasPassword: !!me.has_password});
+    }
+    _acctRender(state);
+  }).catch(() => _acctRender(state));
+}
+
+function _acctRender(state) {
+  const u = window._authUser || {};
+  if (!u.username && state !== 'acct-done') return;
+  document.getElementById('acct-username').textContent = u.username || '';
+  document.getElementById('acct-last-name').textContent = u.username || 'your account';
+  const parts = [];
+  if (u.googleLinked) parts.push('Google');
+  if (u.hasPassword) parts.push('password');
+  document.getElementById('acct-signin').textContent = parts.length ? parts.join(' + ') : '—';
+  const hasPw = u.hasPassword !== false;          // unknown → offer the password box
+  document.getElementById('acct-pw-wrap').style.display = hasPw ? '' : 'none';
+  document.getElementById('acct-google-wrap').style.display = u.googleLinked ? '' : 'none';
+  document.getElementById('acct-google-text').textContent = hasPw
+    ? 'Or confirm by signing in with Google again:' : "To confirm it's you, sign in with Google again.";
+  document.getElementById('acct-google-btn').textContent = hasPw ? 'Confirm with Google instead' : 'Confirm with Google';
+  document.getElementById('acct-pw').value = '';
+  _acctMsg('');
+  _acctShow(state || 'acct-info');
+  document.getElementById('acct-modal').classList.add('open');
+}
+
+function _acctClose() {
+  const done = document.getElementById('acct-done').classList.contains('show');
+  document.getElementById('acct-modal').classList.remove('open');
+  if (done) window.location.href = '/';
+}
+
+function _acctAfterDelete() {
+  // Same clearing as sign-out, so the deleted lists don't linger on this device.
+  window._authUser = null;
+  window._watchlist = {}; window._keywords = []; window._newIds = new Set();
+  window._lastRunISO = null; window._lastAnchorISO = null; window._savedSearches = [];
+  try { favorites = []; } catch (e) {}
+  ['watchlist', 'keywords', 'new_ids', 'last_run', 'favorites', 'last_anchor']
+    .forEach(k => _lsSet(k, k === 'watchlist' ? {} : (k === 'last_run' || k === 'last_anchor' ? '' : [])));
+  _setAuthUI(null, null);
+  _acctShow('acct-done');
+  _acctMsg('');
+}
+
+function _acctDelete(btn, body) {
+  btn.disabled = true;
+  _acctMsg('Deleting…');
+  fetch('/api/account/delete', {
+    method: 'POST', credentials: 'same-origin',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body || {})
+  }).then(r => r.json().catch(() => ({})).then(d => ({ok: r.ok && d.ok, d}))).then(({ok, d}) => {
+    btn.disabled = false;
+    if (!ok) { _acctMsg(d.error || 'Something went wrong — nothing was deleted.', true); return; }
+    _acctAfterDelete();
+  }).catch(() => { btn.disabled = false; _acctMsg('Network error — nothing was deleted.', true); });
+}
+
+function _acctApplyDeepLink() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const v = params.get('account_delete');
+    if (!v) return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete('account_delete');
+    history.replaceState(null, '', url.toString());
+    if (v === 'confirm' && window._authUser) _acctOpen('acct-last');
+    else if (v === 'failed') {
+      _acctOpen('acct-info');
+      _acctMsg("Google sign-in didn't match this account, so nothing was deleted.", true);
+    }
+  } catch (e) { /* never block page load */ }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+  on('auth-email', () => { if (window._authUser) _acctOpen('acct-info'); });
+  on('about-account-btn', () => { _closeAboutModal(); _acctOpen('acct-info'); });
+  on('acct-close-x', _acctClose);
+  on('acct-done-btn', _acctClose);
+  on('acct-delete-link', () => { _acctMsg(''); _acctShow('acct-confirm'); setTimeout(() => document.getElementById('acct-pw')?.focus(), 50); });
+  on('acct-cancel-btn', () => { _acctMsg(''); _acctShow('acct-info'); });
+  on('acct-keep-btn', _acctClose);
+  on('acct-delete-pw-btn', function () {
+    const pw = document.getElementById('acct-pw').value;
+    if (!pw) { _acctMsg('Enter your password to confirm.', true); return; }
+    _acctDelete(this, {password: pw});
+  });
+  on('acct-delete-final-btn', function () { _acctDelete(this, {}); });
+  on('acct-google-btn', () => { window.location.href = '/api/auth/google?purpose=delete'; });
+  const pw = document.getElementById('acct-pw');
+  if (pw) pw.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('acct-delete-pw-btn').click(); });
+  const m = document.getElementById('acct-modal');
+  if (m) m.addEventListener('click', e => { if (e.target === m) _acctClose(); });
 });

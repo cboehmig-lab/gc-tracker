@@ -1,5 +1,49 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-10-09 · Current version: v2.22.0 (alerts beta: /admin/users beta switch, "Email alerts" panel for beta users, whole-list alerts only — no per-term choices; v2.21.0 alert email: 3 sections — new Want List items, Want List price drops, Watch List price drops; "Gear Alert:" subjects; v2.20.0 NEW also flags listings new to the site regardless of listed date — late arrivals; returns excluded; /api/new-catchup after the sweep; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign: newest-first list in the site's look, terms at the bottom; v2.19.2 alert email button runs the user's scan then opens the Want List; v2.19.1 alert email button opens the Want List; v2.19.0 email alerts step 2: daily 10 AM ET alert engine, /go/<sku>, signed pause/stop links, Postmark bounce webhook — Chuck-only; v2.18.1 privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-10-09 · Current version: v2.22.1 (self-service account deletion — password or Google re-confirm, immediate; About Close fix; v2.22.0 alerts beta: /admin/users beta switch, "Email alerts" panel for beta users, whole-list alerts only — no per-term choices; v2.21.0 alert email: 3 sections — new Want List items, Want List price drops, Watch List price drops; "Gear Alert:" subjects; v2.20.0 NEW also flags listings new to the site regardless of listed date — late arrivals; returns excluded; /api/new-catchup after the sweep; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign: newest-first list in the site's look, terms at the bottom; v2.19.2 alert email button runs the user's scan then opens the Want List; v2.19.1 alert email button opens the Want List; v2.19.0 email alerts step 2: daily 10 AM ET alert engine, /go/<sku>, signed pause/stop links, Postmark bounce webhook — Chuck-only; v2.18.1 privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.22.1 — 2026-10-09: Self-service account deletion (+ About "Close" fix)
+
+**Why (Chuck)**: needed before email alerts go public (decided 2026-10-07: confirm with password, or Google
+re-sign-in for Google-only accounts; deletion immediate, no grace period). Mockup approved 2026-10-09
+("Claude outputs" → account_delete_mockup.png).
+
+**UI (`#acct-modal` in HTML_TEMPLATE, `_acct*` in static/gc.js, styles at the end of gc.css)**: clicking the header
+username (desktop) or About → "Your account" (phones; button only shown when signed in) opens "Your account"
+(username, sign-in methods, "Delete my account…"). Confirm screen lists what's deleted + "can't be undone; lists on
+this device are cleared too". Password accounts: password box → "Delete my account permanently". Google-linked
+accounts: "Confirm with Google" (or "…instead" when they also have a password) → `/api/auth/google?purpose=delete`.
+Back on `/?account_delete=confirm` → "Last step" screen → final button. `=failed` → message, nothing deleted.
+After deleting: same local clearing as sign-out (+ last_anchor), "Your account has been deleted", Close → reload `/`.
+`_acctOpen` re-reads /api/me first because in-page login paths don't all know google_linked / has_password.
+
+**Server**
+- `POST /api/account/delete` {password?}: signed-in only (401). Accepted if `session["delete_ok"]` = {uid, exp}
+  matches the user and hasn't expired (10 min), else the password must match (`check_password_hash`); wrong
+  passwords use the login rate limiter (`_check_login_rate` / `_record_login_failure` — they also count toward that
+  IP's login lockout). Google-only account without a fresh re-confirm → 400. Then `_purge_user_rows` (every
+  per-user table + users), session cleared, log `[account] user N deleted their account (self-service, …)`.
+- `/api/auth/google?purpose=delete`: requires a signed-in session; pending state stores purpose + uid; adds
+  `prompt=select_account` and `max_age=0`. Callback with purpose=delete never logs anyone in or links anything: if the
+  returned Google `sub` equals the signed-in user's google_id (and the uid matches the state) → `session["delete_ok"]`
+  → `/?account_delete=confirm`; otherwise `/?account_delete=failed`. Normal Google sign-in unchanged.
+- `/api/me` adds `has_password`.
+- Privacy policy: deletion is self-service and immediate (How: username / About → Delete my account; confirm with
+  password or Google); email request still accepted; backups keep copies up to 7 days (alert addresses encrypted).
+- Admin "schedule deletion in 10 days" / "Delete Now" on /admin/users unchanged.
+
+**Bug fix (from v2.22.0)**: `document.querySelector('.about-close-btn')` matched the Email alerts panel's Close
+button (same class, earlier in the page), so About's Close button did nothing. Now scoped to `#about-modal`.
+
+**Verified locally**: signed out → 401; `/api/me` has_password; wrong password → 401 + nothing deleted; right
+password → every per-user table + users row gone, session signed out, other users untouched; Google-only without
+re-confirm → 400; re-confirm redirect carries prompt=select_account + max_age=0; a DIFFERENT Google account → failed,
+still signed in as the same user, nothing deletable; matching account → confirm → delete works; expired token → 400;
+token for another uid → 400; purpose=delete while signed out → failed; normal Google sign-in has no max_age; repeated
+wrong passwords → 429; /privacy has the new text. Playwright on a local server: About shows "Your account" and its
+Close works; username opens the box; wrong password message; delete → done screen, gt_keywords/gt_watchlist cleared,
+reload signed out, users table empty; no page errors.
 
 ---
 

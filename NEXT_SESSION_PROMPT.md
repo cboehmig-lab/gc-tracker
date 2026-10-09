@@ -1,3 +1,30 @@
+# Next Session Prompt — v2.22.1 (self-service account deletion) built, NOT pushed
+
+1. **Push v2.22.1**: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+   `git add gc_tracker_app.py static/gc.js static/gc.css HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit,
+   `git push origin main`.
+2. **Live check**: footer v2.22.1; About → "Your account" shows when signed in and About's Close works; click the
+   username → Your account. Test deletion on a throwaway account (register one, delete with its password); optionally a
+   throwaway Google account for the Google path. Railway log: `[account] user N deleted their account (...)`.
+3. Beta testers added 2026-10-09 — watch /admin/users states + /admin/alerts after each 10 AM run.
+4. Remaining before public launch: launch switch (alerts for every signed-in user) + "Email alerts are here!" popup
+   (off until launch), privacy-policy "small number of users" wording, ALERTS_DAILY_CEILING → ~300, DMARC
+   p=quarantine after reviewing digests (~2026-10-23).
+
+---
+
+**2026-10-09 (night) — done in the browser**: Postmark upgraded to Basic ($15/mo, 10,000 emails, renews Nov 9;
++$1.80 per extra 1,000). Railway web `ALERTS_DAILY_CEILING=100` added + deployed (raise to ~300 at public launch).
+DMARC reporting ON: Postmark DMARC Digests signed up (weekly summary to chuck@gcgeartracker.com); Cloudflare `_dmarc`
+TXT now `"v=DMARC1; p=none; pct=100; rua=mailto:re+me4uv1vmax1@dmarc.postmarkapp.com; sp=none; aspf=r;"`.
+**~2026-10-23**: read the digests; if only Postmark (and Cloudflare forwarding) show up, change `p=none` → `p=quarantine`.
+Chuck doesn't send AS chuck@gcgeartracker.com today but may later — if so, that sender must pass SPF/DKIM for
+gcgeartracker.com first (e.g. Gmail "Send mail as" via Postmark SMTP), or quarantine would spam-folder it.
+Next code options (Chuck to pick): self-service account deletion, launch popup ("Email alerts are here!", max once/day,
+3 times, don't show again; signed-out → register/sign in; off until launch), launch switch (alerts for every signed-in user).
+
+**Versioning from 2026-10-09 on**: next change is v2.22.1, then v2.22.2 … — patch number only; the middle number moves only for a milestone Chuck names (see HANDOFF_PROMPT.md rule 5).
+
 # Next Session Prompt — v2.22.0 (alerts beta) built, NOT pushed. Then: invite the two testers
 
 **2026-10-09 (evening)**: v2.21.0 pushed (three-section email). v2.22.0 built + tested locally (HANDOFF.md v2.22.0).

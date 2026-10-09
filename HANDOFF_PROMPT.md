@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-10-09 · Version: v2.22.0 (alerts beta + Email alerts panel; v2.21.0 alert email: new items + Want List drops + Watch List drops; v2.20.0 NEW = dated-new OR first seen by the site since your last scan — late arrivals, returns excluded; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign; v2.19.2 alert button = scan → Want List; v2.19.1 alert email button → Want List view; v2.19.0 email alerts step 2: daily alert engine, Chuck-only; v2.18.1 privacy policy covers email alerts + Postmark; contact chuck@gcgeartracker.com; v2.18.0 email alerts step 1: plumbing, admin-only — see EMAIL_ALERTS_DESIGN.md; v2.17.9 Impact.com verification meta tag; v2.17.8 = Phase G browse speedups; v2.17.7 = S1 cleanup; v2.17.6 = silent sweep; v2.17.5 = quick-window hotfix; v2.17.4 = Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-10-09 · Version: v2.22.1 (self-service account deletion; v2.22.0 alerts beta + Email alerts panel; v2.21.0 alert email: new items + Want List drops + Watch List drops; v2.20.0 NEW = dated-new OR first seen by the site since your last scan — late arrivals, returns excluded; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign; v2.19.2 alert button = scan → Want List; v2.19.1 alert email button → Want List view; v2.19.0 email alerts step 2: daily alert engine, Chuck-only; v2.18.1 privacy policy covers email alerts + Postmark; contact chuck@gcgeartracker.com; v2.18.0 email alerts step 1: plumbing, admin-only — see EMAIL_ALERTS_DESIGN.md; v2.17.9 Impact.com verification meta tag; v2.17.8 = Phase G browse speedups; v2.17.7 = S1 cleanup; v2.17.6 = silent sweep; v2.17.5 = quick-window hotfix; v2.17.4 = Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -39,6 +39,7 @@ ALERTS_EMAIL_KEY_OLD). Values never go in chat, files or logs.
 3. **Git pushes must come from the Mac terminal** — the Cowork sandbox gets a proxy 403 on GitHub pushes. As of v2.13.3, `origin` points at the SSH URL (`git@github.com:cboehmig-lab/gc-tracker.git`), so the normal `git push origin main` works AND keeps the ahead/behind count accurate. (Previously pushes went to the raw SSH URL while `origin` was HTTPS — pushes landed but `origin/main` tracking never updated, causing a phantom "ahead N" forever.)
 4. **Sandbox git lock files**: if `git commit` fails with "cannot lock ref HEAD", the Mac owns the lock. Tell the user: `rm ~/Desktop/gc_tracker/.git/HEAD.lock && rm ~/Desktop/gc_tracker/.git/refs/heads/main.lock` then re-run.
 5. **Version bump**: only change `APP_VERSION` in `gc_tracker_app.py` — the `<!-- __VER__ -->` placeholder in `HTML_TEMPLATE` auto-propagates it everywhere.
+   **Numbering (Chuck, 2026-10-09)**: bump only the LAST number for each change (2.22.0 → 2.22.1 → 2.22.2 …). Bump the middle number only for a real milestone (e.g. email alerts going public) and only when Chuck says so. Every push still needs a bump — APP_VERSION is also the static-file cache-buster (`?v=`).
 6. **`_require_admin()` / `_require_admin_api()` are NOT decorators** — they return None or a response. Call inline: `denied = _require_admin(); if denied: return denied`. Never use as `@_require_admin`.
 7. **Template replacements at startup**: `HTML_TEMPLATE`, `CL_TEMPLATE`, and `NEWDEALS_TEMPLATE` all get `<!-- __GA__ -->` replaced at module load. `HTML_TEMPLATE` also gets `<!-- __VER__ -->`. The `<!-- __STORES_NOSCRIPT__ -->` placeholder stays in `HTML_TEMPLATE` and is replaced at *request time* in `index()` — do not bake it in at startup.
 
@@ -117,6 +118,12 @@ share the default-view entry. Responses carry `facet_gen`; gc.js sends `skip_fac
 server omits the facet lists if the generation still matches. Search debounce 200 ms. Byte-identical to v2.17.7 on a
 270-request comparison. Autocomplete skipped (Chuck); >1 worker not needed (low overlap). This closes Phase G.
 See HANDOFF.md v2.17.8.
+
+---
+
+## v2.22.1 — self-service account deletion (2026-10-09)
+
+"Your account" box (header username / About) → Delete my account: password, or Google re-sign-in (`/api/auth/google?purpose=delete` → `session["delete_ok"]` 10 min) → `POST /api/account/delete` → `_purge_user_rows`. Immediate. Also fixed About's Close button. Full detail: HANDOFF.md v2.22.1.
 
 ---
 

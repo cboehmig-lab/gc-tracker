@@ -824,3 +824,25 @@ tr.fav-row td:last-child{color:#4ade80}
 .al-status.bad{color:#ffb3b3!important}
 .al-msg{min-height:1em;font-size:.8rem;color:#ffffff;margin:12px 0 0}
 .al-msg.err{color:#ffb3b3}
+
+/* ── Your account / delete account (v2.22.1) ── */
+#auth-email.acct-clickable{cursor:pointer;text-decoration:underline dotted rgba(255,255,255,.5);text-underline-offset:3px}
+.about-account-btn{display:block;margin:14px auto 0;padding:7px 18px;background:#2a2a2a;border:1px solid #4a4a4a;border-radius:5px;color:#ffffff;font-size:.82rem;cursor:pointer}
+#acct-modal{display:none;position:fixed;inset:0;z-index:960;background:rgba(0,0,0,.7);align-items:center;justify-content:center}
+#acct-modal.open{display:flex}
+#acct-box{background:#1a1a1a;border:1px solid #3a3a3a;border-radius:10px;padding:22px 24px;max-width:380px;width:92%;position:relative;color:#ffffff;max-height:90vh;overflow-y:auto;box-sizing:border-box}
+#acct-box h3{color:#ffffff;font-size:1.05rem;margin:0 0 10px}
+#acct-box p{font-size:.85rem;color:#ffffff;margin:0 0 10px;line-height:1.45}
+.acct-row{display:flex;justify-content:space-between;gap:10px;font-size:.85rem;padding:8px 0;border-bottom:1px solid #2a2a2a;color:#ffffff}
+.acct-delete-link{margin-top:14px;background:none;border:none;padding:0;color:#ffb3b3;text-decoration:underline;font-size:.82rem;cursor:pointer}
+.acct-list{margin:0 0 12px 18px;padding:0;font-size:.82rem;line-height:1.55;color:#e6e6e6}
+.acct-warn{background:#2a1212;border:1px solid #7a3a3a;color:#ffd6d6;border-radius:6px;padding:9px 11px;font-size:.82rem;margin:0 0 14px}
+#acct-box label{display:block;font-size:.78rem;color:#e6e6e6;margin-bottom:4px}
+#acct-pw{width:100%;box-sizing:border-box;padding:9px 12px;background:#252525;border:1px solid #4a4a4a;border-radius:5px;color:#ffffff;font-size:.95rem;outline:none;margin-bottom:10px}
+.acct-danger{width:100%;padding:10px;background:#b00000;border:none;border-radius:5px;color:#ffffff;font-weight:700;font-size:.88rem;cursor:pointer}
+.acct-danger:hover{background:#cc0000}
+.acct-danger:disabled,.acct-google:disabled{opacity:.6;cursor:default}
+.acct-google{width:100%;padding:10px;background:#ffffff;border:none;border-radius:5px;color:#222222;font-weight:600;font-size:.88rem;cursor:pointer}
+#acct-google-wrap{margin-top:12px}
+.acct-full{width:100%;margin-top:10px;flex:none}
+.acct-done-msg{background:#122a17;border:1px solid #2d6a2d;color:#d6f5de;border-radius:6px;padding:10px 12px;font-size:.85rem}

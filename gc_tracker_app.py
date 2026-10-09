@@ -3042,9 +3042,15 @@ def auth_google():
     # '/\\host' backslash trick that browsers turn into a protocol-relative '//host').
     next_url     = _safe_next(request.args.get("next", "/"), "/")
     redirect_uri = url_for("auth_google_callback", _external=True)
+    # v2.22.1: purpose=delete = re-confirm the SIGNED-IN user before self-service
+    # account deletion. Bound to that user id; the callback never logs anyone in for it.
+    purpose = "delete" if request.args.get("purpose") == "delete" else ""
+    if purpose and not session.get("user_id"):
+        return redirect("/?account_delete=failed")
     # Store state server-side — avoids session cookie issues on Railway proxy
     state = _sec.token_urlsafe(32)
-    _oauth_pending[state] = {"next_url": next_url, "expires": time.time() + 600}
+    _oauth_pending[state] = {"next_url": next_url, "expires": time.time() + 600,
+                             "purpose": purpose, "uid": session.get("user_id") if purpose else None}
     # Purge expired states
     now_t = time.time()
     for k in [k for k, v in list(_oauth_pending.items()) if v["expires"] < now_t]:
@@ -3056,6 +3062,9 @@ def auth_google():
         "scope":         "openid email profile",
         "state":         state,
     }
+    if purpose:
+        params["prompt"] = "select_account"   # make them actively pick the account again
+        params["max_age"] = "0"               # and ask Google to re-authenticate
     return redirect("https://accounts.google.com/o/oauth2/v2/auth?" + _up.urlencode(params))
 
 @app.route("/api/auth/google/callback")
@@ -3111,6 +3120,18 @@ def _auth_google_callback_inner():
     if not google_id:
         return redirect("/?google_error=1")
 
+    # v2.22.1: re-confirmation for self-service account deletion. Only marks the
+    # session as confirmed (10 min) when the Google account is the one linked to
+    # the signed-in user; the deletion itself still needs the user's final click.
+    if pending.get("purpose") == "delete":
+        uid = session.get("user_id")
+        user = _user_by_id(uid) if uid else None
+        if (not user or uid != pending.get("uid") or not user.get("google_id")
+                or not hmac.compare_digest(str(user["google_id"]), str(google_id))):
+            return redirect("/?account_delete=failed")
+        session["delete_ok"] = {"uid": uid, "exp": time.time() + 600}
+        return redirect("/?account_delete=confirm")
+
     now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # 1) Already linked by google_id → just log in
@@ -3161,6 +3182,39 @@ def _auth_google_callback_inner():
     sep = "&" if "?" in next_url else "?"
     return redirect(next_url + sep + "google_new=1")
 
+@app.route("/api/account/delete", methods=["POST"])
+def api_account_delete():
+    """v2.22.1 self-service account deletion — immediate and permanent (Chuck,
+    2026-10-07). Confirmed by the account password, or by a fresh Google
+    re-sign-in (session["delete_ok"], set by the Google callback, 10 min).
+    Everything goes through _purge_user_rows (all per-user tables + users)."""
+    uid = session.get("user_id")
+    if not uid:
+        return jsonify({"error": "Please sign in first."}), 401
+    user = _user_by_id(uid)
+    if not user:
+        session.pop("user_id", None); session.pop("user_username", None)
+        return jsonify({"error": "Account not found."}), 404
+    ok_tok = session.get("delete_ok") or {}
+    google_ok = ok_tok.get("uid") == uid and float(ok_tok.get("exp") or 0) > time.time()
+    if not google_ok:
+        ip = _client_ip()
+        if not _check_login_rate(ip):
+            return jsonify({"error": "Too many attempts. Please wait a few minutes and try again."}), 429
+        password = str((request.json or {}).get("password") or "")
+        if not user.get("password_hash"):
+            return jsonify({"error": "Please confirm with Google first."}), 400
+        if not password or not check_password_hash(user["password_hash"], password.strip()):
+            _record_login_failure(ip)
+            return jsonify({"error": "That password isn't right."}), 401
+    with _user_db() as conn:
+        _purge_user_rows(conn, uid)
+        conn.commit()
+    for k in ("user_id", "user_username", "delete_ok"):
+        session.pop(k, None)
+    print(f"[account] user {uid} deleted their account (self-service, {'google' if google_ok else 'password'})")
+    return jsonify({"ok": True})
+
 @app.route("/api/auth/config")
 def auth_config():
     return jsonify({"google_oauth": _GOOGLE_OAUTH_ENABLED})
@@ -3175,6 +3229,7 @@ def api_me():
         "logged_in":    True,
         "username":     session.get("user_username", ""),
         "google_linked": bool(user and user.get("google_id")),
+        "has_password": bool(user and user.get("password_hash")),   # v2.22.1 (account deletion confirm)
         "has_email":    bool(user and user.get("email")),
         "is_admin":     _is_admin(),
         "data":         _get_user_data(user_id),
@@ -9602,6 +9657,50 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </div>
 
 <!-- ── About modal ── -->
+<!-- ── Your account / delete account (v2.22.1; JS in static/gc.js) ── -->
+<div id="acct-modal">
+  <div id="acct-box">
+    <button id="acct-close-x" class="alerts-x" aria-label="Close">✕</button>
+    <div id="acct-info" class="al-state">
+      <h3>Your account</h3>
+      <div class="acct-row"><span>Username</span><b id="acct-username"></b></div>
+      <div class="acct-row"><span>Sign-in</span><span id="acct-signin"></span></div>
+      <button id="acct-delete-link" class="acct-delete-link">Delete my account…</button>
+    </div>
+    <div id="acct-confirm" class="al-state">
+      <h3>Delete your account?</h3>
+      <p>This permanently deletes, right away:</p>
+      <ul class="acct-list">
+        <li>Your account and sign-in</li>
+        <li>Your Watch List, Want List, favorite stores and saved searches</li>
+        <li>Your email-alert address and alert history</li>
+      </ul>
+      <div class="acct-warn">This can't be undone. Lists saved on this device are cleared too.</div>
+      <div id="acct-pw-wrap">
+        <label for="acct-pw">Enter your password to confirm</label>
+        <input id="acct-pw" type="password" autocomplete="current-password" maxlength="200">
+        <button id="acct-delete-pw-btn" class="acct-danger">Delete my account permanently</button>
+      </div>
+      <div id="acct-google-wrap">
+        <p id="acct-google-text">To confirm it's you, sign in with Google again.</p>
+        <button id="acct-google-btn" class="acct-google">Confirm with Google</button>
+      </div>
+      <button id="acct-cancel-btn" class="al-secondary acct-full">Cancel</button>
+    </div>
+    <div id="acct-last" class="al-state">
+      <h3>Last step</h3>
+      <p>Google confirmed it's you. Delete <b id="acct-last-name"></b> and everything in it?</p>
+      <button id="acct-delete-final-btn" class="acct-danger">Delete my account permanently</button>
+      <button id="acct-keep-btn" class="al-secondary acct-full">Cancel — keep my account</button>
+    </div>
+    <div id="acct-done" class="al-state">
+      <div class="acct-done-msg">Your account has been deleted. Thanks for using GC Gear Tracker.</div>
+      <button id="acct-done-btn" class="about-close-btn">Close</button>
+    </div>
+    <p id="acct-msg" class="al-msg"></p>
+  </div>
+</div>
+
 <!-- ── Email alerts panel (v2.22.0, beta accounts + admin; JS in static/gc.js) ── -->
 <div id="alerts-modal">
   <div id="alerts-box">
@@ -9666,6 +9765,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <circle cx="18" cy="16" r="3" stroke="#aaa" stroke-width="1.5"/>
       </svg>
     </a>
+    <button id="about-account-btn" class="about-account-btn" style="display:none">Your account</button>
     <a href="/privacy" target="_blank" rel="noopener" style="display:block;margin-top:8px;font-size:.78rem;color:#666;text-align:center;text-decoration:none">Privacy Policy</a>
     <button class="about-close-btn">Close</button>
   </div>
@@ -9798,11 +9898,15 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid #222;color:#555;fon
   </ul>
 
   <h2>Data Retention</h2>
-  <p>Your account and associated data are retained until you request deletion. You can request
-  that your account be deleted at any time by contacting us at the address below. Guest users
+  <p>Your account and associated data are retained until you delete your account. You can delete
+  it yourself at any time: click your username (or open About) and choose “Delete my account”. You
+  confirm with your password or by signing in with Google again, and the account and everything in
+  it (Watch List, Want List, favorite stores, saved searches and any alert address) is deleted right
+  away. You can also ask us to delete it by contacting us at the address below. Guest users
   (no account) have no data stored on our servers beyond the anonymous device ID cookie.
-  When you remove your alert address or your account is deleted, it is deleted right away; it can
-  remain, in encrypted form only, in our daily server backups for up to 7 days.</p>
+  When you remove your alert address or your account is deleted, it is deleted right away; copies
+  can remain in our daily server backups for up to 7 days (alert addresses only in encrypted form)
+  before those backups are replaced.</p>
 
   <h2>Children's Privacy</h2>
   <p>This site is not directed at children under 13. We do not knowingly collect personal
@@ -9835,7 +9939,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.22.0"
+APP_VERSION = "2.22.1"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
