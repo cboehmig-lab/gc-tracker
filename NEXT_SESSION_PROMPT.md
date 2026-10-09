@@ -1,3 +1,15 @@
+# Next Session Prompt — v2.21.0 (three-section alert email) built, NOT pushed. Then: step 3 (alerts settings UI)
+
+**2026-10-09 (later)**: v2.20.0 pushed + verified live by Chuck. v2.21.0 built + tested locally (HANDOFF.md v2.21.0).
+1. **Push v2.21.0**: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then
+   `git add gc_tracker_app.py static/gc.js HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`, commit, `git push origin main`.
+2. **Live check**: footer v2.21.0; /admin/alerts → Preview (shows per-section counts) → Send my alert now (or wait for the
+   next 10 AM ET run). In the email: three headlines, light text only, buttons open Want List / Want List + Price Drop /
+   Watch List + Price Drop after a scan. First v2.21.0 run uses a 24 h window for drops (no checked_at yet).
+3. Then step 3 (alerts settings UI, Chuck only) as queued below. Before beta: Postmark Basic + ALERTS_DAILY_CEILING ~500.
+
+---
+
 # Next Session Prompt — v2.20.0 (NEW includes late arrivals) built, NOT pushed. Then: alert email redesign
 
 **2026-10-09**: First scheduled alert run (10:00 ET) worked — Chuck got the email.

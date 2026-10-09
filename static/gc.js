@@ -878,24 +878,34 @@ document.addEventListener('DOMContentLoaded', async () => {
   _applyAlertDeepLink(alreadyLoggedIn);
 });
 
-// ?alert=<id> deep link from a Want List alert email's button (v2.19.1): open the
+// ?alert=<id>[&view=wantdrops|watchdrops] deep link from an alert email's buttons (v2.19.1, v2.21.0): open the
 // Want List view. (Showing exactly that email's items is a later step.) Logged
 // out -> open the sign-in box; the Want List lives on the account.
 function _applyAlertDeepLink(loggedIn) {
   try {
     const params = new URLSearchParams(window.location.search);
     if (!params.get('alert')) return;
+    // v2.21.0: view = wantdrops | watchdrops from the email's price-drop sections
+    // (Want List / Watch List with the Price Drop filter on); none = Want List.
+    const view = params.get('view') || '';
     const url = new URL(window.location.href);
     url.searchParams.delete('alert');
+    url.searchParams.delete('view');
     history.replaceState(null, '', url.toString());
     if (!loggedIn) { _openAuthModal('login'); return; }
-    if (!window._keywords || !window._keywords.length) return;
+    const watchView = view === 'watchdrops';
+    if (watchView ? !Object.keys(window._watchlist || {}).length
+                  : (!window._keywords || !window._keywords.length)) return;
     // v2.19.2: run the user's own scan first. Browse hides listings first seen
     // by someone else's scan until this user scans (the per-user scan gate that
     // keeps NEW tags right), so without a scan an emailed item can be missing.
-    // Then open the Want List once the scan's results have rendered.
+    // Then open the view once the scan's results have rendered.
     window._afterScanDone = function () {
-      setTimeout(function () { if (!_wantListSearchActive) searchWantList(); }, 700);
+      setTimeout(function () {
+        if (watchView) { if (!_watchFilterActive) toggleWatchFilter(); }
+        else if (!_wantListSearchActive) searchWantList();
+        if ((view === 'wantdrops' || watchView) && !_priceDropFilterActive) togglePriceDropFilter();
+      }, 700);
     };
     if (running) return;          // a scan is already going; the hook fires when it ends
     runTracker();

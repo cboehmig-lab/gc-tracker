@@ -1,5 +1,57 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-10-09 · Current version: v2.20.0 (NEW also flags listings new to the site regardless of listed date — late arrivals; returns excluded; /api/new-catchup after the sweep; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign: newest-first list in the site's look, terms at the bottom; v2.19.2 alert email button runs the user's scan then opens the Want List; v2.19.1 alert email button opens the Want List; v2.19.0 email alerts step 2: daily 10 AM ET alert engine, /go/<sku>, signed pause/stop links, Postmark bounce webhook — Chuck-only; v2.18.1 privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-10-09 · Current version: v2.21.0 (alert email: 3 sections — new Want List items, Want List price drops, Watch List price drops; "Gear Alert:" subjects; v2.20.0 NEW also flags listings new to the site regardless of listed date — late arrivals; returns excluded; /api/new-catchup after the sweep; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign: newest-first list in the site's look, terms at the bottom; v2.19.2 alert email button runs the user's scan then opens the Want List; v2.19.1 alert email button opens the Want List; v2.19.0 email alerts step 2: daily 10 AM ET alert engine, /go/<sku>, signed pause/stop links, Postmark bounce webhook — Chuck-only; v2.18.1 privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.21.0 — 2026-10-09: Alert email has three sections — new Want List items, Want List price drops, Watch List price drops
+
+**Why (Chuck, from power-user feedback 2026-10-09; mockup approved — "Claude outputs/alert_email_mockup_2026-10-09.html")**:
+the daily alert now covers price drops too. Layout: three sections with white bold headlines "New Want List Items",
+"Want List Price Drops", "Watch List Price Drops"; up to 10 items each (`_ALERTS_MAX_ITEMS` 25 → 10, per section),
+then a red button — "See N more on GC Gear Tracker" when there are more, otherwise "Open my Want List…" /
+"See Want List price drops…" / "See Watch List price drops…"; an empty section shows "No new <X> today." (italic).
+Same dark site look, but **no dark-gray text anywhere** (secondary text #e6e6e6, labels/links white). Header right
+side "Daily alert · <day>". Footer adds "This mailbox isn't monitored — use the links above to stop or pause alerts."
+(the noreply TODO). Matched-terms chips only list terms that matched something in this email; hidden if none.
+Real rendering from the test data: "Claude outputs/alert_email_v2.21.0_preview.html".
+
+**Subject (Chuck)**: one item → `New Want List Item: <name>` or `Price Drop: <name>, now $X`; otherwise
+`Gear Alert: N new Want List items, M price drops` (only the parts that apply).
+
+**Rules**
+- **New Want List items** = matches listed in (anchor, run_max] (old rule) **OR first seen by the site in
+  (checked_at, now]** — the v2.20.0 NEW rule, so late arrivals reach the email too. Ledger `alert_sent` still prevents repeats.
+- **Price drops** (`_alerts_pick_drops`): an available listing GC flags as dropped (`has_price_drop`) is included if
+  EITHER this user was never emailed about its drop AND `price_drop_since > checked_at`, OR its price is now lower than
+  the price we last emailed them (new ledger table `alert_drop_sent(user_id, sku, price, sent_at)` — upserted with the
+  current price on send). "Was" price shown = the previously alerted price for a further drop, else price + GC's
+  price_drop. Newest drop first.
+- Want List drops: any matching listing, all stores (row cap per pill 500). Watch List drops: the user's watched SKUs
+  (`user_data.watchlist` keys). An item appears once: new beats drop; a watched item that also matches a pill goes under
+  Watch List.
+- Email is sent only if at least one section has something (unchanged "no matches = no email").
+- `alert_settings.checked_at` (new column) = wall time of the user's last check; set on every processed run (sent,
+  none, paused/skipped, init). **First run after the upgrade has no checked_at → window = last 24 h** (so Chuck's first
+  v2.21.0 email covers drops that started in the previous day, not every currently-dropped listing).
+- Users with no pills but a Watch List can now get an email (drops only) — the old early return on "no pills" is gone.
+
+**Deep links**: buttons use `/?alert=<batch>` (new items → Want List, unchanged) and
+`/?alert=<batch>&view=wantdrops|watchdrops`. gc.js `_applyAlertDeepLink` runs the user's scan, then opens the Want List
+or Watch List and turns on the Price Drop filter. Note: these views respect the user's selected stores (Favorites),
+while the email covers all stores — so a "see more" view can show fewer if favorites are selected.
+
+**Other**: `alert_drop_sent` added to `_PER_USER_TABLES` (account deletion), `_alerts_remove` ("Remove my email") and
+`_alerts_prune` (180 days). Admin preview / "Send my alert now" messages show per-section counts; "Rewind 24 h" also
+rewinds checked_at. `alert_batches.skus` now lists every SKU in the email.
+
+**Verified locally** (Postgres 16 + SQLite, `_alerts_process_user` with send mocked): 12 dated + 1 late-arrival match →
+13 new, 10 shown + "See 3 more"; want drop inside the window included, one that started 10 days ago excluded, sold item
+excluded; watched+want-matching item only under Watch List; subject "Gear Alert: 13 new Want List items, 3 price
+drops"; no #bdbdbd/#b5b5b5/#bbb/#ddd/#999-#666 in the HTML; rerun right after → none; a further drop on an emailed item
+→ alerts again with "was $200, down $20" and subject "Price Drop: Boss DD-500 delay, now $180", empty sections read
+"No new … today."; single new item subject; paused → skipped; Remove my email clears the drop ledger. py_compile +
+node --check clean. (Edits were made in the cloud workspace on a copy identical to v2.20.0 — md5 checked — because the
+Mac-side VM's scratch disk was full; the result was written back and md5-verified.)
 
 ---
 

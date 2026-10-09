@@ -256,7 +256,9 @@ def _init_user_db():
         # date_listed (same form as the NEW rule's _norm_item_date) — the user's next
         # alert covers available items listed after it. frequency is left in place,
         # unused (alerts are daily only since 2026-10-08).
-        for _col in ("mode TEXT DEFAULT 'all'", "anchor TEXT", "last_alert_at TEXT"):
+        # v2.21.0: checked_at = wall time of the user's last alert check (bounds the
+        # first_seen half of the NEW rule and which price drops count as new).
+        for _col in ("mode TEXT DEFAULT 'all'", "anchor TEXT", "last_alert_at TEXT", "checked_at TEXT"):
             try:
                 conn.execute(f"ALTER TABLE alert_settings ADD COLUMN {_col}")
             except Exception:
@@ -289,6 +291,18 @@ def _init_user_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_batches_u ON alert_batches(user_id, created_at)")
+        # ── v2.21.0: price-drop ledger — the price we last emailed each user about
+        # for a dropped listing; a later email only repeats it if it drops further.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alert_drop_sent (
+                user_id INTEGER NOT NULL,
+                sku     TEXT    NOT NULL,
+                price   REAL    NOT NULL,
+                sent_at TEXT    NOT NULL,
+                PRIMARY KEY (user_id, sku)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_drop_sent_t ON alert_drop_sent(sent_at)")
         conn.commit()
 
 def _user_by_username(username: str) -> dict | None:
@@ -313,7 +327,8 @@ def _user_by_id(user_id: int) -> dict | None:
 # through _purge_user_rows so a new per-user table can't be forgotten in one path.
 # (v2.18.0) Add new per-user tables HERE.
 _PER_USER_TABLES = ("user_data", "alert_email", "alert_settings", "alert_codes",
-                    "alert_code_sends", "alert_pills", "alert_sent", "alert_batches")
+                    "alert_code_sends", "alert_pills", "alert_sent", "alert_batches",
+                    "alert_drop_sent")
 
 def _purge_user_rows(conn, user_id: int) -> None:
     """Hard-delete every row belonging to user_id (caller commits)."""
@@ -3937,7 +3952,8 @@ def _alerts_remove(user_id: int) -> tuple[bool, str, int]:
     (user id + keyed hash, no address), pruned after 48 h — deleting it here would
     let remove → re-add reset the limits. Account deletion still purges it."""
     with _user_db() as conn:
-        for t in ("alert_email", "alert_codes", "alert_settings", "alert_pills", "alert_sent", "alert_batches"):
+        for t in ("alert_email", "alert_codes", "alert_settings", "alert_pills", "alert_sent", "alert_batches",
+                  "alert_drop_sent"):
             conn.execute(f"DELETE FROM {t} WHERE user_id=?", (user_id,))
         conn.commit()
     return True, "Your email address has been removed.", 200
@@ -4096,7 +4112,7 @@ _ALERTS_RUN_HOUR        = 10      # ET
 _ALERTS_CATCHUP_END     = 13      # ET; after this a missed day is skipped
 _ALERTS_RETRY_MIN       = 20      # incomplete sweep → retry after this many minutes
 _ALERTS_MAX_ATTEMPTS    = 3       # sweep tries per day before sending from what's there
-_ALERTS_MAX_ITEMS       = 25      # items shown per email
+_ALERTS_MAX_ITEMS       = 10      # items shown per email section (v2.21.0: 3 sections x 10)
 _ALERTS_PILL_ROW_CAP    = 500     # rows read per pill per run (a day is ~hundreds)
 _ALERTS_SENT_KEEP_DAYS  = 180
 _ALERTS_SITE            = "https://gcgeartracker.com"
@@ -4158,7 +4174,7 @@ def _alerts_subscribers(only_user: int | None = None) -> list[dict]:
     """Confirmed subscribers allowed to get alerts right now: admin, or the
     per-user beta flag. (The global switch is checked by the caller.)"""
     sql = ("SELECT u.id AS user_id, u.email, u.google_id, u.alerts_beta, u.deleted_at, "
-           "e.email_enc, s.paused, s.suppressed, s.mode, s.anchor "
+           "e.email_enc, s.paused, s.suppressed, s.mode, s.anchor, s.checked_at "
            "FROM alert_email e JOIN users u ON u.id = e.user_id "
            "LEFT JOIN alert_settings s ON s.user_id = e.user_id "
            "WHERE e.confirmed_at IS NOT NULL")
@@ -4218,10 +4234,26 @@ def _alerts_parse_token(tok: str):
     return int(parts[0]), parts[1], parts[2]
 
 
-def _alerts_find_matches(user_id: int, pills: list[str], lo: str, hi: str) -> tuple[list[dict], int]:
-    """Available items listed in (lo, hi] matching any pill, newest first, minus
-    the ledger. Returns (items, pills_skipped). Each item carries `pills`."""
-    found, skipped = {}, 0
+_ALERTS_ITEM_COLS = ("sku, name, brand, price, list_price, has_price_drop, price_drop, condition, store, url, "
+                     f"{_ALERTS_DL_NORM_SQL} AS dl, image_id, price_drop_since, first_seen")
+
+
+def _alerts_row_item(r) -> dict:
+    return {"sku": r[0], "name": r[1] or "", "brand": r[2] or "",
+            "price": float(r[3] or 0), "list_price": float(r[4] or 0),
+            "has_price_drop": bool(r[5]), "price_drop": float(r[6] or 0),
+            "condition": r[7] or "", "store": r[8] or "", "url": r[9] or "",
+            "dl": r[10] or "", "image_id": r[11] or "", "pds": r[12] or "", "fs": r[13] or "",
+            "pills": []}
+
+
+def _alerts_find_matches(user_id: int, pills: list[str], lo: str, hi: str,
+                         fs_lo: str = "", fs_hi: str = "") -> tuple[list[dict], int]:
+    """New Want List items: available items matching any pill that were listed in
+    (lo, hi] OR (v2.21.0, the v2.20.0 NEW rule) first seen by the site in
+    (fs_lo, fs_hi] whatever their listed date — minus the ledger. Newest listed
+    first. Returns (items, pills_skipped). Each item carries `pills`."""
+    skipped = 0
     def _q():
         nonlocal skipped
         out = {}
@@ -4235,21 +4267,17 @@ def _alerts_find_matches(user_id: int, pills: list[str], lo: str, hi: str) -> tu
                         continue
                     if frag is None:
                         continue
+                    win = f"({_ALERTS_DL_NORM_SQL} > %s AND {_ALERTS_DL_NORM_SQL} <= %s)"
+                    wprm = [lo, hi]
+                    if fs_lo and fs_hi:
+                        win = f"({win} OR (first_seen <> '' AND first_seen > %s AND first_seen <= %s))"
+                        wprm += [fs_lo, fs_hi]
                     cur.execute(
-                        f"SELECT sku, name, brand, price, list_price, has_price_drop, price_drop, condition, "
-                        f"store, url, {_ALERTS_DL_NORM_SQL} AS dl, image_id FROM items "
-                        f"WHERE available AND {_ALERTS_DL_NORM_SQL} > %s AND {_ALERTS_DL_NORM_SQL} <= %s "
+                        f"SELECT {_ALERTS_ITEM_COLS} FROM items WHERE available AND {win} "
                         f"AND ({frag}) ORDER BY dl DESC, sku LIMIT {_ALERTS_PILL_ROW_CAP}",
-                        [lo, hi] + list(prm))
+                        wprm + list(prm))
                     for r in cur.fetchall():
-                        it = out.get(r[0])
-                        if it is None:
-                            it = out[r[0]] = {
-                                "sku": r[0], "name": r[1] or "", "brand": r[2] or "",
-                                "price": float(r[3] or 0), "list_price": float(r[4] or 0),
-                                "has_price_drop": bool(r[5]), "price_drop": float(r[6] or 0),
-                                "condition": r[7] or "", "store": r[8] or "", "url": r[9] or "",
-                                "dl": r[10] or "", "image_id": r[11] or "", "pills": []}
+                        it = out.get(r[0]) or out.setdefault(r[0], _alerts_row_item(r))
                         it["pills"].append(kw)
         return out
     skipped = 0
@@ -4263,6 +4291,85 @@ def _alerts_find_matches(user_id: int, pills: list[str], lo: str, hi: str) -> tu
             found.pop(sku, None)
     items = sorted(found.values(), key=lambda it: (it["dl"], it["sku"]), reverse=True)
     return items, skipped
+
+
+def _alerts_drop_ledger(user_id: int, skus) -> dict:
+    """{sku: price we last emailed this user about} for the given SKUs."""
+    skus = list(skus)
+    out = {}
+    with _user_db() as conn:
+        for i in range(0, len(skus), 500):
+            part = skus[i:i + 500]
+            for r in conn.execute(
+                    f"SELECT sku, price FROM alert_drop_sent WHERE user_id=? AND sku IN ({','.join('?' * len(part))})",
+                    (user_id, *part)).fetchall():
+                out[r["sku"]] = float(r["price"] or 0)
+    return out
+
+
+def _alerts_pick_drops(user_id: int, cands: dict, since: str) -> list[dict]:
+    """v2.21.0 price-drop rule (Chuck, 2026-10-09): a listing goes in today's email if
+    GC flags it as dropped and EITHER we never emailed this user about its drop and
+    the drop started after `since` (their last alert check), OR its price is now
+    lower than the price we last emailed them about. Each kept item gets `was`
+    (old price: the previously alerted price, else GC's list price). Newest drop first."""
+    ledger = _alerts_drop_ledger(user_id, cands.keys())
+    keep = []
+    for sku, it in cands.items():
+        if not it["has_price_drop"] or it["price"] <= 0:
+            continue
+        prev = ledger.get(sku)
+        if prev is None:
+            if it["pds"] and it["pds"] > since:
+                it["was"] = it["price"] + it["price_drop"] if it["price_drop"] > 0 else it["list_price"]
+                keep.append(it)
+        elif it["price"] < prev - 0.005:
+            it["was"] = prev
+            keep.append(it)
+    keep.sort(key=lambda it: (it["pds"], it["sku"]), reverse=True)
+    return keep
+
+
+def _alerts_find_want_drops(user_id: int, pills: list[str], since: str) -> list[dict]:
+    """Want List price drops: available, GC-flagged price drops matching any pill
+    (all stores), filtered by _alerts_pick_drops."""
+    if not pills:
+        return []
+    def _q():
+        out = {}
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                for kw in pills:
+                    try:
+                        frag, prm = _tsquery_want_list_entry(kw)
+                    except _TsqueryUnsupported:
+                        continue
+                    if frag is None:
+                        continue
+                    cur.execute(
+                        f"SELECT {_ALERTS_ITEM_COLS} FROM items WHERE available AND has_price_drop "
+                        f"AND ({frag}) ORDER BY price_drop_since DESC, sku LIMIT {_ALERTS_PILL_ROW_CAP}",
+                        list(prm))
+                    for r in cur.fetchall():
+                        it = out.get(r[0]) or out.setdefault(r[0], _alerts_row_item(r))
+                        it["pills"].append(kw)
+        return out
+    return _alerts_pick_drops(user_id, _pg_read(_q), since)
+
+
+def _alerts_find_watch_drops(user_id: int, watch_skus: list, since: str) -> list[dict]:
+    """Watch List price drops: the user's watched SKUs that are available and
+    GC-flagged as dropped, filtered by _alerts_pick_drops."""
+    skus = [s for s in watch_skus if isinstance(s, str) and s][:5000]
+    if not skus:
+        return []
+    def _q():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT {_ALERTS_ITEM_COLS} FROM items WHERE available AND has_price_drop "
+                            f"AND sku = ANY(%s)", (skus,))
+                return {r[0]: _alerts_row_item(r) for r in cur.fetchall()}
+    return _alerts_pick_drops(user_id, _pg_read(_q), since)
 
 
 def _alerts_money(v: float) -> str:
@@ -4293,138 +4400,189 @@ def _alerts_listed_day(dl: str) -> str:
     return lab.split(",")[0] if lab else ""
 
 
-def _alerts_build_email(user_id: int, items: list[dict], pills: list[str], batch_id: str) -> tuple[str, str, str, dict]:
-    """(subject, text, html, headers) for one user's daily alert (v2.19.3 layout:
-    the newest 25 by listed date in one list, styled like the site; the matched
-    Want List terms only at the bottom, each with its own stop link)."""
-    shown = items[:_ALERTS_MAX_ITEMS]
-    n = len(items)
-    more = n - len(shown)
-    matched_pills = [p for p in pills if any(p in it["pills"] for it in items)]
-    if n == 1:
-        subject = f"Want List Item Found: {items[0]['name'] or 'new match'}"
+def _alerts_build_email(user_id: int, new_items: list[dict], want_drops: list[dict],
+                        watch_drops: list[dict], pills: list[str], batch_id: str) -> tuple[str, str, str, dict]:
+    """(subject, text, html, headers) for one user's daily alert. v2.21.0 layout
+    (mockup approved by Chuck 2026-10-09): three sections — New Want List Items,
+    Want List Price Drops, Watch List Price Drops — up to _ALERTS_MAX_ITEMS each,
+    newest first, each ending in a red button ("See N more on GC Gear Tracker"
+    when there are more); an empty section says "No new … today."; no dark-gray
+    text anywhere; the matched Want List terms (with stop links) at the bottom."""
+    esc = _html.escape
+    F = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+    SUB = "#e6e6e6"           # secondary text — light, never dark gray (Chuck)
+    n_new, n_wd, n_wt = len(new_items), len(want_drops), len(watch_drops)
+    total = n_new + n_wd + n_wt
+    n_drops = n_wd + n_wt
+
+    def _cut(s: str, n: int = 140) -> str:
+        return s if len(s) <= n else s[:n - 1].rstrip() + "…"
+
+    # Subject (Chuck): one item → "New Want List Item: <name>" / "Price Drop: <name>, now $X";
+    # otherwise "Gear Alert: N new Want List items, M price drops".
+    if total == 1 and n_new:
+        subject = f"New Want List Item: {_cut(new_items[0]['name'] or 'new match')}"
+    elif total == 1:
+        it = (want_drops or watch_drops)[0]
+        subject = f"Price Drop: {_cut(it['name'] or 'watched item')}, now {_alerts_money(it['price'])}"
     else:
-        subject = f"Want List Items Found: {n} new matches"
+        parts = []
+        if n_new:
+            parts.append(f"{n_new} new Want List item{'s' if n_new != 1 else ''}")
+        if n_drops:
+            parts.append(f"{n_drops} price drop{'s' if n_drops != 1 else ''}")
+        subject = "Gear Alert: " + ", ".join(parts)
     subject = subject[:180]
-    view_all = f"{_ALERTS_SITE}/?alert={batch_id}"
+
+    base = f"{_ALERTS_SITE}/?alert={batch_id}"
+    links = {"new": base, "wantdrops": base + "&view=wantdrops", "watchdrops": base + "&view=watchdrops"}
     pause_url = f"{_ALERTS_SITE}/alerts/u/{_alerts_link_token(user_id, 'u')}"
     manage_url = f"{_ALERTS_SITE}/"
+    matched_pills = [p for p in pills if any(p in it["pills"] for it in new_items + want_drops)]
     stop_links = [(_alerts_pill_label(p),
                    f"{_ALERTS_SITE}/alerts/p/{_alerts_link_token(user_id, 'p', _alerts_pill_id(user_id, p))}")
                   for p in matched_pills]
     note = ("Listings were available when we checked at 10 AM ET and may have sold since. "
             "Items that were listed and sold between checks may not appear.")
-    esc = _html.escape
     today = ""
     if _ALERTS_TZ is not None:
         _now = datetime.now(_timezone.utc).astimezone(_ALERTS_TZ)
         today = f"{_now:%b} {_now.day}"
-    btn_label = f"View all {n} matches on GC Gear Tracker" if more > 0 else "Open my Want List on GC Gear Tracker"
+    sections = [
+        ("new", "New Want List Items", new_items, "No new Want List items today.",
+         "Open my Want List on GC Gear Tracker"),
+        ("wantdrops", "Want List Price Drops", want_drops, "No new Want List price drops today.",
+         "See Want List price drops on GC Gear Tracker"),
+        ("watchdrops", "Watch List Price Drops", watch_drops, "No new Watch List price drops today.",
+         "See Watch List price drops on GC Gear Tracker"),
+    ]
+
+    def _was(it) -> float:
+        if "was" in it:
+            return float(it["was"] or 0)
+        if it["has_price_drop"] and it["price_drop"] > 0:
+            return it["price"] + it["price_drop"]
+        return 0.0
 
     # ── plain text ──
-    t = [f"{n} new Want List match{'es' if n != 1 else ''} at Guitar Center" + (" (newest first)" if n > 1 else ""), ""]
-    for it in shown:
-        price = _alerts_money(it["price"])
-        if it["has_price_drop"] and it["price_drop"] > 0:
-            price += f" (was {_alerts_money(it['price'] + it['price_drop'])})"
-        bits = [price] + [b for b in (it["condition"], it["store"]) if b]
-        _ld = _alerts_listed_day(it["dl"])
-        if _ld:
-            bits.append(f"Listed {_ld}")
-        t += [it["name"], "  " + " · ".join(bits), f"  {_ALERTS_SITE}/go/{it['sku']}", ""]
-    if more > 0:
-        t += [f"+{more} more not shown here.", ""]
-    t += [f"{btn_label}: {view_all}", "", f"Note: {note}", ""]
-    t.append("Matched Want List terms in this alert:")
-    for lab, url in stop_links:
-        t.append(f"  {lab} — stop alerts for this term: {url}")
-    t += ["", "You're getting this because you turned on Want List email alerts at gcgeartracker.com.",
-          f"Manage alerts: {manage_url}", f"Pause all alerts: {pause_url}", "",
+    t = ["GC Gear Tracker — daily alert" + (f" · {today}" if today else ""), ""]
+    for key, title, items, empty, btn in sections:
+        t += [title.upper(), ""]
+        if not items:
+            t += [empty, ""]
+            continue
+        shown = items[:_ALERTS_MAX_ITEMS]
+        for it in shown:
+            price = _alerts_money(it["price"])
+            w = _was(it)
+            if w > it["price"]:
+                price += f" (was {_alerts_money(w)}, down {_alerts_money(w - it['price'])})"
+            bits = [price] + [b for b in (it["condition"], it["store"]) if b]
+            _ld = _alerts_listed_day(it["dl"])
+            if _ld:
+                bits.append(f"Listed {_ld}")
+            t += [it["name"], "  " + " · ".join(bits), f"  {_ALERTS_SITE}/go/{it['sku']}", ""]
+        more = len(items) - len(shown)
+        t += [(f"See {more} more on GC Gear Tracker" if more > 0 else btn) + f": {links[key]}", ""]
+    t += [f"Note: {note}", ""]
+    if stop_links:
+        t.append("Matched Want List terms in this alert:")
+        for lab, url in stop_links:
+            t.append(f"  {lab} — stop alerts for this term: {url}")
+        t.append("")
+    t += ["You're getting this because you turned on email alerts at gcgeartracker.com.",
+          f"Manage alerts: {manage_url}", f"Pause all alerts: {pause_url}",
+          "This mailbox isn't monitored — use the links above to stop or pause alerts.", "",
           "GC Gear Tracker is independent and not affiliated with Guitar Center."]
 
     # ── HTML (tables + inline styles + bgcolor so it survives email clients) ──
-    F = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
-    rows = []
-    for i, it in enumerate(shown):
+    def _row(it, last: bool) -> str:
         go = esc(f"{_ALERTS_SITE}/go/{it['sku']}")
         img = (f'<img src="https://media.guitarcenter.com/is/image/MMGS7/{esc(it["image_id"])}-00-200x200.jpg" '
                f'width="72" height="72" alt="{esc(it["name"][:60])}" style="display:block;width:72px;height:72px;border-radius:6px;'
                f'background:#252525;border:0;object-fit:cover">' if it.get("image_id") else
                '<div style="width:72px;height:72px;border-radius:6px;background:#252525"></div>')
         price = f'<span style="color:#ffffff;font-weight:700">{esc(_alerts_money(it["price"]))}</span>'
-        if it["has_price_drop"] and it["price_drop"] > 0:
-            price = (f'<span style="color:#bdbdbd;text-decoration:line-through;font-size:12px">'
-                     f'{esc(_alerts_money(it["price"] + it["price_drop"]))}</span>&nbsp;' + price +
-                     f'&nbsp;<span style="color:#4ade80;font-size:12px">&darr; {esc(_alerts_money(it["price_drop"]))}</span>')
-        cond = (f'&nbsp;&nbsp;<span style="color:#dddddd;font-size:12px">{esc(it["condition"])}</span>'
+        w = _was(it)
+        if w > it["price"]:
+            price = (f'<span style="color:{SUB};text-decoration:line-through;font-size:12px">'
+                     f'{esc(_alerts_money(w))}</span>&nbsp;' + price +
+                     f'&nbsp;<span style="color:#4ade80;font-size:12px;font-weight:700">&darr; '
+                     f'{esc(_alerts_money(w - it["price"]))}</span>')
+        cond = (f'&nbsp;&nbsp;<span style="color:#ffffff;font-size:12px">{esc(it["condition"])}</span>'
                 if it["condition"] else "")
-        _ld = _alerts_listed_day(it["dl"])   # v2.19.4: day only, no time (Chuck)
+        _ld = _alerts_listed_day(it["dl"])
         meta = " · ".join(esc(x) for x in (it["store"], f"Listed {_ld}" if _ld else "") if x)
-        border = "" if i == len(shown) - 1 else "border-bottom:1px solid #2a2a2a;"
-        rows.append(
-            f'<tr><td style="padding:14px 20px;{border}"><table role="presentation" width="100%" cellpadding="0" '
-            f'cellspacing="0" border="0"><tr><td width="72" valign="top" style="width:72px"><a href="{go}">{img}</a></td>'
-            f'<td valign="top" style="padding-left:14px;font-family:{F}">'
-            f'<a href="{go}" style="color:#ffffff;font-size:15px;font-weight:600;line-height:1.35;text-decoration:none">'
-            f'{esc(it["name"])}</a>'
-            f'<div style="margin-top:5px;font-size:14px;line-height:1.4">{price}{cond}</div>'
-            f'<div style="margin-top:4px;font-size:12px;color:#bdbdbd;line-height:1.4">{meta}</div>'
-            f'</td></tr></table></td></tr>')
+        border = "" if last else "border-bottom:1px solid #2a2a2a;"
+        return (f'<tr><td style="padding:14px 20px;{border}"><table role="presentation" width="100%" cellpadding="0" '
+                f'cellspacing="0" border="0"><tr><td width="72" valign="top" style="width:72px"><a href="{go}">{img}</a></td>'
+                f'<td valign="top" style="padding-left:14px;font-family:{F}">'
+                f'<a href="{go}" style="color:#ffffff;font-size:15px;font-weight:600;line-height:1.35;text-decoration:none">'
+                f'{esc(it["name"])}</a>'
+                f'<div style="margin-top:5px;font-size:14px;line-height:1.4">{price}{cond}</div>'
+                f'<div style="margin-top:4px;font-size:12px;color:{SUB};line-height:1.4">{meta}</div>'
+                f'</td></tr></table></td></tr>')
+
+    body = []
+    for i, (key, title, items, empty, btn) in enumerate(sections):
+        top = "" if i == 0 else "border-top:1px solid #3a3a3a;"
+        body.append(f'<tr><td style="padding:20px 20px 4px;{top}font-family:{F}">'
+                    f'<div style="color:#ffffff;font-size:19px;font-weight:700">{esc(title)}</div></td></tr>')
+        if not items:
+            body.append(f'<tr><td style="padding:6px 20px 20px;font-family:{F};color:{SUB};font-size:14px;'
+                        f'font-style:italic">{esc(empty)}</td></tr>')
+            continue
+        shown = items[:_ALERTS_MAX_ITEMS]
+        body += [_row(it, j == len(shown) - 1) for j, it in enumerate(shown)]
+        more = len(items) - len(shown)
+        label = f"See {more} more on GC Gear Tracker" if more > 0 else btn
+        body.append(f'<tr><td style="padding:6px 20px 20px;font-family:{F}"><table role="presentation" cellpadding="0" '
+                    f'cellspacing="0" border="0"><tr><td bgcolor="#cc0000" style="background:#cc0000;border-radius:6px">'
+                    f'<a href="{esc(links[key])}" style="display:inline-block;padding:11px 20px;color:#ffffff;'
+                    f'font-size:14px;font-weight:700;text-decoration:none;font-family:{F}">{esc(label)}</a>'
+                    f'</td></tr></table></td></tr>')
     chips = "".join(
         f'<span style="display:inline-block;margin:0 6px 8px 0;padding:4px 10px;border-radius:12px;background:#0a2e17;'
         f'border:1px solid #2d6a2d;font-size:12px;color:#4ade80;font-family:{F};white-space:nowrap">{esc(lab)}'
-        f'&nbsp;&nbsp;<a href="{esc(url)}" style="color:#b6e6c2;text-decoration:underline;font-size:11px">stop alerts</a>'
+        f'&nbsp;&nbsp;<a href="{esc(url)}" style="color:#d6f5de;text-decoration:underline;font-size:11px">stop alerts</a>'
         f'</span>' for lab, url in stop_links)
-    more_html = (f'<div style="margin-top:10px;font-size:12px;color:#bdbdbd;font-family:{F}">'
-                 f'+{more} more not shown here</div>' if more > 0 else "")
+    terms_html = (f'<tr><td style="padding:16px 20px 10px;border-top:1px solid #2a2a2a;font-family:{F}">'
+                  f'<div style="font-size:11px;font-weight:700;color:#ffffff;letter-spacing:.5px;text-transform:uppercase;'
+                  f'margin-bottom:10px">Matched Want List terms in this alert</div>{chips}</td></tr>') if stop_links else ""
+    first = (new_items + want_drops + watch_drops)[0]
     html = (
         '<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
         '<meta name="color-scheme" content="dark light"><meta name="supported-color-schemes" content="dark light">'
         f'<title>{esc(subject)}</title></head>'
         f'<body style="margin:0;padding:0;background:#111111" bgcolor="#111111">'
-        # preheader: the inbox preview line
-        f'<div style="display:none;max-height:0;overflow:hidden;color:#111111">{esc(shown[0]["name"])}'
-        + (f" and {n - 1} more" if n > 1 else "") + '</div>'
+        f'<div style="display:none;max-height:0;overflow:hidden;color:#111111">{esc(first["name"])}'
+        + (f" and {total - 1} more" if total > 1 else "") + '</div>'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#111111" '
         'style="background:#111111"><tr><td align="center" style="padding:20px 10px">'
         '<table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" '
         'style="width:100%;max-width:600px;background:#1a1a1a;border:1px solid #2e2e2e;border-radius:10px;overflow:hidden" bgcolor="#1a1a1a">'
-        # header bar (solid fallback for clients without gradients)
         f'<tr><td bgcolor="#6a0000" style="background:#6a0000;background-image:linear-gradient(135deg,#4a0000,#7a0000);'
         f'padding:16px 20px;font-family:{F}"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
         f'<tr><td style="color:#ffffff;font-size:18px;font-weight:700;font-family:{F}">GC Gear Tracker</td>'
-        f'<td align="right" style="color:#ffd6d6;font-size:12px;font-family:{F}">Want List alert'
+        f'<td align="right" style="color:#ffe3e3;font-size:12px;font-family:{F}">Daily alert'
         + (f" · {esc(today)}" if today else "") + '</td></tr></table></td></tr>'
-        # intro
-        f'<tr><td style="padding:18px 20px 6px;font-family:{F}">'
-        f'<div style="color:#ffffff;font-size:19px;font-weight:700">{n} new match{"es" if n != 1 else ""} on your Want List</div>'
-        f'<div style="color:#bdbdbd;font-size:13px;margin-top:4px">Used gear at Guitar Center'
-        + (" · newest first" if n > 1 else "") + '</div></td></tr>'
-        + "".join(rows) +
-        # button
-        f'<tr><td style="padding:8px 20px 18px;font-family:{F}">'
-        f'<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="#cc0000" '
-        f'style="background:#cc0000;border-radius:6px"><a href="{esc(view_all)}" style="display:inline-block;padding:11px 20px;'
-        f'color:#ffffff;font-size:14px;font-weight:700;text-decoration:none;font-family:{F}">{esc(btn_label)}</a>'
-        f'</td></tr></table>{more_html}'
-        f'<div style="margin-top:14px;font-size:12px;color:#b5b5b5;line-height:1.5">Note: {esc(note)}</div></td></tr>'
-        # matched terms
-        f'<tr><td style="padding:16px 20px 10px;border-top:1px solid #2a2a2a;font-family:{F}">'
-        f'<div style="font-size:11px;font-weight:700;color:#bbbbbb;letter-spacing:.5px;text-transform:uppercase;'
-        f'margin-bottom:10px">Matched Want List terms in this alert</div>{chips}</td></tr>'
-        # footer
-        f'<tr><td style="padding:12px 20px 18px;border-top:1px solid #2a2a2a;font-size:12px;color:#b5b5b5;'
-        f'line-height:1.6;font-family:{F}">You\'re getting this because you turned on Want List email alerts at '
-        f'<a href="{esc(manage_url)}" style="color:#dddddd">gcgeartracker.com</a>.<br>'
-        f'<a href="{esc(manage_url)}" style="color:#dddddd">Manage alerts</a> &nbsp;·&nbsp; '
-        f'<a href="{esc(pause_url)}" style="color:#dddddd">Pause all alerts</a><br>'
+        + "".join(body) +
+        f'<tr><td style="padding:14px 20px 18px;border-top:1px solid #3a3a3a;font-size:12px;color:{SUB};'
+        f'line-height:1.5;font-family:{F}">Note: {esc(note)}</td></tr>'
+        + terms_html +
+        f'<tr><td style="padding:12px 20px 18px;border-top:1px solid #2a2a2a;font-size:12px;color:{SUB};'
+        f'line-height:1.6;font-family:{F}">You\'re getting this because you turned on email alerts at '
+        f'<a href="{esc(manage_url)}" style="color:#ffffff">gcgeartracker.com</a>.<br>'
+        f'<a href="{esc(manage_url)}" style="color:#ffffff">Manage alerts</a> &nbsp;·&nbsp; '
+        f'<a href="{esc(pause_url)}" style="color:#ffffff">Pause all alerts</a><br>'
+        'This mailbox isn\'t monitored — use the links above to stop or pause alerts.<br>'
         'GC Gear Tracker is independent and not affiliated with Guitar Center.</td></tr>'
         '</table></td></tr></table></body></html>')
     headers = {"List-Unsubscribe": f"<{pause_url}>", "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"}
     return subject, "\n".join(t), html, headers
 
 
-def _alerts_set_anchor(user_id: int, anchor: str, sent: bool = False) -> None:
+def _alerts_set_anchor(user_id: int, anchor: str, sent: bool = False, checked_at: str | None = None) -> None:
     now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     with _user_db() as conn:
         conn.execute("INSERT OR IGNORE INTO alert_settings(user_id, frequency, paused, mode, updated_at) "
@@ -4433,61 +4591,77 @@ def _alerts_set_anchor(user_id: int, anchor: str, sent: bool = False) -> None:
             conn.execute("UPDATE alert_settings SET anchor=?, last_alert_at=? WHERE user_id=?", (anchor, now, user_id))
         else:
             conn.execute("UPDATE alert_settings SET anchor=? WHERE user_id=?", (anchor, user_id))
+        if checked_at:
+            conn.execute("UPDATE alert_settings SET checked_at=? WHERE user_id=?", (checked_at, user_id))
         conn.commit()
 
 
 def _alerts_process_user(u: dict, run_max: str, *, advance: bool = True, dry_run: bool = False) -> dict:
     """One user's daily alert. Returns {"result": sent|none|skipped|init|failed|ceiling|error, ...}.
-    dry_run: compute + build the email, change nothing, send nothing."""
+    dry_run: compute + build the email, change nothing, send nothing.
+    v2.21.0: three sections. `checked_at` (wall time of this user's last check)
+    bounds the first_seen half of the NEW rule and which price drops count as
+    new; when unset (first run after the upgrade) the window is the last 24 h."""
     uid = u["user_id"]
+    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     if u.get("paused") or u.get("suppressed"):
         if advance and not dry_run and run_max:
-            _alerts_set_anchor(uid, run_max)      # no backlog dump when they resume
+            _alerts_set_anchor(uid, run_max, checked_at=now)   # no backlog dump when they resume
         return {"result": "skipped"}
     anchor = u.get("anchor")
     if not anchor:
         if not dry_run and run_max:
-            _alerts_set_anchor(uid, run_max)
+            _alerts_set_anchor(uid, run_max, checked_at=now)
         return {"result": "init"}
-    if not run_max or run_max <= anchor:
-        return {"result": "none"}
-    pills = _alerts_active_pills(uid, _get_user_data(uid).get("keywords") or [], u.get("mode") or "all")
-    if not pills:
+    since = u.get("checked_at") or (datetime.utcnow() - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _ud = _get_user_data(uid)
+    pills = _alerts_active_pills(uid, _ud.get("keywords") or [], u.get("mode") or "all")
+    watch = list((_ud.get("watchlist") or {}).keys())
+    hi = max(run_max or anchor, anchor)
+    new_items, skipped = ([], 0)
+    if pills:
+        new_items, skipped = _alerts_find_matches(uid, pills, anchor, hi, since, now)
+    # An item appears once: new beats a drop; a watched item's drop goes under Watch List.
+    shown = {it["sku"] for it in new_items}
+    watch_drops = [it for it in _alerts_find_watch_drops(uid, watch, since) if it["sku"] not in shown]
+    shown |= {it["sku"] for it in watch_drops}
+    want_drops = [it for it in _alerts_find_want_drops(uid, pills, since) if it["sku"] not in shown]
+    counts = {"pills": len(pills), "pills_skipped": skipped, "new": len(new_items),
+              "want_drops": len(want_drops), "watch_drops": len(watch_drops)}
+    total = len(new_items) + len(want_drops) + len(watch_drops)
+    if not total:
         if advance and not dry_run:
-            _alerts_set_anchor(uid, run_max)
-        return {"result": "none", "pills": 0}
-    items, skipped = _alerts_find_matches(uid, pills, anchor, run_max)
-    if not items:
-        if advance and not dry_run:
-            _alerts_set_anchor(uid, run_max)
-        return {"result": "none", "pills": len(pills), "pills_skipped": skipped}
+            _alerts_set_anchor(uid, hi, checked_at=now)
+        return {"result": "none", **counts}
     batch_id = _secrets_alerts.token_urlsafe(12)
-    subject, text, html, headers = _alerts_build_email(uid, items, pills, batch_id)
+    subject, text, html, headers = _alerts_build_email(uid, new_items, want_drops, watch_drops, pills, batch_id)
     if dry_run:
-        return {"result": "preview", "matches": len(items), "pills": len(pills), "pills_skipped": skipped,
-                "subject": subject, "text": text}
+        return {"result": "preview", "matches": total, **counts, "subject": subject, "text": text, "html": html}
     addr = _dec_email(u["email_enc"])
     if not addr:
         return {"result": "error", "why": "undecryptable"}
     ok, why = send_email(addr, subject, text, html, tag="daily-alert", headers=headers)
     if not ok:
         return {"result": "ceiling" if why == "ceiling" else "failed", "why": why}
-    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     with _user_db() as conn:
         conn.executemany("INSERT OR IGNORE INTO alert_sent(user_id, sku, sent_at, batch) VALUES(?,?,?,?)",
-                         [(uid, it["sku"], now, batch_id) for it in items])
+                         [(uid, it["sku"], now, batch_id) for it in new_items])
+        conn.executemany("INSERT INTO alert_drop_sent(user_id, sku, price, sent_at) VALUES(?,?,?,?) "
+                         "ON CONFLICT(user_id, sku) DO UPDATE SET price=excluded.price, sent_at=excluded.sent_at",
+                         [(uid, it["sku"], it["price"], now) for it in want_drops + watch_drops])
         conn.execute("INSERT INTO alert_batches(id, user_id, created_at, skus) VALUES(?,?,?,?)",
-                     (batch_id, uid, now, json.dumps([it["sku"] for it in items])))
+                     (batch_id, uid, now, json.dumps([it["sku"] for it in new_items + want_drops + watch_drops])))
         conn.commit()
     if advance:
-        _alerts_set_anchor(uid, run_max, sent=True)
-    return {"result": "sent", "matches": len(items), "pills": len(pills), "pills_skipped": skipped}
+        _alerts_set_anchor(uid, hi, sent=True, checked_at=now)
+    return {"result": "sent", "matches": total, **counts}
 
 
 def _alerts_prune() -> None:
     cut = (datetime.utcnow() - timedelta(days=_ALERTS_SENT_KEEP_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     with _user_db() as conn:
         conn.execute("DELETE FROM alert_sent WHERE sent_at < ?", (cut,))
+        conn.execute("DELETE FROM alert_drop_sent WHERE sent_at < ?", (cut,))
         conn.execute("DELETE FROM alert_batches WHERE created_at < ?", (cut,))
         conn.commit()
 
@@ -4783,9 +4957,10 @@ def _alerts_admin_preview(uid: int) -> tuple[str, str]:
         return "No confirmed alert address on this account.", ""
     r = _alerts_process_user(subs[0], _alerts_pg_max_listed() or "", advance=False, dry_run=True)
     if r["result"] == "preview":
-        return (f"Preview: {r['matches']} match(es) across {r['pills']} pill(s) — nothing sent.",
+        return (f"Preview: {r['new']} new Want List item(s), {r['want_drops']} Want List price drop(s), "
+                f"{r['watch_drops']} Watch List price drop(s) — nothing sent.",
                 f"Subject: {r['subject']}\n\n{r['text']}")
-    msg = {"none": "No new matches since your last alert — no email would be sent.",
+    msg = {"none": "Nothing new since your last alert (no new items or price drops) — no email would be sent.",
            "skipped": "Your alerts are paused or suppressed — no email would be sent.",
            "init": "No alert window yet (it starts at your next alert)."}.get(r["result"], r["result"])
     return msg, ""
@@ -4801,8 +4976,9 @@ def _alerts_admin_send_mine(uid: int) -> str:
         r = _alerts_process_user(subs[0], _alerts_pg_max_listed() or "", advance=True)
     finally:
         _ALERTS_RUN_LOCK.release()
-    return {"sent": f"Sent: {r.get('matches', 0)} match(es).",
-            "none": "No new matches since your last alert — nothing sent.",
+    return {"sent": (f"Sent: {r.get('new', 0)} new item(s), {r.get('want_drops', 0)} Want List drop(s), "
+                     f"{r.get('watch_drops', 0)} Watch List drop(s)."),
+            "none": "Nothing new since your last alert — nothing sent.",
             "skipped": "Your alerts are paused or suppressed — nothing sent.",
             "init": "Alert window started now; matches will come from listings after this.",
             "ceiling": "Daily send limit reached — nothing sent.",
@@ -4813,7 +4989,7 @@ def _alerts_admin_rewind(uid: int, hours: int = 24) -> str:
     """Testing aid: move your own window back so the next alert has content.
     Already-sent items stay in the ledger and still won't repeat."""
     a = (datetime.utcnow() - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    _alerts_set_anchor(uid, a)
+    _alerts_set_anchor(uid, a, checked_at=a)
     return f"Your alert window now starts {hours} h ago ({a})."
 
 
@@ -9558,7 +9734,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.20.0"
+APP_VERSION = "2.21.0"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
