@@ -6846,11 +6846,16 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
     is_new_sql = "(sku = ANY(%(new_ids)s))"
     reverse = (sort_dir == "desc")
     order_parts = []
-    # v2.22.3 (Chuck, 2026-10-09): NEW rows no longer float to the top — every
-    # view sorts by the chosen column only (default: listed date, newest first).
-    # Fresh listings are still at the top by date; late arrivals carry their NEW
-    # tag wherever their listed date puts them. The "New" chip (f_new_only) shows
-    # just the NEW ones. (Was: new+want / new / rest partition when not user-sorted.)
+    # v2.22.3 (Chuck, 2026-10-09): plain NEW rows no longer float to the top —
+    # they sort by the chosen column (default: listed date, newest first), so
+    # late arrivals carry their NEW tag wherever their date puts them; the
+    # "Newly Listed" chip (f_new_only) shows just the NEW ones.
+    # v2.22.4 (Chuck, 2026-10-10): EXCEPT NEW Want List matches — they still go
+    # first (unless the person sorted a column themselves). Inside that group
+    # the normal date order puts truly new matches before resurfaced (older-dated)
+    # ones; then everything else as above.
+    if not user_sorted and kw_sql:
+        order_parts.append(f"({is_new_sql} AND {kw_bool}) DESC")
     if sort_field == "condition":
         order_parts.append(f"{_PG_COND_KNOWN_SQL} DESC")
         order_parts.append(f"{_PG_COND_RANK_SQL} {'DESC' if reverse else 'ASC'}")
@@ -9965,7 +9970,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.22.3"
+APP_VERSION = "2.22.4"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
