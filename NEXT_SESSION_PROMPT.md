@@ -1,3 +1,17 @@
+# Next Session Prompt — v2.22.5 written to the HOME PC clone, NOT pushed (as of 2026-10-10)
+
+1. **Push from the home PC** (PowerShell): `cd ~\gc_tracker`, `git rm gc.js` (stray root copy from the web upload),
+   `git add gc_tracker_app.py static/gc.js pg_schema.sql HANDOFF.md HANDOFF_PROMPT.md NEXT_SESSION_PROMPT.md`,
+   `git commit -m "v2.22.5: Date Listed = date appeared on our site, sorted by it"`, `git push`.
+   (First time: `git config --global user.name/user.email`; the first push opens a GitHub sign-in.)
+2. **On the work Mac next time, FIRST**: `cd ~/Desktop/gc_tracker`, `rm -f .git/index.lock`, `git pull`.
+3. Live check: footer v2.22.5; "Date Listed" for late listings shows today; default order = NEW Want List matches,
+   then newest appeared; Railway log `[pg] concurrent indexes ready` (idx_items_appeared).
+4. Still queued: launch switch + "Email alerts are here!" popup (off until launch), privacy wording, daily ceiling
+   ~300, DMARC p=quarantine after reviewing digests (~2026-10-23).
+
+---
+
 # Next Session Prompt — v2.22.3 (date-sorted NEW + Newly Listed chip) built, NOT pushed
 
 1. **Push v2.22.3**: `cd ~/Desktop/gc_tracker`, then `rm -f .git/index.lock`, then

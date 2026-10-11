@@ -1393,9 +1393,16 @@ def get_store_info() -> dict:
 PAGE_SIZE = 240
 
 def _fmt_date(d: str) -> str:
-    """Convert YYYY-MM-DD to M/D/YY."""
+    """Convert YYYY-MM-DD (or a UTC timestamp) to M/D/YY. v2.22.5: full UTC
+    timestamps are shown as their US Eastern calendar day, so something that
+    appeared at 8 PM Central isn't dated tomorrow."""
     try:
         from datetime import date
+        if len(d) > 10 and "T" in d:
+            tz = globals().get("_ALERTS_TZ")
+            if tz is not None:
+                t = datetime.strptime(d[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=_timezone.utc).astimezone(tz)
+                return f"{t.month}/{t.day}/{str(t.year)[2:]}"
         dt = date.fromisoformat(d[:10])
         return f"{dt.month}/{dt.day}/{str(dt.year)[2:]}"
     except Exception:
@@ -4379,8 +4386,10 @@ def _alerts_parse_token(tok: str):
     return int(parts[0]), parts[1], parts[2]
 
 
+# v2.22.5: `dl` is the day the listing APPEARED on our site (first_seen), falling
+# back to GC's listed date — the email's "Listed <day>" and its ordering follow it.
 _ALERTS_ITEM_COLS = ("sku, name, brand, price, list_price, has_price_drop, price_drop, condition, store, url, "
-                     f"{_ALERTS_DL_NORM_SQL} AS dl, image_id, price_drop_since, first_seen")
+                     f"COALESCE(NULLIF(first_seen, ''), {_ALERTS_DL_NORM_SQL}) AS dl, image_id, price_drop_since, first_seen")
 
 
 def _alerts_row_item(r) -> dict:
@@ -6570,6 +6579,12 @@ _PG_SORT_MAP = {
     "image_id":          ("image_id", True),
 }
 _PG_SORTABLE = set(_PG_SORT_MAP) | {"condition"}
+# v2.22.5 (Chuck, 2026-10-10): the "Date Listed" column now shows — and the
+# default sort uses — when the listing first APPEARED on our site (first_seen),
+# not GC's own listed date. Listings that appear together share a timestamp, so
+# GC's date breaks the tie. Rows with no first_seen fall back to GC's date.
+# Backed by idx_items_appeared (pg_schema.sql) — keep this text identical.
+_PG_APPEARED_SQL = "COALESCE(NULLIF(first_seen, ''), date_listed)"
 _PG_COND_RANK_SQL = (
     "CASE condition "
     "WHEN 'Excellent' THEN 0 WHEN 'Great' THEN 1 WHEN 'Good' THEN 2 "
@@ -6859,6 +6874,10 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
     if sort_field == "condition":
         order_parts.append(f"{_PG_COND_KNOWN_SQL} DESC")
         order_parts.append(f"{_PG_COND_RANK_SQL} {'DESC' if reverse else 'ASC'}")
+    elif sort_field == "date":
+        _d = 'DESC' if reverse else 'ASC'
+        order_parts.append(f"{_PG_APPEARED_SQL} {_d}")
+        order_parts.append(f"date_listed {_d}")
     else:
         col, lower = _PG_SORT_MAP[sort_field]
         expr = f"LOWER({col})" if lower else col
@@ -6972,7 +6991,7 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
             cur.execute(
                 f"SELECT sku, name, brand, category, subcategory, condition, condition_note, "
                 f"price, list_price, price_drop, price_drop_since, store, location, url, "
-                f"image_id, is_vintage, date_listed "
+                f"image_id, is_vintage, date_listed, {_PG_APPEARED_SQL} AS appeared "
                 f"FROM items WHERE {filtered_where_sql} ORDER BY {order_sql} "
                 f"LIMIT %(_limit)s OFFSET %(_offset)s",
                 {**params, "_limit": per_page, "_offset": start})
@@ -7008,8 +7027,9 @@ def _pg_browse(*, store_set, search_all, user_last_scan, kw_entries, fq,
             "category":         r["category"] or "",
             "subcategory":      r["subcategory"] or "",
             "condition":        r["condition"] or "",
-            "date":             _fmt_date(r["date_listed"] or ""),
-            "date_raw":         r["date_listed"] or "",
+            "date":             _fmt_date(r["appeared"] or ""),     # v2.22.5: date it appeared on our site
+            "date_raw":         r["appeared"] or "",
+            "gc_date_raw":      r["date_listed"] or "",            # GC's own listed date
             "image_id":         r["image_id"] or "",
             "is_vintage":       bool(r["is_vintage"]),
             "condition_note":   r["condition_note"] or "",
@@ -8383,10 +8403,7 @@ def api_new_catchup():
         _PG_SCAN_DB_LOCK.release()
     dates = [d for _, d in rows if d]
     return jsonify({"new_ids": [sku for sku, _ in rows], "until": until,
-                    "max_date": max(dates) if dates else "",
-                    # v2.22.3: listed before `since` (the previous scan) — older
-                    # listings that only just became visible on GC
-                    "older_ids": [sku for sku, d in rows if d and d < since]})
+                    "max_date": max(dates) if dates else ""})
 
 
 def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_last_run: str = "", run_time: str = "", device_last_anchor: str = "", user_id: int | None = None,
@@ -8774,7 +8791,6 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             return
         send({"type": "progress", "msg": f"  Saving changes for {len(all_products):,} items…"})
         late_ids = None        # v2.22.2: first-seen NEW list, filled under the DB lock below
-        _new_older = 0         # v2.22.3: of those, listed before the previous scan
         _t_db = time.time()
         if not _PG_SCAN_DB_LOCK.acquire(timeout=_PG_SCAN_DB_LOCK_TIMEOUT):
             _save_failed("lock", TimeoutError("previous scan's database write still running"))
@@ -8876,9 +8892,6 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                         _fs_rows = _pg_first_seen_between(
                             _fs_since, run_time, None if nationwide else stores_to_scan)
                         late_ids = [r[0] for r in _fs_rows]
-                        # v2.22.3: how many were listed before the previous scan, i.e.
-                        # older listings that only just became visible on GC.
-                        _new_older = sum(1 for _sku, _dl in _fs_rows if _dl and _dl < _fs_since)
                     except Exception as e:
                         late_ids = None
                         print(f"[new] first-seen lookup failed (scan falls back to the dated NEW rule): "
@@ -8942,8 +8955,9 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
                 "category":         p.get("category", ""),
                 "subcategory":      p.get("subcategory", ""),
                 "condition":        p.get("condition", ""),
-                "date":             _fmt_date(date_src),
-                "date_raw":         date_src,
+                "date":             _fmt_date(merged.get(p["id"], {}).get("first_seen") or date_src),   # v2.22.5
+                "date_raw":         merged.get(p["id"], {}).get("first_seen") or date_src,
+                "gc_date_raw":      date_src,
                 "image_id":         p.get("image_id") or merged.get(p["id"], {}).get("image_id", ""),
                 "condition_note":   p.get("condition_note") or merged.get(p["id"], {}).get("condition_note", ""),
             }
@@ -9079,7 +9093,6 @@ def _run(selected_stores: list[str], baseline: bool, run_id: str = "", device_la
             "sweep":       _sweep,
             "scan_time":   run_time,
             "late_since":  "" if baseline else (device_last_run or ""),   # v2.20.0: /api/new-catchup window start
-            "new_older":   _new_older,   # v2.22.3: NEW listings listed before the previous scan
             "scan_anchor": new_anchor,
             "items":       items_for_sse,
             "use_browse":  large_scan,
@@ -9970,7 +9983,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.22.4"
+APP_VERSION = "2.22.5"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

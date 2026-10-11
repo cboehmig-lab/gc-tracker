@@ -2981,12 +2981,7 @@ function _newCatchup() {
     if (!d || running || window._lateSince !== since) return;   // a newer scan took over
     if (!(window._newIds instanceof Set)) window._newIds = new Set(window._newIds || []);
     const before = window._newIds.size;
-    const olderSet = new Set(d.older_ids || []);
-    let addedOlder = 0;
-    (d.new_ids || []).forEach(id => {
-      if (!window._newIds.has(id) && olderSet.has(id)) addedOlder++;
-      window._newIds.add(id);
-    });
+    (d.new_ids || []).forEach(id => window._newIds.add(id));
     const added = window._newIds.size - before;
     if (d.until && (!window._lastRunISO || d.until > window._lastRunISO)) {
       window._lastRunISO = d.until;
@@ -3003,8 +2998,7 @@ function _newCatchup() {
       // v2.22.3 (Chuck): NEW rows sort by listed date like everything else, so
       // late finds just pick up their NEW tag where they belong — no redraw.
       // Exception: with the "😮 Newly Listed" chip on, refresh so they join that list.
-      appendLog(`  +${added.toLocaleString()} more new listing${added === 1 ? '' : 's'} found` +
-        (addedOlder > 0 ? ` (including ${addedOlder.toLocaleString()} older listing${addedOlder === 1 ? '' : 's'} that just became visible).` : '.'), 'log-dim');
+      appendLog(`  +${added.toLocaleString()} more new listing${added === 1 ? '' : 's'} found.`, 'log-dim');
       if (_browseMode === 'server' && _newFilterActive) {
         _srvLoading = false;
         _fetchBrowsePage(_srvPage || 1);
@@ -3100,10 +3094,7 @@ function showResults(msg, isBaseline) {
     }
   }
 
-  // v2.22.3 (Chuck): say how many NEW ones are older listings that only just showed up on GC.
-  const _olderNote = (!isFirstRun && msg.new_older > 0)
-    ? ` (including ${msg.new_older.toLocaleString()} older listing${msg.new_older === 1 ? '' : 's'} that just became visible)` : '';
-  appendLog(`✓ ${isFirstRun ? 'Initial scan complete' : 'Done' + stoppedNote + ' — ' + freshNewCount.toLocaleString() + ' new this scan' + _olderNote}.`, 'log-dim');
+  appendLog(`✓ ${isFirstRun ? 'Initial scan complete' : 'Done' + stoppedNote + ' — ' + freshNewCount.toLocaleString() + ' new this scan'}.`, 'log-dim');
 
   window._lastRunISO = msg.scan_time || new Date().toISOString();
   _lsSet('last_run', window._lastRunISO);
@@ -3185,7 +3176,9 @@ function showResults(msg, isBaseline) {
     kwMatch: _itemMatchesKeyword(item),
   }));
   window._tableData.sort((a, b) => {
-    // v2.22.3: listed date only (NEW rows no longer float to the top)
+    // v2.22.3: listed date; v2.22.4: NEW Want List matches first (then by date)
+    const aw = (a.isNew && a.kwMatch) ? 0 : 1, bw = (b.isNew && b.kwMatch) ? 0 : 1;
+    if (aw !== bw) return aw - bw;
     return (b.date_raw || '').localeCompare(a.date_raw || '');
   });
   window._sortCol = null; window._sortDir = 1; window._localPage = 1;

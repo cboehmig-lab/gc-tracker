@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-10-09 · Version: v2.22.3 (NEW sorts by date + "😮 Newly Listed" chip; v2.22.2 NEW = first seen since your last scan only; v2.22.1 self-service account deletion; v2.22.0 alerts beta + Email alerts panel; v2.21.0 alert email: new items + Want List drops + Watch List drops; v2.20.0 NEW = dated-new OR first seen by the site since your last scan — late arrivals, returns excluded; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign; v2.19.2 alert button = scan → Want List; v2.19.1 alert email button → Want List view; v2.19.0 email alerts step 2: daily alert engine, Chuck-only; v2.18.1 privacy policy covers email alerts + Postmark; contact chuck@gcgeartracker.com; v2.18.0 email alerts step 1: plumbing, admin-only — see EMAIL_ALERTS_DESIGN.md; v2.17.9 Impact.com verification meta tag; v2.17.8 = Phase G browse speedups; v2.17.7 = S1 cleanup; v2.17.6 = silent sweep; v2.17.5 = quick-window hotfix; v2.17.4 = Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-10-10 · Version: v2.22.5 (Date Listed = appeared date, default sort; v2.22.4 NEW Want List matches first; v2.22.3 NEW sorts by date + "😮 Newly Listed" chip; v2.22.2 NEW = first seen since your last scan only; v2.22.1 self-service account deletion; v2.22.0 alerts beta + Email alerts panel; v2.21.0 alert email: new items + Want List drops + Watch List drops; v2.20.0 NEW = dated-new OR first seen by the site since your last scan — late arrivals, returns excluded; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign; v2.19.2 alert button = scan → Want List; v2.19.1 alert email button → Want List view; v2.19.0 email alerts step 2: daily alert engine, Chuck-only; v2.18.1 privacy policy covers email alerts + Postmark; contact chuck@gcgeartracker.com; v2.18.0 email alerts step 1: plumbing, admin-only — see EMAIL_ALERTS_DESIGN.md; v2.17.9 Impact.com verification meta tag; v2.17.8 = Phase G browse speedups; v2.17.7 = S1 cleanup; v2.17.6 = silent sweep; v2.17.5 = quick-window hotfix; v2.17.4 = Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -124,6 +124,12 @@ See HANDOFF.md v2.17.8.
 ## v2.22.1 — self-service account deletion (2026-10-09)
 
 "Your account" box (header username / About) → Delete my account: password, or Google re-sign-in (`/api/auth/google?purpose=delete` → `session["delete_ok"]` 10 min) → `POST /api/account/delete` → `_purge_user_rows`. Immediate. Also fixed About's Close button. Full detail: HANDOFF.md v2.22.1.
+
+---
+
+## v2.22.4 / v2.22.5 — sorting (2026-10-10)
+
+Default table order: NEW Want List matches first (when not user-sorted), then by "Date Listed", which since v2.22.5 is when the listing first APPEARED on our site (first_seen, fallback GC date_listed), GC's date as tie-break; index idx_items_appeared. Two clones now: Mac ~/Desktop/gc_tracker and home PC C:\Users\cboeh\gc_tracker — always `git pull` first. Full detail: HANDOFF.md v2.22.4/v2.22.5.
 
 ---
 

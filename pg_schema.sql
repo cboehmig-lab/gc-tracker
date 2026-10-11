@@ -132,3 +132,5 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_items_search_vector ON items USING g
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_items_name_brand_trgm ON items USING gin ((coalesce(name, '') || ' ' || coalesce(brand, '')) gin_trgm_ops);
 -- v2.20.0: NEW rule late arrivals (first_seen after the last scan) and the browse scan gate MAX(first_seen)
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_items_first_seen ON items (first_seen);
+-- v2.22.5: default "Date Listed" sort = when the listing first appeared on our site, GC date as tie-break (must match _PG_APPEARED_SQL)
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_items_appeared ON items ((COALESCE(NULLIF(first_seen, ''), date_listed)) DESC, date_listed DESC, sku) WHERE available;

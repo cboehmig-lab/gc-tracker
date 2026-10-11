@@ -1,5 +1,57 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-10-09 · Current version: v2.22.3 (NEW rows sort by listed date + "😮 Newly Listed" filter chip + "older listings" count in the scan log; v2.22.2 NEW = first seen by the site since your last scan only, site + alert email; v2.22.1 self-service account deletion — password or Google re-confirm, immediate; About Close fix; v2.22.0 alerts beta: /admin/users beta switch, "Email alerts" panel for beta users, whole-list alerts only — no per-term choices; v2.21.0 alert email: 3 sections — new Want List items, Want List price drops, Watch List price drops; "Gear Alert:" subjects; v2.20.0 NEW also flags listings new to the site regardless of listed date — late arrivals; returns excluded; /api/new-catchup after the sweep; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign: newest-first list in the site's look, terms at the bottom; v2.19.2 alert email button runs the user's scan then opens the Want List; v2.19.1 alert email button opens the Want List; v2.19.0 email alerts step 2: daily 10 AM ET alert engine, /go/<sku>, signed pause/stop links, Postmark bounce webhook — Chuck-only; v2.18.1 privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-10-10 · Current version: v2.22.5 ("Date Listed" = date the listing appeared on our site, default sort by it, GC date as tie-break; v2.22.4 NEW Want List matches first; v2.22.3 NEW rows sort by listed date + "😮 Newly Listed" filter chip + "older listings" count in the scan log; v2.22.2 NEW = first seen by the site since your last scan only, site + alert email; v2.22.1 self-service account deletion — password or Google re-confirm, immediate; About Close fix; v2.22.0 alerts beta: /admin/users beta switch, "Email alerts" panel for beta users, whole-list alerts only — no per-term choices; v2.21.0 alert email: 3 sections — new Want List items, Want List price drops, Watch List price drops; "Gear Alert:" subjects; v2.20.0 NEW also flags listings new to the site regardless of listed date — late arrivals; returns excluded; /api/new-catchup after the sweep; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign: newest-first list in the site's look, terms at the bottom; v2.19.2 alert email button runs the user's scan then opens the Want List; v2.19.1 alert email button opens the Want List; v2.19.0 email alerts step 2: daily 10 AM ET alert engine, /go/<sku>, signed pause/stop links, Postmark bounce webhook — Chuck-only; v2.18.1 privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.22.5 — 2026-10-10: "Date Listed" = when the listing appeared on our site; default sort by it
+
+**Why (Chuck)**: a listing that showed up today but that GC listed in August shouldn't sort back in August. Keep the
+familiar column name "Date Listed", but make it the date/time the listing first appeared in our database
+(first_seen) and sort by that; listings that appear together share a timestamp, so GC's own listed date orders them
+within it. Also: drop the "(including N older listings that just became visible)" scan-log note — the column makes it
+self-explanatory. Chuck: "the order won't match what's on the GC site but who cares."
+
+**Server**
+- `_PG_APPEARED_SQL = "COALESCE(NULLIF(first_seen, ''), date_listed)"` (rows with no first_seen fall back to GC's date).
+- sort_field "date" → `ORDER BY <appeared> dir, date_listed dir` (+ sku). The NEW-Want-List-first tier (v2.22.4) is
+  unchanged and still comes first when not user-sorted.
+- Browse rows: `date` / `date_raw` = appeared; new `gc_date_raw` = GC's date_listed. Local-mode (small scan) rows the same.
+- `_fmt_date`: full UTC timestamps are shown as their US Eastern calendar day (an 8 PM Central appearance isn't dated
+  tomorrow).
+- New index `idx_items_appeared` ON items ((COALESCE(NULLIF(first_seen,''),date_listed)) DESC, date_listed DESC, sku)
+  WHERE available (pg_schema.sql concurrent section; text must match _PG_APPEARED_SQL). On 120k test rows the default
+  page query is an index scan, ~0.1 ms.
+- Alert email: `dl` (shown as "Listed <day>", and its order) = appeared day, falling back to GC's date.
+- Removed the scan `done` field `new_older` and the catch-up `older_ids` (and their log notes in gc.js).
+- Removed the stray repo-root `gc.js` from the v2.22.4 upload.
+
+**Known quirk**: listings already on GC when the catalog was first loaded (spring 2026) show that first-load date
+rather than their real one; few should remain (inventory turns over ~every 7-8 weeks). Follow-up if it looks off: use
+date_listed when first_seen is within the initial-load window.
+
+**Verified** (Postgres + Flask test client): default order L1 (late, appeared 1 h ago) → F1 (fresh, 2 h) → the rest tied
+on appeared → by GC date; L1 shows today's date with gc_date_raw kept; Newly Listed chip, New + Want List, Want List,
+user date sort and price sort all correct; scan suite and email suite green; index used.
+
+**Home PC**: Chuck cloned the repo to C:\Users\cboeh\gc_tracker (Windows, Git for Windows) so he can push from home
+too. RULE with two machines: `git pull` before starting on either, push when done. On Windows no index.lock step;
+Windows checkout uses CRLF (autocrlf) — a Linux shell on the mounted folder sees every file as modified; ignore that,
+use `git status` in PowerShell.
+
+---
+
+## v2.22.4 — 2026-10-10: NEW Want List matches sort first again
+
+**Why (Chuck)**: after v2.22.3 (NEW rows sort by date, not floated), he wanted Want List matches that are NEW to still
+lead: "truly new want items, then resurfaced want items, then everything else as it is now".
+**Change**: `_pg_browse` — when not user-sorted and the person has a Want List, ORDER BY starts with
+`(is_new AND kw) DESC`; inside that group the normal date order already puts truly new matches before resurfaced
+(older-dated) ones. Plain NEW rows (not Want List matches) still sort by date. gc.js local-mode sort mirrors it.
+**Verified** (Postgres + Flask test client): a fresh and a late Want List match first, then the rest by date; a column
+sort by the user = plain order.
+**Deploy note**: built while the Mac was offline; Chuck uploaded via github.com from his home PC (commit a93b932
+"Add files via upload"). gc.js was accidentally uploaded to the REPO ROOT instead of static/, so the live static/gc.js
+stayed v2.22.3 (only the small local-mode sort was missing) and a stray root `gc.js` was added — removed in v2.22.5.
 
 ---
 
