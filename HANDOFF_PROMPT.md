@@ -1,5 +1,5 @@
 # GC Gear Tracker — Session Handoff Prompt
-*Generated: 2026-10-12 · Version: v2.22.7 (self-service password reset, change password, account email confirm-by-code, sign out other devices on reset; v2.22.6 privacy wording fixes; v2.22.5 Date Listed = appeared date, default sort; v2.22.4 NEW Want List matches first; v2.22.3 NEW sorts by date + "😮 Newly Listed" chip; v2.22.2 NEW = first seen since your last scan only; v2.22.1 self-service account deletion; v2.22.0 alerts beta + Email alerts panel; v2.21.0 alert email: new items + Want List drops + Watch List drops; v2.20.0 NEW = dated-new OR first seen by the site since your last scan — late arrivals, returns excluded; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign; v2.19.2 alert button = scan → Want List; v2.19.1 alert email button → Want List view; v2.19.0 email alerts step 2: daily alert engine, Chuck-only; v2.18.1 privacy policy covers email alerts + Postmark; contact chuck@gcgeartracker.com; v2.18.0 email alerts step 1: plumbing, admin-only — see EMAIL_ALERTS_DESIGN.md; v2.17.9 Impact.com verification meta tag; v2.17.8 = Phase G browse speedups; v2.17.7 = S1 cleanup; v2.17.6 = silent sweep; v2.17.5 = quick-window hotfix; v2.17.4 = Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
+*Generated: 2026-10-12 · Version: v2.22.8 (alerts launch switch — default OFF, Chuck flips it on /admin/alerts — + "Email alerts are here!" popup + /admin/alerts numbers; v2.22.7 self-service password reset, change password, account email confirm-by-code, sign out other devices on reset; v2.22.6 privacy wording fixes; v2.22.5 Date Listed = appeared date, default sort; v2.22.4 NEW Want List matches first; v2.22.3 NEW sorts by date + "😮 Newly Listed" chip; v2.22.2 NEW = first seen since your last scan only; v2.22.1 self-service account deletion; v2.22.0 alerts beta + Email alerts panel; v2.21.0 alert email: new items + Want List drops + Watch List drops; v2.20.0 NEW = dated-new OR first seen by the site since your last scan — late arrivals, returns excluded; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign; v2.19.2 alert button = scan → Want List; v2.19.1 alert email button → Want List view; v2.19.0 email alerts step 2: daily alert engine, Chuck-only; v2.18.1 privacy policy covers email alerts + Postmark; contact chuck@gcgeartracker.com; v2.18.0 email alerts step 1: plumbing, admin-only — see EMAIL_ALERTS_DESIGN.md; v2.17.9 Impact.com verification meta tag; v2.17.8 = Phase G browse speedups; v2.17.7 = S1 cleanup; v2.17.6 = silent sweep; v2.17.5 = quick-window hotfix; v2.17.4 = Phase G S1 two-phase scan; v2.17.3 = Phase G S2+S3 faster scans; v2.17.2 = desktop button "Scan for New Listings"; v2.17.1 = Phase G step 1: request timing, no behavior change; v2.17.0 = Phase F step 5c: JSON catalog retired, Postgres is the only catalog store; see HANDOFF.md) · Live at: gcgeartracker.com*
 
 Use this at the start of a new session to bring Claude up to speed instantly.
 
@@ -31,6 +31,13 @@ Railway env: POSTMARK_SERVER_TOKEN, ALERTS_EMAIL_KEY, ALERTS_HMAC_KEY (+ optiona
 ALERTS_EMAIL_KEY_OLD). Values never go in chat, files or logs.
 
 ---
+
+## Alerts launch (v2.22.8, 2026-10-12)
+
+`alert_meta.launch_open` (default off) = "Open alerts to everyone" on /admin/alerts: opens `_alerts_allowed()` /
+`_alerts_subscribers()` to all signed-in accounts, shows the popup (`/api/alerts/promo`, JS `_promo*`), and drops the
+"small number of users" phrase from /privacy. `global_switch` is the separate emergency stop ("Pause all alert
+sending"). Per-kind send counts live in `alert_sends_tag`. Load test: 300 subscribers ≈ 2 min run, site unaffected.
 
 ## Password reset / account email (v2.22.7, 2026-10-12)
 

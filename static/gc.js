@@ -659,6 +659,7 @@ async function _onAuthSuccess(d, isNew) {
   await _loadAndMergeServerData(d.data || {});
   _updateRelativeTime();
   _maybeShowLinkBanner(!!d.google_linked, !!d.has_email, window._googleOauthEnabled);
+  _promoAfterAuth();   // v2.22.8: signed in from the alerts popup → open the alerts panel
   // Auto-trigger baseline scan on first-ever login (no prior scan history)
   if (!window._lastRunISO) {
     appendLog('🎸 Welcome! Building the inventory database for the first time — this takes a few minutes…', 'log-dim');
@@ -883,6 +884,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   _applyAlertDeepLink(alreadyLoggedIn);
   _acctApplyDeepLink();   // v2.22.1: back from Google re-confirm for account deletion
   _pwApplyDeepLink();     // v2.22.7: back from an emailed password-reset link
+  _promoAfterAuth();      // v2.22.8: popup → signed in (e.g. back from Google) → open alerts
+  _promoMaybeShow();      // v2.22.8: "Email alerts are here!" popup (launch switch on only)
 });
 
 // ?alert=<id>[&view=wantdrops|watchdrops] deep link from an alert email's buttons (v2.19.1, v2.21.0): open the
@@ -5387,4 +5390,96 @@ document.addEventListener('DOMContentLoaded', () => {
   enter('acct-pwc-new2', 'acct-pwc-save');
   enter('acct-email-in', 'acct-email-send');
   enter('acct-ecode-in', 'acct-ecode-ok');
+});
+
+
+// ── "Email alerts are here!" popup (v2.22.8) ─────────────────────────────────
+// Server decides IF alerts are launched (/api/alerts/promo: launch switch on);
+// this browser decides how often: at most once a day, 3 times total, never after
+// "Don't show this again" (localStorage gt_alerts_promo — per device). Never shown
+// to anyone whose alerts are on, on top of another box, during a scan, or on a
+// page opened from an email / reset / sign-in link.
+const _PROMO_KEY = 'gt_alerts_promo';
+const _PROMO_AFTER_AUTH = 'gt_promo_after_auth';
+const _promoSkipThisLoad = /[?&](reset|alert|account_delete|google_new|google_error)=/.test(window.location.search);
+
+function _promoGet() { try { return JSON.parse(localStorage.getItem(_PROMO_KEY) || '{}') || {}; } catch (e) { return {}; } }
+function _promoSet(o) { try { localStorage.setItem(_PROMO_KEY, JSON.stringify(o)); } catch (e) {} }
+function _promoToday() { const d = new Date(); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); }
+function _promoEvent(ev) {
+  fetch('/api/alerts/promo-event', {method: 'POST', credentials: 'same-origin',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ev})}).catch(() => {});
+}
+function _promoBusy() {
+  if (typeof running !== 'undefined' && running) return true;
+  return ['auth-modal', 'acct-modal', 'alerts-modal', 'about-modal', 'google-welcome-modal',
+          'first-run-modal', 'kw-modal', 'vs-modal'].some(id => {
+    const el = document.getElementById(id);
+    return el && getComputedStyle(el).display !== 'none';
+  });
+}
+function _promoClose() { document.getElementById('promo-modal')?.classList.remove('open'); }
+
+function _promoShow(info) {
+  const out = !info.logged_in;
+  const vis = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; };
+  vis('promo-text-out', out); vis('promo-create', out); vis('promo-signin', out);
+  vis('promo-text-in', !out); vis('promo-turnon', !out);
+  vis('promo-want-empty', !out && info.want_empty);
+  document.getElementById('promo-badge').textContent = out ? 'NEW · FREE' : 'NEW';
+  const st = _promoGet();
+  st.n = (st.n || 0) + 1; st.last = _promoToday();
+  _promoSet(st);
+  document.getElementById('promo-modal').classList.add('open');
+  _promoEvent('shown');
+}
+
+function _promoMaybeShow() {
+  if (_promoSkipThisLoad) return;
+  const st = _promoGet();
+  if (st.never || (st.n || 0) >= 3 || st.last === _promoToday()) return;
+  let tries = 0;
+  const attempt = () => {
+    fetch('/api/alerts/promo', {credentials: 'same-origin'}).then(r => r.json()).then(info => {
+      if (!info || !info.open || info.alerts_on) return;
+      if (_promoBusy()) { if (++tries < 12) setTimeout(attempt, 15000); return; }
+      _promoShow(info);
+    }).catch(() => {});
+  };
+  setTimeout(attempt, 4000);
+}
+
+// After "Create a free account" / "sign in" from the popup: once signed in (in-page
+// or back from Google), open the Email alerts panel — after any other box closes.
+function _promoAfterAuth() {
+  let t = 0;
+  try { t = parseInt(sessionStorage.getItem(_PROMO_AFTER_AUTH) || '0', 10) || 0; } catch (e) {}
+  if (!t || Date.now() - t > 30 * 60 * 1000 || !window._authUser) return;
+  try { sessionStorage.removeItem(_PROMO_AFTER_AUTH); } catch (e) {}
+  let waits = 0;
+  const go = () => {
+    const am = document.getElementById('acct-modal');
+    if ((am && am.classList.contains('open')) && waits++ < 300) { setTimeout(go, 1000); return; }
+    openAlertsPanel();
+  };
+  setTimeout(go, 800);
+}
+
+function _promoToAuth(tab) {
+  try { sessionStorage.setItem(_PROMO_AFTER_AUTH, String(Date.now())); } catch (e) {}
+  _promoEvent('click');
+  _promoClose();
+  _openAuthModal(tab);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+  on('promo-create', () => _promoToAuth('register'));
+  on('promo-signin', () => _promoToAuth('login'));
+  on('promo-turnon', () => { _promoEvent('click'); _promoClose(); openAlertsPanel(); });
+  on('promo-later', _promoClose);
+  on('promo-x', _promoClose);
+  on('promo-never', () => { const st = _promoGet(); st.never = true; _promoSet(st); _promoEvent('never'); _promoClose(); });
+  const m = document.getElementById('promo-modal');
+  if (m) m.addEventListener('click', e => { if (e.target === m) _promoClose(); });
 });

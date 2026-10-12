@@ -1,5 +1,63 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-10-12 · Current version: v2.22.7 (self-service password reset + change password + account email confirm-by-code + sign out other devices; v2.22.6 privacy policy wording: account email + IP/host logs; v2.22.5 "Date Listed" = date the listing appeared on our site, default sort by it, GC date as tie-break; v2.22.4 NEW Want List matches first; v2.22.3 NEW rows sort by listed date + "😮 Newly Listed" filter chip + "older listings" count in the scan log; v2.22.2 NEW = first seen by the site since your last scan only, site + alert email; v2.22.1 self-service account deletion — password or Google re-confirm, immediate; About Close fix; v2.22.0 alerts beta: /admin/users beta switch, "Email alerts" panel for beta users, whole-list alerts only — no per-term choices; v2.21.0 alert email: 3 sections — new Want List items, Want List price drops, Watch List price drops; "Gear Alert:" subjects; v2.20.0 NEW also flags listings new to the site regardless of listed date — late arrivals; returns excluded; /api/new-catchup after the sweep; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign: newest-first list in the site's look, terms at the bottom; v2.19.2 alert email button runs the user's scan then opens the Want List; v2.19.1 alert email button opens the Want List; v2.19.0 email alerts step 2: daily 10 AM ET alert engine, /go/<sku>, signed pause/stop links, Postmark bounce webhook — Chuck-only; v2.18.1 privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-10-12 · Current version: v2.22.8 (alerts launch switch + "Email alerts are here!" popup + /admin/alerts launch & numbers section; v2.22.7 self-service password reset + change password + account email confirm-by-code + sign out other devices; v2.22.6 privacy policy wording: account email + IP/host logs; v2.22.5 "Date Listed" = date the listing appeared on our site, default sort by it, GC date as tie-break; v2.22.4 NEW Want List matches first; v2.22.3 NEW rows sort by listed date + "😮 Newly Listed" filter chip + "older listings" count in the scan log; v2.22.2 NEW = first seen by the site since your last scan only, site + alert email; v2.22.1 self-service account deletion — password or Google re-confirm, immediate; About Close fix; v2.22.0 alerts beta: /admin/users beta switch, "Email alerts" panel for beta users, whole-list alerts only — no per-term choices; v2.21.0 alert email: 3 sections — new Want List items, Want List price drops, Watch List price drops; "Gear Alert:" subjects; v2.20.0 NEW also flags listings new to the site regardless of listed date — late arrivals; returns excluded; /api/new-catchup after the sweep; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign: newest-first list in the site's look, terms at the bottom; v2.19.2 alert email button runs the user's scan then opens the Want List; v2.19.1 alert email button opens the Want List; v2.19.0 email alerts step 2: daily 10 AM ET alert engine, /go/<sku>, signed pause/stop links, Postmark bounce webhook — Chuck-only; v2.18.1 privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.22.8 — 2026-10-12: Alerts launch switch, "Email alerts are here!" popup, /admin/alerts numbers
+
+**Why (Chuck, 2026-10-12)**: goal 2 — let every registered user turn on alerts, announced by a popup (sign up /
+sign in if logged out; max 3 showings; don't-show-again), and see opt-ins + daily sends on /admin/alerts. Mockup
+approved ("Claude outputs" → alerts_popup_mockup.png/.html); Chuck: say "GC", not "Guitar Center", in the popup
+(the "Not affiliated with Guitar Center, Inc." footers stay spelled out). **Ships with the switch OFF — Chuck turns
+it on himself on /admin/alerts** (ideally right after a 10 AM run).
+
+**Launch switch** — `alert_meta.launch_open` ("on"/"off", default off), `_alerts_launch_open()`. On: `_alerts_allowed()`
+lets every signed-in, not-scheduled-for-deletion account use alerts (so the "✉ Email alerts" buttons appear for
+everyone), `_alerts_subscribers()` includes every confirmed address, `/api/alerts/promo` answers open, and
+`privacy_page()` strips `_PRIVACY_ROLLOUT_PHRASE` (" (currently being rolled out to a small number of users)").
+Off: back to admin + beta; nothing deleted. /admin/alerts actions `launch_on` / `launch_off` (CSRF as before).
+The old "global switch" (alert_meta.global_switch) is unchanged in behavior but relabeled **"Pause all alert
+sending (emergency stop)" / "Resume alert sending"**; while paused the popup also stays hidden. Both switches now
+work from the break-glass /admin/login too (the other test actions still need the Google admin login).
+
+**Numbers on /admin/alerts** (new "Launch / Who's opted in / Emails sent" block at the top, `_alerts_admin_launch_html`;
+counts only, never an address): alerts on (confirmed, not paused, not bounced), paused, bounced/suppressed, new
+opt-ins in 7 days (alert_email.created_at), total accounts, popup shown/clicked/never (anonymous totals); today's
+sends vs ALERTS_DAILY_CEILING, this month vs Postmark Basic's 10,000, ceiling last hit; a 14-day table by kind.
+New SQLite table `alert_sends_tag(day, tag, count)` — `send_email()` bumps it right after taking a ceiling slot
+(so its totals match alert_sends). Kinds (`_alerts_tag_kind`): daily-alert → Daily alerts; confirm-code/acct-code →
+Codes; pw-* → Password emails; anything else (test) → Other. Days before v2.22.8 show "(before per-kind counting)".
+
+**Popup** — markup `#promo-modal` (next to #alerts-modal), styles end of gc.css, JS end of static/gc.js (`_promo*`).
+`GET /api/alerts/promo` → {open, logged_in, alerts_on, want_empty}; open only if alerts are configured, launched
+and not paused. Browser rules (localStorage `gt_alerts_promo` = {n, last, never}, per device): ≤1/day, ≤3 total,
+never after "Don't show this again", never if alerts are already on; skipped on pages opened from ?reset= / ?alert=
+/ ?account_delete= / ?google_new= / ?google_error=; waits (re-checks every 15 s, 12 tries) while a scan runs or
+any other box is open; first try 4 s after load. Signed out: "Create a free account" / "I have an account: sign in"
+open the existing auth box and set sessionStorage `gt_promo_after_auth`; once signed in (in-page via
+_onAuthSuccess, or back from Google via the DOMContentLoaded hook) `_promoAfterAuth()` opens the Email alerts
+panel — after the sign-up confirm-email box closes. Signed in: "Turn on email alerts" opens the panel; an empty
+Want List adds a "add a few searches first" note. `POST /api/alerts/promo-event {ev: shown|click|never}` bumps
+alert_meta promo_* counters (≤20/hour per IP in memory; nothing per user stored).
+
+**Load test (before launch, local Postgres 16, 120k synthetic listings, Postmark mocked at 0.25 s/email)**:
+300 subscribers with 3-25 Want List searches and 5-60 Watch List items each, every one getting an email (worst
+case — synthetic data matched far more than real data will): the daily run took **114 s** (75 s of it the
+simulated Postmark calls, ~0.13 s/user of database + email building); 150 subscribers took 62 s. The site's
+browse requests during the run: median 3 ms, max 21 ms — no visible slowdown (the run is a background thread).
+Roughly linear, so ~1,000 subscribers ≈ 6-7 min. The 300/day ceiling, not run time, is the limit to watch.
+
+**Verified**: 30/30 server checks (switch default off; promo closed when off / paused; plain user 404 → 200 after
+launch; subscribers follow the switch; /privacy phrase present/absent; promo-event counters + flood cap; tag
+counting; admin section renders counts, no address; launch on/off incl. break-glass; bad CSRF 403; index has the
+popup with "GC" wording); 23/23 popup logic checks in jsdom (variants, once a day, 3 max, never, link pages skipped,
+waits for other boxes and scans, after-sign-in opens alerts, stale flag ignored). py_compile + node --check clean.
+Not done: a real-browser screenshot pass (no browser available locally this session) — check the popup's look live
+after deploy (see below).
+
+**After push**: /admin/alerts shows the new block with "admin + beta only"; /privacy still has the phrase. To see the
+popup before launching, the admin can run `_promoShow({open:true, logged_in:false})` in the browser console. Then:
+"Open alerts to everyone" → popup appears for others, /privacy phrase gone.
 
 ---
 

@@ -863,3 +863,19 @@ tr.fav-row td:last-child{color:#4ade80}
 .acct-mini{font-size:.8rem;color:#e6e6e6;line-height:1.5;margin-top:12px;padding-top:12px;border-top:1px solid #2e2e2e}
 .acct-mini b{color:#ffffff}
 .acct-email-sub{color:#e6e6e6;font-size:.78rem}
+
+/* ── "Email alerts are here!" popup (v2.22.8) ── */
+#promo-modal{display:none;position:fixed;inset:0;z-index:950;background:rgba(0,0,0,.72);align-items:center;justify-content:center;padding:12px}
+#promo-modal.open{display:flex}
+#promo-box{background:#1a1a1a;border:1px solid #3a3a3a;border-radius:12px;padding:22px 22px 16px;max-width:380px;width:100%;position:relative;color:#ffffff;max-height:92vh;overflow-y:auto;box-sizing:border-box}
+#promo-box h3{margin:0 0 8px;font-size:1.15rem;color:#ffffff}
+#promo-box p{margin:0 0 12px;font-size:.86rem;line-height:1.5;color:#ffffff}
+.promo-badge{display:inline-block;background:#3a1010;border:1px solid #7a2a2a;color:#ffd0d0;font-size:.68rem;font-weight:700;letter-spacing:.05em;padding:3px 8px;border-radius:20px;margin-bottom:10px}
+.promo-list{margin:0 0 14px 18px;padding:0;font-size:.83rem;line-height:1.6;color:#f0f0f0}
+#promo-box .promo-note{background:#2a2410;border:1px solid #6a5a20;color:#ffeeb0;border-radius:6px;padding:8px 10px;font-size:.8rem}
+.promo-gray{display:block;width:100%;margin-top:8px;padding:10px;background:#2a2a2a;border:1px solid #4a4a4a;border-radius:5px;color:#ffffff;font-weight:600;font-size:.88rem;cursor:pointer}
+#promo-box .acct-primary{margin-top:2px}
+#promo-box .promo-fine{font-size:.75rem;color:#e6e6e6;margin:12px 0 0}
+.promo-foot{display:flex;justify-content:space-between;align-items:center;margin-top:12px}
+.promo-link-plain{background:none;border:none;padding:0;color:#e6e6e6;font-size:.8rem;cursor:pointer}
+.promo-link{background:none;border:none;padding:0;color:#ffb3b3;font-size:.8rem;cursor:pointer;text-decoration:underline}

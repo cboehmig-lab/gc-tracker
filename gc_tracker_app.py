@@ -244,6 +244,16 @@ def _init_user_db():
                 count INTEGER NOT NULL DEFAULT 0
             )
         """)
+        # v2.22.8: per-kind send counts for /admin/alerts (alert_sends keeps the total
+        # that the ceiling uses; this splits it by send_email tag). Counted when a slot is taken.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alert_sends_tag (
+                day   TEXT NOT NULL,
+                tag   TEXT NOT NULL,
+                count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (day, tag)
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS alert_meta (
                 k TEXT PRIMARY KEY,
@@ -4413,7 +4423,11 @@ def _alerts_allowed() -> bool:
     if _is_admin():
         return True
     u = _user_by_id(uid)
-    return bool(u and u.get("alerts_beta") and not u.get("deleted_at"))
+    if not u or u.get("deleted_at"):
+        return False
+    # v2.22.8: the launch switch (/admin/alerts "Open alerts to everyone") opens
+    # alerts to every signed-in account; before that, beta accounts only.
+    return bool(u.get("alerts_beta") or _alerts_launch_open())
 
 def _alerts_day() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d")
@@ -4449,6 +4463,14 @@ def send_email(to: str, subject: str, text: str, html: str | None = None, *,
         return False, "not_configured"
     if not _alerts_take_send_slot():
         return False, "ceiling"
+    try:   # v2.22.8 per-kind counts (admin numbers only; never blocks a send)
+        with _user_db() as conn:
+            conn.execute("INSERT INTO alert_sends_tag(day, tag, count) VALUES(?,?,1) "
+                         "ON CONFLICT(day, tag) DO UPDATE SET count = count + 1",
+                         (_alerts_day(), (tag or "other")[:40]))
+            conn.commit()
+    except Exception as e:
+        print(f"[alerts] tag count failed: {type(e).__name__}")
     payload = {
         "From": _ALERTS_FROM, "To": to, "Subject": subject, "TextBody": text,
         "MessageStream": stream, "Tag": tag,
@@ -4655,6 +4677,47 @@ def _alerts_json(result):
     ok, msg, status = result
     return jsonify({"ok": ok, "message": msg, **({} if ok else {"error": msg})}), status
 
+# ── "Email alerts are here!" popup (v2.22.8) ──────────────────────────────────
+_promo_hits: dict = {}   # ip -> [timestamps] (bounds the anonymous counters)
+
+@app.route("/api/alerts/promo")
+def api_alerts_promo():
+    """Should this browser be offered the popup? Only while the launch switch is
+    on (and sending isn't paused). The once-a-day / 3-times / don't-show-again
+    rules live in the browser."""
+    if not (_ALERTS_READY and _alerts_launch_open() and _alerts_global_on()):
+        return jsonify({"open": False})
+    uid = session.get("user_id")
+    out = {"open": True, "logged_in": bool(uid), "alerts_on": False, "want_empty": True}
+    if uid:
+        with _user_db() as conn:
+            out["alerts_on"] = bool(conn.execute(
+                "SELECT 1 FROM alert_email WHERE user_id=? AND confirmed_at IS NOT NULL", (uid,)).fetchone())
+        out["want_empty"] = not (_get_user_data(uid).get("keywords") or [])
+    return jsonify(out)
+
+@app.route("/api/alerts/promo-event", methods=["POST"])
+def api_alerts_promo_event():
+    """Anonymous counters for /admin/alerts: shown / click / never. No user, IP or
+    device is stored — just three totals."""
+    ev = str((request.json or {}).get("ev") or "")
+    if ev not in ("shown", "click", "never"):
+        return jsonify({"ok": False}), 400
+    ip, now = _client_ip(), time.time()
+    hits = [t for t in _promo_hits.get(ip, []) if now - t < 3600]
+    if len(hits) >= 20:
+        return jsonify({"ok": True})          # quietly ignore floods
+    hits.append(now)
+    _promo_hits[ip] = hits
+    if len(_promo_hits) > 5000:
+        for k in [k for k, v in list(_promo_hits.items()) if not v or now - v[-1] > 3600]:
+            _promo_hits.pop(k, None)
+    with _user_db() as conn:
+        conn.execute("INSERT INTO alert_meta(k, v) VALUES(?, '1') ON CONFLICT(k) DO UPDATE SET "
+                     "v = CAST(CAST(v AS INTEGER) + 1 AS TEXT)", ("promo_" + ev,))
+        conn.commit()
+    return jsonify({"ok": True})
+
 @app.route("/api/alerts/status")
 def api_alerts_status():
     if not _alerts_allowed():
@@ -4707,10 +4770,11 @@ def admin_alerts():
         expected  = session.get("_admin_csrf") or ""
         if not expected or not submitted or not hmac.compare_digest(submitted, expected):
             return Response("Invalid CSRF token — go back and reload the page.", status=403, content_type="text/plain")
-        if not uid:
+        action = request.form.get("action", "")
+        # v2.22.8: the two switches work from the break-glass login too (no site user needed).
+        if not uid and action not in ("switch_on", "switch_off", "launch_on", "launch_off"):
             session["_alerts_flash"] = "Log in with your Google admin account (not the break-glass password) to test."
             return redirect("/admin/alerts")
-        action = request.form.get("action", "")
         if action == "start":
             res = _alerts_start(uid, request.form.get("email", ""))
         elif action == "confirm":
@@ -4729,7 +4793,13 @@ def admin_alerts():
             res = (True, _alerts_admin_rewind(uid), 200)
         elif action in ("switch_on", "switch_off"):
             _alerts_meta_set("global_switch", "on" if action == "switch_on" else "off")
-            res = (True, f"Global switch {'ON' if action == 'switch_on' else 'OFF'}.", 200)
+            res = (True, "Alert sending resumed." if action == "switch_on"
+                   else "All alert sending PAUSED — the daily run will send nothing until resumed.", 200)
+        elif action in ("launch_on", "launch_off"):   # v2.22.8 launch switch
+            _alerts_meta_set("launch_open", "on" if action == "launch_on" else "off")
+            print(f"[alerts] launch switch {'ON — open to everyone' if action == 'launch_on' else 'OFF — beta only'}")
+            res = (True, "Alerts are now open to everyone (popup on, /privacy updated)." if action == "launch_on"
+                   else "Alerts are back to admin + beta only (popup off). No addresses were deleted.", 200)
         else:
             res = (False, "Unknown action.", 400)
         if res is not None:
@@ -4773,6 +4843,7 @@ h1{{color:#fff}} h2{{color:#ccc;font-size:1rem;margin-top:28px}} td{{padding:3px
  &nbsp;·&nbsp; Sent today (UTC): {_alerts_sends_today()} / {_ALERTS_DAILY_CEILING}</div>
 <table style="margin-top:10px">{env_rows}</table>
 {f'<div class="flash">{_html.escape(flash)}</div>' if flash else ''}
+{_alerts_admin_launch_html(form)}
 <h2>Your alert address</h2>
 <div>{me}</div>
 {form("start", f'<input type="email" name="email" placeholder="address to confirm" autocomplete="off" required {inp}>', "Send code")}
@@ -4784,7 +4855,7 @@ h1{{color:#fff}} h2{{color:#ccc;font-size:1rem;margin-top:28px}} td{{padding:3px
 {form("preview", "", "Preview my alert (sends nothing)")}
 {form("send_mine", "", "Send my alert now")}
 {form("rewind", "", "Rewind my window 24 h (testing)", "#443")}
-{form("switch_off" if _alerts_global_on() else "switch_on", "", "Turn global switch OFF" if _alerts_global_on() else "Turn global switch ON", "#600" if _alerts_global_on() else "#253")}
+{form("switch_off" if _alerts_global_on() else "switch_on", "", "Pause all alert sending (emergency stop)" if _alerts_global_on() else "Resume alert sending", "#600" if _alerts_global_on() else "#253")}
 {f'<pre style="background:#1a1a1a;border:1px solid #333;padding:12px;white-space:pre-wrap;max-width:760px">{_html.escape(preview)}</pre>' if preview else ''}
 <p class="note">Addresses are stored encrypted (Fernet, key in Railway env) and are never shown here
 except your own, masked. Codes are stored hashed and expire in {_CODE_TTL_S // 60} min.</p>
@@ -4841,7 +4912,16 @@ def _alerts_meta_set(k: str, v: str) -> None:
 
 
 def _alerts_global_on() -> bool:
+    """The emergency stop ("Pause all alert sending" on /admin/alerts): off = the
+    daily run sends nothing. Default on."""
     return (_alerts_meta_get("global_switch", "on") or "on") == "on"
+
+
+def _alerts_launch_open() -> bool:
+    """v2.22.8 launch switch ("Open alerts to everyone"): every signed-in account can
+    use alerts, the "Email alerts are here!" popup shows, and /privacy drops the
+    "small number of users" phrase. Default OFF — a deploy never launches by itself."""
+    return (_alerts_meta_get("launch_open", "off") or "off") == "on"
 
 
 def _alerts_pg_max_listed() -> str | None:
@@ -4883,7 +4963,9 @@ def _alerts_subscribers(only_user: int | None = None) -> list[dict]:
         args = (only_user,)
     with _user_db() as conn:
         rows = [dict(r) for r in conn.execute(sql + " ORDER BY u.id", args).fetchall()]
-    return [r for r in rows if not r["deleted_at"] and (r["alerts_beta"] or _alerts_user_row_is_admin(r))]
+    everyone = _alerts_launch_open()   # v2.22.8 launch switch
+    return [r for r in rows if not r["deleted_at"]
+            and (everyone or r["alerts_beta"] or _alerts_user_row_is_admin(r))]
 
 
 def _alerts_active_pills(user_id: int, keywords: list, mode: str) -> list[str]:
@@ -5663,6 +5745,86 @@ def _alerts_admin_rewind(uid: int, hours: int = 24) -> str:
     return f"Your alert window now starts {hours} h ago ({a})."
 
 
+def _alerts_tag_kind(tag: str) -> str:
+    if tag == "daily-alert":
+        return "alerts"
+    if tag in ("confirm-code", "acct-code"):
+        return "codes"
+    if tag.startswith("pw-"):
+        return "pw"
+    return "other"
+
+
+def _alerts_admin_launch_html(form) -> str:
+    """v2.22.8 "Launch & numbers" section for /admin/alerts — counts only, never an address."""
+    esc = _html.escape
+    is_open = _alerts_launch_open()
+    now = datetime.utcnow()
+    week_ago = (now - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    days = [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(14)]
+    month = now.strftime("%Y-%m")
+    with _user_db() as conn:
+        q = lambda sql, *a: conn.execute(sql, a).fetchone()[0] or 0
+        accounts = q("SELECT COUNT(*) FROM users WHERE deleted_at IS NULL")
+        beta = q("SELECT COUNT(*) FROM users WHERE alerts_beta=1 AND deleted_at IS NULL")
+        on = q("SELECT COUNT(*) FROM alert_email e LEFT JOIN alert_settings s ON s.user_id=e.user_id "
+               "WHERE e.confirmed_at IS NOT NULL AND COALESCE(s.paused,0)=0 AND s.suppressed IS NULL")
+        paused = q("SELECT COUNT(*) FROM alert_email e JOIN alert_settings s ON s.user_id=e.user_id "
+                   "WHERE e.confirmed_at IS NOT NULL AND s.paused=1")
+        supp = q("SELECT COUNT(*) FROM alert_email e JOIN alert_settings s ON s.user_id=e.user_id "
+                 "WHERE e.confirmed_at IS NOT NULL AND s.suppressed IS NOT NULL")
+        new7 = q("SELECT COUNT(*) FROM alert_email WHERE confirmed_at IS NOT NULL AND created_at > ?", week_ago)
+        totals = {r["day"]: int(r["count"]) for r in conn.execute(
+            f"SELECT day, count FROM alert_sends WHERE day IN ({','.join('?' * len(days))})", days).fetchall()}
+        by = {}
+        for r in conn.execute(f"SELECT day, tag, count FROM alert_sends_tag WHERE day IN ({','.join('?' * len(days))})",
+                              days).fetchall():
+            d = by.setdefault(r["day"], {"alerts": 0, "codes": 0, "pw": 0, "other": 0})
+            d[_alerts_tag_kind(r["tag"])] += int(r["count"])
+        mtd = q("SELECT SUM(count) FROM alert_sends WHERE day LIKE ?", month + "%")
+    promo = {k: int(_alerts_meta_get("promo_" + k, "0") or 0) for k in ("shown", "click", "never")}
+    today = days[0]
+    sent_today = totals.get(today, 0)
+    pct = min(100, round(100 * sent_today / _ALERTS_DAILY_CEILING)) if _ALERTS_DAILY_CEILING else 100
+    rows = []
+    for d in days:
+        b = by.get(d)
+        tot = totals.get(d, 0)
+        if b is None and not tot:
+            continue
+        label = datetime.strptime(d, "%Y-%m-%d").strftime("%a %b %d")
+        if b is None:
+            cells = '<td colspan="4" style="text-align:left;color:#bbb">(before per-kind counting)</td>'
+        else:
+            cells = "".join(f"<td>{b[k]}</td>" for k in ("alerts", "codes", "pw", "other"))
+        rows.append(f"<tr><td>{esc(label)}</td>{cells}<td><b>{tot}</b></td></tr>")
+    table = ("<table><tr><th>Day (UTC)</th><th>Daily alerts</th><th>Codes</th><th>Password emails</th>"
+             "<th>Other</th><th>Total</th></tr>" + "".join(rows) + "</table>") if rows else \
+            '<div style="color:#bbb">No emails sent in the last 14 days.</div>'
+    ceiling_day = _alerts_meta_get("ceiling_hit")
+    tile = lambda n, label: (f'<div style="background:#1a1a1a;border:1px solid #333;border-radius:6px;'
+                             f'padding:8px 14px;min-width:140px"><b style="display:block;font-size:1.3rem;'
+                             f'color:#fff">{n}</b><span style="color:#bbb;font-size:.75rem">{label}</span></div>')
+    status = ('<b style="color:#8fc88f">EVERYONE (launched)</b>' if is_open
+              else f'<b style="color:#ffb070">admin + beta only ({beta} beta)</b>')
+    btn = (form("launch_off", "", "Close alerts again (back to admin + beta)", "#600") if is_open
+           else form("launch_on", "", "Open alerts to everyone", "#253"))
+    return f"""<h2>Launch</h2>
+<div>Alerts open to: {status}</div>
+{btn}
+<div style="color:#bbb;font-size:.8rem;max-width:760px">On = every signed-in account can turn on alerts, the "Email alerts are here!" popup shows
+(max once a day, 3 times per device), and /privacy drops "currently being rolled out to a small number of
+users". Off = back to admin + beta; nobody's address is deleted. Emergency stop for sending is further down.</div>
+<h2>Who's opted in</h2>
+<div style="display:flex;gap:10px;flex-wrap:wrap">{tile(on, "alerts on")}{tile(paused, "paused")}{tile(supp, "bounced / suppressed")}{tile("+" + str(new7), "new opt-ins, last 7 days")}</div>
+<div style="color:#bbb;margin-top:8px">Out of {accounts} accounts. Popup (all devices): shown {promo["shown"]} ·
+clicked {promo["click"]} · "don't show again" {promo["never"]}</div>
+<h2>Emails sent</h2>
+<div>Today (UTC): <b>{sent_today}</b> / {_ALERTS_DAILY_CEILING} ({pct}%) · this month: <b>{mtd}</b> of Postmark Basic's 10,000
+· ceiling last hit: {esc(ceiling_day) if ceiling_day else '<span style="color:#8fc88f">never</span>'}</div>
+{table}"""
+
+
 def _alerts_admin_summary_html() -> str:
     raw = _alerts_meta_get("last_run_summary")
     try:
@@ -5676,8 +5838,8 @@ def _alerts_admin_summary_html() -> str:
     ceiling_day = _alerts_meta_get("ceiling_hit")
     esc = _html.escape
     rows = [f"Confirmed subscribers: <b>{subs}</b> (paused {paused}, suppressed {supp}) · eligible now "
-            f"(admin/beta): <b>{len(_alerts_subscribers())}</b>",
-            f"Global switch: <b>{'ON' if _alerts_global_on() else 'OFF'}</b> · scheduler: "
+            f"({'everyone' if _alerts_launch_open() else 'admin/beta'}): <b>{len(_alerts_subscribers())}</b>",
+            f"Sending: <b>{'on' if _alerts_global_on() else 'PAUSED (emergency stop)'}</b> · scheduler: "
             f"<b>{'on' if _ALERTS_SCHEDULER_ON else 'OFF (ALERTS_SCHEDULER=off)'}</b> · "
             f"time zone: {'ok' if _ALERTS_TZ else '<span style=color:#e88>MISSING</span>'} · "
             f"webhook secret: {'set' if _ALERTS_WEBHOOK_SECRET else '<span style=color:#e88>not set</span>'}",
@@ -6206,7 +6368,12 @@ def api_new_browse():
 
 @app.route("/privacy")
 def privacy_page():
+    if _alerts_launch_open():   # v2.22.8: launched → no "small number of users" phrase
+        return PRIVACY_TEMPLATE.replace(_PRIVACY_ROLLOUT_PHRASE, "")
     return PRIVACY_TEMPLATE
+
+_PRIVACY_ROLLOUT_PHRASE = """ (currently being rolled
+  out to a small number of users)"""
 
 @app.route("/google73eeaa5f083d2e84.html")
 def google_site_verification():
@@ -10365,6 +10532,28 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 
+<!-- ── "Email alerts are here!" popup (v2.22.8; only while the launch switch is on; JS in static/gc.js) ── -->
+<div id="promo-modal">
+  <div id="promo-box" role="dialog" aria-labelledby="promo-title">
+    <button id="promo-x" class="alerts-x" aria-label="Close">✕</button>
+    <span class="promo-badge" id="promo-badge">NEW · FREE</span>
+    <h3 id="promo-title">✉ Email alerts are here!</h3>
+    <p id="promo-text-out">Get a daily email when used gear on your Want List shows up at any GC, plus price drops on your Want List and Watch List.</p>
+    <p id="promo-text-in">We’ll email you when new listings match your Want List, plus price drops on your Want List matches and Watch List. Covers every GC store.</p>
+    <ul class="promo-list">
+      <li>Once a day, around 10 AM Eastern</li>
+      <li>No email on days with nothing new</li>
+      <li>Pause or turn off any time</li>
+    </ul>
+    <p id="promo-want-empty" class="promo-note">Add a few searches to your Want List first, then alerts have something to look for.</p>
+    <button id="promo-create" class="acct-primary">Create a free account</button>
+    <button id="promo-signin" class="promo-gray">I have an account: sign in</button>
+    <button id="promo-turnon" class="acct-primary">Turn on email alerts</button>
+    <p class="promo-fine">Your address is encrypted and used only for alerts. Never sold, never used for marketing.</p>
+    <div class="promo-foot"><button id="promo-later" class="promo-link-plain">Not now</button><button id="promo-never" class="promo-link">Don’t show this again</button></div>
+  </div>
+</div>
+
 <!-- ── Email alerts panel (v2.22.0, beta accounts + admin; JS in static/gc.js) ── -->
 <div id="alerts-modal">
   <div id="alerts-box">
@@ -10605,7 +10794,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.22.7"
+APP_VERSION = "2.22.8"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
