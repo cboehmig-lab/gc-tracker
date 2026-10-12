@@ -303,6 +303,43 @@ def _init_user_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_drop_sent_t ON alert_drop_sent(sent_at)")
+        # ── v2.22.7: password reset, account-email confirmation, sign-out-everywhere ──
+        # email_verified: 1 = the account email was confirmed (code, reset link, or it
+        # came from Google). Typed-in emails from before v2.22.7 stay 0 (still get reset
+        # links — Chuck 2026-10-12 — but no longer auto-link a Google sign-in).
+        # session_gen: bumped by a password reset/change; sessions carrying an older
+        # value are signed out by _session_gen_check (cookie sessions can't be listed).
+        for _col in ("email_verified", "session_gen"):
+            try:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {_col} INTEGER DEFAULT 0")
+            except Exception:
+                pass  # Column already exists
+        # Emails on Google-linked accounts came from (or were matched against a
+        # verified) Google address → count them as confirmed. Idempotent.
+        conn.execute("UPDATE users SET email_verified=1 WHERE COALESCE(google_id,'')<>'' "
+                     "AND COALESCE(email,'')<>'' AND COALESCE(email_verified,0)=0")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pw_resets (
+                user_id    INTEGER PRIMARY KEY REFERENCES users(id),
+                token_hash TEXT NOT NULL UNIQUE,
+                expires_at REAL NOT NULL,
+                created_at REAL NOT NULL
+            )
+        """)
+        conn.execute("CREATE TABLE IF NOT EXISTS pw_reset_sends (user_id INTEGER NOT NULL, sent_at REAL NOT NULL)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pw_reset_sends ON pw_reset_sends(user_id, sent_at)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS acct_email_codes (
+                user_id    INTEGER PRIMARY KEY REFERENCES users(id),
+                email      TEXT NOT NULL,
+                code_hash  TEXT NOT NULL,
+                expires_at REAL NOT NULL,
+                attempts   INTEGER DEFAULT 0,
+                sent_at    REAL NOT NULL
+            )
+        """)
+        conn.execute("CREATE TABLE IF NOT EXISTS acct_email_code_sends (user_id INTEGER NOT NULL, sent_at REAL NOT NULL)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_acct_email_code_sends ON acct_email_code_sends(user_id, sent_at)")
         conn.commit()
 
 def _user_by_username(username: str) -> dict | None:
@@ -322,13 +359,26 @@ def _user_by_id(user_id: int) -> dict | None:
         row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
         return dict(row) if row else None
 
+def _sign_in(user_id: int, username: str, session_gen=None) -> None:
+    """v2.22.7: the one place a site sign-in is written to the session. `sg` is the
+    user's session_gen at sign-in; a password reset/change bumps it, which signs out
+    every other device (see _session_gen_check)."""
+    if session_gen is None:
+        u = _user_by_id(user_id)
+        session_gen = (u or {}).get("session_gen") or 0
+    session.permanent        = True
+    session["user_id"]       = user_id
+    session["user_username"] = username
+    session["sg"]            = int(session_gen or 0)
+
 # Every per-user table except users itself. Account deletion (admin "now", the lazy
 # scheduled purge, the Google import-merge, and later self-service deletion) goes
 # through _purge_user_rows so a new per-user table can't be forgotten in one path.
 # (v2.18.0) Add new per-user tables HERE.
 _PER_USER_TABLES = ("user_data", "alert_email", "alert_settings", "alert_codes",
                     "alert_code_sends", "alert_pills", "alert_sent", "alert_batches",
-                    "alert_drop_sent")
+                    "alert_drop_sent",
+                    "pw_resets", "pw_reset_sends", "acct_email_codes", "acct_email_code_sends")  # v2.22.7
 
 def _purge_user_rows(conn, user_id: int) -> None:
     """Hard-delete every row belonging to user_id (caller commits)."""
@@ -2697,6 +2747,29 @@ def _csrf_check():
         return jsonify({"error": "Cross-origin request blocked."}), 403
     return None
 
+# ── Sign out other devices (v2.22.7) ──────────────────────────────────────────
+# Sessions are signed cookies, so there is no server-side list to revoke. Instead
+# each sign-in stores the user's session_gen in the cookie ("sg"); a password
+# reset or change bumps users.session_gen, and any cookie carrying an older value
+# is signed out here on its next request. Cookies from before v2.22.7 have no "sg"
+# (= 0) and every account starts at 0, so nobody is signed out by the upgrade.
+@app.before_request
+def _session_gen_check():
+    if request.path.startswith("/static/"):
+        return None
+    uid = session.get("user_id")
+    if not uid:
+        return None
+    try:
+        with _user_db() as conn:
+            row = conn.execute("SELECT session_gen FROM users WHERE id=?", (uid,)).fetchone()
+    except Exception:
+        return None   # never block a request on this check
+    if row is not None and int(row[0] or 0) != int(session.get("sg") or 0):
+        for k in ("user_id", "user_username", "delete_ok", "sg"):
+            session.pop(k, None)
+    return None
+
 @app.after_request
 def _track_device(response):
     """Set a long-lived device cookie, log first visit of each day, and add security headers."""
@@ -2990,26 +3063,28 @@ def api_register():
         return jsonify({"error": "Password must be at least 8 characters."}), 400
     if _user_by_username(username):
         return jsonify({"error": "That username is already taken."}), 409
-    email = (data.get("email") or "").strip().lower() or None
-    if email and ("@" not in email or "." not in email.split("@")[-1]):
+    email = _norm_email(data.get("email") or "") or None
+    if email and not _valid_email(email):
         return jsonify({"error": "Please enter a valid email address, or leave it blank."}), 400
-    if email:
-        with _user_db() as conn:
-            if conn.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone():
-                return jsonify({"error": "That email is already linked to another account."}), 409
+    if email and _acct_email_taken(email, None):
+        return jsonify({"error": "That email is already linked to another account."}), 409
     pw_hash = generate_password_hash(password)
     now     = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    # v2.22.7: the email is NOT saved at sign-up any more — it's sent a 6-digit code
+    # and only saved (as confirmed) once the code is entered (_acct_email_confirm).
     with _user_db() as conn:
         cur     = conn.execute(
-            "INSERT INTO users (username, email, password_hash, created_at) VALUES (?,?,?,?)",
-            (username, email, pw_hash, now)
+            "INSERT INTO users (username, email, password_hash, created_at) VALUES (?,NULL,?,?)",
+            (username, pw_hash, now)
         )
         user_id = cur.lastrowid
         conn.commit()
-    session.permanent = True
-    session["user_id"]       = user_id
-    session["user_username"] = username
-    return jsonify({"status": "registered", "username": username, "google_linked": False, "data": _get_user_data(user_id)})
+    _sign_in(user_id, username, 0)
+    out = {"status": "registered", "username": username, "google_linked": False, "data": _get_user_data(user_id)}
+    if email:
+        ok, msg, _code = _acct_email_start(user_id, email)
+        out["email_code"] = {"sent": ok, "message": msg, "masked": _mask_email(email)}
+    return jsonify(out)
 
 @app.route("/api/login", methods=["POST"])
 def api_login():
@@ -3025,9 +3100,7 @@ def api_login():
         if user and user.get("google_id") and not user.get("password_hash"):
             return jsonify({"error": "This account uses Google sign-in. Please use the 'Sign in with Google' button."}), 401
         return jsonify({"error": "Incorrect username or password."}), 401
-    session.permanent = True
-    session["user_id"]       = user["id"]
-    session["user_username"] = username
+    _sign_in(user["id"], username, user.get("session_gen"))
     _touch_last_login(user["id"])
     return jsonify({"status": "ok", "username": username, "google_linked": bool(user.get("google_id")), "data": _get_user_data(user["id"])})
 
@@ -3035,6 +3108,7 @@ def api_login():
 def api_logout():
     session.pop("user_id",       None)
     session.pop("user_username", None)
+    session.pop("sg",            None)
     return jsonify({"status": "logged_out"})
 
 # ── Google OAuth routes ───────────────────────────────────────────────────────
@@ -3140,50 +3214,71 @@ def _auth_google_callback_inner():
         return redirect("/?account_delete=confirm")
 
     now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    g_email = email if (email and email_verified) else ""   # only a Google-verified address counts
 
     # 1) Already linked by google_id → just log in
     user = _user_by_google_id(google_id)
     if user:
-        session.permanent        = True
-        session["user_id"]       = user["id"]
-        session["user_username"] = user["username"]
+        _sign_in(user["id"], user["username"], user.get("session_gen"))
         _touch_last_login(user["id"])
         return redirect(next_url)
 
-    # 2) Email matches an existing account → link & log in
-    # Require email_verified to prevent account takeover via unverified Google emails
-    if email and email_verified:
-        user = _user_by_email(email)
-        if user:
+    # 1b) v2.22.7: already signed in to an account with no Google link (the "link your
+    # Google account" banner) → link Google to THAT account. Both sides are proven:
+    # the session and the Google sign-in. Its email: a Google-verified address replaces
+    # an unconfirmed typed-in one (or fills an empty one) and counts as confirmed.
+    cur_uid = session.get("user_id")
+    cur = _user_by_id(cur_uid) if cur_uid else None
+    if cur and not cur.get("google_id"):
+        try:
+            with _user_db() as conn:
+                conn.execute("UPDATE users SET google_id=? WHERE id=?", (google_id, cur["id"]))
+                if g_email and not (cur.get("email") and cur.get("email_verified")):
+                    _acct_claim_email(conn, cur["id"], g_email)
+                conn.commit()
+        except Exception as exc:
+            print(f"[Google OAuth] link-signed-in error: {type(exc).__name__}")
+            return redirect("/?google_error=1")
+        _touch_last_login(cur["id"])
+        return redirect(next_url)
+
+    # 2) Email matches an existing account → link & log in.
+    # Requires the Google address to be verified AND (v2.22.7) the account's email to
+    # be confirmed — otherwise anyone could pre-register someone's address and have
+    # that person's later Google sign-in land in their account.
+    if g_email:
+        user = _user_by_email(g_email)
+        if user and user.get("email_verified"):
             try:
                 with _user_db() as conn:
                     conn.execute("UPDATE users SET google_id=? WHERE id=?", (google_id, user["id"]))
                     conn.commit()
             except Exception as exc:
                 print(f"[Google OAuth] DB link error: {exc}")
-            session.permanent        = True
-            session["user_id"]       = user["id"]
-            session["user_username"] = user["username"]
+            _sign_in(user["id"], user["username"], user.get("session_gen"))
             _touch_last_login(user["id"])
             return redirect(next_url)
 
     # 3) New Google user → create account
-    # password_hash='' (not None) so existing DBs with NOT NULL constraint don't error
+    # password_hash='' (not None) so existing DBs with NOT NULL constraint don't error.
+    # v2.22.7: if an UNconfirmed account holds this address, the Google user (who has
+    # proven it) gets it (_acct_claim_email clears it from the other account); an
+    # unverified Google address is not stored at all.
     username = _gen_google_username(name or (email.split("@")[0] if email else "user"))
     try:
         with _user_db() as conn:
             cur = conn.execute(
-                "INSERT INTO users (username, email, password_hash, google_id, created_at) VALUES (?,?,?,?,?)",
-                (username, email or None, "", google_id, now)
+                "INSERT INTO users (username, email, password_hash, google_id, created_at) VALUES (?,NULL,?,?,?)",
+                (username, "", google_id, now)
             )
             user_id = cur.lastrowid
+            if g_email:
+                _acct_claim_email(conn, user_id, g_email)
             conn.commit()
     except Exception as exc:
         print(f"[Google OAuth] DB insert error: {exc}")
         return redirect("/?google_error=1")
-    session.permanent        = True
-    session["user_id"]       = user_id
-    session["user_username"] = username
+    _sign_in(user_id, username, 0)
     _touch_last_login(user_id)
     # Flag new Google users so the frontend shows the welcome/setup modal
     sep = "&" if "?" in next_url else "?"
@@ -3222,6 +3317,448 @@ def api_account_delete():
     print(f"[account] user {uid} deleted their account (self-service, {'google' if google_ok else 'password'})")
     return jsonify({"ok": True})
 
+# ── Password reset, change password, account email (v2.22.7) ─────────────────
+# Chuck, 2026-10-12. "Forgot password?" emails a one-time link (token stored only as
+# a SHA-256 hash, 1 hour, single use, a new request cancels the old one). The answer
+# on screen is always the same, whatever the account; Google-only accounts are
+# emailed a "you sign in with Google" note instead of a link. A reset or change bumps
+# users.session_gen (signs out other devices) and sends a "password changed" notice.
+# Account emails are confirmed by a 6-digit code (sign-up and "Add/Change email" in
+# Your account) and only saved once confirmed. All mail goes through send_email()
+# (daily ceiling, tracking off, never logs addresses). Account emails are NEVER used
+# for alerts (alerts have their own encrypted address).
+import hashlib as _hashlib_pw
+_PW_TOKEN_TTL_S      = 3600     # reset link lifetime
+_PW_ACCT_MIN_GAP_S   = 120      # per account: one reset email per 2 minutes
+_PW_ACCT_MAX_PER_H   = 3        # per account, per hour
+_PW_IP_MAX_PER_H     = 5        # forgot-password requests per IP per hour (in memory)
+_PW_GLOBAL_MAX_PER_H = 60       # all reset emails per hour (protects the daily ceiling)
+_PW_MIN_LEN, _PW_MAX_LEN = 8, 200
+_ACODE_TTL_S         = 15 * 60  # account-email confirmation code lifetime
+_ACODE_MAX_ATTEMPTS  = 5
+_ACODE_MIN_GAP_S     = 60
+_ACODE_MAX_PER_HOUR  = 5        # per user
+_ACODE_MAX_GLOBAL_H  = 30
+_forgot_ip_hits: dict = {}      # ip -> [timestamps]
+_FORGOT_SAME_MSG = ("If that account exists and has an email on file, we just sent it a reset link. "
+                    "The link works once and expires in 1 hour.")
+
+
+def _pw_token_hash(token: str) -> str:
+    return _hashlib_pw.sha256(("pwreset:" + (token or "")).encode()).hexdigest()
+
+
+def _pw_send_async(*args, **kwargs):
+    """Send in the background so the forgot-password answer takes the same time
+    whether or not an email goes out (no account probing by timing)."""
+    def _run():
+        try:
+            send_email(*args, **kwargs)
+        except Exception as e:  # never log the address
+            print(f"[pwreset] send error {type(e).__name__}")
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _pw_email_html(username: str, paras: list, button: tuple | None = None, small: list | None = None) -> str:
+    """Dark email in the site's look; light text only (Chuck: no dark gray text)."""
+    esc = _html.escape
+    body = "".join(f'<p style="margin:0 0 14px">{p}</p>' for p in paras)
+    if button:
+        body += (f'<p style="margin:6px 0 18px"><a href="{esc(button[1])}" style="display:inline-block;'
+                 f'background:#cc0000;color:#ffffff;font-weight:bold;padding:12px 22px;border-radius:6px;'
+                 f'text-decoration:none">{esc(button[0])}</a></p>')
+    for p in (small or []):
+        body += f'<p style="margin:0 0 10px;color:#dddddd;font-size:13px">{p}</p>'
+    return ('<div style="background:#111111;padding:24px 0"><div style="max-width:560px;margin:0 auto;'
+            'background:#111111;color:#eeeeee;font-family:Arial,Helvetica,sans-serif;font-size:15px;'
+            'line-height:1.55;padding:8px 24px">'
+            '<div style="font-weight:800;font-size:18px;color:#ffffff;margin-bottom:18px">GC Gear '
+            '<span style="color:#ff4444">Tracker</span></div>'
+            f'<p style="margin:0 0 14px">Hi {esc(username)},</p>{body}'
+            '<div style="border-top:1px solid #333333;margin-top:22px;padding-top:14px;color:#cccccc;font-size:12px">'
+            'GC Gear Tracker · gcgeartracker.com · Not affiliated with Guitar Center, Inc.<br>'
+            "We don't send marketing email.</div></div></div>")
+
+
+def _pw_send_reset(user: dict, token: str) -> None:
+    link = f"{_ALERTS_SITE}/reset/{token}"
+    u = user["username"]
+    text = (f"Hi {u},\n\nSomeone (hopefully you) asked to reset the password for your GC Gear Tracker "
+            f"account. Open this link to choose a new one:\n\n{link}\n\n"
+            "The link works once and expires in 1 hour. Choosing a new password signs you out on your "
+            "other devices.\n\nDidn't ask for this? Ignore this email. Your password stays the same.\n\n"
+            "— GC Gear Tracker (gcgeartracker.com)\n")
+    html = _pw_email_html(u,
+        ["Someone (hopefully you) asked to reset the password for your GC Gear Tracker account. "
+         "Click below to choose a new one:"],
+        ("Choose a new password", link),
+        ["This link works once and expires in 1 hour. Choosing a new password signs you out on your other devices.",
+         "Didn't ask for this? Ignore this email. Your password stays the same."])
+    _pw_send_async(user["email"], "Reset your GC Gear Tracker password", text, html, tag="pw-reset")
+
+
+def _pw_send_google_note(user: dict) -> None:
+    u = user["username"]
+    text = (f"Hi {u},\n\nSomeone asked to reset the password for your GC Gear Tracker account. Your account "
+            "doesn't use a password. You sign in with Google: go to gcgeartracker.com, click "
+            "\"Sign in with Google\" and choose this Google account.\n\nDidn't ask for this? You can ignore "
+            "this email.\n\n— GC Gear Tracker (gcgeartracker.com)\n")
+    html = _pw_email_html(u,
+        ["Someone asked to reset the password for your GC Gear Tracker account. Your account doesn't use "
+         "a password. You sign in with Google."],
+        ("Go to GC Gear Tracker", _ALERTS_SITE + "/"),
+        ['Click <b style="color:#ffffff">Sign in with Google</b> and choose this Google account.',
+         "Didn't ask for this? You can ignore this email."])
+    _pw_send_async(user["email"], "Signing in to GC Gear Tracker", text, html, tag="pw-google")
+
+
+def _pw_send_changed_notice(user: dict) -> None:
+    if not user.get("email"):
+        return
+    u = user["username"]
+    text = (f"Hi {u},\n\nThe password for your GC Gear Tracker account was just changed, and your other "
+            "devices were signed out.\n\nIf this wasn't you, use \"Forgot password?\" on the sign-in screen "
+            "to set a new one, and write to chuck@gcgeartracker.com.\n\n— GC Gear Tracker (gcgeartracker.com)\n")
+    html = _pw_email_html(u,
+        ["The password for your GC Gear Tracker account was just changed, and your other devices were signed out."],
+        None,
+        ['If this wasn\'t you, use <b style="color:#ffffff">Forgot password?</b> on the sign-in screen to set '
+         'a new one, and write to chuck@gcgeartracker.com.'])
+    _pw_send_async(user["email"], "Your GC Gear Tracker password was changed", text, html, tag="pw-changed")
+
+
+def _pw_set_password(conn, uid: int, new_pw: str) -> int:
+    """Set the password and bump session_gen (signs out every other device).
+    Returns the new session_gen. Caller commits."""
+    conn.execute("UPDATE users SET password_hash=?, session_gen=COALESCE(session_gen,0)+1 WHERE id=?",
+                 (generate_password_hash(new_pw), uid))
+    conn.execute("DELETE FROM pw_resets WHERE user_id=?", (uid,))
+    return int(conn.execute("SELECT session_gen FROM users WHERE id=?", (uid,)).fetchone()[0] or 0)
+
+
+def _pw_check_new(pw: str, pw2) -> str | None:
+    if len(pw) < _PW_MIN_LEN:
+        return f"Password must be at least {_PW_MIN_LEN} characters."
+    if len(pw) > _PW_MAX_LEN:
+        return "That password is too long."
+    if pw2 is not None and pw != pw2:
+        return "Passwords do not match."
+    return None
+
+
+@app.route("/api/auth/forgot", methods=["POST"])
+def api_auth_forgot():
+    """Always answers the same way (200 + _FORGOT_SAME_MSG) unless this IP is rate-
+    limited, so it can't be used to find out which accounts exist."""
+    ip, now = _client_ip(), time.time()
+    hits = [t for t in _forgot_ip_hits.get(ip, []) if now - t < 3600]
+    if len(hits) >= _PW_IP_MAX_PER_H:
+        _forgot_ip_hits[ip] = hits
+        return jsonify({"error": "Too many reset requests from this device. Please try again later."}), 429
+    hits.append(now)
+    _forgot_ip_hits[ip] = hits
+    if len(_forgot_ip_hits) > 5000:   # bound memory: drop IPs with nothing recent
+        for k in [k for k, v in list(_forgot_ip_hits.items()) if not v or now - v[-1] > 3600]:
+            _forgot_ip_hits.pop(k, None)
+    who = str((request.json or {}).get("who") or "").strip()[:254]
+    if not who:
+        return jsonify({"error": "Enter your username or email."}), 400
+    same = jsonify({"ok": True, "message": _FORGOT_SAME_MSG})
+    if not _ALERTS_READY:
+        print("[pwreset] email not configured — nothing sent")
+        return same
+    user = _user_by_email(_norm_email(who)) if "@" in who else _user_by_username(who)
+    if not user or user.get("deleted_at") or not user.get("email"):
+        return same
+    uid = user["id"]
+    with _user_db() as conn:
+        conn.execute("DELETE FROM pw_reset_sends WHERE sent_at < ?", (now - 86400,))
+        r = conn.execute("SELECT MAX(sent_at) AS t, COUNT(*) AS n FROM pw_reset_sends "
+                         "WHERE user_id=? AND sent_at > ?", (uid, now - 3600)).fetchone()
+        g = conn.execute("SELECT COUNT(*) AS n FROM pw_reset_sends WHERE sent_at > ?", (now - 3600,)).fetchone()
+        if (r["t"] and now - r["t"] < _PW_ACCT_MIN_GAP_S) or (r["n"] or 0) >= _PW_ACCT_MAX_PER_H:
+            conn.commit()
+            return same          # quietly: the earlier email is still good
+        if (g["n"] or 0) >= _PW_GLOBAL_MAX_PER_H:
+            conn.commit()
+            print("[pwreset] global hourly cap hit")
+            return same
+        conn.execute("INSERT INTO pw_reset_sends(user_id, sent_at) VALUES(?,?)", (uid, now))
+        token = None
+        if user.get("password_hash"):
+            token = _secrets_alerts.token_urlsafe(32)
+            conn.execute("INSERT INTO pw_resets(user_id, token_hash, expires_at, created_at) VALUES(?,?,?,?) "
+                         "ON CONFLICT(user_id) DO UPDATE SET token_hash=excluded.token_hash, "
+                         "expires_at=excluded.expires_at, created_at=excluded.created_at",
+                         (uid, _pw_token_hash(token), now + _PW_TOKEN_TTL_S, now))
+        conn.commit()
+    if token:
+        _pw_send_reset(user, token)
+        print(f"[pwreset] link sent for user {uid}")
+    elif user.get("google_id"):
+        _pw_send_google_note(user)
+        print(f"[pwreset] google-note sent for user {uid}")
+    return same
+
+
+def _pw_session_reset_user() -> dict | None:
+    """The account the reset link in this session is for, if still valid."""
+    st = session.get("pw_reset") or {}
+    try:
+        uid, th = int(st.get("uid") or 0), str(st.get("th") or "")
+    except (TypeError, ValueError):
+        return None
+    if not uid or not th:
+        return None
+    with _user_db() as conn:
+        row = conn.execute("SELECT token_hash, expires_at FROM pw_resets WHERE user_id=?", (uid,)).fetchone()
+    if not row or row["expires_at"] < time.time() or not hmac.compare_digest(row["token_hash"], th):
+        return None
+    u = _user_by_id(uid)
+    return u if (u and not u.get("deleted_at") and u.get("password_hash")) else None
+
+
+@app.route("/reset/<token>")
+def pw_reset_link(token):
+    """The emailed link. Moves the token into the session and redirects at once, so
+    the token never sits in the address bar of a page that loads analytics. Opening
+    it doesn't use it up (mail scanners pre-open links); saving a password does."""
+    th = _pw_token_hash(token[:200])
+    with _user_db() as conn:
+        row = conn.execute("SELECT user_id, expires_at FROM pw_resets WHERE token_hash=?", (th,)).fetchone()
+    if row and row["expires_at"] > time.time():
+        session["pw_reset"] = {"uid": int(row["user_id"]), "th": th}
+        target = "/?reset=1"
+    else:
+        session.pop("pw_reset", None)
+        target = "/?reset=bad"
+    resp = redirect(target)
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/auth/reset-info")
+def api_auth_reset_info():
+    u = _pw_session_reset_user()
+    if not u:
+        return jsonify({"ok": False})
+    return jsonify({"ok": True, "username": u["username"]})
+
+
+@app.route("/api/auth/reset", methods=["POST"])
+def api_auth_reset():
+    u = _pw_session_reset_user()
+    if not u:
+        session.pop("pw_reset", None)
+        return jsonify({"error": "This reset link has expired or was already used.", "expired": True}), 400
+    data = request.json or {}
+    pw = str(data.get("password") or "").strip()
+    bad = _pw_check_new(pw, str(data.get("password2") or "").strip() if "password2" in data else None)
+    if bad:
+        return jsonify({"error": bad}), 400
+    with _user_db() as conn:
+        gen = _pw_set_password(conn, u["id"], pw)
+        conn.execute("UPDATE users SET email_verified=1 WHERE id=? AND COALESCE(email,'')<>''", (u["id"],))
+        conn.commit()   # the link reached that inbox → the address is confirmed
+    session.pop("pw_reset", None)
+    session.pop("delete_ok", None)
+    _sign_in(u["id"], u["username"], gen)
+    _touch_last_login(u["id"])
+    _pw_send_changed_notice(u)
+    print(f"[pwreset] user {u['id']} set a new password (reset link)")
+    return jsonify({"ok": True, "username": u["username"]})
+
+
+@app.route("/api/account/password", methods=["POST"])
+def api_account_password():
+    uid = session.get("user_id")
+    if not uid:
+        return jsonify({"error": "Please sign in first."}), 401
+    user = _user_by_id(uid)
+    if not user:
+        return jsonify({"error": "Account not found."}), 404
+    if not user.get("password_hash"):
+        return jsonify({"error": "Your account signs in with Google and has no password."}), 400
+    ip = _client_ip()
+    if not _check_login_rate(ip):
+        return jsonify({"error": "Too many attempts. Please wait a few minutes and try again."}), 429
+    data = request.json or {}
+    cur = str(data.get("current") or "").strip()
+    if not cur or not check_password_hash(user["password_hash"], cur):
+        _record_login_failure(ip)
+        return jsonify({"error": "Your current password isn't right."}), 401
+    pw = str(data.get("password") or "").strip()
+    bad = _pw_check_new(pw, str(data.get("password2") or "").strip() if "password2" in data else None)
+    if bad:
+        return jsonify({"error": bad}), 400
+    with _user_db() as conn:
+        gen = _pw_set_password(conn, uid, pw)
+        conn.commit()
+    session["sg"] = gen            # keep THIS device signed in
+    _pw_send_changed_notice(user)
+    print(f"[pwreset] user {uid} changed their password (signed in)")
+    return jsonify({"ok": True})
+
+
+# ── Account email (confirm-by-code) ──────────────────────────────────────────
+def _acct_email_taken(email: str, except_uid) -> bool:
+    """True if a CONFIRMED account other than except_uid has this email. An
+    unconfirmed holder doesn't block: whoever confirms it gets it."""
+    with _user_db() as conn:
+        row = conn.execute("SELECT id FROM users WHERE email=? AND COALESCE(email_verified,0)=1 "
+                           "AND id IS NOT ?", (email, except_uid)).fetchone()
+    return bool(row)
+
+
+def _acct_claim_email(conn, uid: int, email: str) -> bool:
+    """Give `email` (already proven by uid) to uid as confirmed, taking it from any
+    UNconfirmed account that holds it. False if a confirmed account has it. Caller commits."""
+    other = conn.execute("SELECT id, email_verified FROM users WHERE email=? AND id<>?", (email, uid)).fetchone()
+    if other and other["email_verified"]:
+        return False
+    if other:
+        conn.execute("UPDATE users SET email=NULL WHERE id=?", (other["id"],))
+        print(f"[account] unconfirmed email moved from user {other['id']} to user {uid} (proven)")
+    conn.execute("UPDATE users SET email=?, email_verified=1 WHERE id=?", (email, uid))
+    return True
+
+
+def _acct_email_start(uid: int, raw: str) -> tuple[bool, str, int]:
+    if not _ALERTS_READY:
+        return False, "Email isn't available right now. Please try again later.", 503
+    email = _norm_email(raw)
+    if not _valid_email(email):
+        return False, "Please enter a valid email address.", 400
+    u = _user_by_id(uid) or {}
+    if u.get("email") == email and u.get("email_verified"):
+        return False, "That's already your confirmed email.", 400
+    if _acct_email_taken(email, uid):
+        return False, "That email is already linked to another account.", 409
+    now = time.time()
+    with _user_db() as conn:
+        conn.execute("DELETE FROM acct_email_code_sends WHERE sent_at < ?", (now - 86400,))
+        r = conn.execute("SELECT MAX(sent_at) AS t, SUM(CASE WHEN sent_at > ? THEN 1 ELSE 0 END) AS h "
+                         "FROM acct_email_code_sends WHERE user_id=?", (now - 3600, uid)).fetchone()
+        g = conn.execute("SELECT COUNT(*) AS n FROM acct_email_code_sends WHERE sent_at > ?",
+                         (now - 3600,)).fetchone()["n"]
+        conn.commit()
+    if r["t"] and now - r["t"] < _ACODE_MIN_GAP_S:
+        return False, "A code was just sent — please wait a minute before asking for another.", 429
+    if (r["h"] or 0) >= _ACODE_MAX_PER_HOUR or g >= _ACODE_MAX_GLOBAL_H:
+        return False, "Too many codes requested. Please try again later.", 429
+    code = f"{_secrets_alerts.randbelow(1_000_000):06d}"
+    with _user_db() as conn:
+        conn.execute("INSERT INTO acct_email_code_sends(user_id, sent_at) VALUES(?,?)", (uid, now))
+        conn.execute("INSERT INTO acct_email_codes(user_id, email, code_hash, expires_at, attempts, sent_at) "
+                     "VALUES(?,?,?,?,0,?) ON CONFLICT(user_id) DO UPDATE SET email=excluded.email, "
+                     "code_hash=excluded.code_hash, expires_at=excluded.expires_at, attempts=0, "
+                     "sent_at=excluded.sent_at",
+                     (uid, email, _alerts_hmac("acode", f"{uid}:{code}"), now + _ACODE_TTL_S, now))
+        conn.commit()
+    mins = _ACODE_TTL_S // 60
+    text = (f"Your GC Gear Tracker confirmation code is {code}\n\nType it into the box on gcgeartracker.com "
+            f"to confirm this email for your account. It expires in {mins} minutes. We use this address "
+            "only for password resets and to tell you when your password changes.\n\n"
+            "If you didn't ask for this, ignore this email — the address won't be saved.\n\n"
+            "— GC Gear Tracker (gcgeartracker.com)\n")
+    html = (f"<p>Your GC Gear Tracker confirmation code is</p>"
+            f"<p style=\"font-size:28px;font-weight:bold;letter-spacing:4px;font-family:monospace\">{code}</p>"
+            f"<p>Type it into the box on gcgeartracker.com to confirm this email for your account. "
+            f"It expires in {mins} minutes. We use this address only for password resets and to tell you "
+            "when your password changes.</p>"
+            "<p>If you didn't ask for this, ignore this email — the address won't be saved.</p>")
+    ok, why = send_email(email, f"Your GC Gear Tracker code: {code}", text, html, tag="acct-code")
+    if not ok:
+        with _user_db() as conn:
+            conn.execute("DELETE FROM acct_email_codes WHERE user_id=?", (uid,))
+            conn.commit()
+        if why == "ceiling":
+            return False, "Email sending is paused for today. Please try again tomorrow.", 503
+        return False, "We couldn't send the code. Please check the address and try again.", 502
+    return True, f"We sent a 6-digit code to {_mask_email(email)}. It expires in {mins} minutes.", 200
+
+
+def _acct_email_confirm(uid: int, raw_code: str) -> tuple[bool, str, int]:
+    code = re.sub(r"\D", "", raw_code or "")
+    now = time.time()
+    with _user_db() as conn:
+        row = conn.execute("SELECT * FROM acct_email_codes WHERE user_id=?", (uid,)).fetchone()
+        if not row or row["expires_at"] < now or row["attempts"] >= _ACODE_MAX_ATTEMPTS:
+            if row:
+                conn.execute("DELETE FROM acct_email_codes WHERE user_id=?", (uid,))
+                conn.commit()
+            return False, "That code has expired. Please ask for a new one.", 400
+        if not code or not hmac.compare_digest(row["code_hash"], _alerts_hmac("acode", f"{uid}:{code}")):
+            conn.execute("UPDATE acct_email_codes SET attempts=attempts+1 WHERE user_id=?", (uid,))
+            conn.commit()
+            left = _ACODE_MAX_ATTEMPTS - row["attempts"] - 1
+            if left <= 0:
+                return False, "Too many wrong tries. Please ask for a new code.", 400
+            return False, f"That code isn't right — {left} {'try' if left == 1 else 'tries'} left.", 400
+        email = row["email"]
+        try:
+            if not _acct_claim_email(conn, uid, email):
+                conn.execute("DELETE FROM acct_email_codes WHERE user_id=?", (uid,))
+                conn.commit()
+                return False, "That email is already linked to another account.", 409
+            conn.execute("DELETE FROM acct_email_codes WHERE user_id=?", (uid,))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            return False, "That email is already linked to another account.", 409
+    print(f"[account] user {uid} confirmed an account email")
+    return True, f"Email confirmed: {_mask_email(email)}", 200
+
+
+def _acct_signed_in_uid():
+    uid = session.get("user_id")
+    return uid if (uid and _user_by_id(uid)) else None
+
+
+@app.route("/api/account/email/start", methods=["POST"])
+def api_account_email_start():
+    uid = _acct_signed_in_uid()
+    if not uid:
+        return jsonify({"error": "Please sign in first."}), 401
+    ok, msg, code = _acct_email_start(uid, str((request.json or {}).get("email") or ""))
+    return jsonify({"ok": True, "message": msg} if ok else {"error": msg}), code
+
+
+@app.route("/api/account/email/confirm", methods=["POST"])
+def api_account_email_confirm():
+    uid = _acct_signed_in_uid()
+    if not uid:
+        return jsonify({"error": "Please sign in first."}), 401
+    ok, msg, code = _acct_email_confirm(uid, str((request.json or {}).get("code") or ""))
+    return jsonify({"ok": True, "message": msg} if ok else {"error": msg}), code
+
+
+@app.route("/api/account/email/cancel", methods=["POST"])
+def api_account_email_cancel():
+    uid = _acct_signed_in_uid()
+    if not uid:
+        return jsonify({"error": "Please sign in first."}), 401
+    with _user_db() as conn:
+        conn.execute("DELETE FROM acct_email_codes WHERE user_id=?", (uid,))
+        conn.commit()
+    return jsonify({"ok": True})
+
+
+def _acct_email_info(user: dict | None) -> dict:
+    """For /api/me — the owner's own email, masked."""
+    if not user:
+        return {}
+    with _user_db() as conn:
+        pc = conn.execute("SELECT email, expires_at, attempts FROM acct_email_codes WHERE user_id=?",
+                          (user["id"],)).fetchone()
+    pending = pc["email"] if (pc and pc["expires_at"] > time.time() and pc["attempts"] < _ACODE_MAX_ATTEMPTS) else None
+    return {
+        "email_masked":   _mask_email(user["email"]) if user.get("email") else None,
+        "email_verified": bool(user.get("email") and user.get("email_verified")),
+        "email_pending":  _mask_email(pending) if pending else None,
+    }
+
+
 @app.route("/api/auth/config")
 def auth_config():
     return jsonify({"google_oauth": _GOOGLE_OAUTH_ENABLED})
@@ -3238,6 +3775,7 @@ def api_me():
         "google_linked": bool(user and user.get("google_id")),
         "has_password": bool(user and user.get("password_hash")),   # v2.22.1 (account deletion confirm)
         "has_email":    bool(user and user.get("email")),
+        **_acct_email_info(user),                                   # v2.22.7
         "is_admin":     _is_admin(),
         "data":         _get_user_data(user_id),
     })
@@ -9189,6 +9727,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
       <input class="auth-field" type="text" id="welcome-login-user" placeholder="Username" autocomplete="username">
       <input class="auth-field" type="password" id="welcome-login-pw" placeholder="Password" autocomplete="current-password">
+      <button type="button" class="auth-forgot" id="welcome-forgot-link">Forgot password?</button>
       <div class="auth-err" id="welcome-login-err"></div>
       <button class="auth-submit" id="welcome-login-submit">Sign In</button>
     </div>
@@ -9205,7 +9744,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <input class="auth-field" type="password" id="welcome-reg-pw" placeholder="Password (8+ characters)" autocomplete="new-password">
       <input class="auth-field" type="password" id="welcome-reg-pw2" placeholder="Confirm password" autocomplete="new-password">
       <input class="auth-field" type="email" id="welcome-reg-email" placeholder="Email (optional)" autocomplete="email" style="margin-bottom:4px">
-      <div style="color:#aaa;font-size:.72rem;margin-bottom:12px;line-height:1.4">Optional — helps identify your account if you ever need support. Never shared or used for marketing.</div>
+      <div style="color:#aaa;font-size:.72rem;margin-bottom:12px;line-height:1.4">Optional — lets you reset your password if you forget it. We’ll email a code to confirm it. Never shared or used for marketing.</div>
       <div class="auth-err" id="welcome-reg-err"></div>
       <button class="auth-submit" id="welcome-register-submit">Create Account &amp; Start Scanning</button>
     </div>
@@ -9290,6 +9829,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
       <input class="auth-field" type="text" id="auth-login-user" placeholder="Username" autocomplete="username">
       <input class="auth-field" type="password" id="auth-login-pw" placeholder="Password" autocomplete="current-password">
+      <button type="button" class="auth-forgot" id="auth-forgot-link">Forgot password?</button>
       <div class="auth-err" id="auth-login-err"></div>
       <button class="auth-submit" id="auth-login-submit">Sign In</button>
       <div class="auth-note">Your watch list, want list &amp; favorites sync across all your devices.</div>
@@ -9307,7 +9847,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <input class="auth-field" type="password" id="auth-reg-pw" placeholder="Password (8+ characters)" autocomplete="new-password">
       <input class="auth-field" type="password" id="auth-reg-pw2" placeholder="Confirm password" autocomplete="new-password">
       <input class="auth-field" type="email" id="auth-reg-email" placeholder="Email (optional)" autocomplete="email" style="margin-bottom:4px">
-      <div class="auth-note" style="margin-bottom:12px;margin-top:0;color:#aaa">Optional — helps identify your account if you ever need support. Never shared or used for marketing.</div>
+      <div class="auth-note" style="margin-bottom:12px;margin-top:0;color:#aaa">Optional — lets you reset your password if you forget it. We’ll email a code to confirm it. Never shared or used for marketing.</div>
       <div class="auth-err" id="auth-reg-err"></div>
       <button class="auth-submit" id="auth-register-submit">Create Account</button>
     </div>
@@ -9709,7 +10249,87 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <h3>Your account</h3>
       <div class="acct-row"><span>Username</span><b id="acct-username"></b></div>
       <div class="acct-row"><span>Sign-in</span><span id="acct-signin"></span></div>
+      <div class="acct-row"><span>Email</span><span id="acct-email-val"></span></div>
+      <div class="acct-actions">
+        <button id="acct-email-btn" class="al-secondary">Add email…</button>
+        <button id="acct-pwchange-btn" class="al-secondary">Change password…</button>
+      </div>
       <button id="acct-delete-link" class="acct-delete-link">Delete my account…</button>
+    </div>
+    <!-- v2.22.7: change password / account email / forgot + reset password -->
+    <div id="acct-pwchange" class="al-state">
+      <h3>Change password</h3>
+      <p>For <b class="acct-uname"></b></p>
+      <label for="acct-pwc-cur">Current password</label>
+      <input id="acct-pwc-cur" class="acct-input" type="password" autocomplete="current-password" maxlength="200">
+      <label for="acct-pwc-new">New password (8+ characters)</label>
+      <input id="acct-pwc-new" class="acct-input" type="password" autocomplete="new-password" maxlength="200">
+      <label for="acct-pwc-new2">Confirm new password</label>
+      <input id="acct-pwc-new2" class="acct-input" type="password" autocomplete="new-password" maxlength="200">
+      <p class="acct-note">This signs you out on your other devices.</p>
+      <button id="acct-pwc-save" class="acct-primary">Change password</button>
+      <button id="acct-pwc-back" class="al-secondary acct-full">Back</button>
+    </div>
+    <div id="acct-pwchanged" class="al-state">
+      <h3>Password changed</h3>
+      <div class="acct-done-msg">Your new password is set. Any other devices that were signed in have been signed out.</div>
+      <button id="acct-pwchanged-close" class="al-secondary acct-full">Close</button>
+    </div>
+    <div id="acct-email" class="al-state">
+      <h3 id="acct-email-title">Add an email</h3>
+      <p>We’ll send a 6-digit code to confirm it. It’s used only to reset your password if you forget it and to tell you when your password changes — never for marketing or alerts.</p>
+      <label for="acct-email-in">Email address</label>
+      <input id="acct-email-in" class="acct-input" type="email" autocomplete="email" maxlength="254" placeholder="you@example.com">
+      <button id="acct-email-send" class="acct-primary">Send code</button>
+      <button id="acct-email-back" class="al-secondary acct-full">Back</button>
+    </div>
+    <div id="acct-ecode" class="al-state">
+      <h3>Confirm your email</h3>
+      <p id="acct-ecode-text"></p>
+      <label for="acct-ecode-in">6-digit code</label>
+      <input id="acct-ecode-in" class="acct-input" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6">
+      <button id="acct-ecode-ok" class="acct-primary">Confirm email</button>
+      <div class="acct-links"><button id="acct-ecode-resend" class="acct-link">Resend code</button> · <button id="acct-ecode-skip" class="acct-link">Skip, don’t save an email</button></div>
+    </div>
+    <div id="acct-edone" class="al-state">
+      <h3>Email confirmed</h3>
+      <div class="acct-done-msg" id="acct-edone-text"></div>
+      <button id="acct-edone-close" class="al-secondary acct-full">Close</button>
+    </div>
+    <div id="pw-forgot" class="al-state">
+      <h3>Reset your password</h3>
+      <p>Enter your username or the email on your account. We’ll email you a link to choose a new password.</p>
+      <input id="pw-who" class="acct-input" type="text" autocomplete="username" maxlength="254" placeholder="Username or email">
+      <button id="pw-send" class="acct-primary">Email me a reset link</button>
+      <div class="acct-links"><button class="acct-link pw-back-signin">← Back to sign in</button></div>
+    </div>
+    <div id="pw-sent" class="al-state">
+      <h3>✉️ Check your email</h3>
+      <p id="pw-sent-text"></p>
+      <div class="acct-mini"><b>Signed up with Google?</b> You don’t have a password here. Just use <b>Sign in with Google</b>.<br><br>
+        <b>No email on your account?</b> Write to chuck@gcgeartracker.com from any address and we’ll sort it out.</div>
+      <div class="acct-links"><button class="acct-link pw-back-signin">← Back to sign in</button></div>
+    </div>
+    <div id="pw-new" class="al-state">
+      <h3>Choose a new password</h3>
+      <p>For account <b id="pw-new-name"></b></p>
+      <label for="pw-new1">New password (8+ characters)</label>
+      <input id="pw-new1" class="acct-input" type="password" autocomplete="new-password" maxlength="200">
+      <label for="pw-new2">Confirm new password</label>
+      <input id="pw-new2" class="acct-input" type="password" autocomplete="new-password" maxlength="200">
+      <p class="acct-note">This signs you out on your other devices.</p>
+      <button id="pw-save" class="acct-primary">Save new password</button>
+    </div>
+    <div id="pw-done" class="al-state">
+      <h3>✅ Password changed</h3>
+      <p>You’re signed in as <b id="pw-done-name"></b>. Any other devices that were signed in have been signed out.</p>
+      <button id="pw-continue" class="acct-primary">Continue</button>
+    </div>
+    <div id="pw-bad" class="al-state">
+      <h3>This link doesn’t work any more</h3>
+      <p>Reset links expire after 1 hour and work only once. Asking for a new link also cancels older ones.</p>
+      <button id="pw-bad-new" class="acct-primary">Send me a new link</button>
+      <div class="acct-links"><button class="acct-link pw-back-signin">← Back to sign in</button></div>
     </div>
     <div id="acct-confirm" class="al-state">
       <h3>Delete your account?</h3>
@@ -9862,8 +10482,9 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid #222;color:#555;fon
   <p><strong style="color:#eee">Account information.</strong> If you create an account, we store
   your chosen username, an optional email address, and a hashed (never plain-text) version of your
   password. If you sign in with Google, we store your Google account ID and the display name Google
-  provides. Your account email address is never required. If you provide it, it is used only to
-  help you get back into your account if you contact us. It is never used for Want List email alerts, which use a separate
+  provides. Your account email address is never required. If you provide it, we confirm it with a
+  one-time code and use it only to send you a password reset link when you ask for one and to tell you
+  when your password changes. It is never used for Want List email alerts, which use a separate
   address you confirm yourself (see below).</p>
 
   <p><strong style="color:#eee">Preferences and scan history.</strong> To sync your data across
@@ -9984,7 +10605,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.22.6"
+APP_VERSION = "2.22.7"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)

@@ -682,7 +682,7 @@ async function _authLogin() {
       body: JSON.stringify({username, password: pw}),
     });
     const d = await r.json();
-    if (!r.ok) { errEl.textContent = d.error || 'Login failed.'; return; }
+    if (!r.ok) { _loginErr(errEl, d.error || 'Login failed.', r.status === 401); return; }
     await _onAuthSuccess(d, false);
   } catch(e) {
     errEl.textContent = 'Network error — please try again.';
@@ -712,6 +712,7 @@ async function _authRegister() {
     const d = await r.json();
     if (!r.ok) { errEl.textContent = d.error || 'Registration failed.'; return; }
     await _onAuthSuccess(d, true);
+    _acctAfterRegister(d, email);   // v2.22.7: confirm the sign-up email by code
   } catch(e) {
     errEl.textContent = 'Network error — please try again.';
   } finally {
@@ -767,7 +768,7 @@ async function _welcomeLogin() {
       body: JSON.stringify({username, password: pw}),
     });
     const d = await r.json();
-    if (!r.ok) { errEl.textContent = d.error || 'Login failed.'; return; }
+    if (!r.ok) { _loginErr(errEl, d.error || 'Login failed.', r.status === 401); return; }
     await _onAuthSuccess(d, false);
   } catch(e) {
     errEl.textContent = 'Network error — please try again.';
@@ -797,6 +798,7 @@ async function _welcomeRegister() {
     const d = await r.json();
     if (!r.ok) { errEl.textContent = d.error || 'Registration failed.'; return; }
     await _onAuthSuccess(d, true);
+    _acctAfterRegister(d, email);   // v2.22.7: confirm the sign-up email by code
   } catch(e) {
     errEl.textContent = 'Network error — please try again.';
   } finally {
@@ -880,6 +882,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   _applyStoreDeepLink();
   _applyAlertDeepLink(alreadyLoggedIn);
   _acctApplyDeepLink();   // v2.22.1: back from Google re-confirm for account deletion
+  _pwApplyDeepLink();     // v2.22.7: back from an emailed password-reset link
 });
 
 // ?alert=<id>[&view=wantdrops|watchdrops] deep link from an alert email's buttons (v2.19.1, v2.21.0): open the
@@ -5056,7 +5059,9 @@ function _acctMsg(t, err) {
 }
 
 function _acctShow(state) {
-  ['acct-info', 'acct-confirm', 'acct-last', 'acct-done'].forEach(id => {
+  ['acct-info', 'acct-confirm', 'acct-last', 'acct-done',
+   'acct-pwchange', 'acct-pwchanged', 'acct-email', 'acct-ecode', 'acct-edone',   // v2.22.7
+   'pw-forgot', 'pw-sent', 'pw-new', 'pw-done', 'pw-bad'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.classList.toggle('show', id === state);
   });
@@ -5069,7 +5074,9 @@ function _acctOpen(state) {
     if (me && me.logged_in) {
       window._authUser = Object.assign(window._authUser || {}, {
         username: me.username || (window._authUser || {}).username,
-        googleLinked: !!me.google_linked, hasPassword: !!me.has_password});
+        googleLinked: !!me.google_linked, hasPassword: !!me.has_password,
+        emailMasked: me.email_masked || null, emailVerified: !!me.email_verified,
+        emailPending: me.email_pending || null});
     }
     _acctRender(state);
   }).catch(() => _acctRender(state));
@@ -5091,13 +5098,25 @@ function _acctRender(state) {
     ? 'Or confirm by signing in with Google again:' : "To confirm it's you, sign in with Google again.";
   document.getElementById('acct-google-btn').textContent = hasPw ? 'Confirm with Google instead' : 'Confirm with Google';
   document.getElementById('acct-pw').value = '';
+  // v2.22.7: account email + change password
+  const ev = document.getElementById('acct-email-val');
+  if (ev) {
+    ev.textContent = u.emailMasked ? (u.emailMasked + (u.emailVerified ? ' ✓' : ' (not confirmed)')) : 'none';
+    ev.title = u.emailMasked && !u.emailVerified ? 'Change it to confirm it with a code' : '';
+  }
+  const eb = document.getElementById('acct-email-btn');
+  if (eb) eb.textContent = u.emailMasked ? 'Change email…' : 'Add email…';
+  const pb = document.getElementById('acct-pwchange-btn');
+  if (pb) pb.style.display = u.hasPassword ? '' : 'none';
+  document.querySelectorAll('#acct-modal .acct-uname').forEach(el => { el.textContent = u.username || ''; });
   _acctMsg('');
   _acctShow(state || 'acct-info');
   document.getElementById('acct-modal').classList.add('open');
 }
 
 function _acctClose() {
-  const done = document.getElementById('acct-done').classList.contains('show');
+  const done = document.getElementById('acct-done').classList.contains('show')
+            || document.getElementById('pw-done').classList.contains('show');   // v2.22.7
   document.getElementById('acct-modal').classList.remove('open');
   if (done) window.location.href = '/';
 }
@@ -5165,4 +5184,207 @@ document.addEventListener('DOMContentLoaded', () => {
   if (pw) pw.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('acct-delete-pw-btn').click(); });
   const m = document.getElementById('acct-modal');
   if (m) m.addEventListener('click', e => { if (e.target === m) _acctClose(); });
+});
+
+
+// ── Password reset / change password / account email (v2.22.7) ───────────────
+// All in the #acct-modal box (extra .al-state panels). Forgot/reset work signed out;
+// the emailed link (/reset/<token>) comes back as /?reset=1 or /?reset=bad.
+let _acctEcodeEmail = '';       // address the pending code went to (for "Resend")
+let _acctEcodeSignup = false;   // true = right after Create Account (Skip wording)
+
+function _pwOpen(state) {
+  // Signed-out screens: no /api/me refresh, just show the panel over everything.
+  try { _closeAuthModal(); } catch (e) {}
+  const fr = document.getElementById('first-run-modal');
+  if (fr) fr.style.display = 'none';
+  _acctMsg('');
+  _acctShow(state);
+  document.getElementById('acct-modal').classList.add('open');
+  const focusId = {'pw-forgot': 'pw-who', 'pw-new': 'pw-new1', 'acct-ecode': 'acct-ecode-in',
+                   'acct-email': 'acct-email-in', 'acct-pwchange': 'acct-pwc-cur'}[state];
+  if (focusId) setTimeout(() => document.getElementById(focusId)?.focus(), 60);
+}
+
+function _pwBackToSignIn() {
+  document.getElementById('acct-modal').classList.remove('open');
+  _openAuthModal('login');
+}
+
+function _loginErr(errEl, msg, offerForgot) {
+  errEl.textContent = msg + (offerForgot ? ' ' : '');
+  if (!offerForgot || /Google/.test(msg)) return;
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'auth-forgot-inline';
+  b.textContent = 'Forgot your password?';
+  b.addEventListener('click', () => _pwStartForgot(''));
+  errEl.appendChild(b);
+}
+
+function _pwStartForgot(prefill) {
+  const w = document.getElementById('pw-who');
+  if (w) w.value = prefill || document.getElementById('auth-login-user')?.value
+                   || document.getElementById('welcome-login-user')?.value || '';
+  _pwOpen('pw-forgot');
+}
+
+function _pwPost(url, body) {
+  return fetch(url, {method: 'POST', credentials: 'same-origin',
+                     headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {})})
+    .then(r => r.json().catch(() => ({})).then(d => ({ok: r.ok, status: r.status, d})));
+}
+
+function _pwSendLink(btn) {
+  const who = (document.getElementById('pw-who').value || '').trim();
+  if (!who) { _acctMsg('Enter your username or email.', true); return; }
+  btn.disabled = true; _acctMsg('Sending…');
+  _pwPost('/api/auth/forgot', {who}).then(({ok, d}) => {
+    btn.disabled = false;
+    if (!ok) { _acctMsg(d.error || 'Something went wrong. Please try again.', true); return; }
+    document.getElementById('pw-sent-text').textContent = d.message || '';
+    _acctMsg('');
+    _acctShow('pw-sent');
+  }).catch(() => { btn.disabled = false; _acctMsg('Network error — please try again.', true); });
+}
+
+function _pwSaveNew(btn) {
+  const a = document.getElementById('pw-new1').value, b = document.getElementById('pw-new2').value;
+  if (a.length < 8) { _acctMsg('Password must be at least 8 characters.', true); return; }
+  if (a !== b) { _acctMsg('Passwords do not match.', true); return; }
+  btn.disabled = true; _acctMsg('Saving…');
+  _pwPost('/api/auth/reset', {password: a, password2: b}).then(({ok, d}) => {
+    btn.disabled = false;
+    if (!ok) {
+      if (d.expired) { _acctMsg(''); _acctShow('pw-bad'); return; }
+      _acctMsg(d.error || 'Something went wrong. Please try again.', true); return;
+    }
+    document.getElementById('pw-done-name').textContent = d.username || '';
+    document.getElementById('pw-new1').value = ''; document.getElementById('pw-new2').value = '';
+    _acctMsg('');
+    _acctShow('pw-done');
+  }).catch(() => { btn.disabled = false; _acctMsg('Network error — please try again.', true); });
+}
+
+function _pwApplyDeepLink() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const v = params.get('reset');
+    if (!v) return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete('reset');
+    history.replaceState(null, '', url.toString());
+    if (v !== '1') { _pwOpen('pw-bad'); return; }
+    fetch('/api/auth/reset-info', {credentials: 'same-origin'}).then(r => r.json()).then(d => {
+      if (d && d.ok) {
+        document.getElementById('pw-new-name').textContent = d.username || '';
+        _pwOpen('pw-new');
+      } else _pwOpen('pw-bad');
+    }).catch(() => _pwOpen('pw-bad'));
+  } catch (e) { /* never block page load */ }
+}
+
+function _acctChangePw(btn) {
+  const cur = document.getElementById('acct-pwc-cur').value;
+  const a = document.getElementById('acct-pwc-new').value, b = document.getElementById('acct-pwc-new2').value;
+  if (!cur) { _acctMsg('Enter your current password.', true); return; }
+  if (a.length < 8) { _acctMsg('New password must be at least 8 characters.', true); return; }
+  if (a !== b) { _acctMsg('New passwords do not match.', true); return; }
+  btn.disabled = true; _acctMsg('Saving…');
+  _pwPost('/api/account/password', {current: cur, password: a, password2: b}).then(({ok, d}) => {
+    btn.disabled = false;
+    if (!ok) { _acctMsg(d.error || 'Something went wrong — your password was not changed.', true); return; }
+    ['acct-pwc-cur', 'acct-pwc-new', 'acct-pwc-new2'].forEach(id => { document.getElementById(id).value = ''; });
+    _acctMsg('');
+    _acctShow('acct-pwchanged');
+  }).catch(() => { btn.disabled = false; _acctMsg('Network error — your password was not changed.', true); });
+}
+
+function _acctShowEcode(email, signup, message) {
+  _acctEcodeEmail = email || '';
+  _acctEcodeSignup = !!signup;
+  const u = window._authUser || {};
+  const t = document.getElementById('acct-ecode-text');
+  t.textContent = (signup ? 'Your account ' + (u.username || '') + ' is ready. ' : '')
+    + (message || 'We sent a 6-digit code to your email.')
+    + ' Enter it to save the address so you can reset your password if you forget it.';
+  document.getElementById('acct-ecode-skip').textContent = signup ? 'Skip, don’t save an email' : 'Cancel';
+  document.getElementById('acct-ecode-in').value = '';
+  _pwOpen('acct-ecode');
+}
+
+function _acctAfterRegister(d, email) {
+  if (!d || !d.email_code || !email) return;
+  if (d.email_code.sent) { _acctShowEcode(email, true, d.email_code.message); return; }
+  // Account was created; only the code email failed — say so, let them retry later.
+  _pwOpen('acct-email');
+  document.getElementById('acct-email-title').textContent = 'Add an email';
+  document.getElementById('acct-email-in').value = email;
+  _acctMsg((d.email_code.message || "We couldn't send the code.") + ' Your account is ready either way.', true);
+}
+
+function _acctEmailSend(btn, emailOverride) {
+  const email = (emailOverride || document.getElementById('acct-email-in').value || '').trim();
+  if (!email) { _acctMsg('Enter an email address.', true); return; }
+  btn.disabled = true; _acctMsg('Sending…');
+  _pwPost('/api/account/email/start', {email}).then(({ok, d}) => {
+    btn.disabled = false;
+    if (!ok) { _acctMsg(d.error || "We couldn't send the code.", true); return; }
+    if (emailOverride) { _acctMsg(d.message || 'Code sent.'); return; }   // Resend: stay on the code screen
+    _acctShowEcode(email, false, d.message);
+  }).catch(() => { btn.disabled = false; _acctMsg('Network error — please try again.', true); });
+}
+
+function _acctEmailConfirm(btn) {
+  const code = (document.getElementById('acct-ecode-in').value || '').trim();
+  if (!/^\d{6}$/.test(code)) { _acctMsg('Enter the 6-digit code from the email.', true); return; }
+  btn.disabled = true; _acctMsg('Checking…');
+  _pwPost('/api/account/email/confirm', {code}).then(({ok, d}) => {
+    btn.disabled = false;
+    if (!ok) { _acctMsg(d.error || 'That code didn’t work.', true); return; }
+    document.getElementById('acct-edone-text').textContent =
+      (d.message || 'Email confirmed.') + ' You can now use “Forgot password?” if you ever need to.';
+    _acctMsg('');
+    _acctShow('acct-edone');
+  }).catch(() => { btn.disabled = false; _acctMsg('Network error — please try again.', true); });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+  const enter = (id, btnId) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('keydown', e => { if (e.key === 'Enter') { e.stopPropagation(); document.getElementById(btnId)?.click(); } });
+  };
+  on('auth-forgot-link', () => _pwStartForgot(document.getElementById('auth-login-user')?.value || ''));
+  on('welcome-forgot-link', () => _pwStartForgot(document.getElementById('welcome-login-user')?.value || ''));
+  document.querySelectorAll('#acct-modal .pw-back-signin').forEach(b => b.addEventListener('click', _pwBackToSignIn));
+  on('pw-send', function () { _pwSendLink(this); });
+  on('pw-save', function () { _pwSaveNew(this); });
+  on('pw-continue', () => { window.location.href = '/'; });
+  on('pw-bad-new', () => _pwStartForgot(''));
+  on('acct-pwchange-btn', () => { _acctMsg(''); _pwOpen('acct-pwchange'); });
+  on('acct-pwc-save', function () { _acctChangePw(this); });
+  on('acct-pwc-back', () => { _acctMsg(''); _acctShow('acct-info'); });
+  on('acct-pwchanged-close', _acctClose);
+  on('acct-email-btn', () => {
+    const u = window._authUser || {};
+    document.getElementById('acct-email-title').textContent = u.emailMasked ? 'Change your email' : 'Add an email';
+    document.getElementById('acct-email-in').value = '';
+    _acctMsg('');
+    _pwOpen('acct-email');
+  });
+  on('acct-email-send', function () { _acctEmailSend(this); });
+  on('acct-email-back', () => { _acctMsg(''); _acctOpen('acct-info'); });
+  on('acct-ecode-ok', function () { _acctEmailConfirm(this); });
+  on('acct-ecode-resend', function () { if (_acctEcodeEmail) _acctEmailSend(this, _acctEcodeEmail); });
+  on('acct-ecode-skip', () => {
+    _pwPost('/api/account/email/cancel', {}).catch(() => {});
+    if (_acctEcodeSignup) _acctClose(); else { _acctMsg(''); _acctOpen('acct-info'); }
+  });
+  on('acct-edone-close', () => { _acctMsg(''); _acctOpen('acct-info'); });
+  enter('pw-who', 'pw-send');
+  enter('pw-new2', 'pw-save');
+  enter('acct-pwc-new2', 'acct-pwc-save');
+  enter('acct-email-in', 'acct-email-send');
+  enter('acct-ecode-in', 'acct-ecode-ok');
 });

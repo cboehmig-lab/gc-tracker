@@ -1,5 +1,84 @@
 # GC Tracker — Handoff Document
-*Last updated: 2026-10-12 · Current version: v2.22.6 (privacy policy wording: account email + IP/host logs; v2.22.5 "Date Listed" = date the listing appeared on our site, default sort by it, GC date as tie-break; v2.22.4 NEW Want List matches first; v2.22.3 NEW rows sort by listed date + "😮 Newly Listed" filter chip + "older listings" count in the scan log; v2.22.2 NEW = first seen by the site since your last scan only, site + alert email; v2.22.1 self-service account deletion — password or Google re-confirm, immediate; About Close fix; v2.22.0 alerts beta: /admin/users beta switch, "Email alerts" panel for beta users, whole-list alerts only — no per-term choices; v2.21.0 alert email: 3 sections — new Want List items, Want List price drops, Watch List price drops; "Gear Alert:" subjects; v2.20.0 NEW also flags listings new to the site regardless of listed date — late arrivals; returns excluded; /api/new-catchup after the sweep; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign: newest-first list in the site's look, terms at the bottom; v2.19.2 alert email button runs the user's scan then opens the Want List; v2.19.1 alert email button opens the Want List; v2.19.0 email alerts step 2: daily 10 AM ET alert engine, /go/<sku>, signed pause/stop links, Postmark bounce webhook — Chuck-only; v2.18.1 privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+*Last updated: 2026-10-12 · Current version: v2.22.7 (self-service password reset + change password + account email confirm-by-code + sign out other devices; v2.22.6 privacy policy wording: account email + IP/host logs; v2.22.5 "Date Listed" = date the listing appeared on our site, default sort by it, GC date as tie-break; v2.22.4 NEW Want List matches first; v2.22.3 NEW rows sort by listed date + "😮 Newly Listed" filter chip + "older listings" count in the scan log; v2.22.2 NEW = first seen by the site since your last scan only, site + alert email; v2.22.1 self-service account deletion — password or Google re-confirm, immediate; About Close fix; v2.22.0 alerts beta: /admin/users beta switch, "Email alerts" panel for beta users, whole-list alerts only — no per-term choices; v2.21.0 alert email: 3 sections — new Want List items, Want List price drops, Watch List price drops; "Gear Alert:" subjects; v2.20.0 NEW also flags listings new to the site regardless of listed date — late arrivals; returns excluded; /api/new-catchup after the sweep; v2.19.4 alert email: listed day only; v2.19.3 alert email redesign: newest-first list in the site's look, terms at the bottom; v2.19.2 alert email button runs the user's scan then opens the Want List; v2.19.1 alert email button opens the Want List; v2.19.0 email alerts step 2: daily 10 AM ET alert engine, /go/<sku>, signed pause/stop links, Postmark bounce webhook — Chuck-only; v2.18.1 privacy policy covers Want List email alerts + Postmark, contact → chuck@gcgeartracker.com; v2.18.0 email alerts step 1 plumbing: Postmark send_email wrapper, Fernet-encrypted alert addresses, confirm-by-code, /admin/alerts test page, _purge_user_rows — admin-only; v2.17.9 Impact.com site-verification meta tag for the GC affiliate reapplication; v2.17.8 browse speedups: aggregate cache keyed by catalog generation, shared default view, page flips skip facet lists, 200 ms search debounce; v2.17.7 removed late-arrival WARNING + /api/quick-window-check; NEW rule unchanged by decision; v2.17.6 silent background sweep, log "\\n" fix; v2.17.5 HOTFIX quick-pass window matches creationDate — GC recent listings have startDate 0; v2.17.4 Phase G S1 two-phase scan: quick NEW pass + background sold/price sweep; v2.17.3 Phase G S2+S3: lean Algolia pages + continuous fetch pool + prior read during fetch; v2.17.2 desktop button "Scan for New Listings"; v2.17.1 Phase G step 1: per-request timing — Server-Timing header, [timing] logs, admin /api/timing; no behavior change; v2.17.0 Phase F step 5c: JSON catalog deleted — Postgres is the only catalog store; v2.16.51 nationwide scans must account for Algolia nbHits before sold-marking + coverage diagnostics; v2.16.50 store filled in from location when Algolia lists none, new items.store_inferred; v2.16.49 scan save writes only new/changed rows + JSON backup after "done"; v2.16.48 Phase F step 5b-ii CUTOVER: scan reads prior state from + writes to Postgres synchronously, JSON = write-only backup; v2.16.47 5b-i shadow + /api/pg-precheck-5b; v2.16.46 step 5a: remaining JSON catalog reads moved to Postgres; v2.16.45 search-box prefix match; v2.16.44 step 4c SQL-only /api/browse) · Domain: gcgeartracker.com*
+
+---
+
+## v2.22.7 — 2026-10-12: Self-service password reset ("Forgot password?"), change password, account email confirmed by code
+
+**Why (Chuck, 2026-10-12)**: goal 1 before the alerts launch. Live data (railway ssh, 2026-10-12): 378 accounts —
+293 Google-only, 85 with a password; of those 45 had an account email (10 via Google, 35 typed at sign-up and never
+verified) and **40 had no email at all** (couldn't self-reset → Chuck approved an "Add email" option for them).
+Decisions: verify new/changed account emails by code (existing unverified emails still get reset links); sign out
+other devices on reset; add "Change password" to Your account; Google auto-link only on confirmed emails; no
+reserved send budget for resets (they share ALERTS_DAILY_CEILING — fine at today's volume). Mockup approved
+("Claude outputs" → password_reset_mockup.png/.html).
+
+**Schema (`_init_user_db`)**: `users.email_verified` (0/1) and `users.session_gen` (int), both DEFAULT 0. Boot runs an
+idempotent `UPDATE users SET email_verified=1` for rows with a google_id AND an email. New per-user tables (all in
+`_PER_USER_TABLES`, so `_purge_user_rows` / account deletion clears them): `pw_resets` (user_id PK, token_hash UNIQUE,
+expires_at, created_at — one live token per account; a new request replaces it), `pw_reset_sends` (rate-limit log,
+pruned after 24 h), `acct_email_codes` (pending address + HMAC of the 6-digit code, 15 min, 5 tries),
+`acct_email_code_sends` (rate-limit log).
+
+**Sign out other devices**: sessions are signed cookies (no server list), so `_sign_in(uid, username, gen)` (now the
+only writer of session user_id — register, login, all Google paths, reset) stores `session["sg"]`; the new
+`@before_request _session_gen_check` (skips /static/) signs out a cookie whose sg != users.session_gen. Reset and
+change-password bump session_gen (`_pw_set_password`). Old cookies have no sg (=0) and every account starts at 0, so
+the upgrade signs nobody out. Cost: one SQLite primary-key read per signed-in request.
+
+**Forgot password** — `POST /api/auth/forgot {who}` (username or email): ALWAYS the same 200 message
+(`_FORGOT_SAME_MSG`) unless the IP is limited (5/hour, in memory -> 429). Then, quietly: password account with email ->
+token (`secrets.token_urlsafe(32)`, stored as sha256 only, 1 hour) + reset email; Google-only with email -> "you sign
+in with Google" email (no token); no email / unknown / scheduled-for-deletion -> nothing. Per account 1 per 2 min and
+3/hour, all accounts 60/hour (quiet skips). Emails go out on a background thread (`_pw_send_async`) so response time
+doesn't reveal whether an account exists. Links use the fixed `_ALERTS_SITE` (never the request Host — no link
+poisoning). Logs: `[pwreset] link sent for user N` / `google-note sent` — never the address.
+**The link** — `GET /reset/<token>`: valid -> `session["pw_reset"]={uid, token_hash}` and 302 to `/?reset=1`
+(Referrer-Policy no-referrer, no-store), else `/?reset=bad`. The token never sits in the address bar of a page that
+loads Google Analytics, and opening it doesn't use it up (mail scanners pre-open links). `GET /api/auth/reset-info` ->
+{ok, username}. `POST /api/auth/reset {password, password2}` (8-200 chars): sets the password, bumps session_gen,
+deletes the token (single use), marks the email confirmed (the link reached it), signs this browser in, sends the
+"password changed" notice.
+**Change password** — `POST /api/account/password {current, password, password2}`: signed in + has a password;
+wrong current password counts toward the login limiter; bumps session_gen but keeps THIS session (sg updated);
+notice email.
+**Account email** — `POST /api/account/email/start {email}` -> 6-digit code (1/min, 5/hour per user, 30/hour total);
+`/confirm {code}`; `/cancel`. The address is only saved (as confirmed) when the code is right. A CONFIRMED holder
+blocks (409); an unconfirmed holder doesn't — whoever proves it gets it (`_acct_claim_email` clears it from the other
+account, logs `[account] unconfirmed email moved from user A to user B`). **Sign-up** no longer stores the typed
+email: the account is created, a code is sent, response `email_code {sent, message, masked}`; the register 409 now
+only fires for a confirmed holder. `/api/me` adds `email_masked`, `email_verified`, `email_pending`.
+**Google callback**: (1) google_id match -> sign in (unchanged). (1b NEW) signed-in account with no Google link (the
+"link your Google account" banner) -> link Google to THAT account; a Google-verified address replaces an unconfirmed
+or empty email. Previously a banner click with a different email created a second account. (2) email match -> link
+ONLY if the account's email is confirmed (closes the pre-registered-address takeover). (3) new user: the email is
+stored only if Google says it's verified, and it's taken from any unconfirmed holder.
+Note: `_is_admin()` still keys on users.email == ADMIN_EMAIL + google_id — don't change Chuck's account email.
+
+**UI (all JS in static/gc.js, end of file; markup in #acct-modal; styles end of gc.css)**: "Forgot password?" under
+the password box in the sign-in box and the first-run welcome box; a wrong password adds an inline "Forgot your
+password?" link. New #acct-modal panels: pw-forgot, pw-sent, pw-new, pw-done (Continue -> reload), pw-bad,
+acct-pwchange, acct-pwchanged, acct-email, acct-ecode (sign-up mode: "Skip, don't save an email"), acct-edone.
+Your account shows Email (masked, check mark / "(not confirmed)" / none) + "Add/Change email…" + "Change password…"
+(password accounts only). Sign-up email note now says it's for password resets. `_pwApplyDeepLink()` handles ?reset=.
+**Privacy**: account-email sentence -> "If you provide it, we confirm it with a one-time code and use it only to send
+you a password reset link when you ask for one and to tell you when your password changes."
+
+**Verified (cloud sandbox, Flask test client, send_email mocked) — 64/64**: sign-up code flow (email not saved until
+confirmed, wrong code, masked /api/me); forgot by username / email / unknown / Google-only / no-email (same message
+every time, right email or none); token stored hashed; 2-minute quiet repeat; link -> /?reset=1 + no-referrer; short /
+mismatched rejected; reset signs out two other devices, signs this one in, notice sent; single use; expired / bogus ->
+bad; old password fails, new works; IP limit 429 on 6th; change password (wrong current 401, other device out, this
+device stays); confirmed holder 409 / unconfirmed holder moved; Google: squatted unconfirmed email NOT linked (new
+account gets it), confirmed email links, banner links to the signed-in account and replaces a typo, unverified Google
+email not stored; pre-v2.22.7 cookie stays signed in; account deletion clears the 4 new tables; /privacy text; boot
+migration on an old-schema DB. Playwright on a local server: sign-up -> code -> confirmed -> Your account -> change
+password -> sign out -> wrong password -> inline Forgot -> sent -> emailed link -> new password -> done -> signed in ->
+reused link shows "doesn't work"; phone view; no page errors.
+
+**After push (live check)**: deploy log clean; sign in -> Your account shows Email + buttons; on a test account with an
+email: Forgot password -> email arrives from the alerts sender -> link -> set password -> another signed-in browser is
+signed out; Postmark Activity tags pw-reset / pw-changed / acct-code.
 
 ---
 
