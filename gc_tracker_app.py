@@ -9862,8 +9862,8 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid #222;color:#555;fon
   <p><strong style="color:#eee">Account information.</strong> If you create an account, we store
   your chosen username, an optional email address, and a hashed (never plain-text) version of your
   password. If you sign in with Google, we store your Google account ID and the display name Google
-  provides. Your account email address is never required and is used only for account recovery if
-  you choose to provide it. It is never used for Want List email alerts, which use a separate
+  provides. Your account email address is never required. If you provide it, it is used only to
+  help you get back into your account if you contact us. It is never used for Want List email alerts, which use a separate
   address you confirm yourself (see below).</p>
 
   <p><strong style="color:#eee">Preferences and scan history.</strong> To sync your data across
@@ -9872,8 +9872,9 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid #222;color:#555;fon
   your account.</p>
 
   <p><strong style="color:#eee">Technical data.</strong> When you use the site, our server
-  receives your IP address. We use it only for rate-limiting (to prevent abuse) and do not log or
-  store it persistently. We also set an anonymous device ID cookie (<code style="color:#aaa;font-size:.85em">gt_device_id</code>)
+  receives your IP address. We use it only for rate-limiting (to prevent abuse), and the site does
+  not store it. Our hosting provider (Railway) may briefly keep standard request logs that include
+  it. We also set an anonymous device ID cookie (<code style="color:#aaa;font-size:.85em">gt_device_id</code>)
   to count unique devices in aggregate — it contains no personal information.</p>
 
   <p><strong style="color:#eee">Analytics.</strong> We use Google Analytics 4 to understand how
@@ -9983,7 +9984,7 @@ if GA_MEASUREMENT_ID:
     )
 else:
     _ga_snippet = ''
-APP_VERSION = "2.22.5"
+APP_VERSION = "2.22.6"
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
 HTML_TEMPLATE    = HTML_TEMPLATE.replace('<!-- __VER__ -->', f'v{APP_VERSION}')
 CL_TEMPLATE      = CL_TEMPLATE.replace('<!-- __GA__ -->', _ga_snippet)
